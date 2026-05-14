@@ -1173,7 +1173,7 @@ local function build_order_by(ctx, request_order_by, output_fields)
     return clauses, nil
 end
 
-local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, limit)
+local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, limit, having_predicates)
     local root = ctx.entity_by_id[key(ctx.object.root_entity_id)]
     local select_parts = {}
     local group_parts = {}
@@ -1203,6 +1203,9 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
     end
     if #group_parts > 0 then
         sql_parts[#sql_parts + 1] = "GROUP BY " .. table.concat(group_parts, ", ")
+    end
+    if having_predicates ~= nil and #having_predicates > 0 then
+        sql_parts[#sql_parts + 1] = "HAVING " .. table.concat(having_predicates, " AND ")
     end
     if #order_by > 0 then
         sql_parts[#sql_parts + 1] = "ORDER BY " .. table.concat(order_by, ", ")
@@ -1507,13 +1510,35 @@ local function compile_request_table(request, options)
         return order_err
     end
 
+    local having_predicates = {}
+    for _, having_filter in ipairs(as_array(request.having, "having")) do
+        if type(having_filter) ~= "table" then
+            return error_result("SEMANTIC_REQUEST_030", "Each having filter must be an object.")
+        end
+        local filter_field = having_filter.field or having_filter.dimension or having_filter.column or having_filter.name
+        if missing(filter_field) then
+            return error_result("SEMANTIC_REQUEST_020", "Having filter requires a field key.")
+        end
+        local metric_field, having_err = resolve_field(ctx, filter_field, "METRIC")
+        if having_err ~= nil then
+            return having_err
+        end
+        local op = upper(having_filter.op or having_filter.operator or "=")
+        local expr = expand_metric(ctx, metric_field)
+        local predicate, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
+        if predicate_err ~= nil then
+            return predicate_err
+        end
+        having_predicates[#having_predicates + 1] = predicate
+    end
+
     local selected_materialization = nil
     local materialization_decision = {
         candidate_count = 0,
         rejected_materializations = {},
         selected_materialization = JSON_NULL,
     }
-    if materialization_runtime ~= nil and type(materialization_runtime.select_materialization) == "function" then
+    if materialization_runtime ~= nil and type(materialization_runtime.select_materialization) == "function" and #having_predicates == 0 then
         selected_materialization, materialization_decision = materialization_runtime.select_materialization(
             ctx,
             selected_dimensions,
@@ -1526,7 +1551,7 @@ local function compile_request_table(request, options)
     if selected_materialization ~= nil then
         sql_text = build_materialized_sql(ctx, selected_dimensions, selected_metrics, filters, order_by, limit, selected_materialization)
     else
-        sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit)
+        sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
     end
 
     local plan = {
@@ -1796,7 +1821,7 @@ local function find_top_level_clauses(tokens)
             depth = depth - 1
         elseif depth == 0 then
             local u = token_upper(token)
-            if u == "FROM" or u == "WHERE" or u == "LIMIT" then
+            if u == "FROM" or u == "WHERE" or u == "LIMIT" or u == "HAVING" then
                 clauses[u] = clauses[u] or i
             elseif u == "GROUP" and token_upper(tokens[i + 1]) == "BY" then
                 clauses.GROUP_BY = clauses.GROUP_BY or i
@@ -1811,7 +1836,7 @@ end
 local function clause_end(tokens, clauses, current_name)
     local start_index = clauses[current_name]
     local best = #tokens + 1
-    for _, candidate in ipairs({"FROM", "WHERE", "GROUP_BY", "ORDER_BY", "LIMIT"}) do
+    for _, candidate in ipairs({"FROM", "WHERE", "GROUP_BY", "HAVING", "ORDER_BY", "LIMIT"}) do
         local pos = clauses[candidate]
         if pos ~= nil and pos > start_index and pos < best then
             best = pos
@@ -1935,6 +1960,110 @@ local function parse_where_filters(tokens, start_index, end_index)
     return filters, nil
 end
 
+local function parse_having_filters(ctx, tokens, start_index, end_index)
+    local filters = {}
+    local chunks = {}
+    local current_start = start_index
+    local depth = 0
+    local after_between = false
+    local i = start_index
+    while i <= end_index do
+        local token = tokens[i]
+        if token.text == "(" then
+            depth = depth + 1
+        elseif token.text == ")" then
+            depth = depth - 1
+        elseif depth == 0 then
+            local u = token_upper(token)
+            if u == "BETWEEN" then
+                after_between = true
+            elseif u == "AND" then
+                if after_between then
+                    after_between = false
+                else
+                    chunks[#chunks + 1] = {current_start, i - 1}
+                    current_start = i + 1
+                end
+            end
+        end
+        i = i + 1
+    end
+    chunks[#chunks + 1] = {current_start, end_index}
+
+    for _, chunk in ipairs(chunks) do
+        local first = chunk[1]
+        local last = chunk[2]
+        local op_index = nil
+        local op = nil
+        for idx = first, last do
+            local u = token_upper(tokens[idx])
+            if u == "IN" or u == "BETWEEN" or u == "LIKE" or u == "=" or u == "!=" or u == "<>" or u == ">" or u == ">=" or u == "<" or u == "<=" then
+                op_index = idx
+                op = u
+                break
+            end
+        end
+        if op_index == nil then
+            return nil, error_result("SEMANTIC_QUERY_030", "Unsupported HAVING predicate.")
+        end
+        local field = identifier_from_part(token_slice(tokens, first, op_index - 1))
+        if field == nil then
+            return nil, error_result("SEMANTIC_QUERY_031", "HAVING predicate must start with a semantic metric.")
+        end
+        local resolved, resolve_err = resolve_field(ctx, field, nil)
+        if resolve_err ~= nil then
+            return nil, recode_error_prefix(resolve_err, "SEMANTIC_QUERY")
+        end
+        if resolved.kind ~= "METRIC" then
+            return nil, error_result("SEMANTIC_QUERY_040", "HAVING supports metric predicates only. Use WHERE for dimension filters.")
+        end
+        if op == "IN" then
+            if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "(" or tokens[last].text ~= ")" then
+                return nil, error_result("SEMANTIC_QUERY_032", "IN predicate requires a literal list.")
+            end
+            local values = {}
+            for _, part in ipairs(split_top_level(tokens, op_index + 2, last - 1, ",")) do
+                local value = literal_from_tokens(part)
+                if value == nil then
+                    return nil, error_result("SEMANTIC_QUERY_033", "IN predicate supports literal values only.")
+                end
+                values[#values + 1] = value
+            end
+            filters[#filters + 1] = {field = resolved.name, op = "IN", value = values}
+        elseif op == "BETWEEN" then
+            local and_index = nil
+            for idx = op_index + 1, last do
+                if token_upper(tokens[idx]) == "AND" then
+                    and_index = idx
+                    break
+                end
+            end
+            if and_index == nil then
+                return nil, error_result("SEMANTIC_QUERY_034", "BETWEEN predicate requires 'field BETWEEN value1 AND value2'.")
+            end
+            local v1 = literal_from_tokens(token_slice(tokens, op_index + 1, and_index - 1))
+            local v2 = literal_from_tokens(token_slice(tokens, and_index + 1, last))
+            if v1 == nil or v2 == nil then
+                return nil, error_result("SEMANTIC_QUERY_035", "BETWEEN predicate requires two literal values.")
+            end
+            filters[#filters + 1] = {field = resolved.name, op = "BETWEEN", value = {v1, v2}}
+        else
+            local value_tokens = token_slice(tokens, op_index + 1, last)
+            local value = literal_from_tokens(value_tokens)
+            if value == nil then
+                local value_sql = trim(render_token_slice(value_tokens))
+                if value_sql == "" then
+                    return nil, error_result("SEMANTIC_QUERY_033", "HAVING predicate requires a right-hand value.")
+                end
+                filters[#filters + 1] = {field = resolved.name, op = op, value = null, value_sql = value_sql}
+            else
+                filters[#filters + 1] = {field = resolved.name, op = op, value = value}
+            end
+        end
+    end
+    return filters, nil
+end
+
 local function parse_order_by(tokens, start_index, end_index, select_aliases, selected_output)
     local order_by = {}
     for _, part in ipairs(split_top_level(tokens, start_index, end_index, ",")) do
@@ -2029,6 +2158,7 @@ local function parse_semantic_sql(sql_text, options)
         metrics = {},
         dimensions = {},
         filters = {},
+        having = {},
         order_by = {},
         client = "semantic-sql",
         purpose = "semantic_sql",
@@ -2081,11 +2211,18 @@ local function parse_semantic_sql(sql_text, options)
     end
 
     if clauses.WHERE ~= nil then
-        local filters, filter_err = parse_where_filters(tokens, clauses.WHERE + 1, clause_end(tokens, clauses, "WHERE"))
+        local raw_filters, filter_err = parse_where_filters(tokens, clauses.WHERE + 1, clause_end(tokens, clauses, "WHERE"))
         if filter_err ~= nil then
             return nil, filter_err
         end
-        request.filters = filters
+        for _, filter in ipairs(raw_filters) do
+            local field, _ = resolve_field(ctx, filter.field, nil)
+            if field ~= nil and field.kind == "METRIC" then
+                request.having[#request.having + 1] = filter
+            else
+                request.filters[#request.filters + 1] = filter
+            end
+        end
     end
 
     if #request.dimensions > 0 and not wildcard_select then
@@ -2122,6 +2259,16 @@ local function parse_semantic_sql(sql_text, options)
         end
     elseif #request.dimensions == 0 and clauses.GROUP_BY ~= nil then
         return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY is only supported for selected dimensions.")
+    end
+
+    if clauses.HAVING ~= nil then
+        local having_filters, having_err = parse_having_filters(ctx, tokens, clauses.HAVING + 1, clause_end(tokens, clauses, "HAVING"))
+        if having_err ~= nil then
+            return nil, having_err
+        end
+        for _, f in ipairs(having_filters) do
+            request.having[#request.having + 1] = f
+        end
     end
 
     if clauses.ORDER_BY ~= nil then

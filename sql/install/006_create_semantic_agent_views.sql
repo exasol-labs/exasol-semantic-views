@@ -291,6 +291,8 @@ SELECT 'FILTER_OPERATOR', 'BETWEEN', 'Use a two-element array value: [lower, upp
 UNION ALL
 SELECT 'ORDER_BY_KEYS', 'field, direction', 'direction accepts ASC or DESC.'
 UNION ALL
+SELECT 'HAVING_KEYS', 'field, op, value', 'Use the having array to filter on aggregated metric values after GROUP BY. Same shape as filters but field must be a METRIC.'
+UNION ALL
 SELECT 'HANDLE_TYPE', 'AGENT_REQUEST', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.'
 UNION ALL
 SELECT 'HANDLE_TYPE', 'QUERY_LOG', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.';
