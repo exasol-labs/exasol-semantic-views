@@ -1,0 +1,6 @@
+interface:
+  display_name: "Exasol Semantic Analyst"
+  short_description: "Answer governed analytics questions through Exasol Semantic Views"
+  default_prompt: "Use $exasol-semantic-analyst to discover metrics, compile structured requests, and answer business questions through an existing Exasol Semantic Views model."
+policy:
+  allow_implicit_invocation: true

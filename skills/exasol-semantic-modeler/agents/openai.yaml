@@ -1,0 +1,6 @@
+interface:
+  display_name: "Exasol Semantic Modeler"
+  short_description: "Build and maintain Exasol semantic models"
+  default_prompt: "Use $exasol-semantic-modeler to inspect the physical schema, derive a semantic model, author metrics, validate, and publish an Exasol Semantic Views model."
+policy:
+  allow_implicit_invocation: false

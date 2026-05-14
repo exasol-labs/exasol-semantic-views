@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Claude Code session data (personal, not project-wide)
+.claude/
+
+# Working files
+plans/
+
+# Environment / credentials
+.env
+.env.*
+*.pem
+*.key
