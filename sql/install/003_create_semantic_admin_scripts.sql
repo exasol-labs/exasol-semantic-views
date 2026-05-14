@@ -5110,19 +5110,31 @@ end
 
 local function parse_where_filters(tokens, start_index, end_index)
     local filters = {}
+    local chunks = {}
+    -- Split on top-level AND conjunctions, but skip the AND that belongs to a
+    -- BETWEEN...AND range (e.g. "field BETWEEN v1 AND v2").
     local current_start = start_index
     local depth = 0
+    local after_between = false
     local i = start_index
-    local chunks = {}
     while i <= end_index do
         local token = tokens[i]
         if token.text == "(" then
             depth = depth + 1
         elseif token.text == ")" then
             depth = depth - 1
-        elseif depth == 0 and token_upper(token) == "AND" then
-            chunks[#chunks + 1] = {current_start, i - 1}
-            current_start = i + 1
+        elseif depth == 0 then
+            local u = token_upper(token)
+            if u == "BETWEEN" then
+                after_between = true
+            elseif u == "AND" then
+                if after_between then
+                    after_between = false
+                else
+                    chunks[#chunks + 1] = {current_start, i - 1}
+                    current_start = i + 1
+                end
+            end
         end
         i = i + 1
     end
@@ -5135,7 +5147,7 @@ local function parse_where_filters(tokens, start_index, end_index)
         local op = nil
         for idx = first, last do
             local u = token_upper(tokens[idx])
-            if u == "IN" or u == "LIKE" or u == "=" or u == "!=" or u == "<>" or u == ">" or u == ">=" or u == "<" or u == "<=" then
+            if u == "IN" or u == "BETWEEN" or u == "LIKE" or u == "=" or u == "!=" or u == "<>" or u == ">" or u == ">=" or u == "<" or u == "<=" then
                 op_index = idx
                 op = u
                 break
@@ -5161,6 +5173,23 @@ local function parse_where_filters(tokens, start_index, end_index)
                 values[#values + 1] = value
             end
             filters[#filters + 1] = {field = field, op = "IN", value = values}
+        elseif op == "BETWEEN" then
+            local and_index = nil
+            for idx = op_index + 1, last do
+                if token_upper(tokens[idx]) == "AND" then
+                    and_index = idx
+                    break
+                end
+            end
+            if and_index == nil then
+                return nil, error_result("SEMANTIC_QUERY_034", "BETWEEN predicate requires 'field BETWEEN value1 AND value2'.")
+            end
+            local v1 = literal_from_tokens(token_slice(tokens, op_index + 1, and_index - 1))
+            local v2 = literal_from_tokens(token_slice(tokens, and_index + 1, last))
+            if v1 == nil or v2 == nil then
+                return nil, error_result("SEMANTIC_QUERY_035", "BETWEEN predicate requires two literal values.")
+            end
+            filters[#filters + 1] = {field = field, op = "BETWEEN", value = {v1, v2}}
         else
             local value_tokens = token_slice(tokens, op_index + 1, last)
             local value = literal_from_tokens(value_tokens)
@@ -5178,7 +5207,7 @@ local function parse_where_filters(tokens, start_index, end_index)
     return filters, nil
 end
 
-local function parse_order_by(tokens, start_index, end_index, select_aliases)
+local function parse_order_by(tokens, start_index, end_index, select_aliases, selected_output)
     local order_by = {}
     for _, part in ipairs(split_top_level(tokens, start_index, end_index, ",")) do
         local direction = "ASC"
@@ -5190,6 +5219,12 @@ local function parse_order_by(tokens, start_index, end_index, select_aliases)
             end
         end
         local field = identifier_from_part(part)
+        if field == nil and #part == 1 and part[1].kind == "number" then
+            local ordinal = tonumber(part[1].text)
+            if selected_output ~= nil then
+                field = selected_output[ordinal]
+            end
+        end
         if field == nil then
             return nil, error_result("SEMANTIC_QUERY_060", "ORDER BY supports selected semantic fields only.")
         end
@@ -5362,7 +5397,7 @@ local function parse_semantic_sql(sql_text, options)
     end
 
     if clauses.ORDER_BY ~= nil then
-        local order_by, order_err = parse_order_by(tokens, clauses.ORDER_BY + 2, clause_end(tokens, clauses, "ORDER_BY"), select_aliases)
+        local order_by, order_err = parse_order_by(tokens, clauses.ORDER_BY + 2, clause_end(tokens, clauses, "ORDER_BY"), select_aliases, selected_output)
         if order_err ~= nil then
             return nil, order_err
         end
