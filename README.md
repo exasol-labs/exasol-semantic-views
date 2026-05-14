@@ -7,7 +7,7 @@ SQL users, BI tools, and agents through one shared compiler.
 The project is built around a simple idea: the semantic layer should live where
 the data runs. Definitions, validation results, agent context, materialization
 metadata, and generated SQL explanations are stored in Exasol and served
-through SQL and Lua.
+through SQL.
 
 ## The Concept
 
@@ -283,54 +283,6 @@ It gives agents the safe workflow for discovery, `COMPILE_REQUEST_JSON`,
 executing generated SQL, explanations, feedback, and SQL-native metric
 authoring.
 
-## What Works Today
-
-The implemented path is Nano-verified end to end:
-
-- Semantic catalog tables in `SYS_SEMANTIC`.
-- Human/tool metadata views in `SEMANTIC_CATALOG`.
-- Lua admin APIs for models, entities, relationships, dimensions, facts,
-  metrics, objects, synonyms, validation, publishing, and agent metadata.
-- SQL-native metric authoring through `ALTER SEMANTIC VIEW ... REPLACE FACTS
-  ... REPLACE METRICS ...`.
-- Single-metric edits through `ALTER SEMANTIC VIEW ... ADD OR REPLACE METRIC`.
-- Direct fallback and dry-run authoring through
-  `SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION`.
-- Atomic rejection of invalid Semantic SQL applies, with previous catalog state
-  restored after validation failure.
-- Structured metric metadata in `SEMANTIC_DEFINITION_SOURCES`,
-  `METRIC_INPUTS`, and `METRIC_FILTERS`.
-- Semantic filters over dimensions, such as
-  `FILTER (WHERE order_status = 'COMPLETE')`, resolved to physical Exasol SQL.
-- SQL-native introspection through `SHOW`, `DESCRIBE`, `EXPLAIN`, and `EXPORT`
-  semantic commands.
-- Model validation with stable rule codes.
-- Metric dependency extraction.
-- Metric/dimension compatibility matrix.
-- Current validation issues through `SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES`.
-- Structured request compilation through `COMPILE_REQUEST_JSON`.
-- SQL compilation through `COMPILE_SQL`.
-- Opt-in SQL debug compilation through `COMPILE_SQL_DEBUG`.
-- Guarded published semantic views.
-- Session-scoped Lua SQL preprocessor activation.
-- Published semantic view comments and discovery helper tables for generic
-  metadata tools, including MCP-visible discovery tables that stay readable
-  when semantic preprocessing is active.
-- Agent context views in `SEMANTIC_AGENT`.
-- Agent-visible validation errors and request-schema metadata for deterministic
-  tool contracts.
-- Search, glossary, explanation, verified-query, instruction, and feedback
-  scripts.
-- Manual materialization registration with deterministic compiler selection
-  and fallback to base SQL when coverage or rollup safety is incomplete.
-- Local Nano smoke tests covering the installed path.
-
-Still planned:
-
-- Optional Lua Virtual Schema adapter if it adds value beyond views plus the
-  preprocessor.
-- Deeper interoperability tooling around semantic model exchange.
-
 ## Quickstart With Exasol Nano
 
 Start or check Nano from the parent workspace:
@@ -420,6 +372,3 @@ names and types for BI tools, while the compiler owns the actual metric logic.
 - [Creating metrics](docs/creating-metrics.md)
 - [Agent contract](docs/agent-contract.md)
 - [Autonomous agent skill](skills/exasol-semantic-views-agent/SKILL.md)
-- [User study issue verification](reports/study-issues-verification.md)
-- [Implementation plan](plans/semantic_layer_implementation_plan.md)
-- [Design rationale](plans/semantic_layer_design_rationale.md)
