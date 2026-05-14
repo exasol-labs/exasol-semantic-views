@@ -1,4 +1,19 @@
-# Exasol Semantic Views
+<div align="center">
+
+<h1>Exasol Semantic Views</h1>
+
+<p><em>A database-native semantic layer for Exasol.<br>Governed metrics, deterministic compilation, and a structured agent contract — all in SQL.</em></p>
+
+[![Exasol](https://img.shields.io/badge/Exasol-2025.1%2B-003865?logo=databricks&logoColor=white)](https://www.exasol.com)
+[![Runtime](https://img.shields.io/badge/runtime-Lua%20%7C%20SQL-informational)](#manual-install-order)
+[![Agent-first](https://img.shields.io/badge/agent--first-COMPILE__REQUEST__JSON-blueviolet)](#agent-first-by-design)
+[![Semantic SQL](https://img.shields.io/badge/Semantic%20SQL-preprocessor-success)](#a-concrete-example)
+
+**[Quickstart](#quickstart-with-exasol-nano) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example)**
+
+</div>
+
+---
 
 Exasol Semantic Views is a database-native semantic layer for Exasol. It turns
 business meaning into governed database metadata, then exposes that meaning to
