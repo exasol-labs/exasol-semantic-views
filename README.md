@@ -277,11 +277,16 @@ preprocessor by itself. Database-wide preprocessor activation can mitigate that
 for simple generic MCP `SELECT` queries against published semantic views, but it
 does not fix MCP metadata listing gaps or add script execution support.
 
-The repository also includes a Codex-compatible skill for autonomous agents:
-[skills/exasol-semantic-views-agent/SKILL.md](skills/exasol-semantic-views-agent/SKILL.md).
-It gives agents the safe workflow for discovery, `COMPILE_REQUEST_JSON`,
-executing generated SQL, explanations, feedback, and SQL-native metric
-authoring.
+The repository includes two Codex-compatible agent skills:
+
+- [**exasol-semantic-analyst**](skills/exasol-semantic-analyst/SKILL.md) — for
+  agents answering business questions against an existing model. Covers
+  discovery, compatibility checking, `COMPILE_REQUEST_JSON`, result execution,
+  explanation, and feedback capture.
+- [**exasol-semantic-modeler**](skills/exasol-semantic-modeler/SKILL.md) — for
+  agents creating or maintaining a model. Covers schema inspection, entity and
+  relationship modelling, fact and dimension authoring, SQL-native metric DDL,
+  validation, publication, and governance configuration.
 
 ## Quickstart With Exasol Nano
 
@@ -289,15 +294,6 @@ Start or check Nano from the parent workspace:
 
 ```sh
 ../nano/exanano status
-```
-
-Nano is expected at:
-
-```text
-EXASOL_HOST=localhost
-EXASOL_PORT=8563
-EXASOL_USER=sys
-EXASOL_PASSWORD=exasol
 ```
 
 Run the full local smoke test:
@@ -344,31 +340,17 @@ packaged into install SQL:
 python3 tools/package_lua_scripts.py
 ```
 
-## How It Fits Together
-
-```text
-SYS_SEMANTIC catalog tables
-  -> validation and compatibility matrix
-  -> SQL-native definition runtime
-  -> shared Lua compiler core
-  -> COMPILE_REQUEST_JSON for agents
-  -> COMPILE_SQL for SQL tools
-  -> Lua SQL preprocessor for BI-style semantic views
-  -> SHOW / DESCRIBE / EXPLAIN / EXPORT semantic introspection
-  -> SEMANTIC_AGENT context and feedback scripts
-  -> ordinary Exasol SQL over physical tables
-```
-
-The published views are intentionally thin. They expose discoverable column
-names and types for BI tools, while the compiler owns the actual metric logic.
-
 ## Project Docs
 
-- [Architecture](docs/architecture.md)
-- [Semantic compiler](docs/semantic-compiler.md)
-- [Semantic SQL preprocessor](docs/semantic-sql-preprocessor.md)
-- [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
-- [Semantic catalog](docs/semantic-catalog.md)
-- [Creating metrics](docs/creating-metrics.md)
-- [Agent contract](docs/agent-contract.md)
-- [Autonomous agent skill](skills/exasol-semantic-views-agent/SKILL.md)
+- Usage
+  - [Creating metrics](docs/creating-metrics.md)
+  - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
+- Design
+  - [Architecture](docs/architecture.md)
+  - [Semantic compiler](docs/semantic-compiler.md)
+  - [Semantic SQL preprocessor](docs/semantic-sql-preprocessor.md)
+  - [Semantic catalog](docs/semantic-catalog.md)
+- Agents
+  - [Agent contract](docs/agent-contract.md)
+  - [Analyst skill](skills/exasol-semantic-analyst/SKILL.md) — answering business questions
+  - [Modeler skill](skills/exasol-semantic-modeler/SKILL.md) — creating and maintaining models
