@@ -1,6 +1,16 @@
-# SQL Install Order
+# SQL Install Files
 
-Planned install order:
+These seven files must be run in order. The easiest way is the installer:
+
+```sh
+python3 tools/install.py
+```
+
+The installer packages the Lua runtime into `003_create_semantic_admin_scripts.sql`
+before executing the files. Pass `--skip-package` if you have already packaged
+the Lua sources in a prior step.
+
+## File order
 
 ```text
 000_create_schemas.sql
@@ -12,11 +22,6 @@ Planned install order:
 006_create_semantic_agent_views.sql
 ```
 
-Milestones 1 through 3 implement files `000` through `003`. The validator and
-structured request compiler are installed from
-`003_create_semantic_admin_scripts.sql` as Lua `CREATE SCRIPT` programs. Files
-`004` through `006` are placeholders for later milestones.
-
-Run `tools/package_lua_scripts.py` before installing when Lua source files under
-`lua/semantic_layer/` change. The Nano smoke script runs this packaging step
-automatically.
+`003_create_semantic_admin_scripts.sql` is generated — do not edit it directly.
+Edit the Lua sources under `lua/semantic_layer/` and re-run
+`python3 tools/package_lua_scripts.py` (or just `python3 tools/install.py`).

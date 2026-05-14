@@ -148,7 +148,12 @@ Facilities still worth adding in a dedicated semantic MCP adapter:
 
 Before enabling semantic SQL database-wide:
 
-1. Install the extension SQL files in order.
+1. Install the extension:
+
+   ```sh
+   python3 tools/install.py
+   ```
+
 2. Validate the model:
 
    ```sql
@@ -249,7 +254,11 @@ has system-wide activation:
    ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = NULL;
    ```
 
-4. Run the install files in the documented order.
+4. Re-run the installer:
+
+   ```sh
+   python3 tools/install.py --skip-package
+   ```
 5. Run validation and representative semantic queries in a session-scoped test.
 6. Re-enable the system setting:
 

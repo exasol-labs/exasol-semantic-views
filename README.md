@@ -5,7 +5,7 @@
 <p><em>A database-native semantic layer for Exasol.<br>Governed metrics, deterministic compilation, and a structured agent contract — all in SQL.</em></p>
 
 [![Exasol](https://img.shields.io/badge/Exasol-2025.1%2B-003865?logo=databricks&logoColor=white)](https://www.exasol.com)
-[![Runtime](https://img.shields.io/badge/runtime-Lua%20%7C%20SQL-informational)](#manual-install-order)
+[![Runtime](https://img.shields.io/badge/runtime-Lua%20%7C%20SQL-informational)](#installation)
 [![Agent-first](https://img.shields.io/badge/agent--first-COMPILE__REQUEST__JSON-blueviolet)](#agent-first-by-design)
 [![Semantic SQL](https://img.shields.io/badge/Semantic%20SQL-preprocessor-success)](#a-concrete-example)
 
@@ -334,26 +334,37 @@ PYTHON_BIN=../exasol-json-tables/.venv/bin/python sh tools/run_nano_smoke.sh
 After the smoke test, try the semantic SQL example above in a session after
 enabling semantic SQL.
 
-## Manual Install Order
+## Installation
 
-For manual installs, run the SQL files in this order:
-
-```text
-sql/install/000_create_schemas.sql
-sql/install/001_create_semantic_catalog.sql
-sql/install/002_create_semantic_catalog_views.sql
-sql/install/003_create_semantic_admin_scripts.sql
-sql/install/004_create_semantic_preprocessor.sql
-sql/install/005_create_semantic_surface_helpers.sql
-sql/install/006_create_semantic_agent_views.sql
-```
-
-The semantic definition, compiler, materialization, and agent Lua runtimes are
-packaged into install SQL:
+Point the installer at a running Exasol instance and run:
 
 ```sh
-python3 tools/package_lua_scripts.py
+python3 tools/install.py
 ```
+
+This packages the Lua runtime into install SQL and runs all seven install scripts
+in order. Connection defaults to `localhost:8563` with user `sys`/`exasol`. Override
+with environment variables:
+
+```sh
+EXASOL_HOST=myhost EXASOL_USER=admin EXASOL_PASSWORD=secret python3 tools/install.py
+```
+
+To also load the bundled sales demo model:
+
+```sh
+python3 tools/install.py --example
+```
+
+`pyexasol` must be available (`pip install pyexasol`). If your default Python does
+not have it, prefix with your virtualenv Python:
+
+```sh
+PYTHON_BIN=.venv/bin/python $PYTHON_BIN tools/install.py --example
+```
+
+Pass `--skip-package` to skip the Lua packaging step and use the already-generated
+`sql/install/` files — useful in CI after a prior packaging run.
 
 ## Project Docs
 

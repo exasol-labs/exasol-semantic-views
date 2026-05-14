@@ -18,6 +18,14 @@ introspection views.
 
 ## Install Files
 
+Run the installer to apply all catalog files in order:
+
+```sh
+python3 tools/install.py
+```
+
+The installer packages the Lua runtime and runs these seven files in sequence:
+
 ```text
 sql/install/000_create_schemas.sql
 sql/install/001_create_semantic_catalog.sql
