@@ -679,3 +679,23 @@ SELECT
   CREATED_AT,
   CREATED_BY
 FROM SEMANTIC_CATALOG.SEMANTIC_DEFINITION_SOURCES;
+
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.MODEL_ROLE_GRANTS AS
+SELECT
+  g.GRANT_ID,
+  g.MODEL_ID,
+  g.MODEL_NAME,
+  g.ROLE_NAME,
+  g.PUBLISHED_SCHEMA,
+  g.GRANTED_AT,
+  g.GRANTED_BY,
+  g.STATUS
+FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+WHERE g.STATUS = 'ACTIVE';
+
+-- METRIC_TYPE: additive storage policy used by the compiler join/aggregation planner.
+--   Values: SIMPLE (fully additive), FILTERED (conditional aggregate), RATIO (non-additive quotient),
+--   DERIVED (formula over other metrics), WINDOW (pre-computed rolling window -- not yet supported).
+-- METRIC_KIND: semantic classification used by agents and discovery tools.
+--   Values: SIMPLE, FILTERED, RATIO, DERIVED. Mirrors METRIC_TYPE for standard metrics.
+--   An older column name for METRIC_TYPE also exists in legacy rows -- use METRIC_KIND for display.

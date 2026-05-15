@@ -209,6 +209,36 @@ query([[
     WHERE MODEL_ID = :model_id
 ]], {model_id = model.id})
 
+local version_rows = query([[
+    SELECT VERSION_NUMBER FROM SYS_SEMANTIC.MODEL_VERSIONS
+    WHERE VERSION_ID = :version_id
+]], {version_id = model.version_id})
+local version_number = 1
+if version_rows ~= nil and #version_rows > 0 then
+    version_number = row_value(version_rows[1], "VERSION_NUMBER", 1) or 1
+end
+
+local count_rows = query([[
+    SELECT COALESCE(MAX(PUBLISH_NUMBER), 0) + 1 AS NEXT_PUBLISH_NUMBER
+    FROM SYS_SEMANTIC.MODEL_PUBLISH_HISTORY
+    WHERE MODEL_ID = :model_id
+]], {model_id = model.id})
+local publish_number = 1
+if count_rows ~= nil and #count_rows > 0 then
+    publish_number = row_value(count_rows[1], "NEXT_PUBLISH_NUMBER", 1) or 1
+end
+
+query([[
+    INSERT INTO SYS_SEMANTIC.MODEL_PUBLISH_HISTORY
+      (MODEL_ID, VERSION_ID, VERSION_NUMBER, PUBLISH_NUMBER)
+    VALUES (:model_id, :version_id, :version_number, :publish_number)
+]], {
+    model_id = model.id,
+    version_id = model.version_id,
+    version_number = version_number,
+    publish_number = publish_number,
+})
+
 exit(output_rows, [[
   MODEL_NAME VARCHAR(256),
   PUBLISHED_SCHEMA VARCHAR(256),

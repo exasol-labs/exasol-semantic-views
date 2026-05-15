@@ -47,11 +47,12 @@ def compile_request(con, request: dict[str, Any] | str) -> dict[str, Any]:
         "status": row[0],
         "error_code": row[1],
         "error_message": row[2],
-        "generated_sql": row[3],
-        "plan_json": row[4],
-        "clarification_json": row[5],
-        "validation_run_id": row[6],
-        "agent_request_id": row[7],
+        "original_sql": row[3],
+        "generated_sql": row[4],
+        "plan_json": row[5],
+        "clarification_json": row[6],
+        "validation_run_id": row[7],
+        "agent_request_id": row[8],
     }
 
 

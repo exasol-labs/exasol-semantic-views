@@ -1037,6 +1037,10 @@ local function build_filters(ctx, request_filters, selected_dimensions, needed_e
             return nil, nil, error_result("SEMANTIC_REQUEST_031", "MVP filters support dimensions only: " .. tostring(filter_field) .. ".")
         end
         local op = upper(filter.op or filter.operator or "=")
+        if missing(filter.value) and missing(filter.value_sql) and op ~= "IS NULL" and op ~= "IS NOT NULL" then
+            return nil, nil, error_result("SEMANTIC_REQUEST_015",
+                "Filter for field '" .. tostring(field.name) .. "' requires a value or value_sql key.")
+        end
         local expression = tostring(field.expression)
         local predicate, predicate_err = build_dimension_predicate(expression, op, filter.value, field.data_type, filter.value_sql)
         if predicate_err ~= nil then
@@ -1285,13 +1289,15 @@ end
 local function log_request(result, request_json, request, model)
     local request_model_id = model and model.model_id or null
     local request_version_id = model and model.version_id or null
+    local dimensions = request and request.dimensions or {}
+    local metrics = request and request.metrics or {}
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
           MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
-          PLAN_JSON, STATUS, ERROR_CODE, ERROR_MESSAGE, FINISHED_AT
+          PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE, FINISHED_AT
         ) VALUES (
           :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
-          :plan_json, :status, :error_code, :error_message, CURRENT_TIMESTAMP
+          :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message, CURRENT_TIMESTAMP
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -1301,6 +1307,8 @@ local function log_request(result, request_json, request, model)
         request_json = null_if_missing(request_json),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
+        requested_metrics = null_if_missing(json_encode(metrics)),
+        requested_dimensions = null_if_missing(json_encode(dimensions)),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
@@ -1517,7 +1525,9 @@ local function compile_request_table(request, options)
         end
         local filter_field = having_filter.field or having_filter.dimension or having_filter.column or having_filter.name
         if missing(filter_field) then
-            return error_result("SEMANTIC_REQUEST_020", "Having filter requires a field key.")
+            -- SEMANTIC_REQUEST_025: having filter structure error (missing field key), distinct from
+            -- SEMANTIC_REQUEST_020 (unknown field name) so agents can handle each differently.
+            return error_result("SEMANTIC_REQUEST_025", "Having filter requires a field key. Accepted aliases: field, dimension, column, name.")
         end
         local metric_field, having_err = resolve_field(ctx, filter_field, "METRIC")
         if having_err ~= nil then
@@ -2313,10 +2323,18 @@ local function compile_sql_internal(sql_text, options)
     return result, compiled_request, compiled_model
 end
 
+local function collision_error(msg)
+    -- SEMANTIC_REQUEST_100 / SEMANTIC_QUERY_100: transient transaction collision - safe to retry.
+    return string.find(msg, "GlobalTransactionRollback", 1, true) ~= nil
+        or string.find(msg, "Transaction collision", 1, true) ~= nil
+end
+
 function M.compile_sql(sql_text)
     local ok, result, request, model = pcall(compile_sql_internal, sql_text, {validate = true})
     if not ok then
-        return error_result("SEMANTIC_QUERY_999", tostring(result)), nil, nil
+        local msg = tostring(result)
+        local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
+        return error_result(code, msg), nil, nil
     end
     return result, request, model
 end
@@ -2338,7 +2356,9 @@ function M.compile_sql_for_preprocessor(sql_text)
         unchanged_unknown_schema = true,
     })
     if not ok then
-        return error_result("SEMANTIC_QUERY_999", tostring(result))
+        local msg = tostring(result)
+        local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
+        return error_result(code, msg)
     end
     return result
 end
@@ -2346,7 +2366,9 @@ end
 function M.compile_request_json(request_json)
     local ok, result, request, model = pcall(compile_internal, request_json)
     if not ok then
-        result = error_result("SEMANTIC_REQUEST_999", tostring(result))
+        local msg = tostring(result)
+        local code = collision_error(msg) and "SEMANTIC_REQUEST_100" or "SEMANTIC_REQUEST_999"
+        result = error_result(code, msg)
         request = nil
         model = nil
     end

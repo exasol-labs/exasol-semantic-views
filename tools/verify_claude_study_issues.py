@@ -77,8 +77,9 @@ def compile_request(con, request: dict[str, Any]) -> dict[str, Any]:
                 "status": row[0],
                 "error_code": row[1],
                 "error_message": row[2],
-                "generated_sql": row[3],
-                "clarification_json": row[5] if len(row) > 5 else None,
+                "original_sql": row[3],
+                "generated_sql": row[4],
+                "clarification_json": row[6] if len(row) > 6 else None,
             }
         )
     return result

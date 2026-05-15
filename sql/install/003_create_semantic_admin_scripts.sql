@@ -715,6 +715,343 @@ exit({{dimension_id, model_name, object_name, dimension_name, false, bool_value(
 ]])
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION(
+  MODEL_NAME,
+  OBJECT_NAME,
+  ENTITY_NAME,
+  DIMENSION_NAME,
+  EXPRESSION,
+  DATA_TYPE,
+  DISPLAY_NAME,
+  DESCRIPTION,
+  FORMAT_HINT,
+  IS_CERTIFIED
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function optional_text(value)
+    if missing(value) then
+        return null
+    end
+    return tostring(value)
+end
+
+local function bool_value(value, default_value)
+    if missing(value) then
+        return default_value
+    end
+    local text = string.lower(tostring(value))
+    return value == true or text == "true" or text == "1"
+end
+
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then
+        return nil
+    end
+    return rows[1][1]
+end
+
+local function model_row(model_name)
+    local rows = query([[
+        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID
+        FROM SYS_SEMANTIC.MODELS m
+        WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+    ]], {model_name = model_name})
+    if rows == nil or #rows == 0 then
+        error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+    end
+    return {
+        model_id = row_value(rows[1], "MODEL_ID", 1),
+        version_id = row_value(rows[1], "VERSION_ID", 2)
+    }
+end
+
+local function entity_id(model, entity_name)
+    local id = scalar([[
+        SELECT ENTITY_ID
+        FROM SYS_SEMANTIC.ENTITIES
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(ENTITY_NAME) = UPPER(:entity_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, entity_name = entity_name})
+    if id == nil then
+        error("SEMANTIC_ADMIN_014: entity not found: " .. entity_name)
+    end
+    return id
+end
+
+local function object_id(model, object_name)
+    local id = scalar([[
+        SELECT OBJECT_ID
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(OBJECT_NAME) = UPPER(:object_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, object_name = object_name})
+    if id == nil then
+        error("SEMANTIC_ADMIN_017: semantic object not found: " .. object_name)
+    end
+    return id
+end
+
+local function validation_error_summary(validation_rows)
+    for _, row in ipairs(validation_rows or {}) do
+        if row_value(row, "SEVERITY", 1) == "ERROR" then
+            local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
+            local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
+            local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(row, "MESSAGE", 5) or "model validation failed"
+            return tostring(object_type) .. " " .. tostring(object_name) .. " " .. tostring(rule_code) .. ": " .. tostring(message)
+        end
+    end
+    return nil
+end
+
+if missing(EXPRESSION) then
+    error("SEMANTIC_ADMIN_001: EXPRESSION is required")
+end
+if missing(DATA_TYPE) then
+    error("SEMANTIC_ADMIN_001: DATA_TYPE is required")
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local object_name = normalize_name(OBJECT_NAME, "OBJECT_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local dimension_name = normalize_name(DIMENSION_NAME, "DIMENSION_NAME")
+local model = model_row(model_name)
+local entity_id_value = entity_id(model, entity_name)
+local object_id_value = object_id(model, object_name)
+
+local existing_id = scalar([[
+    SELECT DIMENSION_ID
+    FROM SYS_SEMANTIC.DIMENSIONS
+    WHERE MODEL_ID = :model_id
+      AND VERSION_ID = :version_id
+      AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
+]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
+
+local was_update = existing_id ~= nil
+local dimension_id
+
+if was_update then
+    query([[
+        UPDATE SYS_SEMANTIC.DIMENSIONS
+           SET ENTITY_ID    = :entity_id,
+               EXPRESSION   = :expression,
+               DATA_TYPE    = :data_type,
+               DISPLAY_NAME = :display_name,
+               DESCRIPTION  = :description,
+               FORMAT_HINT  = :format_hint,
+               IS_CERTIFIED = :is_certified
+         WHERE DIMENSION_ID = :dimension_id
+    ]], {
+        entity_id    = entity_id_value,
+        expression   = tostring(EXPRESSION),
+        data_type    = tostring(DATA_TYPE),
+        display_name = optional_text(DISPLAY_NAME),
+        description  = optional_text(DESCRIPTION),
+        format_hint  = optional_text(FORMAT_HINT),
+        is_certified = bool_value(IS_CERTIFIED, false),
+        dimension_id = existing_id,
+    })
+    dimension_id = existing_id
+else
+    query([[
+        INSERT INTO SYS_SEMANTIC.DIMENSIONS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION, DATA_TYPE,
+          DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, IS_HIDDEN, IS_CERTIFIED, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, :dimension_name, :expression, :data_type,
+          :display_name, :description, :format_hint, FALSE, :is_certified, 'ACTIVE'
+        )
+    ]], {
+        model_id     = model.model_id,
+        version_id   = model.version_id,
+        entity_id    = entity_id_value,
+        dimension_name = dimension_name,
+        expression   = tostring(EXPRESSION),
+        data_type    = tostring(DATA_TYPE),
+        display_name = optional_text(DISPLAY_NAME),
+        description  = optional_text(DESCRIPTION),
+        format_hint  = optional_text(FORMAT_HINT),
+        is_certified = bool_value(IS_CERTIFIED, false)
+    })
+    dimension_id = scalar([[
+        SELECT DIMENSION_ID
+        FROM SYS_SEMANTIC.DIMENSIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
+    local ordinal = scalar([[
+        SELECT COALESCE(MAX(ORDINAL_POSITION), 0) + 1
+        FROM SYS_SEMANTIC.OBJECT_COLUMNS
+        WHERE OBJECT_ID = :object_id
+    ]], {object_id = object_id_value})
+    query([[
+        INSERT INTO SYS_SEMANTIC.OBJECT_COLUMNS (
+          OBJECT_ID, COLUMN_KIND, OBJECT_REF_ID, COLUMN_NAME, ORDINAL_POSITION, IS_VISIBLE
+        ) VALUES (
+          :object_id, 'DIMENSION', :dimension_id, :column_name, :ordinal, TRUE
+        )
+    ]], {
+        object_id    = object_id_value,
+        dimension_id = dimension_id,
+        column_name  = dimension_name,
+        ordinal      = ordinal,
+    })
+end
+
+local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
+local validation_error = validation_error_summary(validation_rows)
+if validation_error ~= nil then
+    if not was_update then
+        query([[DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE OBJECT_ID = :object_id AND COLUMN_KIND = 'DIMENSION' AND OBJECT_REF_ID = :dimension_id]], {object_id = object_id_value, dimension_id = dimension_id})
+        query([[DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE DIMENSION_ID = :dimension_id]], {dimension_id = dimension_id})
+        query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
+    end
+    error("SEMANTIC_ADMIN_091: dimension rejected; validation failed: " .. validation_error)
+end
+exit({{dimension_id, model_name, object_name, dimension_name, was_update, bool_value(IS_CERTIFIED, false), not was_update}}, [[
+  DIMENSION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  OBJECT_NAME VARCHAR(256),
+  DIMENSION_NAME VARCHAR(256),
+  WAS_UPDATE BOOLEAN,
+  IS_CERTIFIED BOOLEAN,
+  OBJECT_COLUMN_REGISTERED BOOLEAN
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_DIMENSION(
+  MODEL_NAME,
+  OBJECT_NAME,
+  DIMENSION_NAME
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then
+        return nil
+    end
+    return rows[1][1]
+end
+
+local function model_row(model_name)
+    local rows = query([[
+        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID
+        FROM SYS_SEMANTIC.MODELS m
+        WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+    ]], {model_name = model_name})
+    if rows == nil or #rows == 0 then
+        error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+    end
+    return {
+        model_id = row_value(rows[1], "MODEL_ID", 1),
+        version_id = row_value(rows[1], "VERSION_ID", 2)
+    }
+end
+
+local function object_id(model, object_name)
+    local id = scalar([[
+        SELECT OBJECT_ID
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(OBJECT_NAME) = UPPER(:object_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, object_name = object_name})
+    if id == nil then
+        error("SEMANTIC_ADMIN_017: semantic object not found: " .. object_name)
+    end
+    return id
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local object_name = normalize_name(OBJECT_NAME, "OBJECT_NAME")
+local dimension_name = normalize_name(DIMENSION_NAME, "DIMENSION_NAME")
+local model = model_row(model_name)
+local object_id_value = object_id(model, object_name)
+
+local dimension_id = scalar([[
+    SELECT DIMENSION_ID
+    FROM SYS_SEMANTIC.DIMENSIONS
+    WHERE MODEL_ID = :model_id
+      AND VERSION_ID = :version_id
+      AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
+]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
+
+if dimension_id == nil then
+    error("SEMANTIC_ADMIN_015: dimension not found: " .. dimension_name)
+end
+
+query([[
+    DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
+     WHERE OBJECT_ID = :object_id
+       AND COLUMN_KIND = 'DIMENSION'
+       AND OBJECT_REF_ID = :dimension_id
+]], {object_id = object_id_value, dimension_id = dimension_id})
+
+query([[
+    DELETE FROM SYS_SEMANTIC.DIMENSIONS
+     WHERE DIMENSION_ID = :dimension_id
+]], {dimension_id = dimension_id})
+
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
+
+exit({{"OK", model_name, object_name, dimension_name}}, [[
+  STATUS VARCHAR(32),
+  MODEL_NAME VARCHAR(256),
+  OBJECT_NAME VARCHAR(256),
+  DIMENSION_NAME VARCHAR(256)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
   MODEL_NAME,
   ENTITY_NAME,
@@ -1738,6 +2075,139 @@ query([[
 })
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.GRANT_MODEL_ROLE(
+    MODEL_NAME,
+    ROLE_NAME
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_200: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_201: invalid " .. label .. ": " .. name)
+    end
+    return string.upper(name)
+end
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function quote_ident(name)
+    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local role_name = normalize_name(ROLE_NAME, "ROLE_NAME")
+
+local model_rows = query([[
+    SELECT MODEL_ID, MODEL_NAME, PUBLISHED_SCHEMA
+    FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if model_rows == nil or #model_rows == 0 then
+    error("SEMANTIC_ADMIN_202: model not found: " .. model_name)
+end
+local model_id = row_value(model_rows[1], "MODEL_ID", 1)
+local model_name_actual = row_value(model_rows[1], "MODEL_NAME", 2)
+local published_schema = row_value(model_rows[1], "PUBLISHED_SCHEMA", 3)
+
+local dup_rows = query([[
+    SELECT GRANT_ID FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS
+    WHERE MODEL_ID = :model_id AND UPPER(ROLE_NAME) = UPPER(:role_name) AND STATUS = 'ACTIVE'
+    LIMIT 1
+]], {model_id = model_id, role_name = role_name})
+if dup_rows ~= nil and #dup_rows > 0 then
+    return {{ model_name_actual, role_name, published_schema, 'ALREADY_GRANTED' }}
+end
+
+query([[
+    INSERT INTO SYS_SEMANTIC.MODEL_ROLE_GRANTS (MODEL_ID, MODEL_NAME, ROLE_NAME, PUBLISHED_SCHEMA)
+    VALUES (:model_id, :model_name, :role_name, :published_schema)
+]], {model_id = model_id, model_name = model_name_actual, role_name = role_name, published_schema = published_schema})
+
+if published_schema ~= nil and tostring(published_schema) ~= "" then
+    query("GRANT SELECT ON SCHEMA " .. quote_ident(published_schema) .. " TO " .. quote_ident(role_name))
+end
+
+exit({{ model_name_actual, role_name, published_schema, 'GRANTED' }}, [[
+    MODEL_NAME VARCHAR(256),
+    ROLE_NAME VARCHAR(256),
+    PUBLISHED_SCHEMA VARCHAR(256),
+    STATUS VARCHAR(32)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REVOKE_MODEL_ROLE(
+    MODEL_NAME,
+    ROLE_NAME
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_210: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_211: invalid " .. label .. ": " .. name)
+    end
+    return string.upper(name)
+end
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function quote_ident(name)
+    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local role_name = normalize_name(ROLE_NAME, "ROLE_NAME")
+
+local model_rows = query([[
+    SELECT MODEL_ID, MODEL_NAME, PUBLISHED_SCHEMA
+    FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if model_rows == nil or #model_rows == 0 then
+    error("SEMANTIC_ADMIN_212: model not found: " .. model_name)
+end
+local model_id = row_value(model_rows[1], "MODEL_ID", 1)
+local model_name_actual = row_value(model_rows[1], "MODEL_NAME", 2)
+local published_schema = row_value(model_rows[1], "PUBLISHED_SCHEMA", 3)
+
+query([[
+    UPDATE SYS_SEMANTIC.MODEL_ROLE_GRANTS
+    SET STATUS = 'REVOKED'
+    WHERE MODEL_ID = :model_id AND UPPER(ROLE_NAME) = UPPER(:role_name) AND STATUS = 'ACTIVE'
+]], {model_id = model_id, role_name = role_name})
+
+if published_schema ~= nil and tostring(published_schema) ~= "" then
+    query("REVOKE SELECT ON SCHEMA " .. quote_ident(published_schema) .. " FROM " .. quote_ident(role_name))
+end
+
+exit({{ model_name_actual, role_name, published_schema, 'REVOKED' }}, [[
+    MODEL_NAME VARCHAR(256),
+    ROLE_NAME VARCHAR(256),
+    PUBLISHED_SCHEMA VARCHAR(256),
+    STATUS VARCHAR(32)
+]])
+/
+
+-- BEGIN GENERATED VALIDATOR_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 local M = {}
 
@@ -1832,21 +2302,23 @@ local SQL_WORDS = {
     YEAR = true,
 }
 
+-- Exasol built-in functions only. QUARTER() does not exist in Exasol -- use CEIL(MONTH(date)/3.0)
 local ALLOWED_FUNCTIONS = {
     ABS = true,
     AVG = true,
     CAST = true,
+    CEIL = true,
     COALESCE = true,
     CONCAT = true,
     COUNT = true,
     DATE_TRUNC = true,
     DAY = true,
     EXTRACT = true,
+    FLOOR = true,
     MAX = true,
     MIN = true,
     MONTH = true,
     NULLIF = true,
-    QUARTER = true,
     ROUND = true,
     SUM = true,
     TO_CHAR = true,
@@ -2083,6 +2555,7 @@ local function column_refs_in_expression(expression)
     end
     local text = strip_string_literals(tostring(expression))
     for alias, column_name in string.gmatch(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)") do
+        local after = string.sub(text, string.find(text, alias .. "%s*%.%s*" .. column_name, 1) or 1)
         refs[#refs + 1] = {alias = upper(alias), column_name = upper(column_name)}
     end
     return refs
@@ -2343,6 +2816,23 @@ local function load_catalog(ctx)
             join_type = row_value(row, "JOIN_TYPE", 7),
             fanout_policy = row_value(row, "FANOUT_POLICY", 8),
             path_priority = row_value(row, "PATH_PRIORITY", 9),
+        })
+    end
+
+    -- Semantic objects with root entity IDs - needed to validate that a metric
+    -- base entity is reachable from the join-root when computing the valid-combinations matrix.
+    ctx.semantic_objects = {}
+    local object_rows = query([[
+        SELECT OBJECT_ID, ROOT_ENTITY_ID
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(object_rows or {}) do
+        table.insert(ctx.semantic_objects, {
+            object_id = row_value(row, "OBJECT_ID", 1),
+            root_entity_id = row_value(row, "ROOT_ENTITY_ID", 2),
         })
     end
 end
@@ -2864,6 +3354,21 @@ local function validate_agent_metadata(ctx)
     end
 end
 
+-- Returns true if metric.base_entity_id is reachable via safe_edges from at least one
+-- semantic object root entity. Mirrors the compiler join-resolution starting point.
+local function metric_reachable_from_any_root(ctx, metric, safe_edges)
+    if #ctx.semantic_objects == 0 then
+        return true  -- no objects loaded, skip the check
+    end
+    for _, obj in ipairs(ctx.semantic_objects) do
+        local ok, _, _ = find_path(safe_edges, obj.root_entity_id, metric.base_entity_id, true)
+        if ok then
+            return true
+        end
+    end
+    return false
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -2874,11 +3379,17 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     local matrix = {}
     for _, metric in ipairs(ctx.metrics) do
         matrix[key(metric.id)] = {}
+        -- Pre-check: the compiler starts joins from the semantic object root. If the
+        -- metric base entity is unreachable from any root via safe edges, every
+        -- metric/dimension combination is invalid (compiler will return SEMANTIC_REQUEST_042).
+        local root_can_reach_metric = metric_reachable_from_any_root(ctx, metric, safe_edges)
         for _, dimension in ipairs(ctx.dimensions) do
             local is_valid = false
             local reason_code = "OK"
             local path = nil
-            if ctx.entity_name_by_id[key(metric.base_entity_id)] == nil then
+            if not root_can_reach_metric then
+                reason_code = "NO_SAFE_JOIN_PATH"
+            elseif ctx.entity_name_by_id[key(metric.base_entity_id)] == nil then
                 reason_code = "MISSING_BASE_ENTITY"
             elseif ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
                 reason_code = "MISSING_DIMENSION_ENTITY"
@@ -2986,6 +3497,7 @@ end
 
 validate_model = M.validate_model
 /
+-- END GENERATED VALIDATOR_RUNTIME
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(
   MODEL_NAME
@@ -4309,6 +4821,10 @@ local function build_filters(ctx, request_filters, selected_dimensions, needed_e
             return nil, nil, error_result("SEMANTIC_REQUEST_031", "MVP filters support dimensions only: " .. tostring(filter_field) .. ".")
         end
         local op = upper(filter.op or filter.operator or "=")
+        if missing(filter.value) and missing(filter.value_sql) and op ~= "IS NULL" and op ~= "IS NOT NULL" then
+            return nil, nil, error_result("SEMANTIC_REQUEST_015",
+                "Filter for field '" .. tostring(field.name) .. "' requires a value or value_sql key.")
+        end
         local expression = tostring(field.expression)
         local predicate, predicate_err = build_dimension_predicate(expression, op, filter.value, field.data_type, filter.value_sql)
         if predicate_err ~= nil then
@@ -4557,13 +5073,15 @@ end
 local function log_request(result, request_json, request, model)
     local request_model_id = model and model.model_id or null
     local request_version_id = model and model.version_id or null
+    local dimensions = request and request.dimensions or {}
+    local metrics = request and request.metrics or {}
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
           MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
-          PLAN_JSON, STATUS, ERROR_CODE, ERROR_MESSAGE, FINISHED_AT
+          PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE, FINISHED_AT
         ) VALUES (
           :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
-          :plan_json, :status, :error_code, :error_message, CURRENT_TIMESTAMP
+          :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message, CURRENT_TIMESTAMP
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -4573,6 +5091,8 @@ local function log_request(result, request_json, request, model)
         request_json = null_if_missing(request_json),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
+        requested_metrics = null_if_missing(json_encode(metrics)),
+        requested_dimensions = null_if_missing(json_encode(dimensions)),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
@@ -4789,7 +5309,9 @@ local function compile_request_table(request, options)
         end
         local filter_field = having_filter.field or having_filter.dimension or having_filter.column or having_filter.name
         if missing(filter_field) then
-            return error_result("SEMANTIC_REQUEST_020", "Having filter requires a field key.")
+            -- SEMANTIC_REQUEST_025: having filter structure error (missing field key), distinct from
+            -- SEMANTIC_REQUEST_020 (unknown field name) so agents can handle each differently.
+            return error_result("SEMANTIC_REQUEST_025", "Having filter requires a field key. Accepted aliases: field, dimension, column, name.")
         end
         local metric_field, having_err = resolve_field(ctx, filter_field, "METRIC")
         if having_err ~= nil then
@@ -5585,10 +6107,18 @@ local function compile_sql_internal(sql_text, options)
     return result, compiled_request, compiled_model
 end
 
+local function collision_error(msg)
+    -- SEMANTIC_REQUEST_100 / SEMANTIC_QUERY_100: transient transaction collision - safe to retry.
+    return string.find(msg, "GlobalTransactionRollback", 1, true) ~= nil
+        or string.find(msg, "Transaction collision", 1, true) ~= nil
+end
+
 function M.compile_sql(sql_text)
     local ok, result, request, model = pcall(compile_sql_internal, sql_text, {validate = true})
     if not ok then
-        return error_result("SEMANTIC_QUERY_999", tostring(result)), nil, nil
+        local msg = tostring(result)
+        local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
+        return error_result(code, msg), nil, nil
     end
     return result, request, model
 end
@@ -5610,7 +6140,9 @@ function M.compile_sql_for_preprocessor(sql_text)
         unchanged_unknown_schema = true,
     })
     if not ok then
-        return error_result("SEMANTIC_QUERY_999", tostring(result))
+        local msg = tostring(result)
+        local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
+        return error_result(code, msg)
     end
     return result
 end
@@ -5618,7 +6150,9 @@ end
 function M.compile_request_json(request_json)
     local ok, result, request, model = pcall(compile_internal, request_json)
     if not ok then
-        result = error_result("SEMANTIC_REQUEST_999", tostring(result))
+        local msg = tostring(result)
+        local code = collision_error(msg) and "SEMANTIC_REQUEST_100" or "SEMANTIC_REQUEST_999"
+        result = error_result(code, msg)
         request = nil
         model = nil
     end
@@ -5645,6 +6179,7 @@ exit({
         result.status or null,
         result.error_code or null,
         result.error_message or null,
+        null,
         result.generated_sql or null,
         result.plan_json or null,
         result.clarification_json or null,
@@ -5655,6 +6190,7 @@ exit({
   STATUS VARCHAR(32),
   ERROR_CODE VARCHAR(128),
   ERROR_MESSAGE VARCHAR(2000000),
+  ORIGINAL_SQL VARCHAR(2000000),
   GENERATED_SQL VARCHAR(2000000),
   PLAN_JSON VARCHAR(2000000),
   CLARIFICATION_JSON VARCHAR(2000000),

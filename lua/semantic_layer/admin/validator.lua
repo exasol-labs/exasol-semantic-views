@@ -91,21 +91,23 @@ local SQL_WORDS = {
     YEAR = true,
 }
 
+-- Exasol built-in functions only. QUARTER() does not exist in Exasol -- use CEIL(MONTH(date)/3.0)
 local ALLOWED_FUNCTIONS = {
     ABS = true,
     AVG = true,
     CAST = true,
+    CEIL = true,
     COALESCE = true,
     CONCAT = true,
     COUNT = true,
     DATE_TRUNC = true,
     DAY = true,
     EXTRACT = true,
+    FLOOR = true,
     MAX = true,
     MIN = true,
     MONTH = true,
     NULLIF = true,
-    QUARTER = true,
     ROUND = true,
     SUM = true,
     TO_CHAR = true,
@@ -603,6 +605,23 @@ local function load_catalog(ctx)
             join_type = row_value(row, "JOIN_TYPE", 7),
             fanout_policy = row_value(row, "FANOUT_POLICY", 8),
             path_priority = row_value(row, "PATH_PRIORITY", 9),
+        })
+    end
+
+    -- Semantic objects with root entity IDs - needed to validate that a metric
+    -- base entity is reachable from the join-root when computing the valid-combinations matrix.
+    ctx.semantic_objects = {}
+    local object_rows = query([[
+        SELECT OBJECT_ID, ROOT_ENTITY_ID
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(object_rows or {}) do
+        table.insert(ctx.semantic_objects, {
+            object_id = row_value(row, "OBJECT_ID", 1),
+            root_entity_id = row_value(row, "ROOT_ENTITY_ID", 2),
         })
     end
 end
@@ -1124,6 +1143,21 @@ local function validate_agent_metadata(ctx)
     end
 end
 
+-- Returns true if metric.base_entity_id is reachable via safe_edges from at least one
+-- semantic object root entity. Mirrors the compiler join-resolution starting point.
+local function metric_reachable_from_any_root(ctx, metric, safe_edges)
+    if #ctx.semantic_objects == 0 then
+        return true  -- no objects loaded, skip the check
+    end
+    for _, obj in ipairs(ctx.semantic_objects) do
+        local ok, _, _ = find_path(safe_edges, obj.root_entity_id, metric.base_entity_id, true)
+        if ok then
+            return true
+        end
+    end
+    return false
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -1134,11 +1168,17 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     local matrix = {}
     for _, metric in ipairs(ctx.metrics) do
         matrix[key(metric.id)] = {}
+        -- Pre-check: the compiler starts joins from the semantic object root. If the
+        -- metric base entity is unreachable from any root via safe edges, every
+        -- metric/dimension combination is invalid (compiler will return SEMANTIC_REQUEST_042).
+        local root_can_reach_metric = metric_reachable_from_any_root(ctx, metric, safe_edges)
         for _, dimension in ipairs(ctx.dimensions) do
             local is_valid = false
             local reason_code = "OK"
             local path = nil
-            if ctx.entity_name_by_id[key(metric.base_entity_id)] == nil then
+            if not root_can_reach_metric then
+                reason_code = "NO_SAFE_JOIN_PATH"
+            elseif ctx.entity_name_by_id[key(metric.base_entity_id)] == nil then
                 reason_code = "MISSING_BASE_ENTITY"
             elseif ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
                 reason_code = "MISSING_DIMENSION_ENTITY"

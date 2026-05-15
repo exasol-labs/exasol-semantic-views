@@ -322,6 +322,35 @@ function M.add_agent_instruction(model_name_arg, scope_type_arg, scope_name_arg,
     if priority == nil then
         priority = 100
     end
+    local dup_rows = query([[
+        SELECT INSTRUCTION_ID FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS
+         WHERE MODEL_ID = :model_id
+           AND VERSION_ID = :version_id
+           AND SCOPE_TYPE = :scope_type
+           AND (SCOPE_ID IS NULL AND :scope_id IS NULL OR SCOPE_ID = :scope_id)
+           AND INSTRUCTION_KIND = :instruction_kind
+           AND INSTRUCTION_TEXT = :instruction_text
+           AND STATUS = 'ACTIVE'
+         LIMIT 1
+    ]], {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        scope_type = scope_type,
+        scope_id = scope_id,
+        instruction_kind = instruction_kind,
+        instruction_text = tostring(instruction_text_arg),
+    })
+    if dup_rows ~= nil and #dup_rows > 0 then
+        local existing_id = row_value(dup_rows[1], "INSTRUCTION_ID", 1)
+        return {{
+            existing_id,
+            model.model_name,
+            scope_type,
+            null_if_missing(scope_name_arg),
+            instruction_kind,
+            "ACTIVE",
+        }}
+    end
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_INSTRUCTIONS (
           MODEL_ID, VERSION_ID, SCOPE_TYPE, SCOPE_ID, INSTRUCTION_KIND,
@@ -514,6 +543,19 @@ function M.describe_semantic_object(model_name_arg, object_name_arg)
           AND UPPER(OBJECT_NAME) = UPPER(:object_name)
     ]], {model_name = model_name, object_name = object_name})
     if object_rows == nil or #object_rows == 0 then
+        -- Improve the error if the caller passed a metric or dimension name by mistake.
+        local field_rows = query([[
+            SELECT FIELD_NAME, FIELD_KIND
+            FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
+            WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+              AND UPPER(FIELD_NAME) = UPPER(:field_name)
+            LIMIT 1
+        ]], {model_name = model_name, field_name = object_name})
+        if field_rows ~= nil and #field_rows > 0 then
+            local kind = string.lower(row_value(field_rows[1], "FIELD_KIND", 2) or "field")
+            error("SEMANTIC_AGENT_011: '" .. object_name .. "' is a " .. kind
+                .. ", not a semantic object. Use DESCRIBE_SEMANTIC_METRIC or query SEMANTIC_AGENT.FIELDS_FOR_AGENT.")
+        end
         error("SEMANTIC_AGENT_011: semantic object not visible: " .. object_name)
     end
     local object = object_rows[1]
@@ -578,7 +620,7 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
         query_mode = upper(trim(query_mode_arg))
     end
     if query_mode ~= "STRUCTURED_REQUEST" and query_mode ~= "SEMANTIC_SQL" then
-        error("SEMANTIC_AGENT_003: invalid QUERY_MODE: " .. tostring(query_mode_arg))
+        error("SEMANTIC_AGENT_003: invalid QUERY_MODE: " .. tostring(query_mode_arg) .. ". Valid values: STRUCTURED_REQUEST, SEMANTIC_SQL")
     end
     local object_rows = query([[
         SELECT MODEL_NAME, OBJECT_NAME, PUBLISHED_SCHEMA, PUBLISHED_OBJECT_NAME,

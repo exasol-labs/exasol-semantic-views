@@ -11,15 +11,27 @@ INSTALL_SQL = ROOT / "sql/install/003_create_semantic_admin_scripts.sql"
 AGENT_INSTALL_SQL = ROOT / "sql/install/006_create_semantic_agent_views.sql"
 COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
+VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
 
 BEGIN = "-- BEGIN GENERATED COMPILER_RUNTIME"
 END = "-- END GENERATED COMPILER_RUNTIME"
+VALIDATOR_BEGIN = "-- BEGIN GENERATED VALIDATOR_RUNTIME"
+VALIDATOR_END = "-- END GENERATED VALIDATOR_RUNTIME"
 SEMANTIC_BEGIN = "-- BEGIN GENERATED SEMANTIC_DEFINITION_RUNTIME"
 SEMANTIC_END = "-- END GENERATED SEMANTIC_DEFINITION_RUNTIME"
 AGENT_BEGIN = "-- BEGIN GENERATED AGENT_RUNTIME"
 AGENT_END = "-- END GENERATED AGENT_RUNTIME"
+
+
+def validator_block() -> str:
+    source = VALIDATOR_SOURCE.read_text(encoding="utf-8").rstrip()
+    return f"""{VALIDATOR_BEGIN}
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
+{source}
+/
+{VALIDATOR_END}"""
 
 
 def compiler_block() -> str:
@@ -47,6 +59,7 @@ exit({{
         result.status or null,
         result.error_code or null,
         result.error_message or null,
+        null,
         result.generated_sql or null,
         result.plan_json or null,
         result.clarification_json or null,
@@ -57,6 +70,7 @@ exit({{
   STATUS VARCHAR(32),
   ERROR_CODE VARCHAR(128),
   ERROR_MESSAGE VARCHAR(2000000),
+  ORIGINAL_SQL VARCHAR(2000000),
   GENERATED_SQL VARCHAR(2000000),
   PLAN_JSON VARCHAR(2000000),
   CLARIFICATION_JSON VARCHAR(2000000),
@@ -436,7 +450,8 @@ def replace_between_markers(text: str, block: str, begin: str, end: str) -> str:
 
 def main() -> int:
     original = INSTALL_SQL.read_text(encoding="utf-8")
-    updated = replace_between_markers(original, semantic_definition_block(), SEMANTIC_BEGIN, SEMANTIC_END)
+    updated = replace_between_markers(original, validator_block(), VALIDATOR_BEGIN, VALIDATOR_END)
+    updated = replace_between_markers(updated, semantic_definition_block(), SEMANTIC_BEGIN, SEMANTIC_END)
     updated = replace_between_markers(updated, compiler_block(), BEGIN, END)
     if updated != original:
         INSTALL_SQL.write_text(updated, encoding="utf-8")

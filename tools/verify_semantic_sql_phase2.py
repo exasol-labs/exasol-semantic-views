@@ -77,8 +77,9 @@ def compile_request_json(con, request: dict) -> dict[str, Any]:
         "status": row[0],
         "error_code": row[1],
         "error_message": row[2],
-        "generated_sql": row[3],
-        "plan_json": row[4],
+        "original_sql": row[3],
+        "generated_sql": row[4],
+        "plan_json": row[5],
     }
 
 

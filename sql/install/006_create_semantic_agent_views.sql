@@ -264,38 +264,42 @@ CREATE OR REPLACE VIEW SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT AS
 SELECT
   'FILTER_KEYS' AS CONTRACT_SECTION,
   'field, dimension, column, name' AS NAME,
-  'Use field for canonical requests. dimension, column, and name are accepted aliases.' AS DESCRIPTION
+  'Use field for canonical requests. dimension, column, and name are accepted aliases.' AS DESCRIPTION,
+  TRUE AS IS_REQUIRED,
+  CAST('string' AS VARCHAR(50)) AS VALUE_TYPE,
+  CAST(NULL AS VARCHAR(500)) AS ALLOWED_VALUES
 UNION ALL
 SELECT
   'FILTER_OPERATOR',
   '=',
-  'Case-insensitive equality for text dimensions; typed equality for other dimensions.'
+  'Case-insensitive equality for text dimensions; typed equality for other dimensions.',
+  FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', '!=', 'Not equal.'
+SELECT 'FILTER_OPERATOR', '!=', 'Not equal.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', '<>', 'Not equal.'
+SELECT 'FILTER_OPERATOR', '<>', 'Not equal.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', '>', 'Greater than.'
+SELECT 'FILTER_OPERATOR', '>', 'Greater than.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', '>=', 'Greater than or equal.'
+SELECT 'FILTER_OPERATOR', '>=', 'Greater than or equal.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', '<', 'Less than.'
+SELECT 'FILTER_OPERATOR', '<', 'Less than.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', '<=', 'Less than or equal.'
+SELECT 'FILTER_OPERATOR', '<=', 'Less than or equal.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', 'LIKE', 'Pattern match.'
+SELECT 'FILTER_OPERATOR', 'LIKE', 'Pattern match.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', 'IN', 'Use an array value.'
+SELECT 'FILTER_OPERATOR', 'IN', 'Use an array value.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'FILTER_OPERATOR', 'BETWEEN', 'Use a two-element array value: [lower, upper].'
+SELECT 'FILTER_OPERATOR', 'BETWEEN', 'Use a two-element array value: [lower, upper].', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
-SELECT 'ORDER_BY_KEYS', 'field, direction', 'direction accepts ASC or DESC.'
+SELECT 'ORDER_BY_KEYS', 'field, direction', 'direction accepts ASC or DESC.', TRUE, 'string', 'ASC, DESC'
 UNION ALL
-SELECT 'HAVING_KEYS', 'field, op, value', 'Use the having array to filter on aggregated metric values after GROUP BY. Same shape as filters but field must be a METRIC.'
+SELECT 'HAVING_KEYS', 'field, op, value', 'Use the having array to filter on aggregated metric values after GROUP BY. Same shape as filters but field must be a METRIC.', FALSE, 'object', NULL
 UNION ALL
-SELECT 'HANDLE_TYPE', 'AGENT_REQUEST', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.'
+SELECT 'HANDLE_TYPE', 'AGENT_REQUEST', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.', FALSE, 'string', 'AGENT_REQUEST, QUERY_LOG'
 UNION ALL
-SELECT 'HANDLE_TYPE', 'QUERY_LOG', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.';
+SELECT 'HANDLE_TYPE', 'QUERY_LOG', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.', FALSE, 'string', 'AGENT_REQUEST, QUERY_LOG';
 
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.MEASURE_GROUPS_FOR_AGENT AS
 SELECT
@@ -437,6 +441,7 @@ CREATE OR REPLACE VIEW SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT AS
 SELECT
   'AGENT_REQUEST' AS HANDLE_TYPE,
   ar.AGENT_REQUEST_ID AS HANDLE_ID,
+  ar.AGENT_REQUEST_ID AS AGENT_REQUEST_ID,
   ar.MODEL_ID,
   m.MODEL_NAME,
   ar.VERSION_ID,
@@ -455,11 +460,12 @@ SELECT
 FROM SYS_SEMANTIC.AGENT_REQUEST_LOG ar
 LEFT JOIN SYS_SEMANTIC.MODELS m
   ON m.MODEL_ID = ar.MODEL_ID
-WHERE ar.USER_NAME = CURRENT_USER
+WHERE (CURRENT_USER = 'SYS' OR ar.USER_NAME = CURRENT_USER)
 UNION ALL
 SELECT
   'QUERY_LOG' AS HANDLE_TYPE,
   ql.QUERY_LOG_ID AS HANDLE_ID,
+  NULL AS AGENT_REQUEST_ID,
   ql.MODEL_ID,
   m.MODEL_NAME,
   ql.VERSION_ID,
@@ -478,7 +484,7 @@ SELECT
 FROM SYS_SEMANTIC.QUERY_LOG ql
 LEFT JOIN SYS_SEMANTIC.MODELS m
   ON m.MODEL_ID = ql.MODEL_ID
-WHERE ql.USER_NAME = CURRENT_USER;
+WHERE (CURRENT_USER = 'SYS' OR ql.USER_NAME = CURRENT_USER);
 
 -- BEGIN GENERATED AGENT_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.AGENT_RUNTIME AS
@@ -806,6 +812,35 @@ function M.add_agent_instruction(model_name_arg, scope_type_arg, scope_name_arg,
     if priority == nil then
         priority = 100
     end
+    local dup_rows = query([[
+        SELECT INSTRUCTION_ID FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS
+         WHERE MODEL_ID = :model_id
+           AND VERSION_ID = :version_id
+           AND SCOPE_TYPE = :scope_type
+           AND (SCOPE_ID IS NULL AND :scope_id IS NULL OR SCOPE_ID = :scope_id)
+           AND INSTRUCTION_KIND = :instruction_kind
+           AND INSTRUCTION_TEXT = :instruction_text
+           AND STATUS = 'ACTIVE'
+         LIMIT 1
+    ]], {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        scope_type = scope_type,
+        scope_id = scope_id,
+        instruction_kind = instruction_kind,
+        instruction_text = tostring(instruction_text_arg),
+    })
+    if dup_rows ~= nil and #dup_rows > 0 then
+        local existing_id = row_value(dup_rows[1], "INSTRUCTION_ID", 1)
+        return {{
+            existing_id,
+            model.model_name,
+            scope_type,
+            null_if_missing(scope_name_arg),
+            instruction_kind,
+            "ACTIVE",
+        }}
+    end
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_INSTRUCTIONS (
           MODEL_ID, VERSION_ID, SCOPE_TYPE, SCOPE_ID, INSTRUCTION_KIND,
@@ -998,6 +1033,19 @@ function M.describe_semantic_object(model_name_arg, object_name_arg)
           AND UPPER(OBJECT_NAME) = UPPER(:object_name)
     ]], {model_name = model_name, object_name = object_name})
     if object_rows == nil or #object_rows == 0 then
+        -- Improve the error if the caller passed a metric or dimension name by mistake.
+        local field_rows = query([[
+            SELECT FIELD_NAME, FIELD_KIND
+            FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
+            WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+              AND UPPER(FIELD_NAME) = UPPER(:field_name)
+            LIMIT 1
+        ]], {model_name = model_name, field_name = object_name})
+        if field_rows ~= nil and #field_rows > 0 then
+            local kind = string.lower(row_value(field_rows[1], "FIELD_KIND", 2) or "field")
+            error("SEMANTIC_AGENT_011: '" .. object_name .. "' is a " .. kind
+                .. ", not a semantic object. Use DESCRIBE_SEMANTIC_METRIC or query SEMANTIC_AGENT.FIELDS_FOR_AGENT.")
+        end
         error("SEMANTIC_AGENT_011: semantic object not visible: " .. object_name)
     end
     local object = object_rows[1]
@@ -1062,7 +1110,7 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
         query_mode = upper(trim(query_mode_arg))
     end
     if query_mode ~= "STRUCTURED_REQUEST" and query_mode ~= "SEMANTIC_SQL" then
-        error("SEMANTIC_AGENT_003: invalid QUERY_MODE: " .. tostring(query_mode_arg))
+        error("SEMANTIC_AGENT_003: invalid QUERY_MODE: " .. tostring(query_mode_arg) .. ". Valid values: STRUCTURED_REQUEST, SEMANTIC_SQL")
     end
     local object_rows = query([[
         SELECT MODEL_NAME, OBJECT_NAME, PUBLISHED_SCHEMA, PUBLISHED_OBJECT_NAME,
