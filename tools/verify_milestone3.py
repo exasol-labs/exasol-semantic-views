@@ -121,6 +121,7 @@ def main() -> int:
             },
         )
         assert_status_ok("revenue by region compile", revenue_by_region)
+        assert_equal("compile request original sql is null", revenue_by_region["original_sql"], None)
         sql = revenue_by_region["generated_sql"]
         assert_contains("revenue SQL selects region", sql, 'c.region AS "customer_region"')
         assert_contains("revenue SQL expands fact", sql, "SUM((ol.quantity * ol.net_unit_price))")
@@ -229,8 +230,36 @@ def main() -> int:
         assert_equal("bad JSON status", bad_json["status"], "ERROR")
         assert_equal("bad JSON code", bad_json["error_code"], "SEMANTIC_REQUEST_001")
 
+        missing_value = compile_request(
+            con,
+            {
+                "model": "sales",
+                "object": "SALES",
+                "metrics": ["total_revenue"],
+                "dimensions": ["customer_region"],
+                "filters": [{"field": "order_status"}],
+                "client": "verify_milestone3",
+            },
+        )
+        assert_equal("missing filter value status", missing_value["status"], "ERROR")
+        assert_equal("missing filter value code", missing_value["error_code"], "SEMANTIC_REQUEST_015")
+
+        bad_having = compile_request(
+            con,
+            {
+                "model": "sales",
+                "object": "SALES",
+                "metrics": ["total_revenue"],
+                "dimensions": ["customer_region"],
+                "having": [{"op": ">", "value": 1000}],
+                "client": "verify_milestone3",
+            },
+        )
+        assert_equal("bad having structure status", bad_having["status"], "ERROR")
+        assert_equal("bad having structure code", bad_having["error_code"], "SEMANTIC_REQUEST_025")
+
         after_logs = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_REQUEST_LOG")
-        assert_equal("agent request logs", after_logs - before_logs, 7)
+        assert_equal("agent request logs", after_logs - before_logs, 9)
     finally:
         con.close()
     return 0

@@ -227,6 +227,23 @@ def main() -> int:
         finally:
             execute(con, "DELETE FROM SYS_SEMANTIC.VERIFIED_QUERIES WHERE QUERY_NAME = 'bad_missing_metric'")
             assert_no_errors("verified query missing metric restored", validate(con))
+
+        with_restore(
+            con,
+            "unsupported function in dimension expression",
+            "INSERT INTO SYS_SEMANTIC.DIMENSIONS ("
+            "  MODEL_ID, VERSION_ID, DIMENSION_NAME, EXPRESSION, DATA_TYPE, ENTITY_ID, STATUS"
+            ") "
+            "SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, 'quarter_test', 'QUARTER(o.order_date)', 'VARCHAR(20)', "
+            "  (SELECT e.ENTITY_ID FROM SYS_SEMANTIC.ENTITIES e "
+            "   WHERE UPPER(e.ENTITY_NAME) = 'ORDER' "
+            "   AND e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID), "
+            "  'ACTIVE' "
+            "FROM SYS_SEMANTIC.MODELS m "
+            "WHERE m.MODEL_NAME = 'sales'",
+            "DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE DIMENSION_NAME = 'quarter_test'",
+            "SEMANTIC_MODEL_016",
+        )
     finally:
         con.close()
     return 0

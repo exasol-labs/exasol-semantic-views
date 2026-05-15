@@ -380,6 +380,89 @@ def main() -> int:
             ),
             scalar(con, "SELECT COUNT(*) FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT"),
         )
+
+        assert_at_least(
+            "request history agent_request_id column",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT "
+                "WHERE HANDLE_TYPE = 'AGENT_REQUEST' AND AGENT_REQUEST_ID IS NOT NULL",
+            ),
+            1,
+        )
+
+        try:
+            fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_OBJECT('sales', 'total_revenue')")
+            raise AssertionError("describe metric as object: expected failure")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            err = str(exc)
+            assert_contains("describe metric as object error code", err, "SEMANTIC_AGENT_011")
+            assert_contains("describe metric as object mentions kind", err, "metric")
+
+        try:
+            fetchall(
+                con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY('sales', 'SALES', 'INVALID_MODE')",
+            )
+            raise AssertionError("invalid query mode: expected failure")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            err = str(exc)
+            assert_contains("invalid query mode error code", err, "SEMANTIC_AGENT_003")
+            assert_contains("invalid query mode lists valid values", err, "STRUCTURED_REQUEST")
+
+        dup_instruction = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION("
+            "'sales', 'METRIC', 'total_revenue', 'DEFINITION', "
+            "'Use total_revenue for recognized net revenue analysis.', NULL, 10)",
+        )
+        assert_equal("idempotent instruction status", dup_instruction[0][5], "ACTIVE")
+        assert_equal(
+            "idempotent instruction no duplicate",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND SCOPE_NAME = 'total_revenue' "
+                "AND INSTRUCTION_KIND = 'DEFINITION'",
+            ),
+            1,
+        )
+
+        assert_at_least(
+            "request log has requested metrics",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_REQUEST_LOG "
+                "WHERE REQUESTED_METRICS IS NOT NULL AND USER_NAME = CURRENT_USER",
+            ),
+            1,
+        )
+
+        assert_equal(
+            "schema view has new columns",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS.EXA_ALL_COLUMNS "
+                "WHERE COLUMN_SCHEMA = 'SEMANTIC_AGENT' "
+                "AND COLUMN_TABLE = 'COMPILE_REQUEST_SCHEMA_FOR_AGENT' "
+                "AND COLUMN_NAME IN ('IS_REQUIRED', 'VALUE_TYPE', 'ALLOWED_VALUES')",
+            ),
+            3,
+        )
+
+        assert_at_least(
+            "schema view includes BETWEEN operator",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT "
+                "WHERE CONTRACT_SECTION = 'FILTER_OPERATOR' AND NAME = 'BETWEEN'",
+            ),
+            1,
+        )
     finally:
         con.close()
     return 0

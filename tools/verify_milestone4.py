@@ -92,6 +92,12 @@ def assert_contains(name: str, text: str, expected: str) -> None:
     print(f"ok {name}: found {expected!r}")
 
 
+def assert_at_least(name: str, actual: int, expected: int) -> None:
+    if actual < expected:
+        raise AssertionError(f"{name}: expected at least {expected}, got {actual}")
+    print(f"ok {name}: {actual}")
+
+
 def assert_status_ok(name: str, result: dict[str, Any]) -> None:
     if result["status"] != "OK":
         raise AssertionError(f"{name}: expected OK, got {result}")
@@ -132,6 +138,16 @@ def main() -> int:
 
         publish_rows = fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")
         assert_equal("published objects", publish_rows, [("sales", "SEMANTIC_SALES", "SALES", 9, "PUBLISHED")])
+        assert_at_least(
+            "publish history recorded",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_PUBLISH_HISTORY mph "
+                "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = mph.MODEL_ID "
+                "WHERE m.MODEL_NAME = 'sales'",
+            ),
+            1,
+        )
         assert_equal(
             "published model status",
             fetchall(con, "SELECT STATUS FROM SEMANTIC_CATALOG.MODELS WHERE MODEL_NAME = 'sales'"),

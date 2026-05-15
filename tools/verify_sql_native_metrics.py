@@ -528,6 +528,52 @@ REPLACE METRICS (
             assert_equal("export semantic dimensions kind", {row[0] for row in dimension_filter}, {"DIMENSION"})
         finally:
             con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()")
+
+        add_replace_rows = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION("
+            "'sales', 'SALES', 'order', 'order_year', "
+            "'YEAR(o.order_date)', 'DECIMAL(4,0)', "
+            "'Order Year', 'Calendar year of order', NULL, FALSE)",
+        )
+        assert_equal("add_or_replace new dimension was_update", add_replace_rows[0][4], False)
+        assert_equal("add_or_replace new dimension object_column_registered", add_replace_rows[0][6], True)
+
+        replace_rows = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION("
+            "'sales', 'SALES', 'order', 'order_year', "
+            "'YEAR(o.order_date)', 'DECIMAL(4,0)', "
+            "'Order Year Updated', 'Updated description', NULL, FALSE)",
+        )
+        assert_equal("add_or_replace updated dimension was_update", replace_rows[0][4], True)
+        assert_equal(
+            "add_or_replace no duplicate",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.DIMENSIONS d "
+                "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = d.MODEL_ID "
+                "WHERE m.MODEL_NAME = 'sales' AND d.DIMENSION_NAME = 'order_year' AND d.STATUS = 'ACTIVE'",
+            ),
+            1,
+        )
+
+        remove_rows = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_DIMENSION('sales', 'SALES', 'order_year')",
+        )
+        assert_equal("remove dimension status", remove_rows[0][0], "OK")
+        assert_equal("remove dimension name confirmed", remove_rows[0][3], "order_year")
+        assert_equal(
+            "remove dimension not visible",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.DIMENSIONS d "
+                "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = d.MODEL_ID "
+                "WHERE m.MODEL_NAME = 'sales' AND d.DIMENSION_NAME = 'order_year'",
+            ),
+            0,
+        )
     finally:
         try:
             con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()")
