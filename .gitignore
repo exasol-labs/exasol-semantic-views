@@ -27,6 +27,7 @@ build/
 
 # Working files
 plans/
+reports
 
 # Environment / credentials
 .env
