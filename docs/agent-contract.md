@@ -182,6 +182,15 @@ A compile call is itself idempotent: re-running with the same request and the
 same model version produces the same `GENERATED_SQL` and `PLAN_JSON`. Each
 call still appends a row to `AGENT_REQUEST_LOG`.
 
+Identical repeated requests are served from `SYS_SEMANTIC.COMPILE_CACHE` and
+flagged with `CACHE_HIT = TRUE` in `AGENT_REQUEST_LOG`. Cache entries are
+keyed on a canonical form of the request that strips `client`, `purpose`,
+and `natural_language_text` (these do not affect compile output), so two
+agents calling the same compile with different `client` strings still
+share the cached result. The cache is invalidated by `PUBLISH_MODEL`,
+`VALIDATE_MODEL`, and materialization changes - callers do not need to
+manage invalidation manually.
+
 ## Catalog Usage
 
 Agent and application integrations should read `SEMANTIC_AGENT` for

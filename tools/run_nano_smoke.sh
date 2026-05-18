@@ -37,3 +37,8 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # re-run the full validator, causing GlobalTransactionRollback collisions for
 # concurrent callers. Asserts every compile in a 6×8 grid returns STATUS=OK.
 "$PYTHON_BIN" tools/verify_concurrent_compile.py
+
+# Server-side compile cache (BUG-D-002): identical repeat requests should hit
+# the cache, be flagged CACHE_HIT in AGENT_REQUEST_LOG, and be invalidated by
+# PUBLISH_MODEL and SET_MATERIALIZATION_STATUS.
+"$PYTHON_BIN" tools/verify_compile_cache.py

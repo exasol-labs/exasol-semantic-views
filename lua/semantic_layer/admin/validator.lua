@@ -1278,6 +1278,14 @@ function M.validate_model(model_name_arg)
         validate_agent_metadata(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
+        -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
+        -- VALIDATE_MODEL after mutating the catalog. Invalidating compile-cache
+        -- entries here gives all those callers cache-coherent compile results
+        -- without each one needing its own DELETE.
+        query([[
+            DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+            WHERE MODEL_VERSION_ID = :version_id
+        ]], {version_id = ctx.version_id})
     end
 
     finish_validation_run(ctx)

@@ -275,9 +275,29 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.AGENT_REQUEST_LOG (
   ERROR_MESSAGE         VARCHAR(2000000),
   REQUESTED_METRICS     VARCHAR(2000000),
   REQUESTED_DIMENSIONS  VARCHAR(2000000),
+  CACHE_HIT             BOOLEAN DEFAULT FALSE,
   STARTED_AT            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FINISHED_AT           TIMESTAMP,
   RUNTIME_MS            DECIMAL(18,0)
+);
+
+-- Server-side compile cache (BUG-D-002). The compiler is deterministic per
+-- (model_version_id, normalized request), so a successful compile is reused
+-- until PUBLISH_MODEL invalidates the entry. CACHE_KEY is an FNV-1a hex hash
+-- computed in Lua over the canonical parsed request (sorted top-level keys,
+-- client/purpose stripped). Entries are written best-effort: a transient
+-- collision on insert (PK conflict from a concurrent identical compile) is
+-- swallowed and the caller still sees the compile result.
+CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.COMPILE_CACHE (
+  MODEL_VERSION_ID  DECIMAL(18,0) NOT NULL,
+  CACHE_KEY         VARCHAR(64)   NOT NULL,
+  GENERATED_SQL     VARCHAR(2000000),
+  PLAN_JSON         VARCHAR(2000000),
+  VALIDATION_RUN_ID DECIMAL(18,0),
+  CREATED_AT        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  LAST_HIT_AT       TIMESTAMP,
+  HIT_COUNT         DECIMAL(18,0) DEFAULT 0,
+  PRIMARY KEY (MODEL_VERSION_ID, CACHE_KEY)
 );
 
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.AGENT_FEEDBACK (

@@ -36,10 +36,39 @@ The explicit agent and SQL lanes are validation-gated:
 - reuses `SYS_SEMANTIC.METRIC_DEPENDENCIES` for dependency-aware planning
 - returns a table-shaped response with status, error fields, generated SQL, plan
   JSON, clarification JSON, and validation run id
-- records explicit agent compile calls in `SYS_SEMANTIC.AGENT_REQUEST_LOG`
+- records explicit agent compile calls in `SYS_SEMANTIC.AGENT_REQUEST_LOG`,
+  with `CACHE_HIT` set to `TRUE` when the result came from the compile cache
 - emits `SEMANTIC_REQUEST_100` / `SEMANTIC_QUERY_100` for transient
   transaction collisions after the runtime's own bounded retries are
   exhausted. These are safe to retry by the caller
+
+### Compile cache
+
+`SYS_SEMANTIC.COMPILE_CACHE` stores `GENERATED_SQL` + `PLAN_JSON` keyed by
+`(MODEL_VERSION_ID, CACHE_KEY)`. `CACHE_KEY` is a 64-bit polynomial hash
+(computed in Lua) of the canonical parsed request. The compiler is
+deterministic per `(model_version_id, normalized request)`, so a cache hit
+returns the stored result without re-running catalog load, matrix lookup,
+join planning, materialization selection, or SQL emission.
+
+Normalization rules for the cache key:
+
+- top-level object keys are sorted, so JSON key order in the request does
+  not affect the cache key
+- `client`, `purpose`, and `natural_language_text` are stripped before
+  hashing - they are logging metadata, not compile inputs
+- arrays (`metrics`, `dimensions`, `filters`, `having`, `order_by`) keep
+  the caller's order, since that order can affect the generated SQL
+
+Invalidation: cache entries are dropped on any event that can change compile
+output for a model version: `PUBLISH_MODEL`, `VALIDATE_MODEL` (and therefore
+every admin DDL script that re-validates), `REGISTER_MATERIALIZATION`,
+`ADD_MATERIALIZATION_COLUMN`, and `SET_MATERIALIZATION_STATUS`. Cache writes
+on miss are best-effort: a PK collision from a concurrent identical compile
+is swallowed, since the caller already has the correct result. Only
+`STATUS = OK` results are cached - errors and clarifications are never
+stored, so a user fixing an invalid request and retrying is not blocked by
+a stale cache row.
 
 The structured compiler supports:
 

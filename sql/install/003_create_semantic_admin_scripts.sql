@@ -1813,6 +1813,12 @@ query([[
     materialization_type = materialization_type,
     freshness_policy = optional_text(FRESHNESS_POLICY)
 })
+-- A new materialization expands the set of candidate plans, so drop cached
+-- compile results for this model version (BUG-D-002 cache coherence).
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID = :version_id
+]], {version_id = model.version_id})
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN(
@@ -1976,6 +1982,13 @@ query([[
     physical_column = physical_column,
     rollup_policy = rollup_policy
 })
+-- New materialization column means selection of this materialization may now
+-- apply to additional requests, so drop cached compile results for this model
+-- version (BUG-D-002 cache coherence).
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID = :version_id
+]], {version_id = model.version_id})
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(
@@ -2073,6 +2086,12 @@ query([[
     version_id = model.version_id,
     materialization_name = materialization_name
 })
+-- Materialization status changes affect materialization selection, so drop
+-- cached compile results for this model version (BUG-D-002 cache coherence).
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID = :version_id
+]], {version_id = model.version_id})
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.GRANT_MODEL_ROLE(
@@ -3489,6 +3508,14 @@ function M.validate_model(model_name_arg)
         validate_agent_metadata(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
+        -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
+        -- VALIDATE_MODEL after mutating the catalog. Invalidating compile-cache
+        -- entries here gives all those callers cache-coherent compile results
+        -- without each one needing its own DELETE.
+        query([[
+            DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+            WHERE MODEL_VERSION_ID = :version_id
+        ]], {version_id = ctx.version_id})
     end
 
     finish_validation_run(ctx)
@@ -4219,6 +4246,160 @@ local function ok_result(sql_text, plan, validation_run_id)
         agent_request_id = nil,
         query_log_id = nil,
         materialization_used = plan_materialization_name(plan),
+    }
+end
+
+-- Compile-result cache (BUG-D-002). The compiler is deterministic per
+-- (model_version_id, normalized request), so a successful compile is reused
+-- until PUBLISH_MODEL drops cache entries for the model version. The parsed
+-- request is canonicalized (strip logging-only fields, sort top-level keys)
+-- and hashed with a 64-bit polynomial hash. Collisions in this space are
+-- vanishingly improbable for any realistic dashboard workload.
+
+local CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
+    natural_language_text = true, natural_language = true}
+
+local function canonical_value(value)
+    if value == nil or value == null or value == JSON_NULL then
+        return null
+    end
+    if type(value) == "table" then
+        if is_array(value) then
+            local out = {}
+            for i = 1, #value do
+                out[i] = canonical_value(value[i])
+            end
+            return out
+        end
+        local keys = {}
+        for k, _ in pairs(value) do
+            if type(k) == "string" then
+                keys[#keys + 1] = k
+            end
+        end
+        table.sort(keys)
+        local out = {}
+        for _, k in ipairs(keys) do
+            out[k] = canonical_value(value[k])
+        end
+        return out
+    end
+    return value
+end
+
+local function canonical_request_text(request)
+    if type(request) ~= "table" then
+        return nil
+    end
+    local stripped = {}
+    for k, v in pairs(request) do
+        if type(k) == "string" and not CACHE_IGNORED_REQUEST_KEYS[string.lower(k)] then
+            stripped[k] = v
+        end
+    end
+    local ok, encoded = pcall(json_encode, canonical_value(stripped))
+    if not ok then
+        return nil
+    end
+    return encoded
+end
+
+-- 64-bit polynomial hash (two parallel 32-bit polynomials with different bases
+-- and primes). Pure Lua 5.1 - no bitwise ops, all arithmetic stays under 2^53
+-- so doubles are exact.
+local function compile_cache_key(canonical_text)
+    if type(canonical_text) ~= "string" or canonical_text == "" then
+        return nil
+    end
+    local h1, h2 = 5381, 0
+    for i = 1, #canonical_text do
+        local b = string.byte(canonical_text, i)
+        h1 = (h1 * 33 + b) % 4294967296
+        h2 = (h2 * 31 + b) % 4294967296
+    end
+    return string.format("%08x%08x", h1, h2)
+end
+
+local function cache_lookup(model_version_id, cache_key)
+    if cache_key == nil or model_version_id == nil then
+        return nil
+    end
+    local rows = query([[
+        SELECT GENERATED_SQL, PLAN_JSON, VALIDATION_RUN_ID
+        FROM SYS_SEMANTIC.COMPILE_CACHE
+        WHERE MODEL_VERSION_ID = :model_version_id
+          AND CACHE_KEY = :cache_key
+    ]], {model_version_id = model_version_id, cache_key = cache_key})
+    if rows == nil or #rows == 0 then
+        return nil
+    end
+    local row = rows[1]
+    return {
+        generated_sql = row_value(row, "GENERATED_SQL", 1),
+        plan_json = row_value(row, "PLAN_JSON", 2),
+        validation_run_id = row_value(row, "VALIDATION_RUN_ID", 3),
+    }
+end
+
+local function cache_store(model_version_id, cache_key, result)
+    if cache_key == nil or model_version_id == nil or result == nil
+        or result.status ~= "OK" or missing(result.generated_sql) then
+        return
+    end
+    -- Best-effort insert. A PK collision (same model_version_id + cache_key)
+    -- means another concurrent compile already wrote this entry, so nothing
+    -- to do. A transient transaction collision is also swallowed - the caller
+    -- already has the compile result.
+    pcall(query, [[
+        INSERT INTO SYS_SEMANTIC.COMPILE_CACHE (
+          MODEL_VERSION_ID, CACHE_KEY, GENERATED_SQL, PLAN_JSON,
+          VALIDATION_RUN_ID, LAST_HIT_AT, HIT_COUNT
+        ) VALUES (
+          :model_version_id, :cache_key, :generated_sql, :plan_json,
+          :validation_run_id, NULL, 0
+        )
+    ]], {
+        model_version_id = model_version_id,
+        cache_key = cache_key,
+        generated_sql = null_if_missing(result.generated_sql),
+        plan_json = null_if_missing(result.plan_json),
+        validation_run_id = null_if_missing(result.validation_run_id),
+    })
+end
+
+local function cache_touch(model_version_id, cache_key)
+    if cache_key == nil or model_version_id == nil then
+        return
+    end
+    pcall(query, [[
+        UPDATE SYS_SEMANTIC.COMPILE_CACHE
+        SET LAST_HIT_AT = CURRENT_TIMESTAMP,
+            HIT_COUNT = HIT_COUNT + 1
+        WHERE MODEL_VERSION_ID = :model_version_id
+          AND CACHE_KEY = :cache_key
+    ]], {model_version_id = model_version_id, cache_key = cache_key})
+end
+
+local function cached_ok_result(cached)
+    -- Reconstruct an ok_result payload from the cached row. plan_json comes
+    -- straight from storage. materialization_used is recovered by decoding it.
+    local plan = nil
+    if not missing(cached.plan_json) then
+        local ok, decoded = pcall(json_decode, cached.plan_json)
+        if ok then plan = decoded end
+    end
+    return {
+        status = "OK",
+        error_code = nil,
+        error_message = nil,
+        generated_sql = cached.generated_sql,
+        plan_json = cached.plan_json,
+        clarification_json = nil,
+        validation_run_id = cached.validation_run_id,
+        agent_request_id = nil,
+        query_log_id = nil,
+        materialization_used = plan_materialization_name(plan),
+        cache_hit = true,
     }
 end
 
@@ -5078,10 +5259,12 @@ local function log_request(result, request_json, request, model)
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
           MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
-          PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE, FINISHED_AT
+          PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE,
+          CACHE_HIT, FINISHED_AT
         ) VALUES (
           :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
-          :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message, CURRENT_TIMESTAMP
+          :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message,
+          :cache_hit, CURRENT_TIMESTAMP
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -5096,6 +5279,7 @@ local function log_request(result, request_json, request, model)
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
+        cache_hit = result.cache_hit == true,
     })
     result.agent_request_id = scalar([[
         SELECT MAX(AGENT_REQUEST_ID)
@@ -5194,6 +5378,26 @@ local function compile_request_table(request, options)
     local model = options.model or load_model(model_name)
     if model == nil then
         return error_result(error_prefix .. "_011", "Model not found: " .. model_name .. ".")
+    end
+
+    -- Compile-cache fast path: hit returns the stored GENERATED_SQL + PLAN_JSON
+    -- without re-running catalog load, matrix lookup, join planning, materialization
+    -- selection, or SQL emission. Cache writes happen further down the function
+    -- only when the full compile succeeded (so error results never get cached).
+    local cache_key = nil
+    if options.cache ~= false and not missing(model.version_id) then
+        cache_key = compile_cache_key(canonical_request_text(request))
+        if cache_key ~= nil then
+            local cached = cache_lookup(model.version_id, cache_key)
+            if cached ~= nil then
+                cache_touch(model.version_id, cache_key)
+                local result = cached_ok_result(cached)
+                if error_prefix ~= "SEMANTIC_REQUEST" then
+                    recode_error_prefix(result, error_prefix)
+                end
+                return result, request, model
+            end
+        end
     end
 
     local ctx, load_code, load_message = load_catalog(model, object_name)
@@ -5400,7 +5604,11 @@ local function compile_request_table(request, options)
     for _, dimension in ipairs(selected_dimensions) do
         plan.dimensions[#plan.dimensions + 1] = dimension.name
     end
-    return ok_result(sql_text, plan, validation_run_id), request, model
+    local result = ok_result(sql_text, plan, validation_run_id)
+    if cache_key ~= nil then
+        cache_store(model.version_id, cache_key, result)
+    end
+    return result, request, model
 end
 
 local function compile_internal(request_json)

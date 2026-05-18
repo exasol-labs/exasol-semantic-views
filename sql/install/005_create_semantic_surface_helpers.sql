@@ -113,6 +113,14 @@ for _, issue in ipairs(validation_rows or {}) do
     end
 end
 
+-- Drop the compile cache for this model_version. PUBLISH_MODEL is the
+-- canonical "model definition or materializations changed" point, so cached
+-- compile results for the prior view of this version are no longer trusted.
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID = :version_id
+]], {version_id = model.version_id})
+
 query("CREATE SCHEMA IF NOT EXISTS " .. quote_ident(model.published_schema))
 query("COMMENT ON SCHEMA " .. quote_ident(model.published_schema) .. " IS "
     .. sql_string("Published semantic model schema for " .. tostring(model.name) .. ". Query semantic views with SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL or COMPILE_REQUEST_JSON."))
