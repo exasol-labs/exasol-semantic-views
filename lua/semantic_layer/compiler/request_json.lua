@@ -1613,8 +1613,13 @@ local function compile_request_table(request, options)
         end
         add_unique(selected_metrics, selected_metric_seen, field)
     end
-    if #selected_metrics == 0 then
-        return error_result("SEMANTIC_REQUEST_023", "At least one metric is required.")
+    -- Dimension-only discovery (BUG-D-003): allow an empty metrics list as long
+    -- as dimensions is non-empty. Compiles to a deduplicated GROUP BY over the
+    -- dimensions - the same shape a dashboard needs to populate facet filters
+    -- without having to fake an unused metric.
+    if #selected_metrics == 0 and #selected_dimensions == 0 then
+        return error_result("SEMANTIC_REQUEST_023",
+            "At least one metric or dimension is required.")
     end
 
     local needed_entities = {[key(ctx.object.root_entity_id)] = true}
@@ -1698,7 +1703,12 @@ local function compile_request_table(request, options)
     end
 
     local having_predicates = {}
-    for _, having_filter in ipairs(as_array(request.having, "having")) do
+    local having_list = as_array(request.having, "having")
+    if #having_list > 0 and #selected_metrics == 0 then
+        return error_result("SEMANTIC_REQUEST_026",
+            "HAVING requires at least one metric in the request.")
+    end
+    for _, having_filter in ipairs(having_list) do
         if type(having_filter) ~= "table" then
             return error_result("SEMANTIC_REQUEST_030", "Each having filter must be an object.")
         end
@@ -1727,7 +1737,14 @@ local function compile_request_table(request, options)
         rejected_materializations = {},
         selected_materialization = JSON_NULL,
     }
-    if materialization_runtime ~= nil and type(materialization_runtime.select_materialization) == "function" and #having_predicates == 0 then
+    -- Aggregate materializations exist to serve metric aggregations. A
+    -- dimension-only discovery request (#selected_metrics == 0) bypasses
+    -- the selector and falls through to base-source SQL so distinct
+    -- dimension values come from the authoritative source.
+    if materialization_runtime ~= nil
+        and type(materialization_runtime.select_materialization) == "function"
+        and #having_predicates == 0
+        and #selected_metrics > 0 then
         selected_materialization, materialization_decision = materialization_runtime.select_materialization(
             ctx,
             selected_dimensions,

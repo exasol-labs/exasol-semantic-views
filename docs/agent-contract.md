@@ -150,6 +150,15 @@ aliases are `op` and `operator`. Supported operators are `=`, `!=`, `<>`, `>`,
 `>=`, `<`, `<=`, `LIKE`, `IN`, and `BETWEEN`; `BETWEEN` expects a two-element
 array. `ORDER BY` fields must refer to selected metrics or dimensions.
 
+A request must include at least one `metric` or one `dimension`. A request
+with only `dimensions` (no `metrics`) compiles to a deduplicated `GROUP BY`
+over those dimensions - useful for populating facet filters, drill-into-detail
+flows, and any other "show me the distinct values" pattern. `HAVING` requires
+at least one metric and returns `SEMANTIC_REQUEST_026` if used in a
+dimension-only request. Aggregate materializations are bypassed for
+dimension-only requests so distinct values come from the authoritative
+source.
+
 The database also exposes this contract in
 `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`, so adapters can discover the
 accepted keys without scraping documentation.

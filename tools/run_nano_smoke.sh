@@ -42,3 +42,8 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # the cache, be flagged CACHE_HIT in AGENT_REQUEST_LOG, and be invalidated by
 # PUBLISH_MODEL and SET_MATERIALIZATION_STATUS.
 "$PYTHON_BIN" tools/verify_compile_cache.py
+
+# Dimension-only discovery (BUG-D-003): metrics-less requests should compile to
+# a deduplicated GROUP BY so dashboards can populate facet filters without
+# faking an unused metric.
+"$PYTHON_BIN" tools/verify_dimension_discovery.py

@@ -72,6 +72,14 @@ a stale cache row.
 
 The structured compiler supports:
 
+0. **Dimension-only discovery requests.** A request with `dimensions` set
+   and `metrics` empty compiles to `SELECT dim1, dim2, ... FROM <root>
+   [JOIN ...] [WHERE filters] GROUP BY dim1, dim2, ...`. This is the
+   intended shape for populating facet filters or any other distinct-values
+   discovery flow. `HAVING` requires a metric (returns
+   `SEMANTIC_REQUEST_026` if supplied alongside zero metrics) and
+   aggregate materializations are skipped, since they exist to serve
+   aggregations.
 1. Metrics and dimensions by canonical names or visible synonyms.
 2. Dimension filters with `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`,
    `IN`, and `BETWEEN`. Text `=`, `!=`, `<>`, `LIKE`, and `IN` filters compile
