@@ -5256,7 +5256,9 @@ local function compile_request_table(request, options)
         local validation_message
         validation_run_id, validation_message = latest_successful_validation(model)
         if validation_run_id == nil then
-            return error_result(error_prefix .. "_010", "Model validation is missing or stale: " .. validation_message)
+            return error_result(error_prefix .. "_010",
+                "Model validation is missing or stale: " .. validation_message
+                .. " Run EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('" .. tostring(model.model_name) .. "') (or PUBLISH_MODEL) before compiling.")
         end
     else
         local validation_errors
@@ -5409,7 +5411,11 @@ local function compile_internal(request_json)
     if type(request) ~= "table" or is_array(request) then
         return error_result("SEMANTIC_REQUEST_001", "Request JSON must be an object.")
     end
-    return compile_request_table(request, {validate = true, error_prefix = "SEMANTIC_REQUEST"})
+    -- Compile reuses the latest successful validation run for the active model version.
+    -- PUBLISH_MODEL (and VALIDATE_MODEL) own the writes to VALIDATION_RUNS,
+    -- METRIC_DEPENDENCIES, and METRIC_DIMENSION_MATRIX. Re-running them on every
+    -- compile produced transaction collisions under concurrent load (BUG-001).
+    return compile_request_table(request, {validate = false, error_prefix = "SEMANTIC_REQUEST"})
 end
 
 local function decode_quoted_identifier(token)
@@ -6113,8 +6119,31 @@ local function collision_error(msg)
         or string.find(msg, "Transaction collision", 1, true) ~= nil
 end
 
+-- Bounded retry for transient transaction collisions. After the validator-skip
+-- fix (BUG-001) the residual contention is the AGENT_REQUEST_LOG / QUERY_LOG
+-- insert. Two retries with a tiny busy backoff are sufficient in practice.
+-- Exasol Lua has no sleep, so we burn a small amount of CPU to let the
+-- competing transaction commit before retrying.
+local COLLISION_RETRIES = 2
+
+local function busy_backoff()
+    local budget = 0
+    for _ = 1, 200000 do
+        budget = budget + 1
+    end
+    return budget
+end
+
 function M.compile_sql(sql_text)
-    local ok, result, request, model = pcall(compile_sql_internal, sql_text, {validate = true})
+    -- See compile_internal: reuse the latest successful validation run instead of
+    -- re-running the validator on every compile (BUG-001).
+    local ok, result, request, model
+    for attempt = 0, COLLISION_RETRIES do
+        ok, result, request, model = pcall(compile_sql_internal, sql_text, {validate = false})
+        if ok then break end
+        if not collision_error(tostring(result)) then break end
+        if attempt < COLLISION_RETRIES then busy_backoff() end
+    end
     if not ok then
         local msg = tostring(result)
         local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
@@ -6134,11 +6163,18 @@ function M.compile_sql_for_preprocessor(sql_text)
     if string.find(upper_sql, "SELECT", 1, true) == nil or string.find(upper_sql, "FROM", 1, true) == nil then
         return {status = "UNCHANGED", generated_sql = sql_text}
     end
-    local ok, result = pcall(compile_sql_internal, sql_text, {
+    local options = {
         validate = false,
         unchanged_nonsemantic = true,
         unchanged_unknown_schema = true,
-    })
+    }
+    local ok, result
+    for attempt = 0, COLLISION_RETRIES do
+        ok, result = pcall(compile_sql_internal, sql_text, options)
+        if ok then break end
+        if not collision_error(tostring(result)) then break end
+        if attempt < COLLISION_RETRIES then busy_backoff() end
+    end
     if not ok then
         local msg = tostring(result)
         local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
@@ -6148,7 +6184,13 @@ function M.compile_sql_for_preprocessor(sql_text)
 end
 
 function M.compile_request_json(request_json)
-    local ok, result, request, model = pcall(compile_internal, request_json)
+    local ok, result, request, model
+    for attempt = 0, COLLISION_RETRIES do
+        ok, result, request, model = pcall(compile_internal, request_json)
+        if ok then break end
+        if not collision_error(tostring(result)) then break end
+        if attempt < COLLISION_RETRIES then busy_backoff() end
+    end
     if not ok then
         local msg = tostring(result)
         local code = collision_error(msg) and "SEMANTIC_REQUEST_100" or "SEMANTIC_REQUEST_999"
@@ -6156,7 +6198,16 @@ function M.compile_request_json(request_json)
         request = nil
         model = nil
     end
-    log_request(result, request_json, request, model)
+    -- log_request inserts into AGENT_REQUEST_LOG and can itself collide under
+    -- concurrent load. Retry the same way so the caller keeps STATUS=OK and a
+    -- usable agent_request_id. If it still fails, leave the compile result
+    -- intact - the generated SQL is still executable.
+    for attempt = 0, COLLISION_RETRIES do
+        local log_ok, log_err = pcall(log_request, result, request_json, request, model)
+        if log_ok then break end
+        if not collision_error(tostring(log_err)) then break end
+        if attempt < COLLISION_RETRIES then busy_backoff() end
+    end
     return result
 end
 

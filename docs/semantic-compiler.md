@@ -22,14 +22,24 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL('<semantic-sql>');
 
 The explicit agent and SQL lanes are validation-gated:
 
-- uses `SEMANTIC_ADMIN.VALIDATE_MODEL` before
-  generating SQL
+- reuses the latest successful `VALIDATE_MODEL` run for the model's active
+  version. Compiling does not re-run the validator: `PUBLISH_MODEL` (and the
+  admin DDL scripts after every model mutation) own the writes to
+  `VALIDATION_RUNS`, `METRIC_DEPENDENCIES`, and `METRIC_DIMENSION_MATRIX`.
+  This eliminates the transaction collisions concurrent compile callers
+  used to see, and roughly quarters the per-compile latency. A model that
+  has never been validated returns `SEMANTIC_REQUEST_010`; run
+  `EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL` or
+  `SEMANTIC_ADMIN.PUBLISH_MODEL` first.
 - rejects metric/dimension pairs through
   `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX`
 - reuses `SYS_SEMANTIC.METRIC_DEPENDENCIES` for dependency-aware planning
 - returns a table-shaped response with status, error fields, generated SQL, plan
   JSON, clarification JSON, and validation run id
 - records explicit agent compile calls in `SYS_SEMANTIC.AGENT_REQUEST_LOG`
+- emits `SEMANTIC_REQUEST_100` / `SEMANTIC_QUERY_100` for transient
+  transaction collisions after the runtime's own bounded retries are
+  exhausted. These are safe to retry by the caller
 
 The structured compiler supports:
 

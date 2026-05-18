@@ -32,3 +32,8 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 
 "$PYTHON_BIN" tools/verify_milestone6.py
 "$PYTHON_BIN" tools/verify_sql_native_metrics.py
+
+# Concurrent-compile regression (BUG-001): every COMPILE_REQUEST_JSON used to
+# re-run the full validator, causing GlobalTransactionRollback collisions for
+# concurrent callers. Asserts every compile in a 6×8 grid returns STATUS=OK.
+"$PYTHON_BIN" tools/verify_concurrent_compile.py

@@ -154,6 +154,34 @@ The database also exposes this contract in
 `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`, so adapters can discover the
 accepted keys without scraping documentation.
 
+## Error Codes and Retry
+
+`COMPILE_REQUEST_JSON` and `COMPILE_SQL` return `ERROR_CODE` values in two
+families:
+
+- `SEMANTIC_REQUEST_NNN` for structured requests
+- `SEMANTIC_QUERY_NNN` for the SQL preprocessor entry points
+
+Two codes carry retry semantics rather than user fix-up semantics:
+
+- `SEMANTIC_REQUEST_100` / `SEMANTIC_QUERY_100` —
+  **transient transaction collision, safe to retry.** Emitted when the
+  compile path hit `GlobalTransactionRollback` after the compiler's own
+  bounded retries were exhausted. Callers should retry the same request
+  after a short backoff (≥50 ms). The generated SQL would have been
+  identical, so caching keyed on the request is safe.
+- `SEMANTIC_REQUEST_999` / `SEMANTIC_QUERY_999` —
+  **unexpected error, not retryable.** Indicates an exception that did not
+  match any known compile error. Treat as a bug report signal; the
+  `ERROR_MESSAGE` carries the underlying Lua / SQL message.
+
+All other codes are deterministic input or model errors. Retrying them
+without changing the request will reproduce the same failure.
+
+A compile call is itself idempotent: re-running with the same request and the
+same model version produces the same `GENERATED_SQL` and `PLAN_JSON`. Each
+call still appends a row to `AGENT_REQUEST_LOG`.
+
 ## Catalog Usage
 
 Agent and application integrations should read `SEMANTIC_AGENT` for
