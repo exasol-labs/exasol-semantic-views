@@ -1,0 +1,48 @@
+version: "0.2.0.dev0"
+semantic_model:
+  - name: minimal_sales
+    description: Minimal OSI fixture for Exasol Semantic Views import planning.
+    datasets:
+      - name: orders
+        source: MART.ORDERS
+        primary_key:
+          - order_id
+        description: One row per order.
+        fields:
+          - name: order_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: o.order_id
+            dimension: {}
+            description: Order identifier.
+            custom_extensions:
+              - vendor_name: EXASOL
+                data: '{"field_kind":"DIMENSION","data_type":"DECIMAL(18,0)","source_alias":"o"}'
+          - name: order_status
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: o.order_status
+            dimension: {}
+            description: Order lifecycle status.
+            custom_extensions:
+              - vendor_name: EXASOL
+                data: '{"field_kind":"DIMENSION","data_type":"VARCHAR(32)","source_alias":"o"}'
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"entity_name":"orders","source_schema":"MART","source_object":"ORDERS","source_alias":"o","primary_key_expr":"o.order_id","grain_description":"One row per order"}'
+    metrics:
+      - name: order_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(order_id)
+        description: Number of orders.
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"data_type":"DECIMAL(18,0)","base_entity":"orders","metric_type":"SIMPLE","metric_kind":"SIMPLE","aggregation_function":"COUNT","measure_expr":"order_id","is_private":false,"is_certified":true}'
+    custom_extensions:
+      - vendor_name: EXASOL
+        data: '{"published_schema":"SEMANTIC_MINIMAL_SALES","semantic_objects":[{"object_name":"ORDERS","root_entity":"orders","columns":[{"kind":"DIMENSION","name":"order_id","ordinal":1},{"kind":"DIMENSION","name":"order_status","ordinal":2},{"kind":"METRIC","name":"order_count","ordinal":3}]}]}'
+

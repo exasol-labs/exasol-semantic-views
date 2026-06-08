@@ -1,0 +1,72 @@
+version: "0.2.0.dev0"
+semantic_model:
+  - name: sales_effective_dated_customer
+    description: Fixture for relationships that need native Exasol join SQL.
+    datasets:
+      - name: order_line
+        source: MART.ORDER_LINES
+        primary_key:
+          - order_id
+          - line_id
+        fields:
+          - name: order_date
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ol.order_date
+            dimension:
+              is_time: true
+            description: Order date.
+            custom_extensions:
+              - vendor_name: EXASOL
+                data: '{"field_kind":"DIMENSION","data_type":"DATE","format_hint":"day"}'
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"entity_name":"order_line","source_schema":"MART","source_object":"ORDER_LINES","source_alias":"ol","primary_key_expr":"CAST(ol.order_id AS VARCHAR(36)) || ''-'' || CAST(ol.line_id AS VARCHAR(36))"}'
+      - name: customer_history
+        source: MART.CUSTOMER_HISTORY
+        primary_key:
+          - customer_id
+          - valid_from
+        unique_keys:
+          - - customer_id
+            - valid_from
+        fields:
+          - name: customer_region
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ch.region
+            dimension: {}
+            description: Customer region valid at order time.
+            custom_extensions:
+              - vendor_name: EXASOL
+                data: '{"field_kind":"DIMENSION","data_type":"VARCHAR(100)"}'
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"entity_name":"customer_history","source_schema":"MART","source_object":"CUSTOMER_HISTORY","source_alias":"ch","primary_key_expr":"CAST(ch.customer_id AS VARCHAR(36)) || ''|'' || CAST(ch.valid_from AS VARCHAR(36))"}'
+    relationships:
+      - name: order_line_to_customer_history
+        from: order_line
+        to: customer_history
+        from_columns:
+          - customer_id
+        to_columns:
+          - customer_id
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","join_condition":"ol.customer_id = ch.customer_id AND ol.order_date >= ch.valid_from AND ol.order_date < ch.valid_to","path_priority":10,"requires_native_join_condition":true}'
+    metrics:
+      - name: order_line_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(order_date)
+        description: Number of order lines.
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"data_type":"DECIMAL(18,0)","base_entity":"order_line","metric_type":"SIMPLE","aggregation_function":"COUNT","measure_expr":"order_date"}'
+    custom_extensions:
+      - vendor_name: EXASOL
+        data: '{"published_schema":"SEMANTIC_SALES_HISTORY","semantic_objects":[{"object_name":"SALES_HISTORY","root_entity":"order_line","columns":[{"kind":"DIMENSION","name":"order_date","ordinal":1},{"kind":"DIMENSION","name":"customer_region","ordinal":2},{"kind":"METRIC","name":"order_line_count","ordinal":3}]}]}'
+

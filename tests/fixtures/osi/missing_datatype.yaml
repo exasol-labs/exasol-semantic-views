@@ -1,0 +1,33 @@
+version: "0.2.0.dev0"
+semantic_model:
+  - name: missing_datatype
+    description: Valid OSI fixture that should fail strict Exasol import planning because OSI core has no data type field.
+    datasets:
+      - name: orders
+        source: MART.ORDERS
+        primary_key:
+          - order_id
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"entity_name":"orders","source_schema":"MART","source_object":"ORDERS","source_alias":"o","primary_key_expr":"o.order_id"}'
+        fields:
+          - name: order_status
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: o.order_status
+            dimension: {}
+            description: Order status without an Exasol data_type extension.
+    metrics:
+      - name: order_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(order_status)
+        description: Count of orders without an Exasol data_type extension.
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"base_entity":"orders","metric_type":"SIMPLE","aggregation_function":"COUNT","measure_expr":"order_status"}'
+    custom_extensions:
+      - vendor_name: EXASOL
+        data: '{"published_schema":"SEMANTIC_MISSING_DATATYPE","semantic_objects":[{"object_name":"ORDERS","root_entity":"orders","columns":[{"kind":"DIMENSION","name":"order_status","ordinal":1},{"kind":"METRIC","name":"order_count","ordinal":2}]}]}'
