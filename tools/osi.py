@@ -46,6 +46,16 @@ class ExportOptions:
     profile: str
 
 
+@dataclass(frozen=True)
+class ImportOptions:
+    profile: str
+    strict: bool
+    warnings_as_errors: bool
+    target_model: str | None = None
+    published_schema: str | None = None
+    source: str | None = None
+
+
 def sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -1115,6 +1125,1122 @@ def validate_document(document: dict[str, Any]) -> None:
         raise OsiValidationError(deduped)
 
 
+EXASOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+NATIVE_METRIC_TYPES = {"ADDITIVE", "RATIO", "DISTINCT", "SEMI_ADDITIVE", "WINDOW", "DERIVED"}
+
+MODEL_EXTENSION_KEYS = {
+    "published_schema",
+    "owner_role",
+    "profile",
+    "semantic_object",
+    "semantic_objects",
+    "relationships_requiring_native_join_condition",
+    "catalog_custom_extensions",
+}
+ENTITY_EXTENSION_KEYS = {
+    "entity_name",
+    "source_schema",
+    "source_object",
+    "source_alias",
+    "primary_key_expr",
+    "grain_description",
+    "description",
+    "unique_keys",
+    "catalog_custom_extensions",
+}
+FIELD_EXTENSION_KEYS = {
+    "field_kind",
+    "entity_name",
+    "source_alias",
+    "data_type",
+    "additive_policy",
+    "display_name",
+    "format_hint",
+    "unit_hint",
+    "sensitivity_label",
+    "display_policy",
+    "is_hidden",
+    "is_private",
+    "is_certified",
+    "object_columns",
+    "catalog_custom_extensions",
+}
+RELATIONSHIP_EXTENSION_KEYS = {
+    "from_entity",
+    "to_entity",
+    "join_condition",
+    "relationship_cardinality",
+    "join_type",
+    "fanout_policy",
+    "path_priority",
+    "description",
+    "requires_native_join_condition",
+    "catalog_custom_extensions",
+}
+METRIC_EXTENSION_KEYS = {
+    "data_type",
+    "base_entity",
+    "metric_type",
+    "metric_kind",
+    "aggregation_function",
+    "measure_expr",
+    "semantic_filter_expr",
+    "sql_filter_expr",
+    "distinct_key_expr",
+    "non_additive_dimension",
+    "window_spec_json",
+    "type_params_json",
+    "format_hint",
+    "unit_hint",
+    "display_name",
+    "sensitivity_label",
+    "display_policy",
+    "owner_role",
+    "is_private",
+    "is_certified",
+    "object_columns",
+    "catalog_custom_extensions",
+}
+
+
+def diagnostic(code: str, severity: str, path: str, message: str) -> dict[str, str]:
+    return {"code": code, "severity": severity, "path": path, "message": message}
+
+
+def add_diagnostic(diagnostics: list[dict[str, str]], code: str, severity: str, path: str, message: str) -> None:
+    diagnostics.append(diagnostic(code, severity, path, message))
+
+
+def finalize_diagnostics(diagnostics: list[dict[str, str]], warnings_as_errors: bool) -> list[dict[str, str]]:
+    if not warnings_as_errors:
+        return diagnostics
+    return [
+        dict(item, severity="ERROR") if item["severity"] == "WARNING" else item
+        for item in diagnostics
+    ]
+
+
+def diagnostics_blocking(diagnostics: list[dict[str, str]]) -> bool:
+    return any(item["severity"] == "ERROR" for item in diagnostics)
+
+
+def is_valid_exasol_name(value: Any) -> bool:
+    return isinstance(value, str) and bool(EXASOL_NAME_RE.match(value))
+
+
+def sanitize_exasol_name(value: str, prefix: str = "osi") -> str:
+    name = re.sub(r"[^A-Za-z0-9_]", "_", value.strip())
+    name = re.sub(r"_+", "_", name).strip("_")
+    if not name:
+        name = prefix
+    if not re.match(r"^[A-Za-z]", name):
+        name = f"{prefix}_{name}"
+    return name
+
+
+def generated_alias(name: str, used_aliases: set[str]) -> str:
+    base = sanitize_exasol_name(name, "t").lower()
+    candidate = base[:30] or "t"
+    suffix = 2
+    while candidate.upper() in used_aliases:
+        trim_at = max(1, 30 - len(str(suffix)) - 1)
+        candidate = f"{base[:trim_at]}_{suffix}"
+        suffix += 1
+    used_aliases.add(candidate.upper())
+    return candidate
+
+
+def default_published_schema(model_name: str) -> str:
+    return sanitize_exasol_name(f"SEMANTIC_{model_name.upper()}", "SEMANTIC")
+
+
+def json_path_key(path: str, key: str) -> str:
+    return f"{path}.{key}"
+
+
+def extension_path(path: str, index: int) -> str:
+    return f"{path}.custom_extensions[{index}]"
+
+
+def parse_exasol_extensions(value: Any, path: str, diagnostics: list[dict[str, str]]) -> list[dict[str, Any]]:
+    parsed: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return parsed
+    for index, extension in enumerate(value):
+        if not isinstance(extension, dict):
+            continue
+        if str(extension.get("vendor_name", "")).upper() != "EXASOL":
+            continue
+        data = extension.get("data")
+        if not isinstance(data, str):
+            continue
+        try:
+            parsed_data = json.loads(data)
+        except json.JSONDecodeError as exc:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_080",
+                "ERROR",
+                extension_path(path, index),
+                f"Exasol extension data must parse as JSON: {exc.msg}",
+            )
+            continue
+        parsed.append({"data": parsed_data, "raw_data": data, "path": extension_path(path, index)})
+    return parsed
+
+
+def canonical_exasol_extension(value: Any, path: str, diagnostics: list[dict[str, str]]) -> dict[str, Any]:
+    extensions = parse_exasol_extensions(value, path, diagnostics)
+    if not extensions:
+        return {}
+    if len(extensions) > 1:
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_100",
+            "WARNING",
+            path,
+            "Multiple Exasol extensions found; using the first one as the canonical native envelope.",
+        )
+    data = extensions[0]["data"]
+    if not isinstance(data, dict):
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_100",
+            "ERROR",
+            extensions[0]["path"],
+            "Exasol extension envelope must be a JSON object.",
+        )
+        return {}
+    return data
+
+
+def validate_catalog_custom_extensions(value: Any, path: str, diagnostics: list[dict[str, str]]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", path, "catalog_custom_extensions must be an array.")
+        return
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", item_path, "catalog custom extension must be an object.")
+            continue
+        data = item.get("data")
+        if not isinstance(data, str):
+            add_diagnostic(diagnostics, "OSI_IMPORT_080", "ERROR", f"{item_path}.data", "catalog custom extension data must be a JSON string.")
+            continue
+        try:
+            json.loads(data)
+        except json.JSONDecodeError as exc:
+            add_diagnostic(diagnostics, "OSI_IMPORT_080", "ERROR", f"{item_path}.data", f"catalog custom extension data must parse as JSON: {exc.msg}")
+
+
+def validate_object_columns(value: Any, path: str, diagnostics: list[dict[str, str]], require_kind: bool = False) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", path, "object_columns must be an array.")
+        return
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", item_path, "object column must be an object.")
+            continue
+        if "ordinal" in item and not isinstance(item["ordinal"], int):
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{item_path}.ordinal", "object column ordinal must be an integer.")
+        if require_kind and item.get("kind") not in {"DIMENSION", "FACT", "METRIC"}:
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{item_path}.kind", "object column kind must be DIMENSION, FACT, or METRIC.")
+        if require_kind and not isinstance(item.get("name"), str):
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{item_path}.name", "object column name must be a string.")
+
+
+def validate_unique_key_extensions(value: Any, path: str, diagnostics: list[dict[str, str]]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", path, "unique_keys must be an array.")
+        return
+    for key_index, key in enumerate(value):
+        key_path = f"{path}[{key_index}]"
+        if not isinstance(key, dict):
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", key_path, "unique key extension must be an object.")
+            continue
+        if not isinstance(key.get("key_name"), str) or not key.get("key_name"):
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{key_path}.key_name", "native unique key name is required.")
+        if key.get("key_kind") not in {"PRIMARY", "UNIQUE", "ALTERNATE"}:
+            add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{key_path}.key_kind", "native unique key kind must be PRIMARY, UNIQUE, or ALTERNATE.")
+        columns = key.get("columns")
+        if not isinstance(columns, list) or not columns:
+            add_diagnostic(diagnostics, "OSI_IMPORT_090", "ERROR", f"{key_path}.columns", "native unique key must contain at least one column.")
+
+
+def validate_exasol_envelope(
+    data: dict[str, Any],
+    context: str,
+    path: str,
+    diagnostics: list[dict[str, str]],
+) -> None:
+    allowed_by_context = {
+        "model": MODEL_EXTENSION_KEYS,
+        "entity": ENTITY_EXTENSION_KEYS,
+        "field": FIELD_EXTENSION_KEYS,
+        "relationship": RELATIONSHIP_EXTENSION_KEYS,
+        "metric": METRIC_EXTENSION_KEYS,
+    }
+    allowed = allowed_by_context[context]
+    extra = sorted(set(data) - allowed)
+    if extra:
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_100",
+            "WARNING",
+            path,
+            f"Exasol extension envelope has unsupported keys that will be preserved only as extension metadata: {extra}",
+        )
+    validate_catalog_custom_extensions(data.get("catalog_custom_extensions"), f"{path}.catalog_custom_extensions", diagnostics)
+    if context == "model":
+        semantic_objects = data.get("semantic_objects")
+        if semantic_objects is not None:
+            if not isinstance(semantic_objects, list):
+                add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{path}.semantic_objects", "semantic_objects must be an array.")
+            else:
+                for index, semantic_object in enumerate(semantic_objects):
+                    object_path = f"{path}.semantic_objects[{index}]"
+                    if not isinstance(semantic_object, dict):
+                        add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", object_path, "semantic object metadata must be an object.")
+                        continue
+                    if not isinstance(semantic_object.get("object_name"), str) or not semantic_object.get("object_name"):
+                        add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{object_path}.object_name", "semantic object name is required.")
+                    validate_object_columns(semantic_object.get("columns"), f"{object_path}.columns", diagnostics, require_kind=True)
+        native_relationships = data.get("relationships_requiring_native_join_condition")
+        if native_relationships is not None and not isinstance(native_relationships, list):
+            add_diagnostic(diagnostics, "OSI_IMPORT_110", "ERROR", f"{path}.relationships_requiring_native_join_condition", "native relationship metadata must be an array.")
+    elif context == "entity":
+        validate_unique_key_extensions(data.get("unique_keys"), f"{path}.unique_keys", diagnostics)
+    elif context == "field":
+        if "field_kind" in data and data.get("field_kind") not in {"DIMENSION", "FACT"}:
+            add_diagnostic(diagnostics, "OSI_IMPORT_040", "ERROR", f"{path}.field_kind", "field_kind must be DIMENSION or FACT.")
+        validate_object_columns(data.get("object_columns"), f"{path}.object_columns", diagnostics)
+    elif context == "relationship":
+        if data.get("requires_native_join_condition") and not data.get("join_condition"):
+            add_diagnostic(diagnostics, "OSI_IMPORT_110", "ERROR", path, "relationship marked as native join but join_condition is missing.")
+    elif context == "metric":
+        validate_object_columns(data.get("object_columns"), f"{path}.object_columns", diagnostics)
+
+
+def selected_expression(expression: dict[str, Any], path: str, diagnostics: list[dict[str, str]], strict: bool) -> str | None:
+    dialects = expression.get("dialects")
+    if not isinstance(dialects, list):
+        return None
+    fallback: str | None = None
+    fallback_dialect: str | None = None
+    for dialect in dialects:
+        if not isinstance(dialect, dict):
+            continue
+        if isinstance(dialect.get("expression"), str) and fallback is None:
+            fallback = dialect["expression"]
+            fallback_dialect = str(dialect.get("dialect"))
+        if dialect.get("dialect") == OSI_DIALECT and isinstance(dialect.get("expression"), str):
+            return dialect["expression"]
+    if fallback is not None:
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_070",
+            "ERROR" if strict else "WARNING",
+            path,
+            f"No {OSI_DIALECT} expression found; using {fallback_dialect}.",
+        )
+    return fallback
+
+
+def parse_source(source: str, path: str, diagnostics: list[dict[str, str]]) -> tuple[str | None, str | None]:
+    pieces = [piece.strip() for piece in source.split(".")]
+    if len(pieces) != 2 or not all(pieces):
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_020",
+            "ERROR",
+            path,
+            "Dataset source must map to an Exasol schema.object reference.",
+        )
+        return None, None
+    return pieces[0], pieces[1]
+
+
+def primary_key_expression(alias: str, columns: list[str] | None) -> str | None:
+    if not columns:
+        return None
+    if len(columns) == 1:
+        return f"{alias}.{columns[0]}"
+    return " || '-' || ".join(f"CAST({alias}.{column} AS VARCHAR(36))" for column in columns)
+
+
+def normalize_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"true", "1", "yes"}
+
+
+def add_operation(
+    operations: list[dict[str, Any]],
+    operation: str,
+    target: str,
+    source_path: str,
+    arguments: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    payload = {
+        "operation": operation,
+        "target": target,
+        "source_path": source_path,
+        "arguments": clean_json_value(arguments),
+    }
+    if metadata:
+        payload["metadata"] = clean_json_value(metadata)
+    operations.append(payload)
+
+
+def non_exasol_extension_operations(
+    model_name: str,
+    scope_type: str,
+    scope_name: str | None,
+    extensions: Any,
+    source_path: str,
+    operations: list[dict[str, Any]],
+) -> None:
+    if not isinstance(extensions, list):
+        return
+    for index, extension in enumerate(extensions):
+        if not isinstance(extension, dict):
+            continue
+        vendor_name = extension.get("vendor_name")
+        data = extension.get("data")
+        if not isinstance(vendor_name, str) or vendor_name.upper() == "EXASOL" or not isinstance(data, str):
+            continue
+        add_operation(
+            operations,
+            "add_custom_extension",
+            "SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION",
+            extension_path(source_path, index),
+            {
+                "model_name": model_name,
+                "scope_type": scope_type,
+                "scope_name": scope_name,
+                "vendor_name": vendor_name,
+                "data_json": data,
+                "source_format": "OSI",
+                "extension_name": "default",
+            },
+        )
+
+
+def catalog_extension_operations(
+    model_name: str,
+    scope_type: str,
+    scope_name: str | None,
+    catalog_extensions: Any,
+    source_path: str,
+    operations: list[dict[str, Any]],
+) -> None:
+    if not isinstance(catalog_extensions, list):
+        return
+    for index, item in enumerate(catalog_extensions):
+        if not isinstance(item, dict) or not isinstance(item.get("data"), str):
+            continue
+        add_operation(
+            operations,
+            "add_custom_extension",
+            "SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION",
+            f"{source_path}.catalog_custom_extensions[{index}]",
+            {
+                "model_name": model_name,
+                "scope_type": scope_type,
+                "scope_name": scope_name,
+                "vendor_name": "EXASOL",
+                "data_json": item["data"],
+                "source_format": item.get("source_format") or "OSI",
+                "extension_name": item.get("extension_name") or "default",
+            },
+        )
+
+
+def ai_context_operations(
+    model_name: str,
+    object_type: str,
+    object_name: str | None,
+    ai_context: Any,
+    source_path: str,
+    operations: list[dict[str, Any]],
+    diagnostics: list[dict[str, str]],
+) -> None:
+    if ai_context is None:
+        return
+    instructions: str | None = None
+    synonyms: list[str] = []
+    examples: list[str] = []
+    if isinstance(ai_context, str):
+        instructions = ai_context
+    elif isinstance(ai_context, dict):
+        if isinstance(ai_context.get("instructions"), str):
+            instructions = ai_context["instructions"]
+        if isinstance(ai_context.get("synonyms"), list):
+            synonyms = [item for item in ai_context["synonyms"] if isinstance(item, str)]
+        if isinstance(ai_context.get("examples"), list):
+            examples = [item for item in ai_context["examples"] if isinstance(item, str)]
+
+    if synonyms:
+        if object_type in {"ENTITY", "DIMENSION", "FACT", "METRIC", "SEMANTIC_OBJECT"} and object_name:
+            for index, synonym in enumerate(synonyms):
+                add_operation(
+                    operations,
+                    "add_synonym",
+                    "SEMANTIC_ADMIN.ADD_SYNONYM",
+                    f"{source_path}.ai_context.synonyms[{index}]",
+                    {
+                        "model_name": model_name,
+                        "object_type": object_type,
+                        "object_name": object_name,
+                        "synonym": synonym,
+                        "source": "OSI",
+                    },
+                )
+        else:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_120",
+                "WARNING",
+                f"{source_path}.ai_context.synonyms",
+                f"Synonyms for {object_type} are not supported by the current admin helper surface.",
+            )
+    if instructions:
+        if object_type in {"MODEL", "SEMANTIC_OBJECT", "ENTITY", "DIMENSION", "FACT", "METRIC"}:
+            add_operation(
+                operations,
+                "add_agent_instruction",
+                "SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION",
+                f"{source_path}.ai_context.instructions",
+                {
+                    "model_name": model_name,
+                    "scope_type": object_type,
+                    "scope_name": object_name,
+                    "instruction_kind": "GENERAL",
+                    "instruction_text": instructions,
+                    "applies_to_role": None,
+                    "priority": 100,
+                },
+            )
+        else:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_120",
+                "WARNING",
+                f"{source_path}.ai_context.instructions",
+                f"Instructions for {object_type} are not supported by the current admin helper surface.",
+            )
+    for index, example in enumerate(examples):
+        add_operation(
+            operations,
+            "add_agent_instruction",
+            "SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION",
+            f"{source_path}.ai_context.examples[{index}]",
+            {
+                "model_name": model_name,
+                "scope_type": object_type if object_type in {"MODEL", "SEMANTIC_OBJECT", "ENTITY", "DIMENSION", "FACT", "METRIC"} else "MODEL",
+                "scope_name": object_name if object_type in {"SEMANTIC_OBJECT", "ENTITY", "DIMENSION", "FACT", "METRIC"} else None,
+                "instruction_kind": "GENERAL",
+                "instruction_text": f"Example: {example}",
+                "applies_to_role": None,
+                "priority": 200,
+            },
+        )
+
+
+def semantic_objects_for_model(model: dict[str, Any], model_ext: dict[str, Any], datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    semantic_objects = model_ext.get("semantic_objects")
+    if isinstance(semantic_objects, list) and semantic_objects:
+        return [item for item in semantic_objects if isinstance(item, dict)]
+    root_entity = datasets[0]["name"] if datasets else "root"
+    if isinstance(model_ext.get("semantic_object"), str) and model_ext["semantic_object"]:
+        return [{"object_name": model_ext["semantic_object"], "root_entity": root_entity, "columns": []}]
+    return [{"object_name": sanitize_exasol_name(str(model.get("name", "OSI_MODEL")).upper(), "OBJECT"), "root_entity": root_entity, "columns": []}]
+
+
+def object_name_for_member(
+    member_name: str,
+    member_kind: str,
+    member_ext: dict[str, Any],
+    semantic_objects: list[dict[str, Any]],
+) -> str:
+    object_columns = member_ext.get("object_columns")
+    if isinstance(object_columns, list) and object_columns:
+        sorted_columns = sorted(
+            [item for item in object_columns if isinstance(item, dict) and isinstance(item.get("object_name"), str)],
+            key=lambda item: item.get("ordinal", 10_000_000),
+        )
+        if sorted_columns:
+            return str(sorted_columns[0]["object_name"])
+    for semantic_object in semantic_objects:
+        for column in semantic_object.get("columns") or []:
+            if not isinstance(column, dict):
+                continue
+            if column.get("name") == member_name and column.get("kind") == member_kind:
+                return str(semantic_object["object_name"])
+    return str(semantic_objects[0]["object_name"])
+
+
+def generated_unique_key_name(entity_name: str, key_kind: str, index: int | None = None) -> str:
+    if key_kind == "PRIMARY":
+        return sanitize_exasol_name(f"{entity_name}_primary_key", "key")
+    return sanitize_exasol_name(f"{entity_name}_unique_key_{index or 1}", "key")
+
+
+def planned_core_keys(dataset: dict[str, Any], entity_name: str) -> list[dict[str, Any]]:
+    keys = []
+    primary_key = dataset.get("primary_key")
+    if isinstance(primary_key, list) and primary_key:
+        keys.append(
+            {
+                "key_name": generated_unique_key_name(entity_name, "PRIMARY"),
+                "key_kind": "PRIMARY",
+                "source_format": "OSI",
+                "description": "Imported from OSI primary_key.",
+                "columns": [{"ordinal": index + 1, "column_name": column} for index, column in enumerate(primary_key)],
+            }
+        )
+    unique_keys = dataset.get("unique_keys")
+    if isinstance(unique_keys, list):
+        for key_index, unique_key in enumerate(unique_keys, start=1):
+            if isinstance(unique_key, list):
+                keys.append(
+                    {
+                        "key_name": generated_unique_key_name(entity_name, "UNIQUE", key_index),
+                        "key_kind": "UNIQUE",
+                        "source_format": "OSI",
+                        "description": "Imported from OSI unique_keys.",
+                        "columns": [{"ordinal": index + 1, "column_name": column} for index, column in enumerate(unique_key)],
+                    }
+                )
+    return keys
+
+
+def add_key_operations(
+    model_name: str,
+    entity_name: str,
+    keys: list[dict[str, Any]],
+    source_path: str,
+    operations: list[dict[str, Any]],
+    diagnostics: list[dict[str, str]],
+) -> None:
+    for key_index, key in enumerate(keys):
+        key_path = f"{source_path}.keys[{key_index}]"
+        key_name = key.get("key_name")
+        key_kind = key.get("key_kind") or "UNIQUE"
+        if not is_valid_exasol_name(key_name):
+            add_diagnostic(diagnostics, "OSI_IMPORT_090", "ERROR", f"{key_path}.key_name", f"Unique key name cannot map to Exasol: {key_name!r}.")
+            continue
+        add_operation(
+            operations,
+            "add_unique_key",
+            "SEMANTIC_ADMIN.ADD_UNIQUE_KEY",
+            key_path,
+            {
+                "model_name": model_name,
+                "entity_name": entity_name,
+                "key_name": key_name,
+                "key_kind": key_kind,
+                "description": key.get("description"),
+                "source_format": key.get("source_format") or "OSI",
+            },
+        )
+        columns = key.get("columns")
+        if not isinstance(columns, list) or not columns:
+            add_diagnostic(diagnostics, "OSI_IMPORT_090", "ERROR", f"{key_path}.columns", "Unique key must contain at least one column.")
+            continue
+        for ordinal, column in enumerate(columns, start=1):
+            if not isinstance(column, dict):
+                add_diagnostic(diagnostics, "OSI_IMPORT_090", "ERROR", f"{key_path}.columns[{ordinal - 1}]", "Unique key column must be an object.")
+                continue
+            column_name = column.get("column_name")
+            expression = column.get("expression")
+            add_operation(
+                operations,
+                "add_unique_key_column",
+                "SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN",
+                f"{key_path}.columns[{ordinal - 1}]",
+                {
+                    "model_name": model_name,
+                    "entity_name": entity_name,
+                    "key_name": key_name,
+                    "column_name": column_name,
+                    "expression": expression,
+                    "ordinal_position": column.get("ordinal") or ordinal,
+                },
+            )
+
+
+def normalize_metric_type(metric_ext: dict[str, Any], path: str, diagnostics: list[dict[str, str]]) -> str:
+    metric_type = str(metric_ext.get("metric_type") or metric_ext.get("metric_kind") or "DERIVED").upper()
+    if metric_type == "SIMPLE" or metric_type == "FILTERED":
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_120",
+            "WARNING",
+            path,
+            f"Native metric_type {metric_type!r} maps to ADDITIVE for the current admin helper surface.",
+        )
+        return "ADDITIVE"
+    if metric_type not in NATIVE_METRIC_TYPES:
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_050",
+            "WARNING",
+            path,
+            f"Metric type {metric_type!r} is not supported by ADD_METRIC; planning DERIVED.",
+        )
+        return "DERIVED"
+    return metric_type
+
+
+def build_relationship_join(
+    relationship: dict[str, Any],
+    relationship_ext: dict[str, Any],
+    aliases_by_entity: dict[str, str],
+    path: str,
+    diagnostics: list[dict[str, str]],
+) -> str | None:
+    if relationship_ext.get("join_condition"):
+        return str(relationship_ext["join_condition"])
+    from_entity = relationship.get("from")
+    to_entity = relationship.get("to")
+    from_columns = relationship.get("from_columns")
+    to_columns = relationship.get("to_columns")
+    if not isinstance(from_entity, str) or not isinstance(to_entity, str):
+        return None
+    if from_entity not in aliases_by_entity or to_entity not in aliases_by_entity:
+        add_diagnostic(diagnostics, "OSI_IMPORT_060", "ERROR", path, "Relationship references an unknown dataset.")
+        return None
+    if not isinstance(from_columns, list) or not isinstance(to_columns, list) or len(from_columns) != len(to_columns):
+        add_diagnostic(diagnostics, "OSI_IMPORT_060", "ERROR", path, "Relationship from_columns and to_columns must have the same length.")
+        return None
+    pieces = []
+    for from_column, to_column in zip(from_columns, to_columns):
+        pieces.append(f"{aliases_by_entity[from_entity]}.{from_column} = {aliases_by_entity[to_entity]}.{to_column}")
+    return " AND ".join(pieces)
+
+
+def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, Any]:
+    validate_document(document)
+    diagnostics: list[dict[str, str]] = []
+    operations: list[dict[str, Any]] = []
+
+    models = document.get("semantic_model")
+    if not isinstance(models, list):
+        raise OsiValidationError(["$.semantic_model must be an array"])
+    if options.target_model and len(models) != 1:
+        add_diagnostic(
+            diagnostics,
+            "OSI_IMPORT_010",
+            "ERROR",
+            "$.semantic_model",
+            "--target-model can only be used when the OSI document contains one semantic model.",
+        )
+
+    plan_models: list[dict[str, Any]] = []
+    for model_index, model in enumerate(models):
+        model_path = f"$.semantic_model[{model_index}]"
+        if not isinstance(model, dict):
+            continue
+        model_ext = canonical_exasol_extension(model.get("custom_extensions"), model_path, diagnostics)
+        if model_ext:
+            validate_exasol_envelope(model_ext, "model", f"{model_path}.custom_extensions[0].data", diagnostics)
+        profile = options.profile
+        if profile == "auto":
+            profile = str(model_ext.get("profile") or "interoperability")
+        if profile not in VALID_PROFILES:
+            add_diagnostic(diagnostics, "OSI_IMPORT_001", "ERROR", model_path, f"Unsupported import profile: {profile}")
+            profile = "interoperability"
+
+        source_model_name = str(model.get("name"))
+        model_name = options.target_model or source_model_name
+        if not is_valid_exasol_name(model_name):
+            add_diagnostic(diagnostics, "OSI_IMPORT_010", "ERROR", f"{model_path}.name", f"Model name cannot map to Exasol: {model_name!r}.")
+            model_name = sanitize_exasol_name(model_name, "model")
+        published_schema = options.published_schema or model_ext.get("published_schema") or default_published_schema(model_name)
+        if not is_valid_exasol_name(published_schema):
+            add_diagnostic(diagnostics, "OSI_IMPORT_020", "ERROR", f"{model_path}.custom_extensions", f"Published schema cannot map to Exasol: {published_schema!r}.")
+            published_schema = default_published_schema(model_name)
+
+        datasets = model.get("datasets")
+        if not isinstance(datasets, list):
+            datasets = []
+        semantic_objects = semantic_objects_for_model(model, model_ext, datasets)
+        add_operation(
+            operations,
+            "create_model",
+            "SEMANTIC_ADMIN.CREATE_MODEL",
+            model_path,
+            {
+                "model_name": model_name,
+                "published_schema": published_schema,
+                "description": model.get("description"),
+                "owner_role": model_ext.get("owner_role"),
+            },
+        )
+        catalog_extension_operations(model_name, "MODEL", None, model_ext.get("catalog_custom_extensions"), f"{model_path}.custom_extensions[0].data", operations)
+        non_exasol_extension_operations(model_name, "MODEL", None, model.get("custom_extensions"), model_path, operations)
+        ai_context_operations(model_name, "MODEL", None, model.get("ai_context"), model_path, operations, diagnostics)
+
+        aliases_by_entity: dict[str, str] = {}
+        entity_ext_by_name: dict[str, dict[str, Any]] = {}
+        dataset_by_entity: dict[str, dict[str, Any]] = {}
+        used_aliases: set[str] = set()
+        field_specs: list[dict[str, Any]] = []
+        metric_specs: list[dict[str, Any]] = []
+
+        for dataset_index, dataset in enumerate(datasets):
+            dataset_path = f"{model_path}.datasets[{dataset_index}]"
+            if not isinstance(dataset, dict):
+                continue
+            entity_ext = canonical_exasol_extension(dataset.get("custom_extensions"), dataset_path, diagnostics)
+            if entity_ext:
+                validate_exasol_envelope(entity_ext, "entity", f"{dataset_path}.custom_extensions[0].data", diagnostics)
+            source_schema = entity_ext.get("source_schema")
+            source_object = entity_ext.get("source_object")
+            if not source_schema or not source_object:
+                parsed_schema, parsed_object = parse_source(str(dataset.get("source", "")), f"{dataset_path}.source", diagnostics)
+                source_schema = source_schema or parsed_schema
+                source_object = source_object or parsed_object
+            entity_name = str(entity_ext.get("entity_name") or dataset.get("name"))
+            if not is_valid_exasol_name(entity_name):
+                add_diagnostic(diagnostics, "OSI_IMPORT_020", "ERROR", f"{dataset_path}.name", f"Dataset name cannot map to Exasol entity: {entity_name!r}.")
+                entity_name = sanitize_exasol_name(entity_name, "entity")
+            source_alias = entity_ext.get("source_alias")
+            if isinstance(source_alias, str) and is_valid_exasol_name(source_alias):
+                if source_alias.upper() in used_aliases:
+                    add_diagnostic(diagnostics, "OSI_IMPORT_020", "ERROR", f"{dataset_path}.custom_extensions", f"Duplicate source alias: {source_alias}.")
+                used_aliases.add(source_alias.upper())
+            else:
+                source_alias = generated_alias(entity_name, used_aliases)
+                add_diagnostic(
+                    diagnostics,
+                    "OSI_IMPORT_020",
+                    "WARNING",
+                    dataset_path,
+                    f"Dataset has no Exasol source_alias extension; generated alias {source_alias!r}.",
+                )
+            primary_key_expr = entity_ext.get("primary_key_expr") or primary_key_expression(str(source_alias), dataset.get("primary_key"))
+
+            add_operation(
+                operations,
+                "add_entity",
+                "SEMANTIC_ADMIN.ADD_ENTITY",
+                dataset_path,
+                {
+                    "model_name": model_name,
+                    "entity_name": entity_name,
+                    "source_schema": source_schema,
+                    "source_object": source_object,
+                    "source_alias": source_alias,
+                    "primary_key_expr": primary_key_expr,
+                    "grain_description": entity_ext.get("grain_description"),
+                    "description": dataset.get("description") or entity_ext.get("description"),
+                },
+            )
+            aliases_by_entity[entity_name] = str(source_alias)
+            entity_ext_by_name[entity_name] = entity_ext
+            dataset_by_entity[entity_name] = dataset
+            catalog_extension_operations(model_name, "ENTITY", entity_name, entity_ext.get("catalog_custom_extensions"), f"{dataset_path}.custom_extensions[0].data", operations)
+            non_exasol_extension_operations(model_name, "ENTITY", entity_name, dataset.get("custom_extensions"), dataset_path, operations)
+            ai_context_operations(model_name, "ENTITY", entity_name, dataset.get("ai_context"), dataset_path, operations, diagnostics)
+
+            native_keys = entity_ext.get("unique_keys")
+            key_source_path = f"{dataset_path}.custom_extensions[0].data.unique_keys"
+            if not isinstance(native_keys, list) or not native_keys:
+                native_keys = planned_core_keys(dataset, entity_name)
+                key_source_path = dataset_path
+            add_key_operations(model_name, entity_name, list(native_keys), key_source_path, operations, diagnostics)
+
+            fields = dataset.get("fields")
+            if isinstance(fields, list):
+                for field_index, field in enumerate(fields):
+                    if not isinstance(field, dict):
+                        continue
+                    field_specs.append(
+                        {
+                            "field": field,
+                            "path": f"{dataset_path}.fields[{field_index}]",
+                            "entity_name": entity_name,
+                        }
+                    )
+
+        for semantic_object_index, semantic_object in enumerate(semantic_objects):
+            object_path = f"{model_path}.custom_extensions[0].data.semantic_objects[{semantic_object_index}]"
+            object_name = semantic_object.get("object_name")
+            root_entity = semantic_object.get("root_entity") or (datasets[0]["name"] if datasets else None)
+            if not is_valid_exasol_name(object_name):
+                add_diagnostic(diagnostics, "OSI_IMPORT_100", "ERROR", f"{object_path}.object_name", f"Semantic object name cannot map to Exasol: {object_name!r}.")
+                continue
+            if root_entity not in aliases_by_entity:
+                add_diagnostic(diagnostics, "OSI_IMPORT_020", "ERROR", f"{object_path}.root_entity", f"Semantic object root entity is unknown: {root_entity!r}.")
+                continue
+            add_operation(
+                operations,
+                "add_semantic_object",
+                "SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT",
+                object_path,
+                {
+                    "model_name": model_name,
+                    "object_name": object_name,
+                    "root_entity_name": root_entity,
+                    "description": semantic_object.get("description"),
+                },
+                metadata={"columns": semantic_object.get("columns") or []},
+            )
+            non_exasol_extension_operations(model_name, "SEMANTIC_OBJECT", str(object_name), semantic_object.get("custom_extensions"), object_path, operations)
+
+        for relationship_index, relationship in enumerate(model.get("relationships") or []):
+            if not isinstance(relationship, dict):
+                continue
+            relationship_path = f"{model_path}.relationships[{relationship_index}]"
+            relationship_ext = canonical_exasol_extension(relationship.get("custom_extensions"), relationship_path, diagnostics)
+            if relationship_ext:
+                validate_exasol_envelope(relationship_ext, "relationship", f"{relationship_path}.custom_extensions[0].data", diagnostics)
+            from_entity = str(relationship_ext.get("from_entity") or relationship.get("from"))
+            to_entity = str(relationship_ext.get("to_entity") or relationship.get("to"))
+            join_condition = build_relationship_join(relationship, relationship_ext, aliases_by_entity, relationship_path, diagnostics)
+            if not join_condition:
+                continue
+            if from_entity not in aliases_by_entity or to_entity not in aliases_by_entity:
+                add_diagnostic(diagnostics, "OSI_IMPORT_060", "ERROR", relationship_path, "Relationship references an unknown entity.")
+                continue
+            add_operation(
+                operations,
+                "add_relationship",
+                "SEMANTIC_ADMIN.ADD_RELATIONSHIP",
+                relationship_path,
+                {
+                    "model_name": model_name,
+                    "relationship_name": relationship.get("name"),
+                    "from_entity_name": from_entity,
+                    "to_entity_name": to_entity,
+                    "join_condition": join_condition,
+                    "cardinality": relationship_ext.get("relationship_cardinality") or "MANY_TO_ONE",
+                    "join_type": relationship_ext.get("join_type") or "LEFT",
+                    "fanout_policy": relationship_ext.get("fanout_policy"),
+                },
+                metadata={"requires_native_join_condition": bool(relationship_ext.get("requires_native_join_condition"))},
+            )
+            catalog_extension_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship_ext.get("catalog_custom_extensions"), f"{relationship_path}.custom_extensions[0].data", operations)
+            non_exasol_extension_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship.get("custom_extensions"), relationship_path, operations)
+            ai_context_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship.get("ai_context"), relationship_path, operations, diagnostics)
+
+        native_relationships = model_ext.get("relationships_requiring_native_join_condition")
+        if isinstance(native_relationships, list):
+            for rel_index, rel in enumerate(native_relationships):
+                if not isinstance(rel, dict):
+                    continue
+                native_path = f"{model_path}.custom_extensions[0].data.relationships_requiring_native_join_condition[{rel_index}]"
+                if not rel.get("join_condition"):
+                    add_diagnostic(diagnostics, "OSI_IMPORT_110", "ERROR", native_path, "Native relationship extension is missing join_condition.")
+                    continue
+                add_operation(
+                    operations,
+                    "add_relationship",
+                    "SEMANTIC_ADMIN.ADD_RELATIONSHIP",
+                    native_path,
+                    {
+                        "model_name": model_name,
+                        "relationship_name": rel.get("relationship_name") or sanitize_exasol_name(f"{rel.get('from_entity')}_to_{rel.get('to_entity')}", "relationship"),
+                        "from_entity_name": rel.get("from_entity"),
+                        "to_entity_name": rel.get("to_entity"),
+                        "join_condition": rel.get("join_condition"),
+                        "cardinality": rel.get("relationship_cardinality") or "MANY_TO_ONE",
+                        "join_type": rel.get("join_type") or "LEFT",
+                        "fanout_policy": rel.get("fanout_policy"),
+                    },
+                    metadata={"requires_native_join_condition": True},
+                )
+
+        for spec in field_specs:
+            field = spec["field"]
+            field_path = spec["path"]
+            field_ext = canonical_exasol_extension(field.get("custom_extensions"), field_path, diagnostics)
+            if field_ext:
+                validate_exasol_envelope(field_ext, "field", f"{field_path}.custom_extensions[0].data", diagnostics)
+            field_kind = field_ext.get("field_kind")
+            if not field_kind:
+                if "dimension" in field:
+                    field_kind = "DIMENSION"
+                elif str(field.get("label", "")).lower() == "fact":
+                    field_kind = "FACT"
+                else:
+                    field_kind = "DIMENSION"
+                    add_diagnostic(
+                        diagnostics,
+                        "OSI_IMPORT_040",
+                        "ERROR" if options.strict else "WARNING",
+                        field_path,
+                        "Field classification is ambiguous; planning it as a dimension.",
+                    )
+            field_kind = str(field_kind).upper()
+            entity_name = str(field_ext.get("entity_name") or spec["entity_name"])
+            expression = selected_expression(field["expression"], json_path_key(field_path, "expression"), diagnostics, options.strict)
+            data_type = field_ext.get("data_type")
+            if not data_type:
+                data_type = "DATE" if field.get("dimension", {}).get("is_time") else ("DECIMAL(36,6)" if field_kind == "FACT" else "VARCHAR(2000000)")
+                add_diagnostic(
+                    diagnostics,
+                    "OSI_IMPORT_030",
+                    "ERROR" if options.strict else "WARNING",
+                    field_path,
+                    f"Field datatype missing; planning fallback {data_type}.",
+                )
+            object_name = object_name_for_member(str(field.get("name")), field_kind, field_ext, semantic_objects)
+            if field_kind == "DIMENSION":
+                add_operation(
+                    operations,
+                    "add_dimension",
+                    "SEMANTIC_ADMIN.ADD_DIMENSION",
+                    field_path,
+                    {
+                        "model_name": model_name,
+                        "object_name": object_name,
+                        "entity_name": entity_name,
+                        "dimension_name": field.get("name"),
+                        "expression": expression,
+                        "data_type": data_type,
+                        "display_name": field_ext.get("display_name"),
+                        "description": field.get("description"),
+                        "format_hint": field_ext.get("format_hint"),
+                        "is_certified": normalize_bool(field_ext.get("is_certified"), False),
+                    },
+                    metadata={"object_columns": field_ext.get("object_columns") or []},
+                )
+                scope_type = "DIMENSION"
+            elif field_kind == "FACT":
+                add_operation(
+                    operations,
+                    "add_fact",
+                    "SEMANTIC_ADMIN.ADD_FACT",
+                    field_path,
+                    {
+                        "model_name": model_name,
+                        "entity_name": entity_name,
+                        "fact_name": field.get("name"),
+                        "expression": expression,
+                        "data_type": data_type,
+                        "additive_policy": field_ext.get("additive_policy") or "ADDITIVE",
+                        "display_name": field_ext.get("display_name"),
+                        "description": field.get("description"),
+                        "is_private": normalize_bool(field_ext.get("is_private"), False),
+                        "is_certified": normalize_bool(field_ext.get("is_certified"), False),
+                    },
+                    metadata={"object_columns": field_ext.get("object_columns") or []},
+                )
+                scope_type = "FACT"
+            else:
+                add_diagnostic(diagnostics, "OSI_IMPORT_040", "ERROR", field_path, f"Unsupported field_kind: {field_kind}.")
+                continue
+            catalog_extension_operations(model_name, scope_type, str(field.get("name")), field_ext.get("catalog_custom_extensions"), f"{field_path}.custom_extensions[0].data", operations)
+            non_exasol_extension_operations(model_name, scope_type, str(field.get("name")), field.get("custom_extensions"), field_path, operations)
+            ai_context_operations(model_name, scope_type, str(field.get("name")), field.get("ai_context"), field_path, operations, diagnostics)
+
+        for metric_index, metric in enumerate(model.get("metrics") or []):
+            if not isinstance(metric, dict):
+                continue
+            metric_path = f"{model_path}.metrics[{metric_index}]"
+            metric_ext = canonical_exasol_extension(metric.get("custom_extensions"), metric_path, diagnostics)
+            if metric_ext:
+                validate_exasol_envelope(metric_ext, "metric", f"{metric_path}.custom_extensions[0].data", diagnostics)
+            base_entity = metric_ext.get("base_entity")
+            if not base_entity:
+                if len(aliases_by_entity) == 1:
+                    base_entity = next(iter(aliases_by_entity))
+                else:
+                    add_diagnostic(diagnostics, "OSI_IMPORT_050", "ERROR", metric_path, "Metric base entity is ambiguous without Exasol extension metadata.")
+                    base_entity = next(iter(aliases_by_entity), None)
+            elif base_entity not in aliases_by_entity:
+                add_diagnostic(diagnostics, "OSI_IMPORT_050", "ERROR", metric_path, f"Metric base entity is unknown: {base_entity!r}.")
+            expression = selected_expression(metric["expression"], json_path_key(metric_path, "expression"), diagnostics, options.strict)
+            data_type = metric_ext.get("data_type")
+            if not data_type:
+                data_type = "DECIMAL(36,6)"
+                add_diagnostic(
+                    diagnostics,
+                    "OSI_IMPORT_030",
+                    "ERROR" if options.strict else "WARNING",
+                    metric_path,
+                    f"Metric datatype missing; planning fallback {data_type}.",
+                )
+            object_name = object_name_for_member(str(metric.get("name")), "METRIC", metric_ext, semantic_objects)
+            metric_type = normalize_metric_type(metric_ext, f"{metric_path}.custom_extensions[0].data.metric_type", diagnostics)
+            add_operation(
+                operations,
+                "add_metric",
+                "SEMANTIC_ADMIN.ADD_METRIC",
+                metric_path,
+                {
+                    "model_name": model_name,
+                    "object_name": object_name,
+                    "metric_name": metric.get("name"),
+                    "expression": expression,
+                    "filter_expr": metric_ext.get("sql_filter_expr") or metric_ext.get("semantic_filter_expr"),
+                    "metric_type": metric_type,
+                    "base_entity_name": base_entity,
+                    "data_type": data_type,
+                    "display_name": metric_ext.get("display_name"),
+                    "description": metric.get("description"),
+                    "format_hint": metric_ext.get("format_hint"),
+                    "is_private": normalize_bool(metric_ext.get("is_private"), False),
+                    "is_certified": normalize_bool(metric_ext.get("is_certified"), False),
+                },
+                metadata={
+                    "metric_kind": metric_ext.get("metric_kind"),
+                    "object_columns": metric_ext.get("object_columns") or [],
+                    "native": clean_json_value(metric_ext),
+                },
+            )
+            catalog_extension_operations(model_name, "METRIC", str(metric.get("name")), metric_ext.get("catalog_custom_extensions"), f"{metric_path}.custom_extensions[0].data", operations)
+            non_exasol_extension_operations(model_name, "METRIC", str(metric.get("name")), metric.get("custom_extensions"), metric_path, operations)
+            ai_context_operations(model_name, "METRIC", str(metric.get("name")), metric.get("ai_context"), metric_path, operations, diagnostics)
+
+        plan_models.append(
+            clean_json_value(
+                {
+                    "source_path": model_path,
+                    "source_model_name": source_model_name,
+                    "model_name": model_name,
+                    "published_schema": published_schema,
+                    "profile": profile,
+                    "semantic_objects": [
+                        {
+                            "object_name": item.get("object_name"),
+                            "root_entity": item.get("root_entity"),
+                            "column_count": len(item.get("columns") or []),
+                        }
+                        for item in semantic_objects
+                    ],
+                }
+            )
+        )
+
+    diagnostics = finalize_diagnostics(diagnostics, options.warnings_as_errors)
+    status = "blocked" if diagnostics_blocking(diagnostics) else "ok"
+    return clean_json_value(
+        {
+            "version": OSI_VERSION,
+            "mode": "dry-run",
+            "status": status,
+            "source": options.source,
+            "models": plan_models,
+            "diagnostics": diagnostics,
+            "operations": operations,
+        }
+    )
+
+
 def dump_json(document: dict[str, Any]) -> str:
     return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
 
@@ -1174,6 +2300,25 @@ def command_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_import(args: argparse.Namespace) -> int:
+    if not args.dry_run:
+        raise OsiError("Milestone 3 only supports import planning. Re-run with --dry-run.")
+    document = load_document(args.path)
+    plan = plan_import(
+        document,
+        ImportOptions(
+            profile=args.profile,
+            strict=args.strict,
+            warnings_as_errors=args.warnings_as_errors,
+            target_model=args.target_model,
+            published_schema=args.published_schema,
+            source=str(args.path),
+        ),
+    )
+    write_output(dump_json(plan), args.output)
+    return 1 if plan["status"] == "blocked" else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Open Semantic Interchange tooling for Exasol Semantic Views.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1201,6 +2346,17 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("path", type=Path)
     validate_parser.add_argument("--quiet", action="store_true")
     validate_parser.set_defaults(func=command_validate)
+
+    import_parser = subparsers.add_parser("import", help="plan an OSI import")
+    import_parser.add_argument("path", type=Path)
+    import_parser.add_argument("--dry-run", action="store_true", help="produce a normalized import plan without database writes")
+    import_parser.add_argument("--profile", choices=["auto", *sorted(VALID_PROFILES)], default="auto")
+    import_parser.add_argument("--strict", action="store_true", help="treat lossy or ambiguous OSI mapping as blocking")
+    import_parser.add_argument("--warnings-as-errors", action="store_true")
+    import_parser.add_argument("--target-model", help="override the imported model name")
+    import_parser.add_argument("--published-schema", help="override the imported model published schema")
+    import_parser.add_argument("--output", type=Path)
+    import_parser.set_defaults(func=command_import)
     return parser
 
 

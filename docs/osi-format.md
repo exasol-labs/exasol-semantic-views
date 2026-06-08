@@ -26,7 +26,7 @@ the string required by the schema.
 
 ## CLI
 
-Milestone 2 adds a host-side OSI CLI:
+Milestones 2 and 3 add a host-side OSI CLI:
 
 ```sh
 python3 tools/osi.py validate sql/examples/sales_osi.yaml
@@ -43,6 +43,13 @@ python3 tools/osi.py export \
   --model sales \
   --profile lossless \
   --format json
+
+python3 tools/osi.py import \
+  --dry-run \
+  --strict \
+  --target-model sales_osi_import \
+  --output /tmp/sales_osi_import_plan.json \
+  sql/examples/sales_osi.yaml
 ```
 
 `validate` works offline against the vendored OSI schema. If `jsonschema` is
@@ -53,6 +60,13 @@ for the pinned OSI `0.2.0.dev0` shape and also validates that each
 `export` reads from `SEMANTIC_CATALOG` and `SEMANTIC_AGENT` views and writes
 JSON or YAML. JSON output has no YAML dependency. YAML input/output requires
 PyYAML, and generated YAML quotes the top-level `version`.
+
+`import --dry-run` validates OSI input and writes a normalized JSON import plan.
+It does not connect to Exasol or mutate the catalog. The plan contains ordered
+operations with `operation`, `target`, `arguments`, `source_path`, and
+`diagnostics`. Blocking diagnostics produce `status: "blocked"` and a nonzero
+CLI exit code. JSON input works without optional YAML dependencies; YAML input
+requires PyYAML.
 
 Optional tool dependencies are listed in:
 
@@ -188,7 +202,29 @@ Relationships that cannot be reduced to equality column pairs are omitted from
 OSI core with a warning and preserved in the lossless model extension as native
 relationship metadata.
 
-## Unsupported In Milestone 2
+## Milestone 3 Import Dry-Run Planner
 
-Milestone 2 does not implement import. Import planning and apply remain later
-milestones.
+The importer currently supports planning only:
+
+- `tools/osi.py import --dry-run`.
+- `--profile auto`, `interoperability`, and `lossless`.
+- `--strict` for blocking lossy mappings such as missing field or metric
+  datatypes.
+- `--warnings-as-errors`.
+- `--target-model` and `--published-schema` overrides.
+- deterministic model, entity, semantic object, relationship, field, fact,
+  metric, custom extension, synonym, instruction, and unique-key operations.
+- canonical `vendor_name: EXASOL` extension envelope validation.
+- native Exasol relationship `join_condition` preference.
+- deterministic names for unnamed OSI core unique keys.
+- raw non-Exasol custom extension payload preservation.
+
+The dry-run artifact is the contract for Milestone 4 apply work. Existing admin
+helpers are referenced where possible. Metadata that the current helper surface
+cannot apply losslessly, such as hidden fact object-column membership, is kept
+in operation `metadata` for the later apply layer.
+
+## Unsupported In Milestone 3
+
+Milestone 3 does not write to Exasol, check live model name collisions, or
+rollback failed imports. Import apply remains a later milestone.
