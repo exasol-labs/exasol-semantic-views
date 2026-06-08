@@ -14,7 +14,8 @@ metric/dimension validity matrix, structured compiler scripts, SQL compiler
 wrapper, guarded published views, SQL preprocessor, agent context views, agent
 feedback tables, the manual materialization registry, SQL-native metric
 definition sources, metric input metadata, metric filter metadata, and
-introspection views.
+introspection views. OSI import/export foundation metadata adds generic custom
+extensions and entity unique-key metadata for lossless round trips.
 
 ## Install Files
 
@@ -58,6 +59,45 @@ SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX
 `VALIDATION_RESULTS` is a history table. Use
 `CURRENT_VALIDATION_ISSUES` when an admin, agent, or dashboard needs the issues
 from the latest validation run only.
+
+## OSI Import/Export Metadata
+
+Milestone 1 adds catalog tables used by future OSI import/export tooling:
+
+- `CUSTOM_EXTENSIONS`: raw vendor extension payloads keyed by model version,
+  scope type, scope id, vendor name, extension name, and source format.
+- `UNIQUE_KEYS`: optional entity-level key definitions imported from OSI or
+  preserved for later OSI export.
+- `UNIQUE_KEY_COLUMNS`: ordered source columns or expressions that make up a
+  unique key.
+
+The public views are available as:
+
+```text
+SEMANTIC_CATALOG.CUSTOM_EXTENSIONS
+SEMANTIC_CATALOG.UNIQUE_KEYS
+SEMANTIC_CATALOG.UNIQUE_KEY_COLUMNS
+```
+
+Extension payloads intentionally remain raw JSON strings. This matches OSI
+`custom_extensions[].data`, which is a JSON string rather than a nested object.
+`VALIDATE_MODEL` checks that the payload parses as JSON and that its scope
+points to an existing model, semantic object, entity, relationship, dimension,
+fact, or metric.
+
+Use the admin helpers instead of direct DML:
+
+```text
+SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION
+SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
+SEMANTIC_ADMIN.ADD_UNIQUE_KEY
+SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
+```
+
+`ADD_CUSTOM_EXTENSION` accepts non-Exasol vendor names without interpretation,
+so import/export can preserve third-party OSI extensions. `ADD_UNIQUE_KEY`
+accepts `PRIMARY`, `UNIQUE`, and `ALTERNATE` key kinds. Unique key columns can
+store either a simple source column name or a native expression, but not both.
 
 ## SQL-Native Metric Definition Metadata
 

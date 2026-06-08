@@ -31,6 +31,22 @@ local VALID_AGENT_INSTRUCTION_KINDS = {
     STYLE = true,
 }
 
+local VALID_EXTENSION_SCOPE_TYPES = {
+    MODEL = true,
+    SEMANTIC_OBJECT = true,
+    ENTITY = true,
+    RELATIONSHIP = true,
+    DIMENSION = true,
+    FACT = true,
+    METRIC = true,
+}
+
+local VALID_UNIQUE_KEY_KINDS = {
+    PRIMARY = true,
+    UNIQUE = true,
+    ALTERNATE = true,
+}
+
 local SQL_WORDS = {
     ABS = true,
     AND = true,
@@ -162,6 +178,201 @@ local function null_if_missing(value)
         return null
     end
     return value
+end
+
+local function parse_json_text(text)
+    if missing(text) then
+        error("empty JSON payload")
+    end
+    text = tostring(text)
+    local pos = 1
+
+    local function peek()
+        return string.sub(text, pos, pos)
+    end
+
+    local function skip_ws()
+        while pos <= #text do
+            local c = peek()
+            if c == " " or c == "\n" or c == "\r" or c == "\t" then
+                pos = pos + 1
+            else
+                return
+            end
+        end
+    end
+
+    local function is_digit(c)
+        return string.match(c, "^%d$") ~= nil
+    end
+
+    local function is_hex(c)
+        return string.match(c, "^[0-9A-Fa-f]$") ~= nil
+    end
+
+    local function read_digits()
+        local count = 0
+        while is_digit(peek()) do
+            count = count + 1
+            pos = pos + 1
+        end
+        return count
+    end
+
+    local function parse_string()
+        if peek() ~= '"' then
+            error("expected string at byte " .. tostring(pos))
+        end
+        pos = pos + 1
+        while pos <= #text do
+            local c = peek()
+            if c == '"' then
+                pos = pos + 1
+                return true
+            elseif c == "\\" then
+                local e = string.sub(text, pos + 1, pos + 1)
+                if e == '"' or e == "\\" or e == "/" or e == "b" or e == "f"
+                    or e == "n" or e == "r" or e == "t" then
+                    pos = pos + 2
+                elseif e == "u" then
+                    for offset = 2, 5 do
+                        if not is_hex(string.sub(text, pos + offset, pos + offset)) then
+                            error("invalid unicode escape at byte " .. tostring(pos))
+                        end
+                    end
+                    pos = pos + 6
+                else
+                    error("invalid escape at byte " .. tostring(pos))
+                end
+            elseif c == "" or string.byte(c) < 32 then
+                error("invalid control character in string at byte " .. tostring(pos))
+            else
+                pos = pos + 1
+            end
+        end
+        error("unterminated string")
+    end
+
+    local parse_value
+
+    local function parse_number()
+        local start_pos = pos
+        if peek() == "-" then
+            pos = pos + 1
+        end
+        if peek() == "0" then
+            pos = pos + 1
+        elseif string.match(peek(), "^[1-9]$") then
+            read_digits()
+        else
+            error("invalid number at byte " .. tostring(start_pos))
+        end
+        if peek() == "." then
+            pos = pos + 1
+            if read_digits() == 0 then
+                error("invalid number fraction at byte " .. tostring(pos))
+            end
+        end
+        local c = peek()
+        if c == "e" or c == "E" then
+            pos = pos + 1
+            c = peek()
+            if c == "+" or c == "-" then
+                pos = pos + 1
+            end
+            if read_digits() == 0 then
+                error("invalid number exponent at byte " .. tostring(pos))
+            end
+        end
+        return true
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        skip_ws()
+        if peek() == "]" then
+            pos = pos + 1
+            return true
+        end
+        while true do
+            parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "]" then
+                pos = pos + 1
+                return true
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected array comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        skip_ws()
+        if peek() == "}" then
+            pos = pos + 1
+            return true
+        end
+        while true do
+            skip_ws()
+            parse_string()
+            skip_ws()
+            if peek() ~= ":" then
+                error("expected object colon at byte " .. tostring(pos))
+            end
+            pos = pos + 1
+            parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "}" then
+                pos = pos + 1
+                return true
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected object comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    function parse_value()
+        skip_ws()
+        local c = peek()
+        if c == '"' then
+            return parse_string()
+        elseif c == "{" then
+            return parse_object()
+        elseif c == "[" then
+            return parse_array()
+        elseif c == "-" or is_digit(c) then
+            return parse_number()
+        elseif string.sub(text, pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif string.sub(text, pos, pos + 4) == "false" then
+            pos = pos + 5
+            return true
+        elseif string.sub(text, pos, pos + 3) == "null" then
+            pos = pos + 4
+            return true
+        end
+        error("unexpected JSON token at byte " .. tostring(pos))
+    end
+
+    parse_value()
+    skip_ws()
+    if pos <= #text then
+        error("unexpected trailing JSON at byte " .. tostring(pos))
+    end
+    return true
+end
+
+local function valid_json_text(text)
+    local ok, _ = pcall(parse_json_text, text)
+    return ok
 end
 
 local function start_validation_run(ctx)
@@ -584,6 +795,7 @@ local function load_catalog(ctx)
     end
 
     ctx.relationships = {}
+    ctx.relationship_by_id = {}
     local relationship_rows = query([[
         SELECT RELATIONSHIP_ID, RELATIONSHIP_NAME, FROM_ENTITY_ID, TO_ENTITY_ID,
                JOIN_CONDITION, RELATIONSHIP_CARDINALITY, JOIN_TYPE, FANOUT_POLICY,
@@ -595,8 +807,9 @@ local function load_catalog(ctx)
         ORDER BY RELATIONSHIP_ID
     ]], {model_id = ctx.model_id, version_id = ctx.version_id})
     for _, row in ipairs(relationship_rows or {}) do
-        table.insert(ctx.relationships, {
-            id = row_value(row, "RELATIONSHIP_ID", 1),
+        local id = row_value(row, "RELATIONSHIP_ID", 1)
+        local relationship = {
+            id = id,
             name = row_value(row, "RELATIONSHIP_NAME", 2),
             from_entity_id = row_value(row, "FROM_ENTITY_ID", 3),
             to_entity_id = row_value(row, "TO_ENTITY_ID", 4),
@@ -605,23 +818,96 @@ local function load_catalog(ctx)
             join_type = row_value(row, "JOIN_TYPE", 7),
             fanout_policy = row_value(row, "FANOUT_POLICY", 8),
             path_priority = row_value(row, "PATH_PRIORITY", 9),
-        })
+        }
+        table.insert(ctx.relationships, relationship)
+        ctx.relationship_by_id[key(id)] = relationship
     end
 
     -- Semantic objects with root entity IDs - needed to validate that a metric
     -- base entity is reachable from the join-root when computing the valid-combinations matrix.
     ctx.semantic_objects = {}
+    ctx.semantic_object_by_id = {}
     local object_rows = query([[
-        SELECT OBJECT_ID, ROOT_ENTITY_ID
+        SELECT OBJECT_ID, OBJECT_NAME, ROOT_ENTITY_ID
         FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
     ]], {model_id = ctx.model_id, version_id = ctx.version_id})
     for _, row in ipairs(object_rows or {}) do
-        table.insert(ctx.semantic_objects, {
-            object_id = row_value(row, "OBJECT_ID", 1),
-            root_entity_id = row_value(row, "ROOT_ENTITY_ID", 2),
+        local id = row_value(row, "OBJECT_ID", 1)
+        local object = {
+            object_id = id,
+            name = row_value(row, "OBJECT_NAME", 2),
+            root_entity_id = row_value(row, "ROOT_ENTITY_ID", 3),
+        }
+        table.insert(ctx.semantic_objects, object)
+        ctx.semantic_object_by_id[key(id)] = object
+    end
+
+    ctx.unique_keys = {}
+    ctx.unique_key_by_id = {}
+    local unique_key_rows = query([[
+        SELECT UNIQUE_KEY_ID, ENTITY_ID, KEY_NAME, KEY_KIND, SOURCE_FORMAT
+        FROM SYS_SEMANTIC.UNIQUE_KEYS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY UNIQUE_KEY_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(unique_key_rows or {}) do
+        local id = row_value(row, "UNIQUE_KEY_ID", 1)
+        local unique_key = {
+            id = id,
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "KEY_NAME", 3),
+            kind = row_value(row, "KEY_KIND", 4),
+            source_format = row_value(row, "SOURCE_FORMAT", 5),
+            columns = {},
+        }
+        table.insert(ctx.unique_keys, unique_key)
+        ctx.unique_key_by_id[key(id)] = unique_key
+    end
+
+    local unique_key_column_rows = query([[
+        SELECT ukc.UNIQUE_KEY_ID, ukc.ORDINAL_POSITION, ukc.COLUMN_NAME, ukc.EXPRESSION
+        FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS ukc
+        JOIN SYS_SEMANTIC.UNIQUE_KEYS uk
+          ON uk.UNIQUE_KEY_ID = ukc.UNIQUE_KEY_ID
+        WHERE uk.MODEL_ID = :model_id
+          AND uk.VERSION_ID = :version_id
+          AND uk.STATUS = 'ACTIVE'
+        ORDER BY ukc.UNIQUE_KEY_ID, ukc.ORDINAL_POSITION
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(unique_key_column_rows or {}) do
+        local unique_key = ctx.unique_key_by_id[key(row_value(row, "UNIQUE_KEY_ID", 1))]
+        if unique_key ~= nil then
+            table.insert(unique_key.columns, {
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 2),
+                column_name = row_value(row, "COLUMN_NAME", 3),
+                expression = row_value(row, "EXPRESSION", 4),
+            })
+        end
+    end
+
+    ctx.custom_extensions = {}
+    local extension_rows = query([[
+        SELECT CUSTOM_EXTENSION_ID, SCOPE_TYPE, SCOPE_ID, VENDOR_NAME,
+               EXTENSION_NAME, SOURCE_FORMAT, DATA_JSON
+        FROM SYS_SEMANTIC.CUSTOM_EXTENSIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+        ORDER BY CUSTOM_EXTENSION_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(extension_rows or {}) do
+        table.insert(ctx.custom_extensions, {
+            id = row_value(row, "CUSTOM_EXTENSION_ID", 1),
+            scope_type = row_value(row, "SCOPE_TYPE", 2),
+            scope_id = row_value(row, "SCOPE_ID", 3),
+            vendor_name = row_value(row, "VENDOR_NAME", 4),
+            extension_name = row_value(row, "EXTENSION_NAME", 5),
+            source_format = row_value(row, "SOURCE_FORMAT", 6),
+            data_json = row_value(row, "DATA_JSON", 7),
         })
     end
 end
@@ -697,6 +983,145 @@ local function validate_structural_rules(ctx)
     for _, row in ipairs(invalid_columns or {}) do
         add_issue(ctx, "ERROR", "OBJECT_COLUMN", row_value(row, "OBJECT_NAME", 1) .. "." .. row_value(row, "COLUMN_NAME", 3),
             "SEMANTIC_MODEL_005", "Semantic object column references a missing or unsupported catalog object.")
+    end
+end
+
+local function custom_extension_scope_exists(ctx, scope_type, scope_id)
+    if missing(scope_type) or missing(scope_id) then
+        return false
+    end
+    if scope_type == "MODEL" then
+        return key(scope_id) == key(ctx.model_id)
+    elseif scope_type == "SEMANTIC_OBJECT" then
+        return ctx.semantic_object_by_id[key(scope_id)] ~= nil
+    elseif scope_type == "ENTITY" then
+        return ctx.entity_by_id[key(scope_id)] ~= nil
+    elseif scope_type == "RELATIONSHIP" then
+        return ctx.relationship_by_id[key(scope_id)] ~= nil
+    elseif scope_type == "DIMENSION" then
+        return ctx.dimension_by_id[key(scope_id)] ~= nil
+    elseif scope_type == "FACT" then
+        return ctx.fact_by_id[key(scope_id)] ~= nil
+    elseif scope_type == "METRIC" then
+        return ctx.metric_by_id[key(scope_id)] ~= nil
+    end
+    return false
+end
+
+local function extension_object_name(extension)
+    return tostring(extension.vendor_name)
+        .. "."
+        .. tostring(extension.extension_name)
+        .. "#"
+        .. tostring(extension.id)
+end
+
+local function validate_custom_extensions(ctx)
+    for _, extension in ipairs(ctx.custom_extensions) do
+        local scope_type = upper(extension.scope_type)
+        local object_name = extension_object_name(extension)
+        if not VALID_EXTENSION_SCOPE_TYPES[scope_type] then
+            add_issue(ctx, "ERROR", "CUSTOM_EXTENSION", object_name, "SEMANTIC_MODEL_026",
+                "Custom extension has unsupported scope type: " .. tostring(extension.scope_type) .. ".")
+        elseif not custom_extension_scope_exists(ctx, scope_type, extension.scope_id) then
+            add_issue(ctx, "ERROR", "CUSTOM_EXTENSION", object_name, "SEMANTIC_MODEL_026",
+                "Custom extension scope does not exist in this model version: "
+                .. scope_type .. "#" .. tostring(extension.scope_id) .. ".")
+        end
+
+        if missing(extension.vendor_name) then
+            add_issue(ctx, "ERROR", "CUSTOM_EXTENSION", object_name, "SEMANTIC_MODEL_027",
+                "Custom extension vendor_name is required.")
+        end
+        if missing(extension.extension_name) then
+            add_issue(ctx, "ERROR", "CUSTOM_EXTENSION", object_name, "SEMANTIC_MODEL_027",
+                "Custom extension extension_name is required.")
+        end
+        if missing(extension.source_format) then
+            add_issue(ctx, "ERROR", "CUSTOM_EXTENSION", object_name, "SEMANTIC_MODEL_027",
+                "Custom extension source_format is required.")
+        end
+        if not valid_json_text(extension.data_json) then
+            add_issue(ctx, "ERROR", "CUSTOM_EXTENSION", object_name, "SEMANTIC_MODEL_027",
+                "Custom extension DATA_JSON must be valid JSON.")
+        end
+    end
+end
+
+local function unique_key_object_name(ctx, unique_key)
+    local entity_name = ctx.entity_name_by_id[key(unique_key.entity_id)] or tostring(unique_key.entity_id)
+    return entity_name .. "." .. tostring(unique_key.name)
+end
+
+local function validate_unique_key_expression(ctx, unique_key, column, entity, owning_alias, object_name)
+    for alias, _ in pairs(aliases_in_expression(column.expression)) do
+        if alias ~= owning_alias then
+            add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
+                "Unique key expression references alias outside the owning entity: " .. alias .. ".")
+        end
+    end
+    for fn, _ in pairs(unsupported_functions(column.expression)) do
+        add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
+            "Unique key expression uses unsupported function: " .. fn .. ".")
+    end
+    for _, ref in ipairs(column_refs_in_expression(column.expression)) do
+        if ref.alias == owning_alias and not source_column_exists(entity.source_schema, entity.source_object, ref.column_name) then
+            add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
+                "Unique key expression references unknown source column: " .. ref.alias .. "." .. ref.column_name .. ".")
+        end
+    end
+end
+
+local function validate_unique_keys(ctx)
+    for _, unique_key in ipairs(ctx.unique_keys) do
+        local object_name = unique_key_object_name(ctx, unique_key)
+        local entity = ctx.entity_by_id[key(unique_key.entity_id)]
+        if entity == nil then
+            add_issue(ctx, "ERROR", "UNIQUE_KEY", object_name, "SEMANTIC_MODEL_028",
+                "Unique key owning entity does not exist in this model version.")
+        end
+
+        local key_kind = upper(unique_key.kind)
+        if not VALID_UNIQUE_KEY_KINDS[key_kind] then
+            add_issue(ctx, "ERROR", "UNIQUE_KEY", object_name, "SEMANTIC_MODEL_028",
+                "Unsupported unique key kind: " .. tostring(unique_key.kind) .. ".")
+        end
+
+        if missing(unique_key.name) then
+            add_issue(ctx, "ERROR", "UNIQUE_KEY", object_name, "SEMANTIC_MODEL_028",
+                "Unique key name is required.")
+        end
+        if #unique_key.columns == 0 then
+            add_issue(ctx, "ERROR", "UNIQUE_KEY", object_name, "SEMANTIC_MODEL_028",
+                "Unique key must contain at least one column or expression.")
+        end
+
+        if entity ~= nil then
+            local owning_alias = upper(entity.alias)
+            for _, column in ipairs(unique_key.columns) do
+                local column_name = column.column_name
+                local expression = column.expression
+                local column_object_name = object_name .. "[" .. tostring(column.ordinal_position) .. "]"
+                if missing(column.ordinal_position) then
+                    add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
+                        "Unique key column ordinal position is required.")
+                end
+                if missing(column_name) and missing(expression) then
+                    add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
+                        "Unique key column must define either COLUMN_NAME or EXPRESSION.")
+                elseif not missing(column_name) and not missing(expression) then
+                    add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
+                        "Unique key column must not define both COLUMN_NAME and EXPRESSION.")
+                elseif not missing(column_name) then
+                    if not source_column_exists(entity.source_schema, entity.source_object, column_name) then
+                        add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
+                            "Unique key column references unknown source column: " .. tostring(column_name) .. ".")
+                    end
+                else
+                    validate_unique_key_expression(ctx, unique_key, column, entity, owning_alias, column_object_name)
+                end
+            end
+        end
     end
 end
 
@@ -1271,6 +1696,8 @@ function M.validate_model(model_name_arg)
     if model_loaded then
         load_catalog(ctx)
         validate_structural_rules(ctx)
+        validate_custom_extensions(ctx)
+        validate_unique_keys(ctx)
         local safe_edges, all_edges = relationship_edges(ctx)
         validate_expressions(ctx, safe_edges)
         extract_metric_dependencies(ctx)

@@ -12,6 +12,8 @@ EXPECTED_TABLES = {
     "MODELS",
     "MODEL_VERSIONS",
     "ENTITIES",
+    "UNIQUE_KEYS",
+    "UNIQUE_KEY_COLUMNS",
     "SEMANTIC_OBJECTS",
     "RELATIONSHIPS",
     "DIMENSIONS",
@@ -25,6 +27,7 @@ EXPECTED_TABLES = {
     "OBJECT_COLUMNS",
     "METRIC_DEPENDENCIES",
     "SYNONYMS",
+    "CUSTOM_EXTENSIONS",
     "AGENT_INSTRUCTIONS",
     "VERIFIED_QUERIES",
     "AGENT_REQUEST_LOG",
@@ -60,6 +63,10 @@ EXPECTED_SCRIPTS = {
     "DISABLE_SEMANTIC_SQL",
     "COMPILER_RUNTIME",
     "COMPILE_REQUEST_JSON",
+    "ADD_CUSTOM_EXTENSION",
+    "GET_CUSTOM_EXTENSIONS",
+    "ADD_UNIQUE_KEY",
+    "ADD_UNIQUE_KEY_COLUMN",
 }
 
 
@@ -96,6 +103,17 @@ def assert_at_least(name: str, actual: int, expected: int) -> None:
     if actual < expected:
         raise AssertionError(f"{name}: expected at least {expected}, got {actual}")
     print(f"ok {name}: {actual}")
+
+
+def assert_script_fails(con, name: str, sql: str, expected_text: str) -> None:
+    try:
+        con.execute(sql).fetchall()
+    except Exception as exc:  # pyexasol wraps script errors.
+        if expected_text not in str(exc):
+            raise AssertionError(f"{name}: expected {expected_text!r} in {exc!r}") from exc
+        print(f"ok {name}: rejected")
+        return
+    raise AssertionError(f"{name}: expected script failure")
 
 
 def main() -> int:
@@ -136,6 +154,16 @@ def main() -> int:
             scalar(con, "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS WHERE VIEW_SCHEMA = 'SEMANTIC_CATALOG'"),
             16,
         )
+        assert_equal(
+            "OSI metadata views",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS "
+                "WHERE VIEW_SCHEMA = 'SEMANTIC_CATALOG' "
+                "AND VIEW_NAME IN ('CUSTOM_EXTENSIONS', 'UNIQUE_KEYS', 'UNIQUE_KEY_COLUMNS')",
+            ),
+            3,
+        )
 
         expected_counts = {
             "SEMANTIC_CATALOG.MODELS WHERE MODEL_NAME = 'sales'": 1,
@@ -158,6 +186,88 @@ def main() -> int:
         }
         for table_expr, expected in expected_counts.items():
             assert_equal(table_expr, scalar(con, f"SELECT COUNT(*) FROM {table_expr}"), expected)
+
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION("
+            "'sales', 'MODEL', NULL, 'EXASOL', '{\"purpose\":\"osi-milestone1\"}', 'OSI', 'milestone1')"
+        ).fetchall()
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION("
+            "'sales', 'ENTITY', 'order', 'PARTNER_VENDOR', '{\"opaque\":true}', 'OSI', 'roundtrip')"
+        ).fetchall()
+        for scope_type, scope_name in [
+            ("SEMANTIC_OBJECT", "SALES"),
+            ("RELATIONSHIP", "order_line_to_order"),
+            ("DIMENSION", "customer_region"),
+            ("FACT", "net_revenue"),
+            ("METRIC", "total_revenue"),
+        ]:
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION("
+                f"'sales', '{scope_type}', '{scope_name}', "
+                f"'EXASOL', '{{\"scope\":\"{scope_type.lower()}\"}}', 'OSI', 'scope_test')"
+            ).fetchall()
+        assert_script_fails(
+            con,
+            "invalid extension JSON",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION("
+            "'sales', 'MODEL', NULL, 'EXASOL', '{bad json', 'OSI', 'invalid_json')",
+            "SEMANTIC_ADMIN_040",
+        )
+        assert_equal(
+            "custom extension preservation",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_CATALOG.CUSTOM_EXTENSIONS "
+                "WHERE MODEL_NAME = 'sales' AND VENDOR_NAME IN ('EXASOL', 'PARTNER_VENDOR')",
+            ),
+            7,
+        )
+        assert_equal(
+            "custom extension helper read",
+            len(
+                con.execute(
+                    "EXECUTE SCRIPT SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS("
+                    "'sales', NULL, NULL, NULL)"
+                ).fetchall()
+            ),
+            7,
+        )
+
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY("
+            "'sales', 'order', 'order_order_id_key', 'PRIMARY', 'Order primary key', 'OSI')"
+        ).fetchall()
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN("
+            "'sales', 'order', 'order_order_id_key', 'order_id', NULL, 1)"
+        ).fetchall()
+        assert_equal(
+            "unique key preservation",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_CATALOG.UNIQUE_KEY_COLUMNS "
+                "WHERE MODEL_NAME = 'sales' "
+                "AND ENTITY_NAME = 'order' "
+                "AND KEY_NAME = 'order_order_id_key' "
+                "AND COLUMN_NAME = 'order_id'",
+            ),
+            1,
+        )
+
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
+        assert_equal(
+            "OSI metadata validation errors",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES "
+                "WHERE MODEL_NAME = 'sales' "
+                "AND RULE_CODE IN ("
+                "'SEMANTIC_MODEL_026', 'SEMANTIC_MODEL_027', "
+                "'SEMANTIC_MODEL_028', 'SEMANTIC_MODEL_029')",
+            ),
+            0,
+        )
     finally:
         con.close()
     return 0

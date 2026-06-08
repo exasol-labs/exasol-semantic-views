@@ -102,6 +102,32 @@ schema validation, extension JSON validation, source and alias resolution,
 field classification, data-type resolution, relationship resolution, and metric
 base-entity resolution.
 
+## Milestone 1 Catalog Foundation
+
+The catalog now has native storage for OSI round-trip metadata:
+
+- `SYS_SEMANTIC.CUSTOM_EXTENSIONS`
+- `SYS_SEMANTIC.UNIQUE_KEYS`
+- `SYS_SEMANTIC.UNIQUE_KEY_COLUMNS`
+
+The corresponding read surface is exposed through `SEMANTIC_CATALOG`.
+Admin scripts add and read extension payloads and manage unique-key metadata:
+
+- `SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION`
+- `SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS`
+- `SEMANTIC_ADMIN.ADD_UNIQUE_KEY`
+- `SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN`
+
+Extension payloads are stored as raw JSON strings to match OSI
+`custom_extensions[].data`. `VALIDATE_MODEL` now rejects malformed extension
+JSON, extension scopes that point to missing objects, unsupported unique-key
+kinds, empty unique keys, and simple unique-key columns that do not resolve to
+source columns.
+
+This keeps the future Python converter focused on OSI schema validation and
+mapping while the database catalog enforces the Exasol-side invariants needed
+for safe import, export, publish, and compile workflows.
+
 ## Unsupported In Milestone 0
 
 Milestone 0 does not implement the converter. It only pins the schema,

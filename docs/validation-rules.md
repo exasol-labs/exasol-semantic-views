@@ -55,12 +55,17 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_013` | error | Dimension, fact, or filter expression uses an out-of-scope alias. |
 | `SEMANTIC_MODEL_014` | error | Metric base entity is missing. |
 | `SEMANTIC_MODEL_016` | error | Expression uses an unsupported MVP function. |
+| `SEMANTIC_MODEL_017` | error | Expression references an unknown source column. |
 | `SEMANTIC_MODEL_020` | warning | Public metric is missing a description. |
 | `SEMANTIC_MODEL_021` | error | Certified synonym is ambiguous. |
 | `SEMANTIC_MODEL_022` | warning | Public numeric metric is missing a unit or format hint. |
 | `SEMANTIC_MODEL_023` | error | Verified query references missing semantic objects, metrics, or dimensions. |
 | `SEMANTIC_MODEL_024` | error | Agent instruction scope type is unsupported. |
 | `SEMANTIC_MODEL_025` | error | Agent instruction kind is unsupported. |
+| `SEMANTIC_MODEL_026` | error | Custom extension scope type is unsupported or points to a missing object. |
+| `SEMANTIC_MODEL_027` | error | Custom extension metadata is incomplete or `DATA_JSON` is not valid JSON. |
+| `SEMANTIC_MODEL_028` | error | Unique key metadata is invalid, references a missing entity, has an unsupported key kind, or has no columns. |
+| `SEMANTIC_MODEL_029` | error | Unique key column metadata is invalid or references an unresolvable source column/expression. |
 | `SEMANTIC_MODEL_030` | error | Visible metric/dimension pair is invalid. |
 
 ## Metric/Dimension Matrix
@@ -101,3 +106,7 @@ The smoke now verifies:
 - many-to-many traversal without fanout returns `SEMANTIC_MODEL_010`
 - ambiguous certified synonym returns `SEMANTIC_MODEL_021`
 - stale verified query references return `SEMANTIC_MODEL_023`
+- invalid OSI extension scope or JSON returns `SEMANTIC_MODEL_026` or
+  `SEMANTIC_MODEL_027`
+- invalid unique-key metadata returns `SEMANTIC_MODEL_028` or
+  `SEMANTIC_MODEL_029`
