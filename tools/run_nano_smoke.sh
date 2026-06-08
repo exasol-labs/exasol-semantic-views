@@ -47,3 +47,7 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # a deduplicated GROUP BY so dashboards can populate facet filters without
 # faking an unused metric.
 "$PYTHON_BIN" tools/verify_dimension_discovery.py
+
+# OSI export (Milestone 2): validate live catalog export, lossless extensions,
+# simple key mapping, and offline OSI schema validation.
+"$PYTHON_BIN" tools/verify_osi_export.py

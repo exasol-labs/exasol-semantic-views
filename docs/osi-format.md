@@ -24,9 +24,45 @@ schema currently uses `const: "0.2.0.dev0"` for the top-level `version`.
 YAML examples quote the version as `"0.2.0.dev0"` so every parser treats it as
 the string required by the schema.
 
+## CLI
+
+Milestone 2 adds a host-side OSI CLI:
+
+```sh
+python3 tools/osi.py validate sql/examples/sales_osi.yaml
+
+python3 tools/osi.py export \
+  --model sales \
+  --object SALES \
+  --profile interoperability \
+  --format yaml \
+  --output sql/examples/sales_osi.yaml \
+  --warnings-output /tmp/sales_osi_warnings.json
+
+python3 tools/osi.py export \
+  --model sales \
+  --profile lossless \
+  --format json
+```
+
+`validate` works offline against the vendored OSI schema. If `jsonschema` is
+installed, the CLI uses it; otherwise it uses the built-in structural validator
+for the pinned OSI `0.2.0.dev0` shape and also validates that each
+`custom_extensions[].data` string parses as JSON.
+
+`export` reads from `SEMANTIC_CATALOG` and `SEMANTIC_AGENT` views and writes
+JSON or YAML. JSON output has no YAML dependency. YAML input/output requires
+PyYAML, and generated YAML quotes the top-level `version`.
+
+Optional tool dependencies are listed in:
+
+```text
+tools/requirements-osi.txt
+```
+
 ## Profiles
 
-Two profiles are planned.
+Two profiles are implemented for export.
 
 ### Interoperability
 
@@ -78,8 +114,9 @@ Current fixtures:
 - `missing_datatype.yaml`: valid OSI that should fail strict Exasol import
   planning because OSI core has no data type field.
 
-`sql/examples/sales_osi.yaml` mirrors the sales interoperability fixture as a
-human-facing example next to the existing sales SQL examples.
+`sql/examples/sales_osi.yaml` is generated from `tools/osi.py export` and
+mirrors the sales interoperability fixture as a human-facing example next to
+the existing sales SQL examples.
 
 ## Milestone 0 Review Learnings
 
@@ -128,8 +165,30 @@ This keeps the future Python converter focused on OSI schema validation and
 mapping while the database catalog enforces the Exasol-side invariants needed
 for safe import, export, publish, and compile workflows.
 
-## Unsupported In Milestone 0
+## Milestone 2 Export Tool
 
-Milestone 0 does not implement the converter. It only pins the schema,
-documents the support policy, and adds fixtures for later implementation and
-tests.
+The exporter currently supports:
+
+- `interoperability` and `lossless` profiles.
+- JSON and YAML output.
+- deterministic entity, field, relationship, and metric ordering.
+- simple primary-key extraction from native primary key expressions.
+- simple primary/unique key export from `UNIQUE_KEYS` and
+  `UNIQUE_KEY_COLUMNS`.
+- simple equality relationship export to OSI `from_columns` and `to_columns`.
+- native relationship metadata in Exasol extensions.
+- field and metric Exasol metadata in canonical `vendor_name: EXASOL`
+  extensions.
+- non-Exasol custom extension `data` string preservation.
+- model, dataset, field, relationship, and metric `ai_context` from synonyms,
+  agent instructions, and verified-query natural-language examples where
+  available.
+
+Relationships that cannot be reduced to equality column pairs are omitted from
+OSI core with a warning and preserved in the lossless model extension as native
+relationship metadata.
+
+## Unsupported In Milestone 2
+
+Milestone 2 does not implement import. Import planning and apply remain later
+milestones.

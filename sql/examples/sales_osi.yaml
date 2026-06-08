@@ -1,206 +1,180 @@
 version: "0.2.0.dev0"
 semantic_model:
-  - name: sales
-    description: Certified semantic sales model exported for generic OSI consumers.
-    ai_context:
-      instructions: Use governed sales metrics and dimensions instead of raw joins.
-      examples:
-        - Total revenue by customer region.
-        - Gross margin by product category.
-    datasets:
-      - name: order_line
-        source: MART.ORDER_LINES
-        primary_key:
-          - order_id
-          - line_id
-        description: One row per order line.
-        fields:
-          - name: net_revenue
-            label: fact
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: ol.quantity * ol.net_unit_price
-            description: Net recognized revenue excluding tax.
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"FACT","data_type":"DECIMAL(18,2)","additive_policy":"ADDITIVE","display_name":"Net Revenue","is_private":false,"is_certified":true}'
-          - name: net_cost
-            label: fact
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: ol.quantity * ol.unit_cost
-            description: Cost recognized for sold units.
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"FACT","data_type":"DECIMAL(18,2)","additive_policy":"ADDITIVE","display_name":"Net Cost","is_private":false,"is_certified":true}'
-          - name: quantity
-            label: fact
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: ol.quantity
-            description: Number of units on the order line.
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"FACT","data_type":"DECIMAL(18,0)","additive_policy":"ADDITIVE","display_name":"Quantity","is_private":false,"is_certified":true}'
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"entity_name":"order_line","source_schema":"MART","source_object":"ORDER_LINES","source_alias":"ol","primary_key_expr":"CAST(ol.order_id AS VARCHAR(36)) || ''-'' || CAST(ol.line_id AS VARCHAR(36))","grain_description":"One row per order line"}'
-      - name: order
-        source: MART.ORDERS
-        primary_key:
-          - order_id
-        description: One row per order.
-        fields:
-          - name: order_month
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: DATE_TRUNC('month', o.order_date)
-            dimension:
-              is_time: true
-            description: Calendar month of the order date.
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"DIMENSION","data_type":"DATE","display_name":"Order Month","format_hint":"month","is_certified":true}'
-          - name: order_status
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: o.order_status
-            dimension: {}
-            description: Lifecycle status of the order.
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"DIMENSION","data_type":"VARCHAR(32)","display_name":"Order Status","is_certified":true}'
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"entity_name":"order","source_schema":"MART","source_object":"ORDERS","source_alias":"o","primary_key_expr":"o.order_id","grain_description":"One row per order"}'
-      - name: customer
-        source: MART.CUSTOMERS
-        primary_key:
-          - customer_id
-        description: One row per customer.
-        fields:
-          - name: customer_region
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: c.region
-            dimension: {}
-            description: Commercial region assigned to the customer.
-            ai_context:
-              synonyms:
-                - region
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"DIMENSION","data_type":"VARCHAR(100)","display_name":"Customer Region","is_certified":true}'
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"entity_name":"customer","source_schema":"MART","source_object":"CUSTOMERS","source_alias":"c","primary_key_expr":"c.customer_id","grain_description":"One row per customer"}'
-      - name: product
-        source: MART.PRODUCTS
-        primary_key:
-          - product_id
-        description: One row per product.
-        fields:
-          - name: product_category
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: p.category
-            dimension: {}
-            description: Commercial product category.
-            custom_extensions:
-              - vendor_name: EXASOL
-                data: '{"field_kind":"DIMENSION","data_type":"VARCHAR(100)","display_name":"Product Category","is_certified":true}'
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"entity_name":"product","source_schema":"MART","source_object":"PRODUCTS","source_alias":"p","primary_key_expr":"p.product_id","grain_description":"One row per product"}'
-    relationships:
-      - name: order_line_to_order
-        from: order_line
-        to: order
-        from_columns:
-          - order_id
-        to_columns:
-          - order_id
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","join_condition":"ol.order_id = o.order_id"}'
-      - name: order_to_customer
-        from: order
-        to: customer
-        from_columns:
-          - customer_id
-        to_columns:
-          - customer_id
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","join_condition":"o.customer_id = c.customer_id"}'
-      - name: order_line_to_product
-        from: order_line
-        to: product
-        from_columns:
-          - product_id
-        to_columns:
-          - product_id
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","join_condition":"ol.product_id = p.product_id"}'
-    metrics:
-      - name: total_revenue
-        expression:
-          dialects:
-            - dialect: ANSI_SQL
-              expression: SUM(net_revenue)
-        description: Net recognized revenue excluding tax.
-        ai_context:
-          synonyms:
-            - revenue
-            - sales
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"SIMPLE","metric_kind":"SIMPLE","aggregation_function":"SUM","measure_expr":"net_revenue","format_hint":"currency","display_name":"Total Revenue","is_private":false,"is_certified":true}'
-      - name: total_cost
-        expression:
-          dialects:
-            - dialect: ANSI_SQL
-              expression: SUM(net_cost)
-        description: Cost recognized for sold units.
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"SIMPLE","metric_kind":"SIMPLE","aggregation_function":"SUM","measure_expr":"net_cost","format_hint":"currency","display_name":"Total Cost","is_private":false,"is_certified":true}'
-      - name: gross_margin
-        expression:
-          dialects:
-            - dialect: ANSI_SQL
-              expression: total_revenue - total_cost
-        description: Total revenue minus total cost.
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"DERIVED","metric_kind":"DERIVED","format_hint":"currency","display_name":"Gross Margin","is_private":false,"is_certified":true}'
-      - name: gross_margin_pct
-        expression:
-          dialects:
-            - dialect: ANSI_SQL
-              expression: gross_margin / NULLIF(total_revenue, 0)
-        description: Gross margin as a percentage of revenue.
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"data_type":"DECIMAL(18,6)","base_entity":"order_line","metric_type":"RATIO","metric_kind":"RATIO","format_hint":"percentage","display_name":"Gross Margin %","is_private":false,"is_certified":true}'
-      - name: completed_revenue
-        expression:
-          dialects:
-            - dialect: ANSI_SQL
-              expression: SUM(net_revenue)
-        description: Net revenue for completed orders only.
-        custom_extensions:
-          - vendor_name: EXASOL
-            data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"FILTERED","metric_kind":"FILTERED","aggregation_function":"SUM","measure_expr":"net_revenue","semantic_filter_expr":"order_status = ''COMPLETE''","sql_filter_expr":"o.order_status = ''COMPLETE''","format_hint":"currency","display_name":"Completed Revenue","is_private":false,"is_certified":true}'
+- name: sales
+  datasets:
+  - name: order_line
+    source: MART.ORDER_LINES
+    primary_key:
+    - order_id
+    - line_id
+    description: Order line grain
     custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"entity_name":"order_line","source_schema":"MART","source_object":"ORDER_LINES","source_alias":"ol","primary_key_expr":"CAST(ol.order_id
+        AS VARCHAR(36)) || ''-'' || CAST(ol.line_id AS VARCHAR(36))","grain_description":"One row per order line","description":"Order
+        line grain"}'
+  - name: order
+    source: MART.ORDERS
+    primary_key:
+    - order_id
+    description: Order header grain
+    fields:
+    - name: order_month
+      expression:
+        dialects:
+        - dialect: ANSI_SQL
+          expression: DATE_TRUNC('month', o.order_date)
+      dimension:
+        is_time: true
+      description: Calendar month of the order date
+      custom_extensions:
       - vendor_name: EXASOL
-        data: '{"published_schema":"SEMANTIC_SALES","owner_role":"FINANCE_ANALYTICS","profile":"interoperability"}'
-
+        data: '{"field_kind":"DIMENSION","entity_name":"order","data_type":"DATE","display_name":"Order Month","format_hint":"month","is_hidden":false,"is_certified":true}'
+    - name: order_status
+      expression:
+        dialects:
+        - dialect: ANSI_SQL
+          expression: o.order_status
+      dimension: {}
+      description: Lifecycle status of the order
+      custom_extensions:
+      - vendor_name: EXASOL
+        data: '{"field_kind":"DIMENSION","entity_name":"order","data_type":"VARCHAR(32)","display_name":"Order Status","is_hidden":false,"is_certified":true}'
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"entity_name":"order","source_schema":"MART","source_object":"ORDERS","source_alias":"o","primary_key_expr":"o.order_id","grain_description":"One
+        row per order","description":"Order header grain"}'
+  - name: customer
+    source: MART.CUSTOMERS
+    primary_key:
+    - customer_id
+    description: Customer dimension
+    fields:
+    - name: customer_region
+      expression:
+        dialects:
+        - dialect: ANSI_SQL
+          expression: c.region
+      dimension: {}
+      description: Commercial region assigned to the customer
+      ai_context:
+        synonyms:
+        - region
+      custom_extensions:
+      - vendor_name: EXASOL
+        data: '{"field_kind":"DIMENSION","entity_name":"customer","data_type":"VARCHAR(100)","display_name":"Customer Region","is_hidden":false,"is_certified":true}'
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"entity_name":"customer","source_schema":"MART","source_object":"CUSTOMERS","source_alias":"c","primary_key_expr":"c.customer_id","grain_description":"One
+        row per customer","description":"Customer dimension"}'
+  - name: product
+    source: MART.PRODUCTS
+    primary_key:
+    - product_id
+    description: Product dimension
+    fields:
+    - name: product_category
+      expression:
+        dialects:
+        - dialect: ANSI_SQL
+          expression: p.category
+      dimension: {}
+      description: Commercial product category
+      custom_extensions:
+      - vendor_name: EXASOL
+        data: '{"field_kind":"DIMENSION","entity_name":"product","data_type":"VARCHAR(100)","display_name":"Product Category","is_hidden":false,"is_certified":true}'
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"entity_name":"product","source_schema":"MART","source_object":"PRODUCTS","source_alias":"p","primary_key_expr":"p.product_id","grain_description":"One
+        row per product","description":"Product dimension"}'
+  description: Certified semantic sales model
+  relationships:
+  - name: order_line_to_order
+    from: order_line
+    to: order
+    from_columns:
+    - order_id
+    to_columns:
+    - order_id
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"from_entity":"order_line","to_entity":"order","join_condition":"ol.order_id = o.order_id","relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","path_priority":100}'
+  - name: order_to_customer
+    from: order
+    to: customer
+    from_columns:
+    - customer_id
+    to_columns:
+    - customer_id
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"from_entity":"order","to_entity":"customer","join_condition":"o.customer_id = c.customer_id","relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","path_priority":100}'
+  - name: order_line_to_product
+    from: order_line
+    to: product
+    from_columns:
+    - product_id
+    to_columns:
+    - product_id
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"from_entity":"order_line","to_entity":"product","join_condition":"ol.product_id = p.product_id","relationship_cardinality":"MANY_TO_ONE","join_type":"LEFT","path_priority":100}'
+  metrics:
+  - name: total_revenue
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: SUM(net_revenue)
+    description: Net recognized revenue excluding tax
+    ai_context:
+      synonyms:
+      - revenue
+      - sales
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"ADDITIVE","metric_kind":"SIMPLE","aggregation_function":"SUM","measure_expr":"net_revenue","type_params_json":"{\"metric_type\":\"ADDITIVE\"}","format_hint":"currency","display_name":"Total
+        Revenue","is_private":false,"is_certified":true}'
+  - name: total_cost
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: SUM(net_cost)
+    description: Cost recognized for sold units
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"ADDITIVE","metric_kind":"SIMPLE","aggregation_function":"SUM","measure_expr":"net_cost","type_params_json":"{\"metric_type\":\"ADDITIVE\"}","format_hint":"currency","display_name":"Total
+        Cost","is_private":false,"is_certified":true}'
+  - name: gross_margin
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: total_revenue - total_cost
+    description: Total revenue minus total cost
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"DERIVED","metric_kind":"DERIVED","type_params_json":"{\"metric_type\":\"DERIVED\"}","format_hint":"currency","display_name":"Gross
+        Margin","is_private":false,"is_certified":true}'
+  - name: gross_margin_pct
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: gross_margin / NULLIF(total_revenue, 0)
+    description: Gross margin as a percentage of revenue
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"data_type":"DECIMAL(18,6)","base_entity":"order_line","metric_type":"RATIO","metric_kind":"RATIO","type_params_json":"{\"metric_type\":\"RATIO\"}","format_hint":"percentage","display_name":"Gross
+        Margin %","is_private":false,"is_certified":true}'
+  - name: completed_revenue
+    expression:
+      dialects:
+      - dialect: ANSI_SQL
+        expression: SUM(net_revenue)
+    description: Net revenue for completed orders only
+    custom_extensions:
+    - vendor_name: EXASOL
+      data: '{"data_type":"DECIMAL(18,2)","base_entity":"order_line","metric_type":"ADDITIVE","metric_kind":"FILTERED","aggregation_function":"SUM","measure_expr":"net_revenue","semantic_filter_expr":"order_status
+        = ''COMPLETE''","sql_filter_expr":"o.order_status = ''COMPLETE''","type_params_json":"{\"metric_type\":\"ADDITIVE\"}","format_hint":"currency","display_name":"Completed
+        Revenue","is_private":false,"is_certified":true}'
+  custom_extensions:
+  - vendor_name: EXASOL
+    data: '{"published_schema":"SEMANTIC_SALES","owner_role":"FINANCE_ANALYTICS","profile":"interoperability","semantic_object":"SALES"}'
