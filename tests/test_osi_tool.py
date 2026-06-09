@@ -407,6 +407,58 @@ def test_validation_warnings_as_errors_blocks_apply() -> None:
     assert ("OSI_APPLY_030", "ERROR") in {(item["code"], item["severity"]) for item in result["diagnostics"]}
 
 
+def test_invalid_apply_mode_blocks_before_database_connection() -> None:
+    plan = {
+        "version": "0.2.0.dev0",
+        "mode": "dry-run",
+        "status": "ok",
+        "source": "<test>",
+        "models": [{"model_name": "mode_model"}],
+        "diagnostics": [],
+        "operations": [],
+    }
+    result = osi.apply_import_plan(
+        None,
+        plan,
+        osi.ImportApplyOptions(
+            collision_policy="fail",
+            rollback_on_failure=True,
+            validate_after_apply=True,
+            warnings_as_errors=False,
+            apply_mode="bogus",
+        ),
+    )
+    assert result["status"] == "blocked"
+    assert "OSI_APPLY_002" in diagnostic_codes(result)
+
+
+def test_batch_warning_json_decodes_to_diagnostics() -> None:
+    rows = [
+        {
+            "STATUS": "OK",
+            "WARNING_JSON": json.dumps(
+                [
+                    {
+                        "code": "OSI_APPLY_030",
+                        "severity": "WARNING",
+                        "path": "metric",
+                        "message": "validation warning",
+                    }
+                ]
+            ),
+        }
+    ]
+    diagnostics = osi.decode_batch_warning_diagnostics(rows)
+    assert diagnostics == [
+        {
+            "code": "OSI_APPLY_030",
+            "severity": "WARNING",
+            "path": "metric",
+            "message": "validation warning",
+        }
+    ]
+
+
 def main() -> int:
     test_fixtures_validate()
     test_invalid_version_fails()
@@ -425,6 +477,8 @@ def main() -> int:
     test_apply_refuses_blocked_plan_without_database_connection()
     test_apply_metadata_warnings_can_block_before_database_connection()
     test_validation_warnings_as_errors_blocks_apply()
+    test_invalid_apply_mode_blocks_before_database_connection()
+    test_batch_warning_json_decodes_to_diagnostics()
     print("ok osi tool tests")
     return 0
 

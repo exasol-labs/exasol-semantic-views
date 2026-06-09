@@ -119,6 +119,194 @@ local function json_encode(value)
     return json_encode(tostring(value))
 end
 
+local function json_decode(text)
+    if missing(text) then
+        error("empty JSON payload")
+    end
+    text = tostring(text)
+    local pos = 1
+
+    local function peek()
+        return string.sub(text, pos, pos)
+    end
+
+    local function skip_ws()
+        while pos <= #text do
+            local c = peek()
+            if c == " " or c == "\n" or c == "\r" or c == "\t" then
+                pos = pos + 1
+            else
+                return
+            end
+        end
+    end
+
+    local function parse_string()
+        if peek() ~= '"' then
+            error("expected string at byte " .. tostring(pos))
+        end
+        pos = pos + 1
+        local out = {}
+        while pos <= #text do
+            local c = peek()
+            if c == '"' then
+                pos = pos + 1
+                return table.concat(out)
+            elseif c == "\\" then
+                local e = string.sub(text, pos + 1, pos + 1)
+                if e == '"' or e == "\\" or e == "/" then
+                    out[#out + 1] = e
+                    pos = pos + 2
+                elseif e == "b" then
+                    out[#out + 1] = "\b"
+                    pos = pos + 2
+                elseif e == "f" then
+                    out[#out + 1] = "\f"
+                    pos = pos + 2
+                elseif e == "n" then
+                    out[#out + 1] = "\n"
+                    pos = pos + 2
+                elseif e == "r" then
+                    out[#out + 1] = "\r"
+                    pos = pos + 2
+                elseif e == "t" then
+                    out[#out + 1] = "\t"
+                    pos = pos + 2
+                elseif e == "u" then
+                    out[#out + 1] = "?"
+                    pos = pos + 6
+                else
+                    error("invalid escape at byte " .. tostring(pos))
+                end
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+        error("unterminated string")
+    end
+
+    local parse_value
+
+    local function parse_number()
+        local start_pos = pos
+        local c = peek()
+        if c == "-" then
+            pos = pos + 1
+        end
+        while string.match(peek(), "%d") do
+            pos = pos + 1
+        end
+        if peek() == "." then
+            pos = pos + 1
+            while string.match(peek(), "%d") do
+                pos = pos + 1
+            end
+        end
+        c = peek()
+        if c == "e" or c == "E" then
+            pos = pos + 1
+            c = peek()
+            if c == "+" or c == "-" then
+                pos = pos + 1
+            end
+            while string.match(peek(), "%d") do
+                pos = pos + 1
+            end
+        end
+        local raw = string.sub(text, start_pos, pos - 1)
+        local value = tonumber(raw)
+        if value == nil then
+            error("invalid number at byte " .. tostring(start_pos))
+        end
+        return value
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "]" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            out[#out + 1] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "]" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected array comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "}" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            skip_ws()
+            local name = parse_string()
+            skip_ws()
+            if peek() ~= ":" then
+                error("expected object colon at byte " .. tostring(pos))
+            end
+            pos = pos + 1
+            out[name] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "}" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected object comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    function parse_value()
+        skip_ws()
+        local c = peek()
+        if c == '"' then
+            return parse_string()
+        elseif c == "{" then
+            return parse_object()
+        elseif c == "[" then
+            return parse_array()
+        elseif c == "-" or string.match(c, "%d") then
+            return parse_number()
+        elseif string.sub(text, pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif string.sub(text, pos, pos + 4) == "false" then
+            pos = pos + 5
+            return false
+        elseif string.sub(text, pos, pos + 3) == "null" then
+            pos = pos + 4
+            return JSON_NULL
+        end
+        error("unexpected JSON token at byte " .. tostring(pos))
+    end
+
+    local value = parse_value()
+    skip_ws()
+    if pos <= #text then
+        error("unexpected trailing JSON at byte " .. tostring(pos))
+    end
+    return value
+end
+
 local function normalize_name(value, label)
     if missing(value) then
         error("SEMANTIC_DDL_001: " .. label .. " is required")
@@ -1385,6 +1573,515 @@ local function restore_model_state(model, snapshot)
     end
 end
 
+local function batch_arg(args, name)
+    if type(args) ~= "table" then
+        return null
+    end
+    return null_if_missing(args[name])
+end
+
+local function batch_call(target, args)
+    if target == "SEMANTIC_ADMIN.CREATE_MODEL" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL(:model_name, :published_schema, :description, :owner_role)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                published_schema = batch_arg(args, "published_schema"),
+                description = batch_arg(args, "description"),
+                owner_role = batch_arg(args, "owner_role"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_ENTITY" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(:model_name, :entity_name, :source_schema, :source_object, :source_alias, :primary_key_expr, :grain_description, :description)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                entity_name = batch_arg(args, "entity_name"),
+                source_schema = batch_arg(args, "source_schema"),
+                source_object = batch_arg(args, "source_object"),
+                source_alias = batch_arg(args, "source_alias"),
+                primary_key_expr = batch_arg(args, "primary_key_expr"),
+                grain_description = batch_arg(args, "grain_description"),
+                description = batch_arg(args, "description"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(:model_name, :object_name, :root_entity_name, :description)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                object_name = batch_arg(args, "object_name"),
+                root_entity_name = batch_arg(args, "root_entity_name"),
+                description = batch_arg(args, "description"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_RELATIONSHIP" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(:model_name, :relationship_name, :from_entity_name, :to_entity_name, :join_condition, :cardinality, :join_type, :fanout_policy)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                relationship_name = batch_arg(args, "relationship_name"),
+                from_entity_name = batch_arg(args, "from_entity_name"),
+                to_entity_name = batch_arg(args, "to_entity_name"),
+                join_condition = batch_arg(args, "join_condition"),
+                cardinality = batch_arg(args, "cardinality"),
+                join_type = batch_arg(args, "join_type"),
+                fanout_policy = batch_arg(args, "fanout_policy"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_DIMENSION" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(:model_name, :object_name, :entity_name, :dimension_name, :expression, :data_type, :display_name, :description, :format_hint, :is_certified)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                object_name = batch_arg(args, "object_name"),
+                entity_name = batch_arg(args, "entity_name"),
+                dimension_name = batch_arg(args, "dimension_name"),
+                expression = batch_arg(args, "expression"),
+                data_type = batch_arg(args, "data_type"),
+                display_name = batch_arg(args, "display_name"),
+                description = batch_arg(args, "description"),
+                format_hint = batch_arg(args, "format_hint"),
+                is_certified = batch_arg(args, "is_certified"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_FACT" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(:model_name, :entity_name, :fact_name, :expression, :data_type, :additive_policy, :display_name, :description, :is_private, :is_certified)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                entity_name = batch_arg(args, "entity_name"),
+                fact_name = batch_arg(args, "fact_name"),
+                expression = batch_arg(args, "expression"),
+                data_type = batch_arg(args, "data_type"),
+                additive_policy = batch_arg(args, "additive_policy"),
+                display_name = batch_arg(args, "display_name"),
+                description = batch_arg(args, "description"),
+                is_private = batch_arg(args, "is_private"),
+                is_certified = batch_arg(args, "is_certified"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_METRIC" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC(:model_name, :object_name, :metric_name, :expression, :filter_expr, :metric_type, :base_entity_name, :data_type, :display_name, :description, :format_hint, :is_private, :is_certified)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                object_name = batch_arg(args, "object_name"),
+                metric_name = batch_arg(args, "metric_name"),
+                expression = batch_arg(args, "expression"),
+                filter_expr = batch_arg(args, "filter_expr"),
+                metric_type = batch_arg(args, "metric_type"),
+                base_entity_name = batch_arg(args, "base_entity_name"),
+                data_type = batch_arg(args, "data_type"),
+                display_name = batch_arg(args, "display_name"),
+                description = batch_arg(args, "description"),
+                format_hint = batch_arg(args, "format_hint"),
+                is_private = batch_arg(args, "is_private"),
+                is_certified = batch_arg(args, "is_certified"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION(:model_name, :scope_type, :scope_name, :vendor_name, :data_json, :source_format, :extension_name)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                scope_type = batch_arg(args, "scope_type"),
+                scope_name = batch_arg(args, "scope_name"),
+                vendor_name = batch_arg(args, "vendor_name"),
+                data_json = batch_arg(args, "data_json"),
+                source_format = batch_arg(args, "source_format"),
+                extension_name = batch_arg(args, "extension_name"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_UNIQUE_KEY" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(:model_name, :entity_name, :key_name, :key_kind, :description, :source_format)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                entity_name = batch_arg(args, "entity_name"),
+                key_name = batch_arg(args, "key_name"),
+                key_kind = batch_arg(args, "key_kind"),
+                description = batch_arg(args, "description"),
+                source_format = batch_arg(args, "source_format"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(:model_name, :entity_name, :key_name, :column_name, :expression, :ordinal_position)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                entity_name = batch_arg(args, "entity_name"),
+                key_name = batch_arg(args, "key_name"),
+                column_name = batch_arg(args, "column_name"),
+                expression = batch_arg(args, "expression"),
+                ordinal_position = batch_arg(args, "ordinal_position"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_SYNONYM" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(:model_name, :object_type, :object_name, :synonym, :source)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                object_type = batch_arg(args, "object_type"),
+                object_name = batch_arg(args, "object_name"),
+                synonym = batch_arg(args, "synonym"),
+                source = batch_arg(args, "source"),
+            }
+        )
+    elseif target == "SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION(:model_name, :scope_type, :scope_name, :instruction_kind, :instruction_text, :applies_to_role, :priority)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                scope_type = batch_arg(args, "scope_type"),
+                scope_name = batch_arg(args, "scope_name"),
+                instruction_kind = batch_arg(args, "instruction_kind"),
+                instruction_text = batch_arg(args, "instruction_text"),
+                applies_to_role = batch_arg(args, "applies_to_role"),
+                priority = batch_arg(args, "priority"),
+            }
+        )
+    end
+    error("SEMANTIC_OSI_010: unsupported normalized import target: " .. tostring(target))
+end
+
+local function metadata_of(operation)
+    if type(operation) ~= "table" or type(operation.metadata) ~= "table" then
+        return {}
+    end
+    return operation.metadata
+end
+
+local function ref_id_for_object_column(model, kind_value, name)
+    local kind_name = upper(kind_value)
+    local ref_id = object_id_by_name(model, kind_name, name)
+    if ref_id == nil then
+        error("SEMANTIC_OSI_020: object-column reference not found: " .. tostring(kind_value) .. " " .. tostring(name))
+    end
+    return kind_name, ref_id
+end
+
+local function visible_value(column, kind_name)
+    if column.is_visible == false then
+        return false
+    end
+    if column.is_visible == true then
+        return true
+    end
+    return kind_name ~= "FACT"
+end
+
+local function insert_object_column(object_id_value, kind_name, ref_id, column_name, ordinal, is_visible)
+    query([[
+        INSERT INTO SYS_SEMANTIC.OBJECT_COLUMNS (
+          OBJECT_ID, COLUMN_KIND, OBJECT_REF_ID, COLUMN_NAME, ORDINAL_POSITION, IS_VISIBLE
+        ) VALUES (
+          :object_id, :column_kind, :object_ref_id, :column_name, :ordinal_position, :is_visible
+        )
+    ]], {
+        object_id = object_id_value,
+        column_kind = kind_name,
+        object_ref_id = ref_id,
+        column_name = column_name,
+        ordinal_position = ordinal,
+        is_visible = is_visible,
+    })
+end
+
+local function replace_semantic_object_columns(args, metadata)
+    local columns = metadata.columns
+    if type(columns) ~= "table" or #columns == 0 then
+        return
+    end
+    local model = load_model(args.model_name)
+    local object_id_value = object_id(model, args.object_name)
+    query("DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE OBJECT_ID = :object_id", {object_id = object_id_value})
+    for index, column in ipairs(columns) do
+        local kind_name, ref_id = ref_id_for_object_column(model, column.kind, column.name)
+        insert_object_column(
+            object_id_value,
+            kind_name,
+            ref_id,
+            column.name,
+            column.ordinal or index,
+            visible_value(column, kind_name)
+        )
+    end
+end
+
+local function patch_operation_object_columns(operation)
+    local metadata = metadata_of(operation)
+    local columns = metadata.object_columns
+    if type(columns) ~= "table" or #columns == 0 then
+        return
+    end
+    local args = operation.arguments or {}
+    local kind_name = nil
+    local ref_name = nil
+    if operation.operation == "add_dimension" then
+        kind_name = "DIMENSION"
+        ref_name = args.dimension_name
+    elseif operation.operation == "add_fact" then
+        kind_name = "FACT"
+        ref_name = args.fact_name
+    elseif operation.operation == "add_metric" then
+        kind_name = "METRIC"
+        ref_name = args.metric_name
+    else
+        return
+    end
+    local model = load_model(args.model_name)
+    local _, ref_id = ref_id_for_object_column(model, kind_name, ref_name)
+    for index, column in ipairs(columns) do
+        local object_id_value = object_id(model, column.object_name)
+        query([[
+            DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
+            WHERE OBJECT_ID = :object_id
+              AND COLUMN_KIND = :column_kind
+              AND OBJECT_REF_ID = :object_ref_id
+        ]], {object_id = object_id_value, column_kind = kind_name, object_ref_id = ref_id})
+        insert_object_column(
+            object_id_value,
+            kind_name,
+            ref_id,
+            column.column_name or ref_name,
+            column.ordinal or index,
+            visible_value(column, kind_name)
+        )
+    end
+end
+
+local function patch_relationship_metadata(operation)
+    local metadata = metadata_of(operation)
+    local native = metadata.native
+    if operation.operation ~= "add_relationship" or type(native) ~= "table" then
+        return
+    end
+    if missing(native.description) and missing(native.path_priority) then
+        return
+    end
+    local args = operation.arguments or {}
+    local model = load_model(args.model_name)
+    query([[
+        UPDATE SYS_SEMANTIC.RELATIONSHIPS
+        SET DESCRIPTION = COALESCE(:description, DESCRIPTION),
+            PATH_PRIORITY = COALESCE(:path_priority, PATH_PRIORITY)
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(RELATIONSHIP_NAME) = UPPER(:relationship_name)
+    ]], {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        relationship_name = args.relationship_name,
+        description = null_if_missing(native.description),
+        path_priority = null_if_missing(native.path_priority),
+    })
+end
+
+local function non_additive_dimension_id(model, native)
+    if missing(native.non_additive_dimension) then
+        return null
+    end
+    local dim_name = tostring(native.non_additive_dimension):match("^%s*([A-Za-z_][A-Za-z0-9_]*)")
+    local dim = dimension_by_name(model, dim_name)
+    if dim == nil then
+        return null
+    end
+    return dim.id
+end
+
+local function patch_metric_metadata(operation)
+    local metadata = metadata_of(operation)
+    local native = metadata.native
+    if operation.operation ~= "add_metric" or type(native) ~= "table" then
+        return
+    end
+    local args = operation.arguments or {}
+    local model = load_model(args.model_name)
+    local metric_id = object_id_by_name(model, "METRIC", args.metric_name)
+    if metric_id == nil then
+        error("SEMANTIC_OSI_030: metric not found for metadata patch: " .. tostring(args.metric_name))
+    end
+    local metric_for_inputs = {
+        name = args.metric_name,
+        expression = args.expression,
+        metric_type = native.metric_type or args.metric_type,
+        semantic_filter_expr = native.semantic_filter_expr,
+    }
+    refresh_metric_inputs(model, metric_id, metric_for_inputs)
+    local sql_filter_expr = native.sql_filter_expr or metric_for_inputs.sql_filter_expr
+    query([[
+        UPDATE SYS_SEMANTIC.METRICS
+        SET METRIC_KIND = COALESCE(:metric_kind, METRIC_KIND),
+            AGGREGATION_FUNCTION = COALESCE(:aggregation_function, AGGREGATION_FUNCTION),
+            MEASURE_EXPR = COALESCE(:measure_expr, MEASURE_EXPR),
+            SEMANTIC_FILTER_EXPR = COALESCE(:semantic_filter_expr, SEMANTIC_FILTER_EXPR),
+            SQL_FILTER_EXPR = COALESCE(:sql_filter_expr, SQL_FILTER_EXPR),
+            FILTER_EXPR = COALESCE(:sql_filter_expr, FILTER_EXPR),
+            DISTINCT_KEY_EXPR = COALESCE(:distinct_key_expr, DISTINCT_KEY_EXPR),
+            NON_ADDITIVE_DIMENSION_ID = COALESCE(:non_additive_dimension_id, NON_ADDITIVE_DIMENSION_ID),
+            WINDOW_SPEC_JSON = COALESCE(:window_spec_json, WINDOW_SPEC_JSON),
+            TYPE_PARAMS_JSON = COALESCE(:type_params_json, TYPE_PARAMS_JSON),
+            UNIT_HINT = COALESCE(:unit_hint, UNIT_HINT),
+            SENSITIVITY_LABEL = COALESCE(:sensitivity_label, SENSITIVITY_LABEL),
+            DISPLAY_POLICY = COALESCE(:display_policy, DISPLAY_POLICY),
+            OWNER_ROLE = COALESCE(:owner_role, OWNER_ROLE)
+        WHERE METRIC_ID = :metric_id
+    ]], {
+        metric_id = metric_id,
+        metric_kind = null_if_missing(native.metric_kind),
+        aggregation_function = null_if_missing(native.aggregation_function),
+        measure_expr = null_if_missing(native.measure_expr),
+        semantic_filter_expr = null_if_missing(native.semantic_filter_expr),
+        sql_filter_expr = null_if_missing(sql_filter_expr),
+        distinct_key_expr = null_if_missing(native.distinct_key_expr),
+        non_additive_dimension_id = non_additive_dimension_id(model, native),
+        window_spec_json = null_if_missing(native.window_spec_json),
+        type_params_json = null_if_missing(native.type_params_json),
+        unit_hint = null_if_missing(native.unit_hint),
+        sensitivity_label = null_if_missing(native.sensitivity_label),
+        display_policy = null_if_missing(native.display_policy),
+        owner_role = null_if_missing(native.owner_role),
+    })
+end
+
+local function model_names_from_plan(plan)
+    local names = {}
+    local seen = {}
+    for _, model in ipairs(plan.models or {}) do
+        if type(model) == "table" and not missing(model.model_name) and not seen[model.model_name] then
+            names[#names + 1] = model.model_name
+            seen[model.model_name] = true
+        end
+    end
+    for _, operation in ipairs(plan.operations or {}) do
+        local args = operation.arguments or {}
+        if operation.operation == "create_model" and not missing(args.model_name) and not seen[args.model_name] then
+            names[#names + 1] = args.model_name
+            seen[args.model_name] = true
+        end
+    end
+    return names
+end
+
+local function validation_summary(plan, warnings, warnings_as_errors)
+    local error_count = 0
+    local warning_count = 0
+    local validation_run_id = nil
+    for _, model_name in ipairs(model_names_from_plan(plan)) do
+        local rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name}) or {}
+        local model = load_model(model_name)
+        validation_run_id = scalar([[
+            SELECT MAX(VALIDATION_RUN_ID)
+            FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE MODEL_ID = :model_id
+              AND VERSION_ID = :version_id
+        ]], {model_id = model.model_id, version_id = model.version_id}) or validation_run_id
+        for _, row in ipairs(rows) do
+            local severity = row_value(row, "SEVERITY", 1)
+            if severity == "ERROR" or severity == "WARNING" then
+                warnings[#warnings + 1] = {
+                    code = "OSI_APPLY_030",
+                    severity = severity,
+                    path = tostring(row_value(row, "OBJECT_NAME", 3) or row_value(row, "OBJECT_TYPE", 2) or "$"),
+                    message = tostring(row_value(row, "RULE_CODE", 4) or "") .. ": " .. tostring(row_value(row, "MESSAGE", 5) or ""),
+                }
+            end
+            if severity == "ERROR" then
+                error_count = error_count + 1
+            elseif severity == "WARNING" then
+                warning_count = warning_count + 1
+            end
+        end
+    end
+    if error_count > 0 then
+        return "ERROR", validation_run_id, tostring(error_count) .. " validation error(s)."
+    end
+    if sql_bool(warnings_as_errors) and warning_count > 0 then
+        return "ERROR", validation_run_id, tostring(warning_count) .. " validation warning(s) promoted to errors."
+    end
+    return "OK", validation_run_id, "Normalized OSI import applied."
+end
+
+local function apply_metadata_patches(plan)
+    for _, operation in ipairs(plan.operations or {}) do
+        patch_relationship_metadata(operation)
+        patch_metric_metadata(operation)
+        patch_operation_object_columns(operation)
+    end
+    for _, operation in ipairs(plan.operations or {}) do
+        if operation.operation == "add_semantic_object" then
+            replace_semantic_object_columns(operation.arguments or {}, metadata_of(operation))
+        end
+    end
+end
+
+function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings_as_errors)
+    local rows = {}
+    local warnings = {}
+    local current_operation = nil
+    local ok, result = pcall(function()
+        local plan = json_decode(plan_json)
+        if type(plan) ~= "table" or type(plan.operations) ~= "table" then
+            error("SEMANTIC_OSI_001: normalized import plan must contain operations")
+        end
+        for index, operation in ipairs(plan.operations) do
+            if type(operation) ~= "table" then
+                error("SEMANTIC_OSI_002: normalized operation must be an object")
+            end
+            current_operation = operation
+            current_operation.index = index - 1
+            local target = operation.target
+            local result_rows = batch_call(target, operation.arguments or {}) or {}
+            rows[#rows + 1] = {
+                "OK",
+                index - 1,
+                operation.operation or null,
+                target or null,
+                operation.source_path or null,
+                #result_rows,
+                nil,
+                nil,
+                "Applied normalized operation.",
+            }
+        end
+        apply_metadata_patches(plan)
+        local status = "OK"
+        local validation_run_id = nil
+        local message = "Normalized OSI import applied."
+        if sql_bool(validate_after_apply) then
+            status, validation_run_id, message = validation_summary(plan, warnings, warnings_as_errors)
+        end
+        rows[#rows + 1] = {
+            status,
+            nil,
+            "validate_model",
+            "SEMANTIC_ADMIN.VALIDATE_MODEL",
+            "$.models",
+            nil,
+            json_encode(warnings),
+            validation_run_id or null,
+            message,
+        }
+        return rows
+    end)
+    if ok then
+        return result
+    end
+    rows[#rows + 1] = {
+        "ERROR",
+        current_operation and current_operation.index or nil,
+        current_operation and current_operation.operation or "apply_normalized_osi_import",
+        current_operation and current_operation.target or "SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT",
+        current_operation and current_operation.source_path or "$",
+        nil,
+        json_encode(warnings),
+        nil,
+        tostring(result),
+    }
+    return rows
+end
+
 function M.apply_semantic_definition(definition_sql, dry_run)
     local source_id = nil
     local snapshot = nil
@@ -1961,6 +2658,7 @@ function M.preprocess_sql(sql_text)
 end
 
 apply_semantic_definition = M.apply_semantic_definition
+apply_normalized_osi_import = M.apply_normalized_osi_import
 describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition

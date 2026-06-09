@@ -61,6 +61,7 @@ class ImportApplyOptions:
     rollback_on_failure: bool
     validate_after_apply: bool
     warnings_as_errors: bool
+    apply_mode: str = "script"
 
 
 def sql_string(value: str) -> str:
@@ -2639,6 +2640,138 @@ def validation_diagnostics(con: Any, model_name: str) -> tuple[list[dict[str, st
     return diagnostics, rows
 
 
+def decode_batch_warning_diagnostics(batch_rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    diagnostics: list[dict[str, str]] = []
+    seen_payloads: set[str] = set()
+    for row in batch_rows:
+        payload = row.get("WARNING_JSON")
+        if not isinstance(payload, str) or payload in seen_payloads:
+            continue
+        seen_payloads.add(payload)
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            add_diagnostic(
+                diagnostics,
+                "OSI_APPLY_050",
+                "WARNING",
+                "$",
+                f"Batch apply returned invalid warning JSON: {payload}",
+            )
+            continue
+        if not isinstance(decoded, list):
+            continue
+        for item in decoded:
+            if not isinstance(item, dict):
+                continue
+            add_diagnostic(
+                diagnostics,
+                str(item.get("code") or "OSI_APPLY_050"),
+                str(item.get("severity") or "WARNING").upper(),
+                str(item.get("path") or "$"),
+                str(item.get("message") or ""),
+            )
+    return diagnostics
+
+
+def batch_operation_results(batch_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for row in batch_rows:
+        operation_index = row.get("OPERATION_INDEX")
+        operation_name = row.get("OPERATION_NAME")
+        if operation_index is None or operation_name == "validate_model":
+            continue
+        results.append(
+            clean_json_value(
+                {
+                    "index": operation_index,
+                    "operation": operation_name,
+                    "target": row.get("TARGET"),
+                    "source_path": row.get("SOURCE_PATH"),
+                    "status": str(row.get("STATUS") or "").lower(),
+                    "row_count": row.get("ROW_COUNT") or 0,
+                }
+            )
+        )
+    return results
+
+
+def batch_validation_run_id(batch_rows: list[dict[str, Any]]) -> Any:
+    for row in reversed(batch_rows):
+        if row.get("VALIDATION_RUN_ID") is not None:
+            return row.get("VALIDATION_RUN_ID")
+    return None
+
+
+def batch_status_error_rows(batch_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in batch_rows if str(row.get("STATUS") or "").upper() == "ERROR"]
+
+
+def apply_import_plan_batch(
+    con: Any,
+    plan: dict[str, Any],
+    options: ImportApplyOptions,
+    diagnostics: list[dict[str, str]],
+) -> dict[str, Any]:
+    batch_rows: list[dict[str, Any]] = []
+    operation_results: list[dict[str, Any]] = []
+    validation_run_id = None
+    try:
+        batch_rows = fetch_dicts(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT("
+            f"{sql_literal(dump_json(plan))}, "
+            f"{sql_literal(options.validate_after_apply)}, "
+            f"{sql_literal(options.warnings_as_errors)})",
+        )
+        operation_results = batch_operation_results(batch_rows)
+        diagnostics.extend(decode_batch_warning_diagnostics(batch_rows))
+        diagnostics = finalize_diagnostics(diagnostics, options.warnings_as_errors)
+        validation_run_id = batch_validation_run_id(batch_rows)
+        error_rows = batch_status_error_rows(batch_rows)
+        if error_rows and not diagnostics_blocking(diagnostics):
+            first_error = error_rows[0]
+            add_diagnostic(
+                diagnostics,
+                "OSI_APPLY_040",
+                "ERROR",
+                str(first_error.get("SOURCE_PATH") or "$.operations"),
+                str(first_error.get("MESSAGE") or "Batch import apply failed."),
+            )
+    except Exception as exc:
+        add_diagnostic(
+            diagnostics,
+            "OSI_APPLY_040",
+            "ERROR",
+            "$.operations",
+            f"Batch import apply failed: {exc}",
+        )
+
+    status = "ok"
+    if diagnostics_blocking(diagnostics) or batch_status_error_rows(batch_rows):
+        status = "failed"
+        if options.rollback_on_failure:
+            for model_name in plan_model_names(plan):
+                cleanup_imported_model(con, model_name)
+            status = "rolled_back"
+
+    return clean_json_value(
+        {
+            "version": OSI_VERSION,
+            "mode": "apply",
+            "apply_mode": "batch",
+            "status": status,
+            "source": plan.get("source"),
+            "models": plan.get("models") or [],
+            "diagnostics": diagnostics,
+            "operation_results": operation_results,
+            "validation_rows": [],
+            "validation_run_id": validation_run_id,
+            "batch_rows": batch_rows,
+        }
+    )
+
+
 def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOptions) -> dict[str, Any]:
     diagnostics = list(plan.get("diagnostics") or [])
     operation_results: list[dict[str, Any]] = []
@@ -2659,9 +2792,8 @@ def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOption
             }
         )
 
-    diagnostics.extend(operation_metadata_diagnostics(plan))
-    diagnostics = finalize_diagnostics(diagnostics, options.warnings_as_errors)
-    if diagnostics_blocking(diagnostics):
+    if options.apply_mode not in {"script", "batch"}:
+        add_diagnostic(diagnostics, "OSI_APPLY_002", "ERROR", "$", f"Unsupported apply mode: {options.apply_mode}.")
         return clean_json_value(
             {
                 "version": OSI_VERSION,
@@ -2673,6 +2805,22 @@ def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOption
                 "operation_results": [],
             }
         )
+
+    if options.apply_mode == "script":
+        diagnostics.extend(operation_metadata_diagnostics(plan))
+        diagnostics = finalize_diagnostics(diagnostics, options.warnings_as_errors)
+        if diagnostics_blocking(diagnostics):
+            return clean_json_value(
+                {
+                    "version": OSI_VERSION,
+                    "mode": "apply",
+                    "status": "blocked",
+                    "source": plan.get("source"),
+                    "models": plan.get("models") or [],
+                    "diagnostics": diagnostics,
+                    "operation_results": [],
+                }
+            )
 
     preflight_diagnostics, replace_models = preflight_apply_plan(con, plan, options)
     diagnostics.extend(preflight_diagnostics)
@@ -2691,6 +2839,9 @@ def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOption
 
     for model_name in replace_models:
         cleanup_imported_model(con, model_name)
+
+    if options.apply_mode == "batch":
+        return apply_import_plan_batch(con, plan, options, diagnostics)
 
     try:
         for index, operation in enumerate(plan.get("operations") or []):
@@ -2866,6 +3017,7 @@ def command_import(args: argparse.Namespace) -> int:
                 rollback_on_failure=not args.no_rollback,
                 validate_after_apply=not args.no_validate,
                 warnings_as_errors=args.warnings_as_errors,
+                apply_mode=args.apply_mode,
             ),
         )
         write_output(dump_json(result), args.output)
@@ -2881,6 +3033,7 @@ def command_import(args: argparse.Namespace) -> int:
                 rollback_on_failure=not args.no_rollback,
                 validate_after_apply=not args.no_validate,
                 warnings_as_errors=args.warnings_as_errors,
+                apply_mode=args.apply_mode,
             ),
         )
     finally:
@@ -2927,6 +3080,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--target-model", help="override the imported model name")
     import_parser.add_argument("--published-schema", help="override the imported model published schema")
     import_parser.add_argument("--collision-policy", choices=["fail", "replace_draft"], default="fail")
+    import_parser.add_argument("--apply-mode", choices=["script", "batch"], default="script")
     import_parser.add_argument("--no-rollback", action="store_true", help="leave the imported model in place after apply failure")
     import_parser.add_argument("--no-validate", action="store_true", help="skip VALIDATE_MODEL after apply")
     import_parser.add_argument("--output", type=Path)

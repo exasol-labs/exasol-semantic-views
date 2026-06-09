@@ -258,9 +258,46 @@ python3 tools/osi.py import --apply sales_osi.yaml \
 imports it into `sales_osi_import`, validates the imported model, compiles and
 runs a representative structured request, and verifies collision preflight.
 
-## Unsupported In Milestone 4
+## Milestone 5 Normalized Batch Apply
 
-Milestone 4 intentionally applies through the public helper surface. The apply
+Milestone 5 adds an optional database-side batch helper:
+
+- `tools/osi.py import --apply --apply-mode batch`.
+- `SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT`.
+- normalized plan JSON input, not raw OSI JSON/YAML.
+- per-operation result rows from the database helper.
+- warning JSON and validation run id in the helper result.
+- post-operation metadata patches for lossless Exasol details that public
+  `ADD_*` helpers cannot set directly.
+
+Example:
+
+```sh
+python3 tools/osi.py import --apply sales_osi.yaml \
+  --target-model sales_osi_import \
+  --collision-policy replace_draft \
+  --apply-mode batch \
+  --output /tmp/sales_osi_import_result.json
+```
+
+The batch helper currently applies:
+
+- exact semantic object column order and visibility.
+- hidden fact object-column membership.
+- dimension, fact, and metric object-column ordinals.
+- relationship description and path priority.
+- native metric metadata including metric kind, aggregation function, measure
+  expression, semantic and SQL filters, type params, owner/display metadata,
+  and derived metric input/filter metadata.
+
+`tools/verify_osi_batch_import.py` exports the live `sales` model as lossless
+OSI, imports it through the batch helper, verifies the returned table shape,
+checks lossless metadata patches in `SYS_SEMANTIC`, and compiles/runs a
+representative structured request.
+
+## Script-Mode Limitations
+
+Script mode intentionally applies through the public helper surface. The apply
 result emits `OSI_IMPORT_120` warnings for lossless metadata that is preserved
 in the plan but not fully applied by those helpers:
 
@@ -271,5 +308,4 @@ in the plan but not fully applied by those helpers:
 - full native metric metadata such as aggregation internals, measure
   expression, semantic filters, and display policy.
 
-Lossless round-trip fidelity for those fields requires either expanded public
-helpers or a narrow normalized batch apply helper in a later milestone.
+Use batch mode when those fields need to be applied in the imported model.

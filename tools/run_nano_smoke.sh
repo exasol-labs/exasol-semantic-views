@@ -55,3 +55,7 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # OSI import apply (Milestone 4): apply a live lossless export into a draft
 # model, validate it, compile against it, and verify collision preflight.
 "$PYTHON_BIN" tools/verify_osi_import.py
+
+# OSI normalized batch import (Milestone 5): apply the normalized plan through
+# one database helper and verify returned rows plus lossless metadata patches.
+"$PYTHON_BIN" tools/verify_osi_batch_import.py
