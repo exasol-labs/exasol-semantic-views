@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Open Semantic Interchange import/export tooling.
 
-Milestone 2 implements export and offline validation. The converter is
-host-side by design: Exasol keeps SQL/Lua runtime behavior in the database,
-while YAML/JSON/schema handling stays in Python.
+The converter is host-side by design: Exasol keeps SQL/Lua runtime behavior in
+the database, while YAML/JSON/schema handling stays in Python.
 """
 
 from __future__ import annotations
@@ -56,6 +55,14 @@ class ImportOptions:
     source: str | None = None
 
 
+@dataclass(frozen=True)
+class ImportApplyOptions:
+    collision_policy: str
+    rollback_on_failure: bool
+    validate_after_apply: bool
+    warnings_as_errors: bool
+
+
 def sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -101,7 +108,7 @@ def connect(args: argparse.Namespace) -> Any:
     try:
         import pyexasol  # type: ignore
     except ImportError as exc:
-        raise OsiError("pyexasol is required for export: pip install pyexasol") from exc
+        raise OsiError("pyexasol is required for database operations: pip install pyexasol") from exc
 
     return pyexasol.connect(
         dsn=f"{args.host}:{args.port}",
@@ -2030,7 +2037,10 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
                     "join_type": relationship_ext.get("join_type") or "LEFT",
                     "fanout_policy": relationship_ext.get("fanout_policy"),
                 },
-                metadata={"requires_native_join_condition": bool(relationship_ext.get("requires_native_join_condition"))},
+                metadata={
+                    "requires_native_join_condition": bool(relationship_ext.get("requires_native_join_condition")),
+                    "native": clean_json_value(relationship_ext),
+                },
             )
             catalog_extension_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship_ext.get("catalog_custom_extensions"), f"{relationship_path}.custom_extensions[0].data", operations)
             non_exasol_extension_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship.get("custom_extensions"), relationship_path, operations)
@@ -2060,7 +2070,7 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
                         "join_type": rel.get("join_type") or "LEFT",
                         "fanout_policy": rel.get("fanout_policy"),
                     },
-                    metadata={"requires_native_join_condition": True},
+                    metadata={"requires_native_join_condition": True, "native": clean_json_value(rel)},
                 )
 
         for spec in field_specs:
@@ -2116,7 +2126,7 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
                         "format_hint": field_ext.get("format_hint"),
                         "is_certified": normalize_bool(field_ext.get("is_certified"), False),
                     },
-                    metadata={"object_columns": field_ext.get("object_columns") or []},
+                    metadata={"object_columns": field_ext.get("object_columns") or [], "native": clean_json_value(field_ext)},
                 )
                 scope_type = "DIMENSION"
             elif field_kind == "FACT":
@@ -2137,7 +2147,7 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
                         "is_private": normalize_bool(field_ext.get("is_private"), False),
                         "is_certified": normalize_bool(field_ext.get("is_certified"), False),
                     },
-                    metadata={"object_columns": field_ext.get("object_columns") or []},
+                    metadata={"object_columns": field_ext.get("object_columns") or [], "native": clean_json_value(field_ext)},
                 )
                 scope_type = "FACT"
             else:
@@ -2241,6 +2251,532 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
     )
 
 
+OPERATION_ARGUMENTS = {
+    "SEMANTIC_ADMIN.CREATE_MODEL": ["model_name", "published_schema", "description", "owner_role"],
+    "SEMANTIC_ADMIN.ADD_ENTITY": [
+        "model_name",
+        "entity_name",
+        "source_schema",
+        "source_object",
+        "source_alias",
+        "primary_key_expr",
+        "grain_description",
+        "description",
+    ],
+    "SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT": ["model_name", "object_name", "root_entity_name", "description"],
+    "SEMANTIC_ADMIN.ADD_RELATIONSHIP": [
+        "model_name",
+        "relationship_name",
+        "from_entity_name",
+        "to_entity_name",
+        "join_condition",
+        "cardinality",
+        "join_type",
+        "fanout_policy",
+    ],
+    "SEMANTIC_ADMIN.ADD_DIMENSION": [
+        "model_name",
+        "object_name",
+        "entity_name",
+        "dimension_name",
+        "expression",
+        "data_type",
+        "display_name",
+        "description",
+        "format_hint",
+        "is_certified",
+    ],
+    "SEMANTIC_ADMIN.ADD_FACT": [
+        "model_name",
+        "entity_name",
+        "fact_name",
+        "expression",
+        "data_type",
+        "additive_policy",
+        "display_name",
+        "description",
+        "is_private",
+        "is_certified",
+    ],
+    "SEMANTIC_ADMIN.ADD_METRIC": [
+        "model_name",
+        "object_name",
+        "metric_name",
+        "expression",
+        "filter_expr",
+        "metric_type",
+        "base_entity_name",
+        "data_type",
+        "display_name",
+        "description",
+        "format_hint",
+        "is_private",
+        "is_certified",
+    ],
+    "SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION": [
+        "model_name",
+        "scope_type",
+        "scope_name",
+        "vendor_name",
+        "data_json",
+        "source_format",
+        "extension_name",
+    ],
+    "SEMANTIC_ADMIN.ADD_UNIQUE_KEY": [
+        "model_name",
+        "entity_name",
+        "key_name",
+        "key_kind",
+        "description",
+        "source_format",
+    ],
+    "SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN": [
+        "model_name",
+        "entity_name",
+        "key_name",
+        "column_name",
+        "expression",
+        "ordinal_position",
+    ],
+    "SEMANTIC_ADMIN.ADD_SYNONYM": ["model_name", "object_type", "object_name", "synonym", "source"],
+    "SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION": [
+        "model_name",
+        "scope_type",
+        "scope_name",
+        "instruction_kind",
+        "instruction_text",
+        "applies_to_role",
+        "priority",
+    ],
+}
+
+
+def sql_literal(value: Any) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return str(normalize_value(value))
+    return sql_string(str(value))
+
+
+def render_operation_sql(operation: dict[str, Any]) -> str:
+    target = operation.get("target")
+    if not isinstance(target, str) or target not in OPERATION_ARGUMENTS:
+        raise OsiError(f"Unsupported import operation target: {target!r}")
+    arguments = operation.get("arguments")
+    if not isinstance(arguments, dict):
+        raise OsiError(f"Import operation arguments must be an object: {operation!r}")
+    rendered_args = [sql_literal(arguments.get(name)) for name in OPERATION_ARGUMENTS[target]]
+    return f"EXECUTE SCRIPT {target}(" + ", ".join(rendered_args) + ")"
+
+
+def operation_metadata_diagnostics(plan: dict[str, Any]) -> list[dict[str, str]]:
+    diagnostics: list[dict[str, str]] = []
+    for index, operation in enumerate(plan.get("operations") or []):
+        if not isinstance(operation, dict):
+            continue
+        metadata = operation.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        path = str(operation.get("source_path") or f"$.operations[{index}]")
+        operation_name = operation.get("operation")
+        native = metadata.get("native") if isinstance(metadata.get("native"), dict) else {}
+        object_columns = metadata.get("object_columns") or metadata.get("columns")
+        if operation_name == "add_semantic_object" and object_columns:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_120",
+                "WARNING",
+                path,
+                "Semantic object column order is advisory for script-by-script apply; field helpers append supported columns.",
+            )
+        elif operation_name == "add_dimension" and object_columns:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_120",
+                "WARNING",
+                path,
+                "Dimension object-column ordinal and visibility metadata cannot be fully applied through ADD_DIMENSION.",
+            )
+        elif operation_name == "add_fact" and object_columns:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_120",
+                "WARNING",
+                path,
+                "Fact object-column membership cannot be applied through ADD_FACT.",
+            )
+        elif operation_name == "add_metric" and object_columns:
+            add_diagnostic(
+                diagnostics,
+                "OSI_IMPORT_120",
+                "WARNING",
+                path,
+                "Metric object-column ordinal and visibility metadata cannot be fully applied through ADD_METRIC.",
+            )
+        if operation_name == "add_relationship":
+            if native.get("description") or native.get("path_priority"):
+                add_diagnostic(
+                    diagnostics,
+                    "OSI_IMPORT_120",
+                    "WARNING",
+                    path,
+                    "Relationship description and path priority cannot be applied through ADD_RELATIONSHIP.",
+                )
+        if operation_name == "add_metric" and native:
+            unsupported_native_keys = [
+                key
+                for key in [
+                    "metric_kind",
+                    "aggregation_function",
+                    "measure_expr",
+                    "semantic_filter_expr",
+                    "distinct_key_expr",
+                    "non_additive_dimension",
+                    "window_spec_json",
+                    "type_params_json",
+                    "unit_hint",
+                    "sensitivity_label",
+                    "display_policy",
+                    "owner_role",
+                ]
+                if key in native
+            ]
+            if unsupported_native_keys:
+                add_diagnostic(
+                    diagnostics,
+                    "OSI_IMPORT_120",
+                    "WARNING",
+                    path,
+                    "Metric native metadata cannot be fully applied through ADD_METRIC: "
+                    + ", ".join(unsupported_native_keys),
+                )
+    return diagnostics
+
+
+def plan_model_names(plan: dict[str, Any]) -> list[str]:
+    names = []
+    for model in plan.get("models") or []:
+        if isinstance(model, dict) and isinstance(model.get("model_name"), str):
+            names.append(model["model_name"])
+    return names
+
+
+def scalar(con: Any, sql: str) -> Any:
+    rows = con.execute(sql).fetchall()
+    if not rows:
+        return None
+    return normalize_value(rows[0][0])
+
+
+def execute_rows_or_empty(con: Any, sql: str) -> list[Any]:
+    stmt = con.execute(sql)
+    try:
+        return stmt.fetchall()
+    except Exception as exc:
+        if "without result set" in str(exc).lower():
+            return []
+        raise
+
+
+def cleanup_imported_model(con: Any, model_name: str) -> None:
+    literal = sql_string(model_name)
+    model_filter = f"MODEL_ID IN (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE UPPER(MODEL_NAME) = UPPER({literal}))"
+    metric_filter = (
+        "METRIC_ID IN (SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS WHERE "
+        f"{model_filter})"
+    )
+    object_filter = (
+        "OBJECT_ID IN (SELECT OBJECT_ID FROM SYS_SEMANTIC.SEMANTIC_OBJECTS WHERE "
+        f"{model_filter})"
+    )
+    unique_key_filter = (
+        "UNIQUE_KEY_ID IN (SELECT UNIQUE_KEY_ID FROM SYS_SEMANTIC.UNIQUE_KEYS WHERE "
+        f"{model_filter})"
+    )
+    materialization_filter = (
+        "MATERIALIZATION_ID IN (SELECT MATERIALIZATION_ID FROM SYS_SEMANTIC.MATERIALIZATIONS WHERE "
+        f"{model_filter})"
+    )
+    calculation_group_filter = (
+        "CALCULATION_GROUP_ID IN (SELECT CALCULATION_GROUP_ID FROM SYS_SEMANTIC.CALCULATION_GROUPS WHERE "
+        f"{model_filter})"
+    )
+    queries = [
+        f"DELETE FROM SYS_SEMANTIC.AGENT_FEEDBACK WHERE AGENT_REQUEST_ID IN (SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.AGENT_FEEDBACK WHERE QUERY_LOG_ID IN (SELECT QUERY_LOG_ID FROM SYS_SEMANTIC.QUERY_LOG WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS WHERE AGENT_REQUEST_ID IN (SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS WHERE QUERY_LOG_ID IN (SELECT QUERY_LOG_ID FROM SYS_SEMANTIC.QUERY_LOG WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS WHERE {materialization_filter}",
+        f"DELETE FROM SYS_SEMANTIC.CALCULATION_ITEMS WHERE {calculation_group_filter}",
+        f"DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS WHERE {unique_key_filter}",
+        f"DELETE FROM SYS_SEMANTIC.METRIC_INPUTS WHERE {metric_filter}",
+        f"DELETE FROM SYS_SEMANTIC.METRIC_FILTERS WHERE {metric_filter}",
+        f"DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES WHERE {metric_filter}",
+        f"DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE {object_filter}",
+        f"DELETE FROM SYS_SEMANTIC.SYNONYMS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.CUSTOM_EXTENSIONS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.VERIFIED_QUERIES WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.OBJECT_PRIVILEGES WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.MATERIALIZATIONS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.CALCULATION_GROUPS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.SEMANTIC_DEFINITION_SOURCES WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.VALIDATION_RESULTS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.VALIDATION_RUNS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.MODEL_PUBLISH_HISTORY WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.QUERY_LOG WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID IN (SELECT VERSION_ID FROM SYS_SEMANTIC.MODEL_VERSIONS WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.UNIQUE_KEYS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.RELATIONSHIPS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.FACTS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.METRICS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.SEMANTIC_OBJECTS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.ENTITIES WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.MODEL_VERSIONS WHERE {model_filter}",
+        f"UPDATE SYS_SEMANTIC.MODELS SET ACTIVE_VERSION_ID = NULL WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.MODELS WHERE UPPER(MODEL_NAME) = UPPER({literal})",
+    ]
+    for sql in queries:
+        con.execute(sql)
+
+
+def model_rows(con: Any, model_name: str) -> list[dict[str, Any]]:
+    return fetch_dicts(
+        con,
+        "SELECT MODEL_NAME, STATUS FROM SYS_SEMANTIC.MODELS "
+        f"WHERE UPPER(MODEL_NAME) = UPPER({sql_string(model_name)})",
+    )
+
+
+def source_object_exists(con: Any, schema_name: str, object_name: str) -> bool:
+    return int(
+        scalar(
+            con,
+            "SELECT COUNT(*) FROM ("
+            "SELECT TABLE_NAME AS OBJECT_NAME FROM SYS.EXA_ALL_TABLES "
+            f"WHERE TABLE_SCHEMA = UPPER({sql_string(schema_name)}) "
+            f"AND TABLE_NAME = UPPER({sql_string(object_name)}) "
+            "UNION ALL "
+            "SELECT VIEW_NAME AS OBJECT_NAME FROM SYS.EXA_ALL_VIEWS "
+            f"WHERE VIEW_SCHEMA = UPPER({sql_string(schema_name)}) "
+            f"AND VIEW_NAME = UPPER({sql_string(object_name)})"
+            ")",
+        )
+        or 0
+    ) > 0
+
+
+def preflight_apply_plan(
+    con: Any,
+    plan: dict[str, Any],
+    options: ImportApplyOptions,
+) -> tuple[list[dict[str, str]], list[str]]:
+    diagnostics: list[dict[str, str]] = []
+    replace_models: list[str] = []
+    for model_name in plan_model_names(plan):
+        rows = model_rows(con, model_name)
+        if not rows:
+            continue
+        status = str(rows[0].get("STATUS") or "")
+        if options.collision_policy == "replace_draft" and status.upper() == "DRAFT":
+            replace_models.append(model_name)
+        else:
+            add_diagnostic(
+                diagnostics,
+                "OSI_APPLY_010",
+                "ERROR",
+                "$.models",
+                f"Target model already exists: {model_name}.",
+            )
+    for index, operation in enumerate(plan.get("operations") or []):
+        if not isinstance(operation, dict) or operation.get("operation") != "add_entity":
+            continue
+        args = operation.get("arguments") if isinstance(operation.get("arguments"), dict) else {}
+        source_schema = args.get("source_schema")
+        source_object = args.get("source_object")
+        if not isinstance(source_schema, str) or not isinstance(source_object, str):
+            add_diagnostic(
+                diagnostics,
+                "OSI_APPLY_020",
+                "ERROR",
+                str(operation.get("source_path") or f"$.operations[{index}]"),
+                "Entity source schema/object is missing from the import plan.",
+            )
+            continue
+        if not source_object_exists(con, source_schema, source_object):
+            add_diagnostic(
+                diagnostics,
+                "OSI_APPLY_020",
+                "ERROR",
+                str(operation.get("source_path") or f"$.operations[{index}]"),
+                f"Source table or view is not visible: {source_schema}.{source_object}.",
+            )
+    return diagnostics, replace_models
+
+
+def validation_diagnostics(con: Any, model_name: str) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    rows = fetch_dicts(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL({sql_literal(model_name)})")
+    diagnostics: list[dict[str, str]] = []
+    for row in rows:
+        severity = str(row.get("SEVERITY", "")).upper()
+        if severity not in {"ERROR", "WARNING"}:
+            continue
+        add_diagnostic(
+            diagnostics,
+            "OSI_APPLY_030",
+            severity,
+            str(row.get("OBJECT_NAME") or row.get("OBJECT_TYPE") or "$"),
+            f"{row.get('RULE_CODE')}: {row.get('MESSAGE')}",
+        )
+    return diagnostics, rows
+
+
+def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOptions) -> dict[str, Any]:
+    diagnostics = list(plan.get("diagnostics") or [])
+    operation_results: list[dict[str, Any]] = []
+    validation_rows: list[dict[str, Any]] = []
+    created_models: list[str] = []
+
+    if plan.get("status") == "blocked":
+        add_diagnostic(diagnostics, "OSI_APPLY_001", "ERROR", "$", "Blocked import plans cannot be applied.")
+        return clean_json_value(
+            {
+                "version": OSI_VERSION,
+                "mode": "apply",
+                "status": "blocked",
+                "source": plan.get("source"),
+                "models": plan.get("models") or [],
+                "diagnostics": diagnostics,
+                "operation_results": [],
+            }
+        )
+
+    diagnostics.extend(operation_metadata_diagnostics(plan))
+    diagnostics = finalize_diagnostics(diagnostics, options.warnings_as_errors)
+    if diagnostics_blocking(diagnostics):
+        return clean_json_value(
+            {
+                "version": OSI_VERSION,
+                "mode": "apply",
+                "status": "blocked",
+                "source": plan.get("source"),
+                "models": plan.get("models") or [],
+                "diagnostics": diagnostics,
+                "operation_results": [],
+            }
+        )
+
+    preflight_diagnostics, replace_models = preflight_apply_plan(con, plan, options)
+    diagnostics.extend(preflight_diagnostics)
+    if diagnostics_blocking(preflight_diagnostics):
+        return clean_json_value(
+            {
+                "version": OSI_VERSION,
+                "mode": "apply",
+                "status": "blocked",
+                "source": plan.get("source"),
+                "models": plan.get("models") or [],
+                "diagnostics": diagnostics,
+                "operation_results": [],
+            }
+        )
+
+    for model_name in replace_models:
+        cleanup_imported_model(con, model_name)
+
+    try:
+        for index, operation in enumerate(plan.get("operations") or []):
+            if not isinstance(operation, dict):
+                continue
+            sql = render_operation_sql(operation)
+            args = operation.get("arguments") if isinstance(operation.get("arguments"), dict) else {}
+            if operation.get("operation") == "create_model" and isinstance(args.get("model_name"), str):
+                created_models.append(args["model_name"])
+            rows = execute_rows_or_empty(con, sql)
+            operation_results.append(
+                clean_json_value(
+                    {
+                        "index": index,
+                        "operation": operation.get("operation"),
+                        "target": operation.get("target"),
+                        "source_path": operation.get("source_path"),
+                        "status": "ok",
+                        "row_count": len(rows),
+                    }
+                )
+            )
+        if options.validate_after_apply:
+            for model_name in plan_model_names(plan):
+                model_diagnostics, rows = validation_diagnostics(con, model_name)
+                diagnostics.extend(model_diagnostics)
+                validation_rows.extend(rows)
+            diagnostics = finalize_diagnostics(diagnostics, options.warnings_as_errors)
+        if diagnostics_blocking(diagnostics):
+            status = "failed"
+            if options.rollback_on_failure:
+                for model_name in created_models:
+                    cleanup_imported_model(con, model_name)
+                status = "rolled_back"
+            return clean_json_value(
+                {
+                    "version": OSI_VERSION,
+                    "mode": "apply",
+                    "status": status,
+                    "source": plan.get("source"),
+                    "models": plan.get("models") or [],
+                    "diagnostics": diagnostics,
+                    "operation_results": operation_results,
+                    "validation_rows": validation_rows,
+                }
+            )
+    except Exception as exc:
+        add_diagnostic(
+            diagnostics,
+            "OSI_APPLY_040",
+            "ERROR",
+            "$.operations",
+            f"Import apply failed: {exc}",
+        )
+        status = "failed"
+        if options.rollback_on_failure:
+            for model_name in created_models:
+                cleanup_imported_model(con, model_name)
+            status = "rolled_back"
+        return clean_json_value(
+            {
+                "version": OSI_VERSION,
+                "mode": "apply",
+                "status": status,
+                "source": plan.get("source"),
+                "models": plan.get("models") or [],
+                "diagnostics": diagnostics,
+                "operation_results": operation_results,
+                "validation_rows": validation_rows,
+            }
+        )
+
+    return clean_json_value(
+        {
+            "version": OSI_VERSION,
+            "mode": "apply",
+            "status": "ok",
+            "source": plan.get("source"),
+            "models": plan.get("models") or [],
+            "diagnostics": diagnostics,
+            "operation_results": operation_results,
+            "validation_rows": validation_rows,
+        }
+    )
+
+
 def dump_json(document: dict[str, Any]) -> str:
     return json.dumps(document, ensure_ascii=False, indent=2) + "\n"
 
@@ -2301,8 +2837,10 @@ def command_validate(args: argparse.Namespace) -> int:
 
 
 def command_import(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        raise OsiError("Milestone 3 only supports import planning. Re-run with --dry-run.")
+    if args.dry_run and args.apply:
+        raise OsiError("Choose either --dry-run or --apply, not both.")
+    if not args.dry_run and not args.apply:
+        raise OsiError("Choose --dry-run to plan or --apply to import.")
     document = load_document(args.path)
     plan = plan_import(
         document,
@@ -2315,8 +2853,40 @@ def command_import(args: argparse.Namespace) -> int:
             source=str(args.path),
         ),
     )
-    write_output(dump_json(plan), args.output)
-    return 1 if plan["status"] == "blocked" else 0
+    if args.dry_run:
+        write_output(dump_json(plan), args.output)
+        return 1 if plan["status"] == "blocked" else 0
+
+    if plan["status"] == "blocked":
+        result = apply_import_plan(
+            None,
+            plan,
+            ImportApplyOptions(
+                collision_policy=args.collision_policy,
+                rollback_on_failure=not args.no_rollback,
+                validate_after_apply=not args.no_validate,
+                warnings_as_errors=args.warnings_as_errors,
+            ),
+        )
+        write_output(dump_json(result), args.output)
+        return 1
+
+    con = connect(args)
+    try:
+        result = apply_import_plan(
+            con,
+            plan,
+            ImportApplyOptions(
+                collision_policy=args.collision_policy,
+                rollback_on_failure=not args.no_rollback,
+                validate_after_apply=not args.no_validate,
+                warnings_as_errors=args.warnings_as_errors,
+            ),
+        )
+    finally:
+        con.close()
+    write_output(dump_json(result), args.output)
+    return 0 if result["status"] == "ok" else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2350,12 +2920,26 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser = subparsers.add_parser("import", help="plan an OSI import")
     import_parser.add_argument("path", type=Path)
     import_parser.add_argument("--dry-run", action="store_true", help="produce a normalized import plan without database writes")
+    import_parser.add_argument("--apply", action="store_true", help="apply the normalized import plan to Exasol")
     import_parser.add_argument("--profile", choices=["auto", *sorted(VALID_PROFILES)], default="auto")
     import_parser.add_argument("--strict", action="store_true", help="treat lossy or ambiguous OSI mapping as blocking")
     import_parser.add_argument("--warnings-as-errors", action="store_true")
     import_parser.add_argument("--target-model", help="override the imported model name")
     import_parser.add_argument("--published-schema", help="override the imported model published schema")
+    import_parser.add_argument("--collision-policy", choices=["fail", "replace_draft"], default="fail")
+    import_parser.add_argument("--no-rollback", action="store_true", help="leave the imported model in place after apply failure")
+    import_parser.add_argument("--no-validate", action="store_true", help="skip VALIDATE_MODEL after apply")
     import_parser.add_argument("--output", type=Path)
+    import_parser.add_argument("--host", default=os.environ.get("EXASOL_HOST", "localhost"))
+    import_parser.add_argument("--port", default=int(os.environ.get("EXASOL_PORT", "8563")), type=int)
+    import_parser.add_argument("--user", default=os.environ.get("EXASOL_USER", "sys"))
+    import_parser.add_argument("--password", default=os.environ.get("EXASOL_PASSWORD", "exasol"))
+    import_parser.add_argument(
+        "--tls-verify",
+        action="store_true",
+        default=os.environ.get("EXASOL_TLS_VERIFY", "").lower() in {"1", "true", "yes"},
+        help="verify Exasol TLS certificate; disabled by default for local Nano",
+    )
     import_parser.set_defaults(func=command_import)
     return parser
 

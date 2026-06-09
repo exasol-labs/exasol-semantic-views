@@ -51,3 +51,7 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # OSI export (Milestone 2): validate live catalog export, lossless extensions,
 # simple key mapping, and offline OSI schema validation.
 "$PYTHON_BIN" tools/verify_osi_export.py
+
+# OSI import apply (Milestone 4): apply a live lossless export into a draft
+# model, validate it, compile against it, and verify collision preflight.
+"$PYTHON_BIN" tools/verify_osi_import.py

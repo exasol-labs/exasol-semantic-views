@@ -204,7 +204,7 @@ relationship metadata.
 
 ## Milestone 3 Import Dry-Run Planner
 
-The importer currently supports planning only:
+The importer supports deterministic planning through:
 
 - `tools/osi.py import --dry-run`.
 - `--profile auto`, `interoperability`, and `lossless`.
@@ -219,12 +219,57 @@ The importer currently supports planning only:
 - deterministic names for unnamed OSI core unique keys.
 - raw non-Exasol custom extension payload preservation.
 
-The dry-run artifact is the contract for Milestone 4 apply work. Existing admin
-helpers are referenced where possible. Metadata that the current helper surface
-cannot apply losslessly, such as hidden fact object-column membership, is kept
-in operation `metadata` for the later apply layer.
+The dry-run artifact is the contract consumed by apply. Existing admin helpers
+are referenced where possible. Metadata that the current helper surface cannot
+apply losslessly, such as hidden fact object-column membership, is kept in
+operation `metadata`.
 
-## Unsupported In Milestone 3
+## Milestone 4 Import Apply
 
-Milestone 3 does not write to Exasol, check live model name collisions, or
-rollback failed imports. Import apply remains a later milestone.
+The apply path supports:
+
+- `tools/osi.py import --apply`.
+- exactly one of `--dry-run` or `--apply` for import commands.
+- script-by-script application through existing `SEMANTIC_ADMIN` helpers.
+- model, entity, semantic object, relationship, dimension, fact, metric,
+  synonym, instruction, custom extension, and unique-key operations.
+- live preflight for blocked plans, target model collisions, and visible source
+  table/view existence.
+- collision policies `fail` and `replace_draft`.
+- optional `--no-rollback` and default best-effort rollback for models created
+  during failed apply.
+- default `VALIDATE_MODEL` after apply, with `--no-validate` for diagnostics or
+  migration work.
+- structured apply output with operation results, planner/apply diagnostics,
+  and validation rows.
+- `--warnings-as-errors` promotion for planner warnings, helper-surface loss
+  warnings, and post-apply validation warnings.
+
+Example:
+
+```sh
+python3 tools/osi.py import --apply sales_osi.yaml \
+  --target-model sales_osi_import \
+  --collision-policy replace_draft \
+  --output /tmp/sales_osi_import_result.json
+```
+
+`tools/verify_osi_import.py` exports the live `sales` model as lossless OSI,
+imports it into `sales_osi_import`, validates the imported model, compiles and
+runs a representative structured request, and verifies collision preflight.
+
+## Unsupported In Milestone 4
+
+Milestone 4 intentionally applies through the public helper surface. The apply
+result emits `OSI_IMPORT_120` warnings for lossless metadata that is preserved
+in the plan but not fully applied by those helpers:
+
+- exact semantic object column order.
+- dimension and metric object-column ordinal/visibility metadata.
+- hidden fact object-column membership.
+- relationship description and path priority.
+- full native metric metadata such as aggregation internals, measure
+  expression, semantic filters, and display policy.
+
+Lossless round-trip fidelity for those fields requires either expanded public
+helpers or a narrow normalized batch apply helper in a later milestone.

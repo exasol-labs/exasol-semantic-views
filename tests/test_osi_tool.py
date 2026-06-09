@@ -266,6 +266,147 @@ def test_invalid_exasol_extension_envelope_blocks_import_plan() -> None:
     assert "OSI_IMPORT_100" in diagnostic_codes(plan)
 
 
+def test_operation_sql_renders_missing_optional_arguments_as_null() -> None:
+    operation_item = {
+        "operation": "add_unique_key_column",
+        "target": "SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN",
+        "source_path": "$.test",
+        "arguments": {
+            "model_name": "sales_osi",
+            "entity_name": "orders",
+            "key_name": "orders_primary_key",
+            "column_name": "order_id",
+            "ordinal_position": 1,
+        },
+    }
+    assert osi.render_operation_sql(operation_item) == (
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN("
+        "'sales_osi', 'orders', 'orders_primary_key', 'order_id', NULL, 1)"
+    )
+
+
+def test_execute_rows_or_empty_accepts_no_result_script_calls() -> None:
+    class NoResultStatement:
+        def fetchall(self) -> list[Any]:
+            raise RuntimeError("Attempt to fetch from statement without result set")
+
+    class FakeConnection:
+        def execute(self, sql: str) -> NoResultStatement:
+            assert sql == "EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL('x')"
+            return NoResultStatement()
+
+    assert osi.execute_rows_or_empty(FakeConnection(), "EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL('x')") == []
+
+
+def test_apply_refuses_blocked_plan_without_database_connection() -> None:
+    blocked_plan = {
+        "version": "0.2.0.dev0",
+        "mode": "dry-run",
+        "status": "blocked",
+        "source": "<test>",
+        "models": [{"model_name": "blocked_model"}],
+        "diagnostics": [{"code": "OSI_IMPORT_030", "severity": "ERROR", "path": "$", "message": "blocked"}],
+        "operations": [],
+    }
+    result = osi.apply_import_plan(
+        None,
+        blocked_plan,
+        osi.ImportApplyOptions(
+            collision_policy="fail",
+            rollback_on_failure=True,
+            validate_after_apply=True,
+            warnings_as_errors=False,
+        ),
+    )
+    assert result["status"] == "blocked"
+    assert "OSI_APPLY_001" in diagnostic_codes(result)
+
+
+def test_apply_metadata_warnings_can_block_before_database_connection() -> None:
+    plan = {
+        "version": "0.2.0.dev0",
+        "mode": "dry-run",
+        "status": "ok",
+        "source": "<test>",
+        "models": [{"model_name": "lossy_model"}],
+        "diagnostics": [],
+        "operations": [
+            {
+                "operation": "add_fact",
+                "target": "SEMANTIC_ADMIN.ADD_FACT",
+                "source_path": "$.fact",
+                "arguments": {
+                    "model_name": "lossy_model",
+                    "entity_name": "orders",
+                    "fact_name": "net_revenue",
+                    "expression": "o.amount",
+                    "data_type": "DECIMAL(18,2)",
+                    "additive_policy": "ADDITIVE",
+                },
+                "metadata": {"object_columns": [{"object_name": "ORDERS", "ordinal": 1, "is_visible": False}]},
+            }
+        ],
+    }
+    result = osi.apply_import_plan(
+        None,
+        plan,
+        osi.ImportApplyOptions(
+            collision_policy="fail",
+            rollback_on_failure=True,
+            validate_after_apply=True,
+            warnings_as_errors=True,
+        ),
+    )
+    assert result["status"] == "blocked"
+    assert ("OSI_IMPORT_120", "ERROR") in {(item["code"], item["severity"]) for item in result["diagnostics"]}
+
+
+def test_validation_warnings_as_errors_blocks_apply() -> None:
+    class FakeStatement:
+        def __init__(self, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
+            self._columns = columns
+            self._rows = rows
+
+        def description(self) -> list[tuple[str]]:
+            return [(column,) for column in self._columns]
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return self._rows
+
+    class FakeConnection:
+        def execute(self, sql: str) -> FakeStatement:
+            if "FROM SYS_SEMANTIC.MODELS" in sql:
+                return FakeStatement(["MODEL_NAME", "STATUS"], [])
+            if "SEMANTIC_ADMIN.VALIDATE_MODEL" in sql:
+                return FakeStatement(
+                    ["SEVERITY", "OBJECT_NAME", "OBJECT_TYPE", "RULE_CODE", "MESSAGE"],
+                    [("WARNING", "total_revenue", "METRIC", "SEMANTIC_MODEL_999", "soft validation warning")],
+                )
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+    plan = {
+        "version": "0.2.0.dev0",
+        "mode": "dry-run",
+        "status": "ok",
+        "source": "<test>",
+        "models": [{"model_name": "validation_warning_model"}],
+        "diagnostics": [],
+        "operations": [],
+    }
+    result = osi.apply_import_plan(
+        FakeConnection(),
+        plan,
+        osi.ImportApplyOptions(
+            collision_policy="fail",
+            rollback_on_failure=True,
+            validate_after_apply=True,
+            warnings_as_errors=True,
+        ),
+    )
+    assert result["status"] == "rolled_back"
+    assert ("OSI_APPLY_030", "ERROR") in {(item["code"], item["severity"]) for item in result["diagnostics"]}
+
+
 def main() -> int:
     test_fixtures_validate()
     test_invalid_version_fails()
@@ -279,6 +420,11 @@ def main() -> int:
     test_import_plan_complex_relationship_prefers_native_join_condition()
     test_import_plan_lossless_preserves_native_metadata()
     test_invalid_exasol_extension_envelope_blocks_import_plan()
+    test_operation_sql_renders_missing_optional_arguments_as_null()
+    test_execute_rows_or_empty_accepts_no_result_script_calls()
+    test_apply_refuses_blocked_plan_without_database_connection()
+    test_apply_metadata_warnings_can_block_before_database_connection()
+    test_validation_warnings_as_errors_blocks_apply()
     print("ok osi tool tests")
     return 0
 
