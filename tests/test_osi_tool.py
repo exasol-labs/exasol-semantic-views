@@ -266,6 +266,120 @@ def test_invalid_exasol_extension_envelope_blocks_import_plan() -> None:
     assert "OSI_IMPORT_100" in diagnostic_codes(plan)
 
 
+def test_import_plan_assigns_distinct_names_to_repeated_non_exasol_extensions() -> None:
+    document = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [
+            {
+                "name": "extension_model",
+                "datasets": [
+                    {
+                        "name": "orders",
+                        "source": "MART.ORDERS",
+                        "custom_extensions": [
+                            {
+                                "vendor_name": "EXASOL",
+                                "data": json.dumps(
+                                    {
+                                        "entity_name": "orders",
+                                        "source_schema": "MART",
+                                        "source_object": "ORDERS",
+                                        "source_alias": "o",
+                                    }
+                                ),
+                            },
+                            {"vendor_name": "PARTNER_VENDOR", "data": '{"first":true}'},
+                            {"vendor_name": "PARTNER_VENDOR", "data": '{"second":true}'},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    plan = plan_document(document, strict=True)
+    extension_names = [
+        item["arguments"]["extension_name"]
+        for item in plan["operations"]
+        if item["operation"] == "add_custom_extension" and item["arguments"]["vendor_name"] == "PARTNER_VENDOR"
+    ]
+    assert extension_names == ["osi_2", "osi_3"]
+
+
+def test_import_plan_preserves_raw_semantic_object_extensions() -> None:
+    document = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [
+            {
+                "name": "semantic_object_extension_model",
+                "datasets": [
+                    {
+                        "name": "orders",
+                        "source": "MART.ORDERS",
+                        "custom_extensions": [
+                            {
+                                "vendor_name": "EXASOL",
+                                "data": json.dumps(
+                                    {
+                                        "entity_name": "orders",
+                                        "source_schema": "MART",
+                                        "source_object": "ORDERS",
+                                        "source_alias": "o",
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                "custom_extensions": [
+                    {
+                        "vendor_name": "EXASOL",
+                        "data": json.dumps(
+                            {
+                                "semantic_objects": [
+                                    {
+                                        "object_name": "ORDERS",
+                                        "root_entity": "orders",
+                                        "custom_extensions": [
+                                            {"vendor_name": "EXASOL", "data": '{"scope":"semantic_object"}'},
+                                            {"vendor_name": "PARTNER_VENDOR", "data": '{"opaque":true}'},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ),
+                    }
+                ],
+            }
+        ],
+    }
+    plan = plan_document(document, strict=True)
+    extensions = [
+        item["arguments"]
+        for item in plan["operations"]
+        if item["operation"] == "add_custom_extension" and item["arguments"]["scope_type"] == "SEMANTIC_OBJECT"
+    ]
+    assert extensions == [
+        {
+            "model_name": "semantic_object_extension_model",
+            "scope_type": "SEMANTIC_OBJECT",
+            "scope_name": "ORDERS",
+            "vendor_name": "EXASOL",
+            "data_json": '{"scope":"semantic_object"}',
+            "source_format": "OSI",
+            "extension_name": "osi_1",
+        },
+        {
+            "model_name": "semantic_object_extension_model",
+            "scope_type": "SEMANTIC_OBJECT",
+            "scope_name": "ORDERS",
+            "vendor_name": "PARTNER_VENDOR",
+            "data_json": '{"opaque":true}',
+            "source_format": "OSI",
+            "extension_name": "osi_2",
+        },
+    ]
+
+
 def test_operation_sql_renders_missing_optional_arguments_as_null() -> None:
     operation_item = {
         "operation": "add_unique_key_column",
@@ -459,6 +573,90 @@ def test_batch_warning_json_decodes_to_diagnostics() -> None:
     ]
 
 
+def test_roundtrip_document_normalization_is_order_stable() -> None:
+    left = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [
+            {
+                "name": "sales",
+                "datasets": [
+                    {"name": "order", "source": "MART.ORDERS"},
+                    {"name": "customer", "source": "MART.CUSTOMERS"},
+                ],
+                "custom_extensions": [
+                    {"vendor_name": "PARTNER_VENDOR", "data": '{"b":2,"a":1}'},
+                    {
+                        "vendor_name": "EXASOL",
+                        "data": json.dumps(
+                            {
+                                "semantic_objects": [
+                                    {
+                                        "object_name": "SALES",
+                                        "root_entity": "order",
+                                        "columns": [
+                                            {"kind": "METRIC", "name": "total_revenue", "ordinal": 2},
+                                            {"kind": "DIMENSION", "name": "customer_region", "ordinal": 1},
+                                        ],
+                                    }
+                                ]
+                            }
+                        ),
+                    },
+                ],
+            }
+        ],
+    }
+    right = {
+        "semantic_model": [
+            {
+                "custom_extensions": [
+                    {
+                        "data": json.dumps(
+                            {
+                                "semantic_objects": [
+                                    {
+                                        "columns": [
+                                            {"name": "customer_region", "ordinal": 1, "kind": "DIMENSION"},
+                                            {"name": "total_revenue", "ordinal": 2, "kind": "METRIC"},
+                                        ],
+                                        "root_entity": "order",
+                                        "object_name": "SALES",
+                                    }
+                                ]
+                            },
+                            separators=(",", ":"),
+                        ),
+                        "vendor_name": "EXASOL",
+                    },
+                    {"data": '{"a":1,"b":2}', "vendor_name": "PARTNER_VENDOR"},
+                ],
+                "datasets": [
+                    {"source": "MART.CUSTOMERS", "name": "customer"},
+                    {"source": "MART.ORDERS", "name": "order"},
+                ],
+                "name": "sales_osi_roundtrip",
+            }
+        ],
+        "version": "0.2.0.dev0",
+    }
+    assert osi.normalize_osi_roundtrip_document(left, "sales") == osi.normalize_osi_roundtrip_document(right, "sales")
+
+
+def test_diff_json_values_reports_stable_paths() -> None:
+    diffs = osi.diff_json_values(
+        {"semantic_model": [{"name": "sales", "datasets": [{"name": "orders"}]}]},
+        {"semantic_model": [{"name": "sales", "datasets": [{"name": "customers"}]}]},
+    )
+    assert diffs == [
+        {
+            "code": "OSI_ROUNDTRIP_001",
+            "severity": "ERROR",
+            "path": "$.semantic_model[0].datasets[0].name",
+            "message": 'Value mismatch: expected "orders", got "customers".',
+        }
+    ]
+
+
 def main() -> int:
     test_fixtures_validate()
     test_invalid_version_fails()
@@ -472,6 +670,8 @@ def main() -> int:
     test_import_plan_complex_relationship_prefers_native_join_condition()
     test_import_plan_lossless_preserves_native_metadata()
     test_invalid_exasol_extension_envelope_blocks_import_plan()
+    test_import_plan_assigns_distinct_names_to_repeated_non_exasol_extensions()
+    test_import_plan_preserves_raw_semantic_object_extensions()
     test_operation_sql_renders_missing_optional_arguments_as_null()
     test_execute_rows_or_empty_accepts_no_result_script_calls()
     test_apply_refuses_blocked_plan_without_database_connection()
@@ -479,6 +679,8 @@ def main() -> int:
     test_validation_warnings_as_errors_blocks_apply()
     test_invalid_apply_mode_blocks_before_database_connection()
     test_batch_warning_json_decodes_to_diagnostics()
+    test_roundtrip_document_normalization_is_order_stable()
+    test_diff_json_values_reports_stable_paths()
     print("ok osi tool tests")
     return 0
 

@@ -1539,7 +1539,41 @@ def non_exasol_extension_operations(
                 "vendor_name": vendor_name,
                 "data_json": data,
                 "source_format": "OSI",
-                "extension_name": "default",
+                "extension_name": f"osi_{index + 1}",
+            },
+        )
+
+
+def raw_custom_extension_operations(
+    model_name: str,
+    scope_type: str,
+    scope_name: str | None,
+    extensions: Any,
+    source_path: str,
+    operations: list[dict[str, Any]],
+) -> None:
+    if not isinstance(extensions, list):
+        return
+    for index, extension in enumerate(extensions):
+        if not isinstance(extension, dict):
+            continue
+        vendor_name = extension.get("vendor_name")
+        data = extension.get("data")
+        if not isinstance(vendor_name, str) or not isinstance(data, str):
+            continue
+        add_operation(
+            operations,
+            "add_custom_extension",
+            "SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION",
+            extension_path(source_path, index),
+            {
+                "model_name": model_name,
+                "scope_type": scope_type,
+                "scope_name": scope_name,
+                "vendor_name": vendor_name,
+                "data_json": data,
+                "source_format": "OSI",
+                "extension_name": f"osi_{index + 1}",
             },
         )
 
@@ -2006,7 +2040,7 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
                 },
                 metadata={"columns": semantic_object.get("columns") or []},
             )
-            non_exasol_extension_operations(model_name, "SEMANTIC_OBJECT", str(object_name), semantic_object.get("custom_extensions"), object_path, operations)
+            raw_custom_extension_operations(model_name, "SEMANTIC_OBJECT", str(object_name), semantic_object.get("custom_extensions"), object_path, operations)
 
         for relationship_index, relationship in enumerate(model.get("relationships") or []):
             if not isinstance(relationship, dict):
@@ -2926,6 +2960,119 @@ def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOption
             "validation_rows": validation_rows,
         }
     )
+
+
+def roundtrip_sort_key(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, dict):
+        return (json.dumps(value, ensure_ascii=False, sort_keys=True, default=str),)
+    parts: list[str] = []
+    ordinal = value.get("ordinal", value.get("ORDINAL_POSITION"))
+    if ordinal is not None:
+        try:
+            parts.append(f"ordinal:{int(ordinal):020d}")
+        except (TypeError, ValueError):
+            parts.append(f"ordinal:{ordinal}")
+    for key_name in [
+        "name",
+        "object_name",
+        "relationship_name",
+        "from_entity",
+        "to_entity",
+        "entity_name",
+        "key_name",
+        "column_name",
+        "kind",
+        "scope_type",
+        "scope_name",
+        "vendor_name",
+        "extension_name",
+        "source_format",
+        "dialect",
+        "data",
+    ]:
+        if value.get(key_name) is not None:
+            parts.append(f"{key_name}:{value[key_name]}")
+    parts.append(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+    return tuple(parts)
+
+
+def normalize_roundtrip_value(value: Any) -> Any:
+    value = clean_json_value(value)
+    if isinstance(value, dict):
+        normalized = {str(key): normalize_roundtrip_value(item) for key, item in value.items()}
+        if isinstance(normalized.get("data"), str):
+            try:
+                data_value = json.loads(str(normalized["data"]))
+            except json.JSONDecodeError:
+                pass
+            else:
+                normalized["data"] = json.dumps(
+                    normalize_roundtrip_value(data_value),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+        return {key: normalized[key] for key in sorted(normalized)}
+    if isinstance(value, list):
+        normalized_items = [normalize_roundtrip_value(item) for item in value]
+        if all(isinstance(item, dict) for item in normalized_items):
+            return sorted(normalized_items, key=roundtrip_sort_key)
+        return normalized_items
+    return value
+
+
+def normalize_osi_roundtrip_document(document: dict[str, Any], canonical_model_name: str | None = None) -> dict[str, Any]:
+    normalized = normalize_roundtrip_value(document)
+    if canonical_model_name and isinstance(normalized, dict):
+        models = normalized.get("semantic_model")
+        if isinstance(models, list):
+            for model in models:
+                if isinstance(model, dict):
+                    model["name"] = canonical_model_name
+    return normalize_roundtrip_value(normalized)
+
+
+def json_preview(value: Any, limit: int = 240) -> str:
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def diff_json_values(expected: Any, actual: Any, path: str = "$", limit: int = 50) -> list[dict[str, str]]:
+    diffs: list[dict[str, str]] = []
+
+    def add(path_value: str, message: str) -> None:
+        if len(diffs) < limit:
+            add_diagnostic(diffs, "OSI_ROUNDTRIP_001", "ERROR", path_value, message)
+
+    def walk(left: Any, right: Any, current_path: str) -> None:
+        if len(diffs) >= limit:
+            return
+        if type(left) is not type(right):
+            add(current_path, f"Type mismatch: expected {type(left).__name__}, got {type(right).__name__}.")
+            return
+        if isinstance(left, dict):
+            left_keys = set(left)
+            right_keys = set(right)
+            for key_name in sorted(left_keys - right_keys):
+                add(f"{current_path}.{key_name}", f"Missing value: expected {json_preview(left[key_name])}.")
+            for key_name in sorted(right_keys - left_keys):
+                add(f"{current_path}.{key_name}", f"Unexpected value: got {json_preview(right[key_name])}.")
+            for key_name in sorted(left_keys & right_keys):
+                walk(left[key_name], right[key_name], f"{current_path}.{key_name}")
+            return
+        if isinstance(left, list):
+            if len(left) != len(right):
+                add(current_path, f"Length mismatch: expected {len(left)}, got {len(right)}.")
+            for index, (left_item, right_item) in enumerate(zip(left, right)):
+                walk(left_item, right_item, f"{current_path}[{index}]")
+            return
+        if left != right:
+            add(current_path, f"Value mismatch: expected {json_preview(left)}, got {json_preview(right)}.")
+
+    walk(expected, actual, path)
+    return diffs
 
 
 def dump_json(document: dict[str, Any]) -> str:

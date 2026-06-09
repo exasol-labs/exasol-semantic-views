@@ -295,6 +295,55 @@ OSI, imports it through the batch helper, verifies the returned table shape,
 checks lossless metadata patches in `SYS_SEMANTIC`, and compiles/runs a
 representative structured request.
 
+## Milestone 6 Lossless Round-Trip
+
+Milestone 6 adds `tools/verify_osi_roundtrip.py`, a live Nano verifier for
+lossless export/import/export fidelity.
+
+The verifier:
+
+- prepares non-Exasol `custom_extensions` at model, semantic object, entity,
+  relationship, dimension, fact, and metric scope.
+- adds a duplicate-safe metric instruction fixture so `ai_context.instructions`
+  is covered.
+- exports the live `sales` model as lossless OSI.
+- plans strict lossless import into `sales_osi_roundtrip`.
+- confirms script mode still reports expected `OSI_IMPORT_120` loss warnings for
+  helper-surface metadata.
+- applies the same plan with `--apply-mode batch`.
+- exports the imported model again.
+- compares normalized OSI documents after canonicalizing the target model name.
+- compares a normalized catalog snapshot keyed by stable names and excluding
+  generated ids, audit timestamps, validation rows, materializations, and query
+  logs.
+- compiles representative requests against the source and imported models and
+  compares generated SQL plus query results.
+- injects unsupported-operation and metadata-patch failures and verifies batch
+  rollback leaves no target model rows.
+
+The comparison intentionally focuses on semantic model content that OSI
+currently supports or preserves through Exasol extensions: entities,
+relationships, dimensions, facts, metrics, object-column membership/order,
+metric filters/native metadata, unique keys, synonyms, instructions, and custom
+extensions.
+
+Known round-trip comparison exclusions:
+
+- `ai_context.examples` exported from verified-query natural-language text are
+  not compared yet. OSI examples contain text only, while Exasol verified queries
+  require request and result-shape metadata to recreate them faithfully.
+- instruction kind, priority, and role are not compared because OSI
+  `ai_context.instructions` is a plain string.
+- synonym source is not compared because OSI `ai_context.synonyms` is a string
+  array.
+- native extension names for raw non-Exasol OSI extensions, and for raw
+  semantic-object extensions, are not compared because OSI `custom_extensions`
+  only carries `vendor_name` and `data`.
+
+The importer assigns deterministic `osi_N` native extension names to raw OSI
+extensions so repeated extensions from the same vendor and scope do not collapse
+into one catalog row during import.
+
 ## Script-Mode Limitations
 
 Script mode intentionally applies through the public helper surface. The apply

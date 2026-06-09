@@ -59,3 +59,7 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # OSI normalized batch import (Milestone 5): apply the normalized plan through
 # one database helper and verify returned rows plus lossless metadata patches.
 "$PYTHON_BIN" tools/verify_osi_batch_import.py
+
+# OSI lossless round-trip (Milestone 6): export/import/export through batch
+# apply, compare normalized OSI and catalog snapshots, and verify rollback.
+"$PYTHON_BIN" tools/verify_osi_roundtrip.py
