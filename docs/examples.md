@@ -119,5 +119,5 @@ python3 tools/verify_osi_roundtrip.py
 
 YAML input and output require PyYAML. JSON validation and JSON import planning
 work without optional YAML dependencies. See [OSI import and export
-format](osi-format.md) for profile guidance, limitations, and upstream converter
-plans.
+format](osi-format.md) for profile guidance, limitations, diagnostics, and
+verification coverage.
