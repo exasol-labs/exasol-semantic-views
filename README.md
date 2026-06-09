@@ -371,6 +371,8 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
 - Usage
   - [Creating metrics](docs/creating-metrics.md)
   - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
+  - [OSI import/export](docs/osi-format.md)
+  - [Examples](docs/examples.md)
 - Design
   - [Architecture](docs/architecture.md)
   - [Semantic compiler](docs/semantic-compiler.md)

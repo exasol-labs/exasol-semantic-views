@@ -1,6 +1,6 @@
 # OSI Import And Export Format
 
-Exasol Semantic Views will support Open Semantic Interchange (OSI) as an
+Exasol Semantic Views supports Open Semantic Interchange (OSI) as an
 import/export format for semantic model lifecycle workflows. OSI is not the
 authoritative store for this project. The authoritative model remains the
 database catalog in `SYS_SEMANTIC`, and query-time behavior remains the existing
@@ -8,7 +8,7 @@ SQL/Lua runtime.
 
 ## Supported Versions
 
-The pinned Milestone 0 schema is:
+The pinned schema is:
 
 ```text
 schemas/osi/0.2.0.dev0/osi-schema.json
@@ -26,7 +26,7 @@ the string required by the schema.
 
 ## CLI
 
-Milestones 2 and 3 add a host-side OSI CLI:
+The host-side OSI CLI provides validation, export, dry-run planning, and apply:
 
 ```sh
 python3 tools/osi.py validate sql/examples/sales_osi.yaml
@@ -99,6 +99,56 @@ published schema, semantic objects, object column order, source aliases, Exasol
 data types, primary-key expressions, relationship join SQL, metric type,
 metric base entity, filters, certification, and format hints.
 
+Use interoperability when the target is another OSI implementation and should
+not need Exasol-specific semantics. Use lossless when the target is another
+Exasol Semantic Views environment or a Git review workflow that must preserve
+native model behavior. For import, `--profile auto` detects Exasol lossless
+extensions when they are present; use `--strict` to block ambiguous or lossy
+documents instead of accepting best-effort defaults.
+
+## Interoperability Limitations
+
+OSI core does not model every Exasol Semantic Views concept. The converter is
+therefore explicit about what is represented in core OSI, what is preserved in
+`EXASOL` extensions, and what remains outside the OSI artifact.
+
+| Exasol semantic information | OSI core support | Current behavior |
+| --- | --- | --- |
+| Semantic objects and published views | No direct core concept | `--object` can produce an object-scoped interoperability export. Lossless export stores all semantic objects, object membership, visibility, and column order in the model `EXASOL` extension. |
+| Facts | No explicit fact object | Facts export as dataset `fields` with `label: fact`; native fact kind, data type, additive policy, privacy, certification, and object-column metadata live in `EXASOL` extensions. Private facts are omitted from interoperability export with `OSI_EXPORT_020`. |
+| Data types | No core field or metric data type | Exasol data types are stored in `EXASOL` extensions. Strict import blocks fields or metrics without resolvable data types because Exasol compilation needs typed metadata. |
+| Metric filters and metric internals | No core filter, aggregation-internal, display, or additive metadata | Metric expression text is exported to OSI core. Filter expressions, aggregation function, measure expression, metric kind, type params, display policy, certification, and owner metadata live in `EXASOL` extensions. |
+| Materializations | No core concept | Materialization definitions and selection history are not exported. Round-trip verification avoids materialization-eligible requests until an explicit extension is added. |
+| Privileges and security policies | No core concept | OSI artifacts do not grant privileges or carry Exasol database access policy. Imported models still execute under normal Exasol privileges. |
+| Relationship join SQL | Core relationships use `from_columns` and `to_columns` arrays | Simple equality joins export to core arrays. Complex joins are omitted from core with `OSI_EXPORT_040` and preserved in lossless `EXASOL` relationship metadata. |
+| Relationship cardinality, join type, and path priority | No complete core equivalent | Stored in `EXASOL` relationship extensions. Batch apply preserves path priority and description. |
+| Primary and unique keys | Simple column keys are supported | Simple primary and unique keys export to core. Expression-based keys are preserved in extensions and produce `OSI_EXPORT_030` for the core loss. |
+| Agent instructions | Core `ai_context.instructions` is plain text | Instruction text round-trips. Native kind, priority, and role are not represented unless a future extension carries them. |
+| Synonyms | Core synonyms are plain strings | Synonym text round-trips. Native synonym source metadata is not represented. |
+| Verified queries and examples | Core examples are text only | Natural-language example text can export to OSI. Exasol verified queries need request JSON and result-shape metadata, so examples are not recreated as verified queries on import. |
+| Third-party custom extensions | Supported as opaque `vendor_name` and JSON string `data` | Non-Exasol extension payloads are preserved exactly by vendor, scope, and JSON string. Native catalog extension names are not represented by OSI and are regenerated deterministically for imported raw OSI extensions. |
+| Validation runs, query logs, and compile cache | No core concept | Operational history is not exported. Import runs normal `VALIDATE_MODEL` after apply unless `--no-validate` is used. |
+
+## Import Apply Modes
+
+Import always starts with host-side OSI validation and deterministic planning.
+The database receives normalized Exasol operations, not raw OSI YAML or JSON.
+
+`--apply-mode script` applies through public `SEMANTIC_ADMIN.ADD_*` helpers. It
+is useful for simple interoperability imports and for checking the public helper
+surface, but it reports `OSI_IMPORT_120` warnings for lossless metadata that the
+helpers cannot currently apply.
+
+`--apply-mode batch` sends the normalized plan to
+`SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT`. This is the expected mode for
+lossless Exasol-to-Exasol workflows because it applies post-operation metadata
+patches for object-column order, hidden fact membership, relationship priority,
+and native metric metadata.
+
+Both apply modes run live preflight checks, support target model collision
+policies, and roll back newly created target models after apply failure unless
+`--no-rollback` is specified.
+
 ## Implementation Language
 
 The primary converter should be an external Python tool, not a Lua script
@@ -110,9 +160,60 @@ validation, compilation, publishing, the SQL preprocessor, and small admin
 helpers. Any database helper added for OSI should accept normalized Exasol
 operations, not raw OSI YAML.
 
+## Upstream Converter Contribution Plan
+
+The current implementation starts in this repository for speed, but the Python
+converter should stay shaped so it can become an upstream
+`open-semantic-interchange/OSI/converters/exasol` contribution.
+
+Recommended upstream package boundary:
+
+- Keep pure OSI concerns portable: document loading, schema validation,
+  diagnostics, extension-envelope parsing, Exasol catalog-to-OSI mapping,
+  OSI-to-normalized-plan mapping, JSON/YAML serialization, and fixture tests.
+- Keep Exasol database execution in this repository: connection handling,
+  `SEMANTIC_CATALOG` queries, `SEMANTIC_ADMIN` script execution, batch helper
+  invocation, cleanup, and Nano smoke tests.
+- Keep database-resident Lua limited to normalized plan execution. Do not move
+  YAML parsing, schema-version checks, or OSI dialect policy into Lua.
+
+Suggested upstream shape:
+
+```text
+converters/exasol/
+  README.md
+  pyproject.toml
+  exasol_osi/
+    __init__.py
+    cli.py
+    diagnostics.py
+    exporter.py
+    extensions.py
+    importer.py
+    schema.py
+  tests/
+    fixtures/
+```
+
+The upstream `README.md` should document both profiles, the limitations matrix
+above, the pinned OSI version, and the `EXASOL` custom-extension envelope. Tests
+should run without an Exasol database by using normalized catalog fixtures and
+OSI files. Live Exasol/Nano verification should remain in this repository unless
+the upstream project explicitly wants optional integration tests.
+
+Open upstream coordination items:
+
+- whether OSI should add `EXASOL` to its expression dialect enum or continue to
+  use `ANSI_SQL` for Exasol-compatible SQL with native dialect metadata in
+  extensions.
+- whether OSI wants a standardized way to represent published semantic views or
+  semantic-object subsets.
+- whether OSI examples should grow request/result metadata that can represent
+  verified-query repositories across vendors.
+
 ## Fixture Directory
 
-Milestone 0 fixtures live under:
+Fixtures live under:
 
 ```text
 tests/fixtures/osi/
@@ -358,3 +459,27 @@ in the plan but not fully applied by those helpers:
   expression, semantic filters, and display policy.
 
 Use batch mode when those fields need to be applied in the imported model.
+
+## Verification Coverage
+
+The OSI surface is covered by offline unit/fixture tests and Nano integration
+verifiers:
+
+- `tests/test_osi_tool.py` covers schema validation, JSON/YAML loading,
+  diagnostic shape, import planning, extension preservation, helper-surface loss
+  diagnostics, batch warning decoding, and round-trip normalization helpers.
+- `tools/verify_osi_export.py` checks live export, schema validation, simple key
+  extraction, relationship column ordering, Exasol extensions, and third-party
+  extension preservation.
+- `tools/verify_osi_import.py` checks dry-run and apply behavior, collision
+  preflight, strict-mode diagnostics, validation after import, simple unique-key
+  import, native Exasol extension mapping, and representative compile execution.
+- `tools/verify_osi_batch_import.py` checks normalized batch apply, returned row
+  shape, metadata patches, and representative compile execution.
+- `tools/verify_osi_roundtrip.py` checks lossless export/import/export
+  equivalence, normalized catalog equivalence, representative compiler SQL and
+  result equivalence, third-party custom-extension preservation, and rollback on
+  injected batch failures.
+
+`tools/run_nano_smoke.sh` runs the live OSI verifiers as part of the local Nano
+smoke suite.
