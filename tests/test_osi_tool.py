@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,12 @@ def test_fixtures_validate() -> None:
     for path in sorted((ROOT / "tests/fixtures/osi").glob("*.yaml")):
         document = load_fixture(path)
         osi.validate_document(document)
+
+
+def test_sales_osi_example_matches_interoperability_fixture() -> None:
+    example = (ROOT / "sql/examples/sales_osi.yaml").read_text(encoding="utf-8")
+    fixture = (ROOT / "tests/fixtures/osi/sales_interoperability.yaml").read_text(encoding="utf-8")
+    assert example == fixture
 
 
 def test_invalid_version_fails() -> None:
@@ -92,6 +100,42 @@ def test_custom_extension_data_must_parse() -> None:
         assert any("data must parse as JSON" in error for error in exc.errors)
     else:
         raise AssertionError("expected invalid extension JSON to fail")
+
+
+def test_json_load_works_when_pyyaml_unavailable() -> None:
+    document = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [{"name": "json_only", "datasets": [{"name": "orders", "source": "MART.ORDERS"}]}],
+    }
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "yaml":
+            raise ImportError("blocked by test")
+        return real_import(name, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as directory:
+        json_path = Path(directory) / "model.json"
+        yaml_path = Path(directory) / "model.yaml"
+        json_path.write_text(json.dumps(document), encoding="utf-8")
+        yaml_path.write_text("version: 0.2.0.dev0\nsemantic_model: []\n", encoding="utf-8")
+        builtins.__import__ = fake_import
+        try:
+            assert osi.load_document(json_path) == document
+            try:
+                osi.load_document(yaml_path)
+            except osi.OsiError as exc:
+                assert "PyYAML is required" in str(exc)
+            else:
+                raise AssertionError("expected YAML load to require PyYAML")
+            try:
+                osi.dump_yaml(document)
+            except osi.OsiError as exc:
+                assert "PyYAML is required" in str(exc)
+            else:
+                raise AssertionError("expected YAML dump to require PyYAML")
+        finally:
+            builtins.__import__ = real_import
 
 
 def test_key_expression_column_extraction() -> None:
@@ -187,6 +231,21 @@ def test_import_plan_json_core_without_yaml_dependency() -> None:
     assert {"OSI_IMPORT_020", "OSI_IMPORT_030"} <= diagnostic_codes(plan)
 
 
+def test_rich_yaml_fixtures_have_json_planning_parity() -> None:
+    if yaml is None:
+        return
+    for fixture_name in [
+        "minimal_model.yaml",
+        "sales_lossless.yaml",
+        "complex_relationship.yaml",
+        "missing_datatype.yaml",
+        "invalid_relationship.yaml",
+    ]:
+        yaml_document = load_fixture(ROOT / f"tests/fixtures/osi/{fixture_name}")
+        json_document = json.loads(json.dumps(yaml_document))
+        assert plan_document(json_document, strict=True) == plan_document(yaml_document, strict=True)
+
+
 def test_import_plan_minimal_fixture() -> None:
     if yaml is None:
         return
@@ -232,6 +291,15 @@ def test_import_plan_complex_relationship_prefers_native_join_condition() -> Non
     assert relationship["metadata"]["requires_native_join_condition"] is True
 
 
+def test_import_plan_invalid_relationship_fixture_fails_stably() -> None:
+    if yaml is None:
+        return
+    plan = plan_document(load_fixture(ROOT / "tests/fixtures/osi/invalid_relationship.yaml"), strict=True)
+    assert plan["status"] == "blocked"
+    errors = {(item["code"], item["path"]) for item in plan["diagnostics"] if item["severity"] == "ERROR"}
+    assert ("OSI_IMPORT_060", "$.semantic_model[0].relationships[0]") in errors
+
+
 def test_import_plan_lossless_preserves_native_metadata() -> None:
     if yaml is None:
         return
@@ -243,6 +311,115 @@ def test_import_plan_lossless_preserves_native_metadata() -> None:
     total_revenue = operation(plan, "add_metric", "total_revenue")
     assert total_revenue["metadata"]["native"]["metric_kind"] == "SIMPLE"
     assert "filter_expr" not in total_revenue["arguments"]
+
+
+def test_import_plan_dialect_fallback_warns_and_strict_blocks() -> None:
+    document = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [
+            {
+                "name": "dialect_model",
+                "datasets": [
+                    {
+                        "name": "orders",
+                        "source": "MART.ORDERS",
+                        "custom_extensions": [
+                            {
+                                "vendor_name": "EXASOL",
+                                "data": json.dumps(
+                                    {
+                                        "entity_name": "orders",
+                                        "source_schema": "MART",
+                                        "source_object": "ORDERS",
+                                        "source_alias": "o",
+                                    }
+                                ),
+                            }
+                        ],
+                        "fields": [
+                            {
+                                "name": "order_status",
+                                "expression": {"dialects": [{"dialect": "SNOWFLAKE", "expression": "o.order_status"}]},
+                                "dimension": {},
+                                "custom_extensions": [
+                                    {
+                                        "vendor_name": "EXASOL",
+                                        "data": json.dumps(
+                                            {
+                                                "field_kind": "DIMENSION",
+                                                "entity_name": "orders",
+                                                "data_type": "VARCHAR(32)",
+                                            }
+                                        ),
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    plan = plan_document(document, strict=False)
+    assert plan["status"] == "ok"
+    assert ("OSI_IMPORT_070", "WARNING") in {(item["code"], item["severity"]) for item in plan["diagnostics"]}
+    assert operation(plan, "add_dimension", "order_status")["arguments"]["expression"] == "o.order_status"
+
+    strict_plan = plan_document(document, strict=True)
+    assert strict_plan["status"] == "blocked"
+    assert ("OSI_IMPORT_070", "ERROR") in {(item["code"], item["severity"]) for item in strict_plan["diagnostics"]}
+
+
+def test_import_plan_native_key_extension_precedes_core_keys() -> None:
+    document = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [
+            {
+                "name": "native_key_model",
+                "datasets": [
+                    {
+                        "name": "orders",
+                        "source": "MART.ORDERS",
+                        "primary_key": ["core_order_id"],
+                        "custom_extensions": [
+                            {
+                                "vendor_name": "EXASOL",
+                                "data": json.dumps(
+                                    {
+                                        "entity_name": "orders",
+                                        "source_schema": "MART",
+                                        "source_object": "ORDERS",
+                                        "source_alias": "o",
+                                        "unique_keys": [
+                                            {
+                                                "key_name": "native_orders_key",
+                                                "key_kind": "PRIMARY",
+                                                "source_format": "OSI",
+                                                "columns": [
+                                                    {
+                                                        "ordinal": 1,
+                                                        "expression": "CAST(o.order_id AS VARCHAR(36))",
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    plan = plan_document(document, strict=True)
+    assert plan["status"] == "ok"
+    key_operations = [item for item in plan["operations"] if item["operation"] == "add_unique_key"]
+    assert [item["arguments"]["key_name"] for item in key_operations] == ["native_orders_key"]
+    key_column = operation(plan, "add_unique_key_column")["arguments"]
+    assert key_column["key_name"] == "native_orders_key"
+    assert key_column.get("column_name") is None
+    assert key_column["expression"] == "CAST(o.order_id AS VARCHAR(36))"
 
 
 def test_invalid_exasol_extension_envelope_blocks_import_plan() -> None:
@@ -377,6 +554,148 @@ def test_import_plan_preserves_raw_semantic_object_extensions() -> None:
             "source_format": "OSI",
             "extension_name": "osi_2",
         },
+    ]
+
+
+def minimal_export_catalog() -> dict[str, Any]:
+    return {
+        "model": {
+            "MODEL_ID": 1,
+            "MODEL_NAME": "warning_model",
+            "DESCRIPTION": "Warning model",
+            "PUBLISHED_SCHEMA": "SEMANTIC_WARNING_MODEL",
+            "OWNER_ROLE": None,
+        },
+        "entities": [
+            {
+                "ENTITY_ID": 10,
+                "ENTITY_NAME": "orders",
+                "SOURCE_SCHEMA": "MART",
+                "SOURCE_OBJECT": "ORDERS",
+                "SOURCE_ALIAS": "o",
+                "PRIMARY_KEY_EXPR": None,
+                "GRAIN_DESCRIPTION": None,
+                "DESCRIPTION": "Orders",
+            },
+            {
+                "ENTITY_ID": 11,
+                "ENTITY_NAME": "customers",
+                "SOURCE_SCHEMA": "MART",
+                "SOURCE_OBJECT": "CUSTOMERS",
+                "SOURCE_ALIAS": "c",
+                "PRIMARY_KEY_EXPR": "c.customer_id",
+                "GRAIN_DESCRIPTION": None,
+                "DESCRIPTION": "Customers",
+            },
+        ],
+        "relationships": [
+            {
+                "RELATIONSHIP_ID": 20,
+                "RELATIONSHIP_NAME": "orders_to_customers_complex",
+                "FROM_ENTITY_NAME": "orders",
+                "TO_ENTITY_NAME": "customers",
+                "JOIN_CONDITION": "o.customer_id = c.customer_id AND o.order_date >= c.valid_from",
+                "RELATIONSHIP_CARDINALITY": "MANY_TO_ONE",
+                "JOIN_TYPE": "LEFT",
+                "FANOUT_POLICY": None,
+                "PATH_PRIORITY": 100,
+                "DESCRIPTION": None,
+            }
+        ],
+        "dimensions": [],
+        "facts": [
+            {
+                "FACT_ID": 30,
+                "FACT_NAME": "private_amount",
+                "ENTITY_NAME": "orders",
+                "EXPRESSION": "o.amount",
+                "DATA_TYPE": "DECIMAL(18,2)",
+                "ADDITIVE_POLICY": "ADDITIVE",
+                "DISPLAY_NAME": None,
+                "FORMAT_HINT": None,
+                "UNIT_HINT": None,
+                "SENSITIVITY_LABEL": None,
+                "DISPLAY_POLICY": None,
+                "IS_PRIVATE": True,
+                "IS_CERTIFIED": False,
+                "DESCRIPTION": None,
+            }
+        ],
+        "metrics": [
+            {
+                "METRIC_ID": 40,
+                "METRIC_NAME": "private_revenue",
+                "BASE_ENTITY_NAME": "orders",
+                "EXPRESSION": "SUM(private_amount)",
+                "DATA_TYPE": "DECIMAL(18,2)",
+                "METRIC_TYPE": "ADDITIVE",
+                "METRIC_KIND": "SIMPLE",
+                "AGGREGATION_FUNCTION": "SUM",
+                "MEASURE_EXPR": "private_amount",
+                "SEMANTIC_FILTER_EXPR": None,
+                "SQL_FILTER_EXPR": None,
+                "DISTINCT_KEY_EXPR": None,
+                "NON_ADDITIVE_DIMENSION_NAME": None,
+                "WINDOW_SPEC_JSON": None,
+                "TYPE_PARAMS_JSON": None,
+                "FORMAT_HINT": None,
+                "UNIT_HINT": None,
+                "DISPLAY_NAME": None,
+                "SENSITIVITY_LABEL": None,
+                "DISPLAY_POLICY": None,
+                "OWNER_ROLE": None,
+                "IS_PRIVATE": True,
+                "IS_CERTIFIED": False,
+                "DESCRIPTION": None,
+            }
+        ],
+        "custom_extensions": [],
+        "synonyms": [],
+        "instructions": [],
+        "object_columns": [],
+        "unique_keys": [
+            {
+                "UNIQUE_KEY_ID": 50,
+                "ENTITY_NAME": "orders",
+                "KEY_NAME": "orders_expr_key",
+                "KEY_KIND": "PRIMARY",
+                "DESCRIPTION": None,
+                "SOURCE_FORMAT": "OSI",
+            }
+        ],
+        "unique_key_columns": [
+            {
+                "UNIQUE_KEY_ID": 50,
+                "ORDINAL_POSITION": 1,
+                "COLUMN_NAME": None,
+                "EXPRESSION": "CAST(o.order_id AS VARCHAR(36))",
+            }
+        ],
+        "semantic_objects": [],
+        "verified_queries": [],
+    }
+
+
+def test_export_warning_generation_for_lossy_interoperability_cases() -> None:
+    document, warnings = osi.build_document(
+        minimal_export_catalog(),
+        osi.ExportOptions(model_name="warning_model", object_name=None, profile="interoperability"),
+    )
+    assert {item["code"] for item in warnings} == {
+        "OSI_EXPORT_020",
+        "OSI_EXPORT_021",
+        "OSI_EXPORT_030",
+        "OSI_EXPORT_040",
+    }
+    model = document["semantic_model"][0]
+    assert "relationships" not in model
+    assert "metrics" not in model
+    assert all("fields" not in dataset for dataset in model["datasets"])
+    orders = next(dataset for dataset in model["datasets"] if dataset["name"] == "orders")
+    assert "primary_key" not in orders
+    orders_extension = json.loads(orders["custom_extensions"][0]["data"])
+    assert orders_extension["unique_keys"][0]["columns"] == [
+        {"ordinal": 1, "expression": "CAST(o.order_id AS VARCHAR(36))"}
     ]
 
 
@@ -659,19 +978,26 @@ def test_diff_json_values_reports_stable_paths() -> None:
 
 def main() -> int:
     test_fixtures_validate()
+    test_sales_osi_example_matches_interoperability_fixture()
     test_invalid_version_fails()
     test_custom_extension_data_must_parse()
+    test_json_load_works_when_pyyaml_unavailable()
     test_key_expression_column_extraction()
     test_relationship_parser()
     test_import_plan_json_core_without_yaml_dependency()
+    test_rich_yaml_fixtures_have_json_planning_parity()
     test_import_plan_minimal_fixture()
     test_import_plan_warnings_as_errors_blocks()
     test_import_plan_missing_datatype_strict_blocks()
     test_import_plan_complex_relationship_prefers_native_join_condition()
+    test_import_plan_invalid_relationship_fixture_fails_stably()
     test_import_plan_lossless_preserves_native_metadata()
+    test_import_plan_dialect_fallback_warns_and_strict_blocks()
+    test_import_plan_native_key_extension_precedes_core_keys()
     test_invalid_exasol_extension_envelope_blocks_import_plan()
     test_import_plan_assigns_distinct_names_to_repeated_non_exasol_extensions()
     test_import_plan_preserves_raw_semantic_object_extensions()
+    test_export_warning_generation_for_lossy_interoperability_cases()
     test_operation_sql_renders_missing_optional_arguments_as_null()
     test_execute_rows_or_empty_accepts_no_result_script_calls()
     test_apply_refuses_blocked_plan_without_database_connection()

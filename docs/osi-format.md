@@ -244,10 +244,10 @@ properties. Future converter code must validate against
 converter and catalog extension storage should preserve this raw string while
 also validating that it parses as JSON.
 
-The sales example and sales interoperability fixture are currently duplicated
-by hand. Once export tooling exists, generate `sql/examples/sales_osi.yaml`
-from the exporter or add a drift check against
-`tests/fixtures/osi/sales_interoperability.yaml`.
+The sales example and sales interoperability fixture currently mirror each
+other. `tests/test_osi_tool.py` fails if `sql/examples/sales_osi.yaml` diverges
+from `tests/fixtures/osi/sales_interoperability.yaml`; a future generated-export
+drift check can strengthen that by regenerating both from the exporter.
 
 The first import planner should produce diagnostics in a deterministic order:
 schema validation, extension JSON validation, source and alias resolution,

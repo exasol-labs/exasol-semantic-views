@@ -1,0 +1,23 @@
+version: "0.2.0.dev0"
+semantic_model:
+  - name: invalid_relationship_model
+    datasets:
+      - name: orders
+        source: MART.ORDERS
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"entity_name":"orders","source_schema":"MART","source_object":"ORDERS","source_alias":"o","primary_key_expr":"o.order_id"}'
+      - name: customers
+        source: MART.CUSTOMERS
+        custom_extensions:
+          - vendor_name: EXASOL
+            data: '{"entity_name":"customers","source_schema":"MART","source_object":"CUSTOMERS","source_alias":"c","primary_key_expr":"c.customer_id"}'
+    relationships:
+      - name: orders_to_customers_invalid
+        from: orders
+        to: customers
+        from_columns:
+          - customer_id
+          - order_id
+        to_columns:
+          - customer_id
