@@ -382,3 +382,7 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
   - [Agent contract](docs/agent-contract.md)
   - [Analyst skill](skills/exasol-semantic-analyst/SKILL.md) — answering business questions
   - [Modeler skill](skills/exasol-semantic-modeler/SKILL.md) — creating and maintaining models
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
