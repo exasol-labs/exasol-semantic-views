@@ -93,7 +93,7 @@ Key functions to know when modifying the compiler:
 
 `validator.lua` (~1250 lines) runs `VALIDATE_MODEL`. It writes to `SYS_SEMANTIC.VALIDATION_RUNS`, `SYS_SEMANTIC.VALIDATION_RESULTS`, `SYS_SEMANTIC.METRIC_DEPENDENCIES`, and `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX`. The compiler reads `METRIC_DIMENSION_MATRIX` as its compatibility gate.
 
-**Critical invariant:** `validator.lua:find_path` and `compiler:find_path` must use identical join-path logic. If they diverge, `VALID_COMBINATIONS_FOR_AGENT` will report IS_VALID=True for combinations that the compiler rejects at runtime (BUG-003 in `reports/bug-log.md`).
+**Critical invariant:** `validator.lua:find_path` and `compiler:find_path` must use identical join-path logic. If they diverge, `VALID_COMBINATIONS_FOR_AGENT` will report IS_VALID=True for combinations that the compiler rejects at runtime (BUG-003 in `docs/known-issues.md`).
 
 ### All SEMANTIC_ADMIN Scripts Are TABLE Scripts
 
@@ -105,20 +105,23 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales');
 ```
 
-### COMPILE_REQUEST_JSON vs COMPILE_SQL Column Layout
+### COMPILE_REQUEST_JSON and COMPILE_SQL Column Layout
 
-These two scripts return **different** column sets:
-- `COMPILE_SQL`: `STATUS, ERROR_CODE, ERROR_MESSAGE, ORIGINAL_SQL, GENERATED_SQL, PLAN_JSON, CLARIFICATION_JSON, VALIDATION_RUN_ID, AGENT_REQUEST_ID` (9 cols)
-- `COMPILE_REQUEST_JSON`: same but **without** `ORIGINAL_SQL` (8 cols — GENERATED_SQL is at index 3, not 4)
+Both scripts return the **identical 9-column** result set:
 
-Python helper pattern to avoid positional indexing bugs:
+`STATUS, ERROR_CODE, ERROR_MESSAGE, ORIGINAL_SQL, GENERATED_SQL, PLAN_JSON, CLARIFICATION_JSON, VALIDATION_RUN_ID, AGENT_REQUEST_ID`
+
+`GENERATED_SQL` is at **index 4** for both. For `COMPILE_REQUEST_JSON` there is no original SQL string, so `ORIGINAL_SQL` (index 3) is always `NULL` — but the column is still present, so positional indices line up with `COMPILE_SQL`.
+
+Python helper pattern to avoid positional indexing bugs (matches `tools/semantic_client.py`):
 ```python
 def sql_string(value): return "'" + value.replace("'", "''") + "'"
 
 rows = conn.execute(f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({sql_string(json.dumps(req))})").fetchall()
 row = rows[0]
 result = {"status": row[0], "error_code": row[1], "error_message": row[2],
-          "generated_sql": row[3], "plan_json": row[4], "agent_request_id": row[7]}
+          "original_sql": row[3], "generated_sql": row[4], "plan_json": row[5],
+          "clarification_json": row[6], "validation_run_id": row[7], "agent_request_id": row[8]}
 ```
 `EXECUTE SCRIPT` does not support pyexasol bind parameters (`?` or `{name}`) — escape manually with `sql_string()`.
 
@@ -154,19 +157,15 @@ The preferred authoring surface is SQL-native Semantic DDL via `APPLY_SEMANTIC_D
 
 ## Known Issues
 
-Active bugs are tracked in `reports/bug-log.md`. The most important ones affecting development:
-
-- **BUG-002**: `order_quarter` dimension in the demo uses `QUARTER()` which doesn't exist in Exasol — compiles OK, fails at execution.
-- **BUG-003**: `VALID_COMBINATIONS_FOR_AGENT` reports IS_VALID=True for some metric/dimension combinations that `COMPILE_REQUEST_JSON` rejects with SEMANTIC_REQUEST_042.
-- **BUG-001**: Concurrent `COMPILE_REQUEST_JSON` calls cause transaction collisions (SEMANTIC_REQUEST_999).
+Known issues and their current status are tracked in the checked-in `docs/known-issues.md`. As of the last verification against Exasol 2026.1.0, the historical BUG-001/002/003 do **not** reproduce on a clean install — see that doc for details before assuming any of them is still live.
 
 ## Plans and Docs
 
-- `plans/next-steps-proposal.md` — current roadmap and prioritized work items
-- `plans/semantic_layer_design_rationale.md` — full architectural rationale and competitive context
 - `docs/creating-metrics.md` — how to define metrics; mental model for entity → fact → metric
 - `docs/agent-contract.md` — the agent discovery and compilation contract
 - `docs/validation-rules.md` — all SEMANTIC_MODEL_* rule codes
 - `docs/semantic-compiler.md` — compiler entrypoints and supported features
 - `docs/semantic-sql-preprocessor.md` — preprocessor activation and supported SQL subset
-- `reports/` — simulated user study reports and bug log from rounds 2 and 3
+- `docs/known-issues.md` — known issues with verified status per Exasol version
+
+> Note: `plans/` and `reports/` are git-ignored working directories (see `.gitignore`). They hold local-only scratch artifacts and are not part of a fresh checkout — do not rely on them in checked-in references.

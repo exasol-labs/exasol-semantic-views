@@ -24,6 +24,7 @@ build/
 
 # Claude Code session data (personal, not project-wide)
 .claude/
+.serena/
 
 # Working files
 plans/

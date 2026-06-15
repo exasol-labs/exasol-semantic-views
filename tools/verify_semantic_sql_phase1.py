@@ -686,7 +686,9 @@ def test_regression_compile_request_json_between(con) -> None:
         fail("regression/compile_request_json_between", f"expected OK, got {row[0]} {row[1]}: {row[2]}")
     else:
         ok("regression/compile_request_json_between", "OK")
-        assert_contains("regression/compile_request_json_between/sql", row[3], "BETWEEN")
+        # COMPILE_REQUEST_JSON returns the same 9-column layout as COMPILE_SQL:
+        # GENERATED_SQL is at index 4 (index 3 is ORIGINAL_SQL, NULL for JSON requests).
+        assert_contains("regression/compile_request_json_between/sql", row[4], "BETWEEN")
 
 
 # ---------------------------------------------------------------------------
