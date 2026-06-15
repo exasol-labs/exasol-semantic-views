@@ -75,9 +75,19 @@ predicates compile case-insensitively. The right side may be a literal or a SQL
 expression, which allows date expressions such as
 `ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -1)`.
 
-Selected dimensions must be covered by `GROUP BY`. `ORDER BY` is limited to
-selected semantic output fields or their output aliases. `SELECT *` expands to
-the visible semantic dimensions and metrics for the published object.
+`GROUP BY` is optional. When omitted, it is inferred from the selected
+dimensions, so this compiles and runs just like the explicit form above:
+
+```sql
+SELECT customer_region, total_revenue
+FROM SEMANTIC_SALES.SALES;          -- GROUP BY customer_region is inferred
+```
+
+If a `GROUP BY` *is* supplied, it must exactly cover the selected dimensions
+(no missing or extra fields), otherwise compilation fails with
+`SEMANTIC_QUERY_008`. `ORDER BY` is limited to selected semantic output fields
+or their output aliases. `SELECT *` expands to the visible semantic dimensions
+and metrics for the published object.
 
 Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.
