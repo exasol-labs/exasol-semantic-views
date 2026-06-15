@@ -234,11 +234,12 @@ def main() -> int:
             "MCP_GUIDANCE",
         )
 
-        assert_fails_with(
-            con,
-            "unsupported semantic SQL",
-            "SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES",
-            "SEMANTIC_QUERY_007",
+        # GROUP BY is optional and inferred from the selected dimensions; a
+        # dimension+metric query without GROUP BY now compiles and runs.
+        assert_equal(
+            "group by inferred from dimensions",
+            len(fetchall(con, "SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES")),
+            3,
         )
     finally:
         try:

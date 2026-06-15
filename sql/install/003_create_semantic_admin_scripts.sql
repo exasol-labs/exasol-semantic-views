@@ -7512,36 +7512,39 @@ local function parse_semantic_sql(sql_text, options)
     end
 
     if #request.dimensions > 0 and not wildcard_select then
-        if clauses.GROUP_BY == nil then
-            return nil, error_result("SEMANTIC_QUERY_007", "Semantic SQL with dimensions must GROUP BY the selected dimensions.")
-        end
-        local grouped = {}
-        for _, part in ipairs(split_top_level(tokens, clauses.GROUP_BY + 2, clause_end(tokens, clauses, "GROUP_BY"), ",")) do
-            local field_name = identifier_from_part(part)
-            if field_name == nil and #part == 1 and part[1].kind == "number" then
-                local ordinal = tonumber(part[1].text)
-                field_name = selected_output[ordinal]
+        -- GROUP BY is optional: when omitted, it is inferred from the selected
+        -- dimensions (build_sql emits GROUP BY from request.dimensions regardless
+        -- of the typed clause). When a GROUP BY *is* supplied, it must exactly
+        -- cover the selected dimensions — no more, no less.
+        if clauses.GROUP_BY ~= nil then
+            local grouped = {}
+            for _, part in ipairs(split_top_level(tokens, clauses.GROUP_BY + 2, clause_end(tokens, clauses, "GROUP_BY"), ",")) do
+                local field_name = identifier_from_part(part)
+                if field_name == nil and #part == 1 and part[1].kind == "number" then
+                    local ordinal = tonumber(part[1].text)
+                    field_name = selected_output[ordinal]
+                end
+                if field_name == nil then
+                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected dimensions by name or ordinal.")
+                end
+                local field, bind_err = resolve_field(ctx, field_name, "DIMENSION")
+                if bind_err ~= nil then
+                    return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+                end
+                grouped[upper(field.name)] = true
             end
-            if field_name == nil then
-                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected dimensions by name or ordinal.")
+            for _, dimension_name in ipairs(request.dimensions) do
+                if not grouped[upper(dimension_name)] then
+                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must cover selected dimension " .. tostring(dimension_name) .. ".")
+                end
             end
-            local field, bind_err = resolve_field(ctx, field_name, "DIMENSION")
-            if bind_err ~= nil then
-                return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+            local group_count = 0
+            for _, _ in pairs(grouped) do
+                group_count = group_count + 1
             end
-            grouped[upper(field.name)] = true
-        end
-        for _, dimension_name in ipairs(request.dimensions) do
-            if not grouped[upper(dimension_name)] then
-                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must cover selected dimension " .. tostring(dimension_name) .. ".")
+            if group_count ~= #request.dimensions then
+                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must not contain dimensions outside the SELECT list.")
             end
-        end
-        local group_count = 0
-        for _, _ in pairs(grouped) do
-            group_count = group_count + 1
-        end
-        if group_count ~= #request.dimensions then
-            return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must not contain dimensions outside the SELECT list.")
         end
     elseif #request.dimensions == 0 and clauses.GROUP_BY ~= nil then
         return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY is only supported for selected dimensions.")
