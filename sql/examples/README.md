@@ -4,6 +4,7 @@ Example files:
 
 - `sales_physical_model.sql`
 - `sales_model_seed.sql`
+- `sales_databricks_metric_view.yaml`
 - `sales_semantic_queries.sql`
 - `sales_osi.yaml`
 
@@ -17,3 +18,11 @@ python3 tools/osi.py export --model sales --object SALES --profile interoperabil
 ```
 
 It is an import/export example, not an install script.
+
+`sales_databricks_metric_view.yaml` is a Databricks Unity Catalog Metric View
+example over the same MART tables. Import it with:
+
+```sh
+python3 tools/import_databricks.py sql/examples/sales_databricks_metric_view.yaml \
+  --model sales_dbx --schema SEMANTIC_SALES_DBX --apply
+```

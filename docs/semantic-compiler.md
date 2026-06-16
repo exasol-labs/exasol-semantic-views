@@ -109,10 +109,14 @@ The selected materialization and rejected-candidate diagnostics are recorded in
 
 `COMPILE_SQL` parses a deliberately small semantic SQL subset and translates it
 into the same request shape before invoking the shared compiler core. Its errors
-use the `SEMANTIC_QUERY_*` namespace. It supports semantic `SELECT *` expansion
-and SQL expressions on the right side of dimension predicates, such as
-`order_month = ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -1)`. `ORDER BY` can refer
-to selected semantic fields or their output aliases.
+use the `SEMANTIC_QUERY_*` namespace. It supports semantic `SELECT *`
+expansion; optional `GROUP BY` inference from selected dimensions; `GROUP BY ALL`;
+`HAVING` metric predicates; metric predicates in `WHERE` auto-routed to `HAVING`;
+`BETWEEN`; and SQL expressions on the right side of dimension predicates, such
+as `order_month = ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -1)`. `ORDER BY` can
+refer to selected semantic fields, output aliases, or ordinals. For Databricks
+compatibility, `MEASURE(metric)` and `agg(metric)` wrappers are accepted in
+`SELECT`, `HAVING`, and `ORDER BY`.
 
 `COMPILE_SQL_DEBUG` has the same compile behavior as `COMPILE_SQL`, but records
 the original SQL, generated SQL, plan JSON, requested dimensions, requested

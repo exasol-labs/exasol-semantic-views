@@ -21,6 +21,7 @@ Runnable example files:
 
 - `sql/examples/sales_physical_model.sql`
 - `sql/examples/sales_model_seed.sql`
+- `sql/examples/sales_databricks_metric_view.yaml`
 - `sql/examples/sales_osi.yaml`
 - `sql/examples/sales_semantic_queries.sql`
 
@@ -38,6 +39,26 @@ ORDER BY total_revenue DESC;
 
 Agents should compile the same request through
 `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON` instead of writing physical joins.
+
+## Databricks UCMV Example
+
+`sql/examples/sales_databricks_metric_view.yaml` is a Databricks Unity Catalog
+Metric View definition over the same demo MART tables. It can be imported into
+the native catalog and queried with Databricks-style semantic SQL:
+
+```sh
+python3 tools/import_databricks.py sql/examples/sales_databricks_metric_view.yaml \
+  --model sales_dbx --schema SEMANTIC_SALES_DBX --apply
+```
+
+The import path is verified by:
+
+```sh
+python3 tools/verify_databricks_import.py
+```
+
+See [Databricks metric views](databricks-metric-views.md) for the supported
+UCMV subset, diagnostics, and query compatibility surface.
 
 ## OSI Import And Export
 

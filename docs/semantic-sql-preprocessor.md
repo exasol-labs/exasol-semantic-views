@@ -69,11 +69,22 @@ ORDER BY total_revenue DESC
 LIMIT 10;
 ```
 
-Supported predicates are dimension predicates with `=`, `!=`, `<>`, `<`, `<=`,
-`>`, `>=`, `LIKE`, and `IN`. Text equality, inequality, `LIKE`, and `IN`
-predicates compile case-insensitively. The right side may be a literal or a SQL
-expression, which allows date expressions such as
-`ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -1)`.
+`SELECT` accepts semantic field names, `SELECT *`, and the Databricks-style
+metric wrappers `MEASURE(metric)` and `agg(metric)`. `MEASURE()` / `agg()` may
+only wrap metrics; wrapping a dimension returns `SEMANTIC_QUERY_006`.
+
+Supported `WHERE` predicates are dimension predicates with `=`, `!=`, `<>`,
+`<`, `<=`, `>`, `>=`, `LIKE`, `IN`, and `BETWEEN`. Text equality,
+inequality, `LIKE`, and `IN` predicates compile case-insensitively. Single-value
+comparison predicates may use a literal or a SQL expression on the right side,
+which allows date expressions such as
+`ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -1)`. `IN` requires a literal list, and
+`BETWEEN` requires literal lower and upper values.
+
+Metric predicates belong in `HAVING` and support the same predicate operators.
+For compatibility with SQL users, a metric predicate written in `WHERE` is
+routed to `HAVING` during parsing, while dimension predicates remain in
+`WHERE`.
 
 `GROUP BY` is optional. When omitted, it is inferred from the selected
 dimensions, so this compiles and runs just like the explicit form above:
@@ -83,11 +94,15 @@ SELECT customer_region, total_revenue
 FROM SEMANTIC_SALES.SALES;          -- GROUP BY customer_region is inferred
 ```
 
-If a `GROUP BY` *is* supplied, it must exactly cover the selected dimensions
-(no missing or extra fields), otherwise compilation fails with
-`SEMANTIC_QUERY_008`. `ORDER BY` is limited to selected semantic output fields
-or their output aliases. `SELECT *` expands to the visible semantic dimensions
-and metrics for the published object.
+If a `GROUP BY` *is* supplied, it must be `GROUP BY ALL` or exactly cover the
+selected dimensions (no missing or extra fields), otherwise compilation fails
+with `SEMANTIC_QUERY_008`. Explicit `GROUP BY` lists may use selected
+dimension names or ordinals.
+
+`ORDER BY` is limited to selected semantic output fields, output aliases, or
+ordinals. Databricks-style `ORDER BY MEASURE(metric)` is accepted for selected
+metrics. `SELECT *` expands to the visible semantic dimensions and metrics for
+the published object.
 
 Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.

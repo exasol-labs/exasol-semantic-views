@@ -53,11 +53,11 @@ as **entities + relationships**:
 
 | Databricks UCMV | This project | Notes |
 |---|---|---|
-| `source: cat.schema.table` | root `ENTITY` (`CREATE_MODEL` + `ADD_ENTITY` + `ADD_SEMANTIC_OBJECT`) | 3-part name → `SOURCE_SCHEMA.SOURCE_OBJECT` (catalog dropped); a short alias is derived |
+| `source: cat.schema.table` | root `ENTITY` (`CREATE_MODEL` + `ADD_ENTITY` + `ADD_SEMANTIC_OBJECT`) | table/view refs use the last path segment as `SOURCE_OBJECT` and the previous segment as `SOURCE_SCHEMA`; earlier catalog/path segments are dropped |
 | `source: SELECT ...` | unsupported (`DBX_IMPORT_210`) | wrap the query in a view and import that view |
 | `joins[]` (`name`, `source`, `on`, `cardinality`) | one `ENTITY` per joined table + one `RELATIONSHIP` | `many_to_one`→`MANY_TO_ONE`, `one_to_many`→`ONE_TO_MANY`; `source.x = join.y` rewritten to alias form |
 | nested `joins` (snowflake) | chained relationships | each level becomes its own entity + relationship |
-| `fields[]` | `DIMENSION` | `joinname.col` / bare columns rewritten to entity source aliases; bound to the referenced entity |
+| `fields[]` | `DIMENSION` | bare columns default to the root entity; `source.col`, `join.col`, and nested paths such as `customer.nation.n_name` resolve to entity source aliases and bind to the referenced entity |
 | `measures[]` `SUM/AVG/MIN/MAX(expr)` | private `FACT` (inner expr) + `METRIC AGG(fact)` (`ADDITIVE`) | |
 | `measures[]` `COUNT(1)` / `COUNT(*)` | `FACT ... AS 1` + `METRIC COUNT(fact)` | row count |
 | `measures[]` `COUNT(DISTINCT col)` | `FACT col` + `METRIC COUNT(DISTINCT fact)` | |
@@ -66,13 +66,20 @@ as **entities + relationships**:
 | `measures[]` arithmetic of `MEASURE()` refs | `METRIC ...` (`DERIVED`) | |
 | `comment` / `display_name` / `synonyms` / `format` | `COMMENT` / `DISPLAY` / `SYNONYMS` / `FORMAT` | `format.type` currency/percent/number → format hint |
 
+For snowflake-style nested joins, the importer registers both absolute paths
+such as `source.customer.nation` and relative paths such as
+`customer.nation`. Expression rewriting uses the longest matching path, so a
+field like `customer.nation.n_name` binds to the `nation` entity and rewrites
+to that entity's generated source alias, for example `n.n_name`. Unresolved
+qualified references are emitted verbatim with a `DBX_IMPORT_310` warning.
+
 ### Supported, partial, and unsupported
 
-**Supported:** table/SQL-view `source`; star and snowflake `joins`
-(`many_to_one` and `one_to_many`); `fields`; `SUM`/`AVG`/`MIN`/`MAX`/`COUNT`/
-`COUNT(DISTINCT)` measures; `FILTER (WHERE ...)` measures; ratio and derived
-measures composed from `MEASURE()`; `comment`, `display_name`, `synonyms`,
-`format`.
+**Supported:** plain table or SQL-view `source`; star and snowflake `joins`
+(`many_to_one` and `one_to_many`); bare, joined, and nested-path `fields`;
+`SUM`/`AVG`/`MIN`/`MAX`/`COUNT`/`COUNT(DISTINCT)` measures; `FILTER (WHERE
+...)` measures; ratio and derived measures composed from `MEASURE()`;
+`comment`, `display_name`, `synonyms`, `format`.
 
 **Partial / dropped (with a diagnostic):**
 - `window:` measures — skipped (`DBX_IMPORT_410`).

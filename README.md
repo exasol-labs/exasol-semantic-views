@@ -322,7 +322,7 @@ schemas, installs the extension, creates the sales example with SQL-native
 metric definitions, validates the model, publishes `SEMANTIC_SALES.SALES`,
 verifies semantic SQL execution, checks the agent context and feedback surface,
 tests materialization selection, and verifies Semantic SQL authoring,
-introspection, and export.
+introspection, export, and Databricks UCMV compatibility.
 
 If your default Python does not have `pyexasol`, point `PYTHON_BIN` at a
 virtualenv Python that does:
@@ -371,6 +371,7 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
 - Usage
   - [Creating metrics](docs/creating-metrics.md)
   - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
+  - [Databricks metric views](docs/databricks-metric-views.md)
   - [OSI import/export](docs/osi-format.md)
   - [Examples](docs/examples.md)
 - Design
