@@ -1,0 +1,73 @@
+# Databricks Unity Catalog Metric View (UCMV) written over this project's demo
+# MART tables, so it validates, compiles, and queries against real demo data.
+# Imported with:
+#   EXECUTE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW(<yaml>, 'sales_dbx', 'SEMANTIC_SALES_DBX', TRUE);
+version: 1.1
+comment: |-
+  Sales metric view imported from Databricks UCMV format.
+  Order-line grain joined to orders, customers, and products.
+source: mart.order_lines
+
+joins:
+  - name: orders
+    source: mart.orders
+    on: source.order_id = orders.order_id
+    cardinality: many_to_one
+    joins:
+      - name: customers
+        source: mart.customers
+        on: orders.customer_id = customers.customer_id
+        cardinality: many_to_one
+  - name: products
+    source: mart.products
+    on: source.product_id = products.product_id
+    cardinality: many_to_one
+
+fields:
+  - name: customer_region
+    expr: customers.region
+    display_name: Customer Region
+    comment: Commercial region assigned to the customer
+    synonyms: [region, territory]
+  - name: order_month
+    expr: DATE_TRUNC('MONTH', orders.order_date)
+    display_name: Order Month
+  - name: order_status
+    expr: orders.order_status
+    display_name: Order Status
+  - name: product_category
+    expr: products.category
+    display_name: Product Category
+
+measures:
+  - name: total_revenue
+    expr: SUM(net_unit_price * quantity)
+    display_name: Total Revenue
+    comment: Net recognized revenue excluding tax
+    synonyms: [revenue, sales]
+    format:
+      type: currency
+      currency_code: USD
+  - name: total_cost
+    expr: SUM(unit_cost * quantity)
+    display_name: Total Cost
+    format:
+      type: currency
+  - name: order_count
+    expr: COUNT(DISTINCT order_id)
+    display_name: Order Count
+    format:
+      type: number
+  - name: line_count
+    expr: COUNT(1)
+    display_name: Line Count
+  - name: completed_revenue
+    expr: SUM(net_unit_price * quantity) FILTER (WHERE orders.order_status = 'COMPLETE')
+    display_name: Completed Revenue
+    format:
+      type: currency
+  - name: avg_order_value
+    expr: MEASURE(total_revenue) / MEASURE(order_count)
+    display_name: Avg Order Value
+    format:
+      type: currency

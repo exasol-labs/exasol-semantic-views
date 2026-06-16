@@ -63,3 +63,11 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # OSI lossless round-trip (Milestone 6): export/import/export through batch
 # apply, compare normalized OSI and catalog snapshots, and verify rollback.
 "$PYTHON_BIN" tools/verify_osi_roundtrip.py
+
+# Databricks UCMV SQL-surface compatibility: MEASURE()/agg() wrappers,
+# GROUP BY ALL, and MEASURE() in HAVING/ORDER BY against a published object.
+"$PYTHON_BIN" tools/verify_databricks_sql_compat.py
+
+# Databricks UCMV import: translate a metric-view YAML over the demo MART
+# tables into native semantic DDL, apply it, and query the imported model.
+"$PYTHON_BIN" tools/verify_databricks_import.py

@@ -153,7 +153,10 @@ The preferred authoring surface is SQL-native Semantic DDL via `APPLY_SEMANTIC_D
 | `sql/examples/sales_model_seed.sql` | Reference model definition (canonical example) |
 | `tools/package_lua_scripts.py` | Regenerates install SQL from Lua source |
 | `tools/install.py` | Full installer: package → connect → reset? → run SQL files |
+| `tools/import_databricks.py` | Host helper: reads a Databricks UCMV YAML file and calls the in-DB importer |
 | `tools/run_nano_smoke.sh` | Full smoke suite |
+
+The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) and its YAML parser/translator live in `semantic_definition.lua`; the MEASURE()/`GROUP BY ALL` query surface lives in `request_json.lua`. See `docs/databricks-metric-views.md`.
 
 ## Known Issues
 
@@ -167,5 +170,6 @@ Known issues and their current status are tracked in the checked-in `docs/known-
 - `docs/semantic-compiler.md` — compiler entrypoints and supported features
 - `docs/semantic-sql-preprocessor.md` — preprocessor activation and supported SQL subset
 - `docs/known-issues.md` — known issues with verified status per Exasol version
+- `docs/databricks-metric-views.md` — Databricks UCMV import + MEASURE()/GROUP BY ALL SQL compatibility
 
 > Note: `plans/` and `reports/` are git-ignored working directories (see `.gitignore`). They hold local-only scratch artifacts and are not part of a fresh checkout — do not rely on them in checked-in references.

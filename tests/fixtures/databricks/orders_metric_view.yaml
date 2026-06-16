@@ -1,0 +1,49 @@
+# Databricks UCMV parser fixture (TPC-H style, mirrors the official docs example).
+# Used for parser/translation coverage only; the source tables do not exist on
+# Nano, so this is not applied — see tools/verify_databricks_import.py for the
+# end-to-end (applied) test over the demo MART tables.
+version: 1.1
+comment: Orders KPIs for sales analysis
+source: samples.tpch.orders
+filter: o_orderdate > '1990-01-01'
+
+joins:
+  - name: customer
+    source: samples.tpch.customer
+    on: source.o_custkey = customer.c_custkey
+    cardinality: many_to_one
+    joins:
+      - name: nation
+        source: samples.tpch.nation
+        on: customer.c_nationkey = nation.n_nationkey
+
+fields:
+  - name: order_month
+    expr: DATE_TRUNC('MONTH', o_orderdate)
+    display_name: Order Month
+  - name: order_status
+    expr: |-
+      CASE WHEN o_orderstatus = 'O' THEN 'Open'
+           WHEN o_orderstatus = 'P' THEN 'Processing'
+           WHEN o_orderstatus = 'F' THEN 'Fulfilled'
+           END
+    display_name: Order Status
+    synonyms: [status, fulfillment_status]
+  - name: customer_nation
+    expr: customer.nation.n_name
+    display_name: Country
+
+measures:
+  - name: order_count
+    expr: COUNT(DISTINCT o_orderkey)
+    display_name: Order Count
+  - name: total_revenue
+    expr: SUM(o_totalprice)
+    display_name: Total Revenue
+    synonyms: [revenue, sales]
+  - name: open_order_revenue
+    expr: SUM(o_totalprice) FILTER (WHERE o_orderstatus = 'O')
+    display_name: Open Order Revenue
+  - name: avg_order_value
+    expr: MEASURE(total_revenue) / MEASURE(order_count)
+    display_name: Avg Order Value
