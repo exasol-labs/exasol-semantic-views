@@ -1153,7 +1153,7 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
     if query_mode == "STRUCTURED_REQUEST" then
         lines[#lines + 1] = "Use COMPILE_REQUEST_JSON with metrics, dimensions, filters, order_by, and limit. Do not write joins or aggregate formulas."
     else
-        lines[#lines + 1] = "Use semantic SQL against " .. row_value(object, "PUBLISHED_SCHEMA", 3) .. "." .. row_value(object, "PUBLISHED_OBJECT_NAME", 4) .. " with selected dimensions in GROUP BY."
+        lines[#lines + 1] = "Use semantic SQL against " .. row_value(object, "PUBLISHED_SCHEMA", 3) .. "." .. row_value(object, "PUBLISHED_OBJECT_NAME", 4) .. "; GROUP BY is optional and inferred from selected dimensions."
         lines[#lines + 1] = "Enable " .. row_value(object, "PREPROCESSOR_QUALIFIED_NAME", 5) .. " for BI-style execution or call COMPILE_SQL explicitly."
     end
     lines[#lines + 1] = "Fields:"
