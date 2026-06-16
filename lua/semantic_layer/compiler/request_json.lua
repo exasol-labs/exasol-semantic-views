@@ -1967,7 +1967,48 @@ local function split_top_level(tokens, start_index, end_index, separator)
     return parts
 end
 
+-- Databricks metric views wrap measures in MEASURE(...) (or its agg() synonym)
+-- in SELECT / HAVING / ORDER BY. Unwrap that call to the bare semantic field name
+-- so the rest of the parser treats it like any other metric reference. Returns the
+-- (possibly rewritten) token list and whether a wrapper was actually removed.
+local function unwrap_measure_part(part)
+    if part == nil or #part < 4 then
+        return part, false
+    end
+    local head = token_upper(part[1])
+    if (head ~= "MEASURE" and head ~= "AGG") or part[2].text ~= "(" then
+        return part, false
+    end
+    local depth = 0
+    local close_index = nil
+    for i = 2, #part do
+        local text = part[i].text
+        if text == "(" then
+            depth = depth + 1
+        elseif text == ")" then
+            depth = depth - 1
+            if depth == 0 then
+                close_index = i
+                break
+            end
+        end
+    end
+    -- Require a non-empty argument and a matching close paren.
+    if close_index == nil or close_index <= 3 then
+        return part, false
+    end
+    local rewritten = {}
+    for i = 3, close_index - 1 do
+        rewritten[#rewritten + 1] = part[i]
+    end
+    for i = close_index + 1, #part do
+        rewritten[#rewritten + 1] = part[i]
+    end
+    return rewritten, true
+end
+
 local function identifier_from_part(part)
+    part = unwrap_measure_part(part)
     if #part == 0 then
         return nil
     end
@@ -2396,13 +2437,17 @@ local function parse_semantic_sql(sql_text, options)
         end
     end
     for _, part in ipairs(wildcard_select and {} or select_parts) do
+        local _, measure_wrapped = unwrap_measure_part(part)
         local field_name = identifier_from_part(part)
         if field_name == nil then
-            return nil, error_result("SEMANTIC_QUERY_005", "SELECT supports semantic field names or *.")
+            return nil, error_result("SEMANTIC_QUERY_005", "SELECT supports semantic field names, MEASURE(metric), or *.")
         end
         local field, bind_err = resolve_field(ctx, field_name, nil)
         if bind_err ~= nil then
             return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+        end
+        if measure_wrapped and field.kind ~= "METRIC" then
+            return nil, error_result("SEMANTIC_QUERY_006", "MEASURE()/agg() may only wrap a metric, not '" .. tostring(field.name) .. "'.")
         end
         selected_output[#selected_output + 1] = field.name
         local output_alias = alias_from_select_part(part)
@@ -2439,39 +2484,51 @@ local function parse_semantic_sql(sql_text, options)
         end
     end
 
+    -- Databricks idiom: GROUP BY ALL groups by every non-aggregated SELECT column.
+    -- Detect the single-token ALL form and let the selected dimensions stand in for
+    -- the explicit grouping list.
+    local is_group_by_all = false
+    if clauses.GROUP_BY ~= nil then
+        local gb_start = clauses.GROUP_BY + 2
+        local gb_end = clause_end(tokens, clauses, "GROUP_BY")
+        is_group_by_all = (gb_end == gb_start) and token_upper(tokens[gb_start]) == "ALL"
+    end
+
     if #request.dimensions > 0 and not wildcard_select then
         if clauses.GROUP_BY == nil then
             return nil, error_result("SEMANTIC_QUERY_007", "Semantic SQL with dimensions must GROUP BY the selected dimensions.")
         end
-        local grouped = {}
-        for _, part in ipairs(split_top_level(tokens, clauses.GROUP_BY + 2, clause_end(tokens, clauses, "GROUP_BY"), ",")) do
-            local field_name = identifier_from_part(part)
-            if field_name == nil and #part == 1 and part[1].kind == "number" then
-                local ordinal = tonumber(part[1].text)
-                field_name = selected_output[ordinal]
+        if not is_group_by_all then
+            local grouped = {}
+            for _, part in ipairs(split_top_level(tokens, clauses.GROUP_BY + 2, clause_end(tokens, clauses, "GROUP_BY"), ",")) do
+                local field_name = identifier_from_part(part)
+                if field_name == nil and #part == 1 and part[1].kind == "number" then
+                    local ordinal = tonumber(part[1].text)
+                    field_name = selected_output[ordinal]
+                end
+                if field_name == nil then
+                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected dimensions by name or ordinal.")
+                end
+                local field, bind_err = resolve_field(ctx, field_name, "DIMENSION")
+                if bind_err ~= nil then
+                    return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+                end
+                grouped[upper(field.name)] = true
             end
-            if field_name == nil then
-                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected dimensions by name or ordinal.")
+            for _, dimension_name in ipairs(request.dimensions) do
+                if not grouped[upper(dimension_name)] then
+                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must cover selected dimension " .. tostring(dimension_name) .. ".")
+                end
             end
-            local field, bind_err = resolve_field(ctx, field_name, "DIMENSION")
-            if bind_err ~= nil then
-                return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+            local group_count = 0
+            for _, _ in pairs(grouped) do
+                group_count = group_count + 1
             end
-            grouped[upper(field.name)] = true
-        end
-        for _, dimension_name in ipairs(request.dimensions) do
-            if not grouped[upper(dimension_name)] then
-                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must cover selected dimension " .. tostring(dimension_name) .. ".")
+            if group_count ~= #request.dimensions then
+                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must not contain dimensions outside the SELECT list.")
             end
         end
-        local group_count = 0
-        for _, _ in pairs(grouped) do
-            group_count = group_count + 1
-        end
-        if group_count ~= #request.dimensions then
-            return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must not contain dimensions outside the SELECT list.")
-        end
-    elseif #request.dimensions == 0 and clauses.GROUP_BY ~= nil then
+    elseif #request.dimensions == 0 and clauses.GROUP_BY ~= nil and not is_group_by_all then
         return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY is only supported for selected dimensions.")
     end
 
