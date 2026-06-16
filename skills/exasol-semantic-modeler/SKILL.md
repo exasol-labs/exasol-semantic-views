@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-modeler
-description: Use when an autonomous agent needs to create, bootstrap, or maintain an Exasol Semantic Views model. Covers schema inspection and autonomous metric derivation from physical tables, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration (agent instructions, verified queries, synonyms).
+description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema inspection and autonomous metric derivation from physical tables, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration (agent instructions, verified queries, synonyms).
 ---
 
 # Exasol Semantic Modeler
@@ -21,6 +21,9 @@ Prefer this order:
 3. Author metrics in order of dependency: additive first, then ratio/derived.
 4. Validate and inspect issues after every structural change.
 5. Publish when validation is clean; add governance metadata after publication.
+
+If the source is a Databricks Unity Catalog Metric View YAML, use the dedicated
+Databricks import path instead of manually rebuilding the model.
 
 Read [authoring-workflows.md](references/authoring-workflows.md) for copyable
 SQL and script examples.
@@ -186,18 +189,43 @@ previous to succeed.
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
 script syntax.
 
+## Databricks UCMV Import
+
+When migrating a Databricks Unity Catalog Metric View, use
+`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW` or the thin host helper
+`tools/import_databricks.py`. Dry-run first by passing `FALSE` as the apply
+flag so the generated native DDL and diagnostics can be reviewed:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW(
+  '<metric view YAML>',
+  '<target_model>',
+  '<published_schema_or_null>',
+  FALSE
+);
+```
+
+Apply with the same script and `TRUE` after review. Apply creates the model,
+validates it, and publishes the generated semantic object. The importer handles
+plain table/view sources, star and snowflake joins, fields, aggregate measures,
+filtered measures, and derived/ratio measures that reference `MEASURE()`.
+Unsupported or partial constructs return `DBX_IMPORT_*` diagnostics. Databricks
+SQL query compatibility (`MEASURE(metric)`, `agg(metric)`, `GROUP BY ALL`) is
+handled by the semantic SQL compiler/preprocessor after publication.
+
 ## Entity and Relationship Management
 
 Register entities with `ADD_ENTITY`:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
-  '<model>',       -- model name
-  '<alias>',       -- short alias used in expressions (e.g. 'order_line')
-  '<schema.table>',-- physical table (e.g. 'MART.ORDER_LINES')
-  '<expr_alias>',  -- SQL alias in expressions (e.g. 'ol')
-  '<pk_expr>',     -- primary key expression (e.g. 'ol.order_line_id')
-  '<display_name>',
+  '<model>',
+  '<entity_name>',
+  '<source_schema>',
+  '<source_object>',
+  '<source_alias>',
+  '<pk_expr>',
+  '<grain_description>',
   '<description>'
 );
 ```
@@ -213,7 +241,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   '<join_condition>',  -- e.g. 'ol.order_id = o.order_id'
   '<cardinality>',     -- MANY_TO_ONE | ONE_TO_ONE | ONE_TO_MANY | MANY_TO_MANY
   '<join_type>',       -- INNER | LEFT
-  '<description>'
+  '<fanout_policy>'    -- usually NULL unless explicitly required
 );
 ```
 
@@ -332,9 +360,11 @@ Register verified queries:
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_VERIFIED_QUERY(
   '<model>', '<object>',
-  '<business_question>',
-  '<request_json_or_semantic_sql>',
-  '<notes>'
+  '<query_name>',
+  '<natural_language_question>',
+  '<request_json>',
+  '<expected_result_shape_or_null>',
+  <is_onboarding_example>
 );
 ```
 
@@ -342,7 +372,7 @@ Add synonyms so agents can discover metrics by alternative names:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
-  '<model>', '<object>', '<canonical_name>', '<synonym>', <is_certified>
+  '<model>', '<object_type>', '<canonical_name>', '<synonym>', '<source>'
 );
 ```
 

@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-analyst
-description: Use when an autonomous agent needs to answer business questions through an existing Exasol Semantic Views model. Covers metric and dimension discovery, valid combination checking, structured request compilation with COMPILE_REQUEST_JSON, semantic SQL compilation, result execution, plan explanation, and feedback capture. Assumes the semantic model is already built and published.
+description: Use when an autonomous agent needs to answer business questions through an existing Exasol Semantic Views model. Covers metric and dimension discovery, valid combination checking, structured request compilation with COMPILE_REQUEST_JSON, semantic SQL compilation including Databricks-style MEASURE()/GROUP BY ALL compatibility, result execution, plan explanation, and feedback capture. Assumes the semantic model is already built and published.
 ---
 
 # Exasol Semantic Analyst
@@ -151,6 +151,8 @@ Operator key aliases: `op`, `operator`.
 Supported operators: `=`, `!=`, `<>`, `>`, `>=`, `<`, `<=`, `LIKE`, `IN`,
 `BETWEEN` (two-value array).
 Text equality, `!=`, `LIKE`, and `IN` are compiled case-insensitively.
+Metric predicates use the optional `having` array with the same object shape as
+`filters`; each `having` entry must reference a metric.
 
 The response row contains:
 
@@ -159,6 +161,7 @@ The response row contains:
 | `STATUS` | `OK` or `ERROR` |
 | `ERROR_CODE` | Stable error namespace (e.g. `SEMANTIC_REQUEST_*`) |
 | `ERROR_MESSAGE` | Human-readable error detail |
+| `ORIGINAL_SQL` | Original semantic SQL text for `COMPILE_SQL`; `NULL` for `COMPILE_REQUEST_JSON` |
 | `GENERATED_SQL` | Physical Exasol SQL to execute |
 | `PLAN_JSON` | Metric roles, join paths, materialization decision |
 | `CLARIFICATION_JSON` | Structured ambiguity prompt when fields are unclear |
@@ -185,7 +188,12 @@ When `STATUS = 'ERROR'`:
 ## Semantic SQL Path
 
 When the user has supplied semantic SQL directly, compile it explicitly rather
-than relying on a session preprocessor:
+than relying on a session preprocessor. The SQL surface accepts selected
+semantic fields, `SELECT *`, optional `GROUP BY` inference from selected
+dimensions, `GROUP BY ALL`, metric predicates in `HAVING`, metric predicates in
+`WHERE` auto-routed to `HAVING`, `BETWEEN`, selected-field aliases or ordinals
+in `ORDER BY`, and Databricks-style `MEASURE(metric)` / `agg(metric)` wrappers
+in `SELECT`, `HAVING`, and `ORDER BY`.
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
@@ -195,6 +203,31 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
    GROUP BY customer_region
    ORDER BY total_revenue DESC
    LIMIT 10'
+);
+```
+
+An equivalent query may omit the explicit `GROUP BY`:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
+  'SELECT customer_region, total_revenue
+   FROM SEMANTIC_SALES.SALES
+   WHERE order_status = ''COMPLETE''
+   ORDER BY total_revenue DESC
+   LIMIT 10'
+);
+```
+
+Databricks-style semantic SQL is also accepted against published semantic
+objects:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
+  'SELECT customer_region, MEASURE(total_revenue) AS total_revenue
+   FROM SEMANTIC_SALES.SALES
+   GROUP BY ALL
+   HAVING MEASURE(total_revenue) > 1000
+   ORDER BY MEASURE(total_revenue) DESC'
 );
 ```
 
@@ -272,10 +305,11 @@ If the question closely matches a verified query, reference it as a starting
 point:
 
 ```sql
-SELECT QUESTION, REQUEST_JSON, GENERATED_SQL, NOTES
+SELECT QUERY_NAME, NATURAL_LANGUAGE_TEXT, REQUEST_JSON, GENERATED_SQL,
+       EXPECTED_RESULT_SHAPE
 FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT
 WHERE MODEL_NAME = '<model>'
-ORDER BY QUESTION;
+ORDER BY QUERY_NAME;
 ```
 
 Verified queries have been reviewed by the model owner. Prefer them over

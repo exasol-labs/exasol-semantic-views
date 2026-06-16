@@ -38,31 +38,41 @@ ORDER BY TABLE_COUNT DESC, COLUMN_NAME;
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
   'sales',
   'order_line',
-  'MART.ORDER_LINES',
+  'MART',
+  'ORDER_LINES',
   'ol',
-  'ol.order_line_id',
-  'Order Line',
+  'CAST(ol.order_id AS VARCHAR(36)) || ''-'' || CAST(ol.line_id AS VARCHAR(36))',
+  'One row per order line',
   'One row per order line item'
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
   'sales',
   'order',
-  'MART.ORDERS',
+  'MART',
+  'ORDERS',
   'o',
   'o.order_id',
-  'Order',
+  'One row per order',
   'One row per customer order'
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
   'sales',
   'customer',
-  'MART.CUSTOMERS',
+  'MART',
+  'CUSTOMERS',
   'c',
   'c.customer_id',
-  'Customer',
+  'One row per customer',
   'One row per customer account'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(
+  'sales',
+  'SALES',
+  'order_line',
+  'Sales metrics and dimensions'
 );
 ```
 
@@ -77,7 +87,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'ol.order_id = o.order_id',
   'MANY_TO_ONE',
   'INNER',
-  'Each order line belongs to one order'
+  NULL
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
@@ -88,7 +98,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'o.customer_id = c.customer_id',
   'MANY_TO_ONE',
   'LEFT',
-  'Each order belongs to one customer'
+  NULL
 );
 ```
 
@@ -101,8 +111,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
   'net_revenue',
   'ol.quantity * ol.net_unit_price',
   'DECIMAL(18,2)',
+  'ADDITIVE',
   'Net Revenue',
-  'Net revenue per order line before tax'
+  'Net revenue per order line before tax',
+  FALSE,
+  TRUE
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
@@ -111,8 +124,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
   'net_cost',
   'ol.quantity * ol.unit_cost',
   'DECIMAL(18,2)',
+  'ADDITIVE',
   'Net Cost',
-  'Cost of goods per order line'
+  'Cost of goods per order line',
+  FALSE,
+  TRUE
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
@@ -121,8 +137,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
   'gross_margin',
   'ol.quantity * ol.net_unit_price - ol.quantity * ol.unit_cost',
   'DECIMAL(18,2)',
+  'ADDITIVE',
   'Gross Margin',
-  'Revenue minus cost per order line'
+  'Revenue minus cost per order line',
+  FALSE,
+  TRUE
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
@@ -131,8 +150,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
   'quantity',
   'ol.quantity',
   'DECIMAL(18,3)',
+  'ADDITIVE',
   'Quantity',
-  'Units sold per line'
+  'Units sold per line',
+  FALSE,
+  TRUE
 );
 ```
 
@@ -144,8 +166,8 @@ Categorical dimensions:
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
   'sales', 'SALES', 'order',
   'order_status',
-  'o.status',
-  'VARCHAR(50)',
+  'o.order_status',
+  'VARCHAR(32)',
   'Order Status',
   'Fulfilment status of the order',
   NULL,
@@ -274,6 +296,43 @@ ADD OR REPLACE METRIC gross_margin_pct
 );
 ```
 
+## Import a Databricks UCMV
+
+Use this path when the source model is a Databricks Unity Catalog Metric View
+YAML. Dry-run first to inspect `GENERATED_DDL` and `DIAGNOSTICS_JSON`:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW(
+  '<metric view YAML>',
+  'sales_dbx',
+  'SEMANTIC_SALES_DBX',
+  FALSE
+);
+```
+
+Apply after review:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW(
+  '<metric view YAML>',
+  'sales_dbx',
+  'SEMANTIC_SALES_DBX',
+  TRUE
+);
+```
+
+The host helper reads the YAML file and calls the same in-database importer:
+
+```sh
+python3 tools/import_databricks.py sql/examples/sales_databricks_metric_view.yaml \
+  --model sales_dbx --schema SEMANTIC_SALES_DBX --apply
+```
+
+Supported imports include plain table/view sources, star and snowflake joins,
+fields, aggregate measures, filtered measures, and derived/ratio measures using
+`MEASURE()`. Review any `DBX_IMPORT_*` diagnostics before treating the imported
+model as production-ready.
+
 ## Validate and Publish
 
 ```sql
@@ -343,9 +402,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION(
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_VERIFIED_QUERY(
   'sales',
   'SALES',
+  'Revenue by region this year',
   'What is total revenue by customer region this year?',
   '{"model":"sales","object":"SALES","metrics":["total_revenue"],"dimensions":["customer_region"],"filters":[{"field":"order_year","op":"=","value":2026}],"order_by":[{"field":"total_revenue","direction":"desc"}]}',
-  'Standard regional revenue breakdown'
+  '{"columns":["customer_region","total_revenue"],"grain":"one row per customer_region"}',
+  TRUE
 );
 ```
 
@@ -353,11 +414,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_VERIFIED_QUERY(
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
-  'sales', 'SALES', 'total_revenue', 'revenue', 1
+  'sales', 'METRIC', 'total_revenue', 'revenue', 'MANUAL'
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
-  'sales', 'SALES', 'gross_margin_pct', 'margin rate', 0
+  'sales', 'METRIC', 'gross_margin_pct', 'margin rate', 'MANUAL'
 );
 ```
 

@@ -131,21 +131,57 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON(
 );
 ```
 
+## Compile a Structured Request — Metric HAVING
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON(
+  '{
+    "model": "sales",
+    "object": "SALES",
+    "metrics": ["total_revenue"],
+    "dimensions": ["customer_region"],
+    "having": [
+      {"field": "total_revenue", "op": ">", "value": 1000}
+    ],
+    "order_by": [{"field": "total_revenue", "direction": "desc"}],
+    "client": "autonomous-agent"
+  }'
+);
+```
+
 ## Compile Semantic SQL Explicitly
 
 Use this when the user supplied semantic SQL and session preprocessor state
-should not be assumed:
+should not be assumed. `GROUP BY` may be omitted when dimensions are selected;
+the compiler infers it from those selected dimensions:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
   'SELECT customer_region, total_revenue
    FROM SEMANTIC_SALES.SALES
    WHERE order_status = ''COMPLETE''
-   GROUP BY customer_region
    ORDER BY total_revenue DESC
    LIMIT 10'
 );
 ```
+
+When a user supplies Databricks-style semantic SQL, preserve that intent and
+compile it through the same `COMPILE_SQL` path:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
+  'SELECT customer_region, MEASURE(total_revenue) AS total_revenue
+   FROM SEMANTIC_SALES.SALES
+   GROUP BY ALL
+   HAVING MEASURE(total_revenue) > 1000
+   ORDER BY MEASURE(total_revenue) DESC'
+);
+```
+
+Accepted semantic SQL includes `SELECT *`, `HAVING` metric predicates,
+`WHERE` metric predicates auto-routed to `HAVING`, `BETWEEN`, `ORDER BY`
+aliases or ordinals, `GROUP BY ALL`, and `MEASURE(metric)` / `agg(metric)` in
+`SELECT`, `HAVING`, and `ORDER BY`.
 
 ## Expected Response Shape
 
@@ -153,6 +189,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
 STATUS
 ERROR_CODE
 ERROR_MESSAGE
+ORIGINAL_SQL
 GENERATED_SQL
 PLAN_JSON
 CLARIFICATION_JSON
@@ -195,10 +232,11 @@ LIMIT 20;
 ## Check Verified Queries
 
 ```sql
-SELECT QUESTION, REQUEST_JSON, NOTES
+SELECT QUERY_NAME, NATURAL_LANGUAGE_TEXT, REQUEST_JSON, GENERATED_SQL,
+       EXPECTED_RESULT_SHAPE
 FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT
 WHERE MODEL_NAME = 'sales'
-ORDER BY QUESTION;
+ORDER BY QUERY_NAME;
 ```
 
 ## Record Feedback
