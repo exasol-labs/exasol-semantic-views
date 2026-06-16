@@ -1,7 +1,6 @@
 # Databricks UCMV parser fixture (TPC-H style, mirrors the official docs example).
-# Used for parser/translation coverage only; the source tables do not exist on
-# Nano, so this is not applied — see tools/verify_databricks_import.py for the
-# end-to-end (applied) test over the demo MART tables.
+# Used for parser/translation coverage and applied against temporary TPCH-shaped
+# tables in tools/verify_databricks_import.py.
 version: 1.1
 comment: Orders KPIs for sales analysis
 source: samples.tpch.orders

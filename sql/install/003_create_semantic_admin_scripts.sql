@@ -11100,10 +11100,13 @@ local function dbx_translate(doc, model_name, published_schema, diags)
         local jname = dbx_unique(entity_seen, dbx_ident(join.name))
         local jalias = dbx_alias(join.name, alias_seen)
         local jpath = parent_path .. "." .. string.lower(join.name)
+        local relative_jpath = string.gsub(jpath, "^source%.", "")
         alias_paths[string.lower(join.name)] = jalias
         alias_paths[jpath] = jalias
+        alias_paths[relative_jpath] = jalias
         entity_by_path[string.lower(join.name)] = jname
         entity_by_path[jpath] = jname
+        entity_by_path[relative_jpath] = jname
         entity_alias[jname] = jalias
         local cardinality = "MANY_TO_ONE"
         if not missing(join.cardinality) and upper(join.cardinality) == "ONE_TO_MANY" then
@@ -11148,16 +11151,33 @@ local function dbx_translate(doc, model_name, published_schema, diags)
     -- Resolve which entity an expression primarily references (for member binding).
     local function entity_for_expr(expr)
         local tokens = tokenize(tostring(expr or ""))
+        local best_entity = nil
+        local best_depth = 0
         for i = 1, #tokens - 1 do
             local tok = tokens[i]
             if (tok.kind == "word" or tok.kind == "identifier") and tokens[i + 1].text == "." then
-                local seg = string.lower(tok.value or tok.text)
-                if entity_by_path[seg] ~= nil and seg ~= "source" then
-                    return entity_by_path[seg]
+                local segs = {string.lower(tok.value or tok.text)}
+                local j = i + 1
+                while tokens[j] ~= nil and tokens[j].text == "." and tokens[j + 1] ~= nil
+                    and (tokens[j + 1].kind == "word" or tokens[j + 1].kind == "identifier") do
+                    segs[#segs + 1] = string.lower(tokens[j + 1].value or tokens[j + 1].text)
+                    j = j + 2
+                end
+                for depth = #segs - 1, 1, -1 do
+                    local prefix = {}
+                    for p = 1, depth do
+                        prefix[p] = segs[p]
+                    end
+                    local path = table.concat(prefix, ".")
+                    if path ~= "source" and entity_by_path[path] ~= nil and depth > best_depth then
+                        best_entity = entity_by_path[path]
+                        best_depth = depth
+                        break
+                    end
                 end
             end
         end
-        return root_name
+        return best_entity or root_name
     end
 
     -- Fields -> dimensions. Also build a lookup from qualified expr -> dim name

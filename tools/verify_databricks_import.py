@@ -17,8 +17,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "sql/examples/sales_databricks_metric_view.yaml"
+SNOWFLAKE_FIXTURE = ROOT / "tests/fixtures/databricks/orders_metric_view.yaml"
 TARGET_MODEL = "sales_dbx"
 TARGET_SCHEMA = "SEMANTIC_SALES_DBX"
+SNOWFLAKE_MODEL = "orders_dbx_snowflake"
+SNOWFLAKE_SCHEMA = "SEMANTIC_ORDERS_DBX_SNOW"
 
 failures = 0
 
@@ -66,13 +69,13 @@ def assert_equal(name: str, actual: Any, expected: Any) -> None:
         fail(name, f"expected {expected!r}, got {actual!r}")
 
 
-def cleanup(con) -> None:
+def cleanup_model(con, model: str, schema: str) -> None:
     """Best-effort removal of a prior import so the test is re-runnable."""
     try:
-        con.execute(f"DROP SCHEMA IF EXISTS {TARGET_SCHEMA} CASCADE")
+        con.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
     except Exception:
         pass
-    ids = fetchall(con, f"SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE UPPER(MODEL_NAME) = UPPER({sql_string(TARGET_MODEL)})")
+    ids = fetchall(con, f"SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE UPPER(MODEL_NAME) = UPPER({sql_string(model)})")
     if not ids:
         return
     model_id = ids[0][0]
@@ -98,11 +101,16 @@ def cleanup(con) -> None:
         tables = remaining
 
 
-def import_view(con, apply: bool) -> dict[str, Any]:
-    yaml_text = FIXTURE.read_text(encoding="utf-8")
+def cleanup(con) -> None:
+    cleanup_model(con, TARGET_MODEL, TARGET_SCHEMA)
+    cleanup_model(con, SNOWFLAKE_MODEL, SNOWFLAKE_SCHEMA)
+
+
+def import_view(con, apply: bool, fixture: Path = FIXTURE, model: str = TARGET_MODEL, schema: str = TARGET_SCHEMA) -> dict[str, Any]:
+    yaml_text = fixture.read_text(encoding="utf-8")
     sql = (
         "EXECUTE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW("
-        f"{sql_string(yaml_text)}, {sql_string(TARGET_MODEL)}, {sql_string(TARGET_SCHEMA)}, {'TRUE' if apply else 'FALSE'})"
+        f"{sql_string(yaml_text)}, {sql_string(model)}, {sql_string(schema)}, {'TRUE' if apply else 'FALSE'})"
     )
     row = fetchall(con, sql)[0]
     return {
@@ -114,6 +122,96 @@ def import_view(con, apply: bool) -> dict[str, Any]:
         "diagnostics": json.loads(row[5]) if row[5] else [],
         "validation_run_id": row[6],
     }
+
+
+TPCH_COLUMNS = {
+    "ORDERS": {
+        "O_ORDERKEY": "DECIMAL(18,0)",
+        "O_CUSTKEY": "DECIMAL(18,0)",
+        "O_ORDERDATE": "DATE",
+        "O_ORDERSTATUS": "VARCHAR(1)",
+        "O_TOTALPRICE": "DECIMAL(18,2)",
+    },
+    "CUSTOMER": {
+        "C_CUSTKEY": "DECIMAL(18,0)",
+        "C_NATIONKEY": "DECIMAL(18,0)",
+    },
+    "NATION": {
+        "N_NATIONKEY": "DECIMAL(18,0)",
+        "N_NAME": "VARCHAR(100)",
+    },
+}
+
+
+def ensure_tpch_fixture(con) -> bool:
+    """Create minimal TPCH tables for applying the snowflake parser fixture.
+
+    Returns True when this function created the TPCH schema and should clean it
+    up afterwards. If a TPCH schema already exists, it is left untouched and
+    must already expose the columns needed by the fixture.
+    """
+    schema_exists = int(fetchall(con, "SELECT COUNT(*) FROM SYS.EXA_ALL_SCHEMAS WHERE SCHEMA_NAME = 'TPCH'")[0][0]) > 0
+    if schema_exists:
+        missing = []
+        for table, columns in TPCH_COLUMNS.items():
+            existing = {
+                row[0]
+                for row in fetchall(
+                    con,
+                    "SELECT COLUMN_NAME FROM SYS.EXA_ALL_COLUMNS "
+                    f"WHERE COLUMN_SCHEMA = 'TPCH' AND COLUMN_TABLE = {sql_string(table)}",
+                )
+            }
+            for column in columns:
+                if column not in existing:
+                    missing.append(f"{table}.{column}")
+        if missing:
+            raise AssertionError("TPCH schema exists but lacks fixture columns: " + ", ".join(missing))
+        return False
+
+    con.execute("CREATE SCHEMA TPCH")
+    for table, columns in TPCH_COLUMNS.items():
+        column_sql = ", ".join(f"{name} {data_type}" for name, data_type in columns.items())
+        con.execute(f"CREATE TABLE TPCH.{table} ({column_sql})")
+    return True
+
+
+def verify_snowflake_fixture(con) -> None:
+    """Apply the existing nested-join fixture and verify deepest-path binding."""
+    cleanup_model(con, SNOWFLAKE_MODEL, SNOWFLAKE_SCHEMA)
+    created_tpch = False
+    try:
+        created_tpch = ensure_tpch_fixture(con)
+    except AssertionError as exc:
+        fail("snowflake/setup_tpch", str(exc))
+        return
+
+    try:
+        res = import_view(con, apply=True, fixture=SNOWFLAKE_FIXTURE, model=SNOWFLAKE_MODEL, schema=SNOWFLAKE_SCHEMA)
+        if res["status"] != "OK":
+            fail("snowflake/apply/status", f"{res['error_code']}: {res['error_message']}")
+            return
+        ok("snowflake/apply/status", "OK")
+        for diag in res["diagnostics"]:
+            if diag.get("severity") == "ERROR":
+                fail("snowflake/diagnostics", f"unexpected ERROR diagnostic: {diag}")
+
+        rows = fetchall(
+            con,
+            "SELECT ENTITY_NAME, EXPRESSION FROM SEMANTIC_CATALOG.DIMENSIONS "
+            f"WHERE UPPER(MODEL_NAME) = UPPER({sql_string(SNOWFLAKE_MODEL)}) "
+            "AND DIMENSION_NAME = 'customer_nation'",
+        )
+        if not rows:
+            fail("snowflake/customer_nation", "dimension missing")
+            return
+        entity_name, expression = rows[0]
+        assert_equal("snowflake/customer_nation/entity", entity_name, "nation")
+        assert_equal("snowflake/customer_nation/expression", expression, "n.n_name")
+    finally:
+        cleanup_model(con, SNOWFLAKE_MODEL, SNOWFLAKE_SCHEMA)
+        if created_tpch:
+            con.execute("DROP SCHEMA IF EXISTS TPCH CASCADE")
 
 
 def main() -> int:
@@ -182,6 +280,9 @@ def main() -> int:
             ok("query/rows", f"{len(rows)} region rows")
         else:
             fail("query/rows", f"expected 3 region rows, got {rows!r}")
+
+        # Apply-time coverage for the existing snowflake parser fixture.
+        verify_snowflake_fixture(con)
 
         if failures:
             print(f"\nFAILED: {failures} assertion(s) failed")
