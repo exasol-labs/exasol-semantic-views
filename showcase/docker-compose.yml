@@ -1,0 +1,14 @@
+# Databricks UCMV on Exasol — showcase database.
+# exasol/nano is the lightweight single-node engine and is multi-arch
+# (linux/amd64 + linux/arm64), so this runs natively on Apple Silicon Macs and
+# on x86 Linux with the same file. No --privileged needed (unlike docker-db).
+# No named volume: the DB is ephemeral, so every `up` starts clean.
+services:
+  exasol:
+    image: exasol/nano:2026.2.0-nano.1
+    container_name: exasol-ucmv-showcase
+    shm_size: "512mb"
+    pids_limit: -1
+    ports:
+      - "127.0.0.1:8563:8563"
+    stop_grace_period: 30s
