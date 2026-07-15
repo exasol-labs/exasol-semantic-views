@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open Semantic Interchange import/export tooling.
+"""Apache Ossie / OSI import/export tooling.
 
 The converter is host-side by design: Exasol keeps SQL/Lua runtime behavior in
 the database, while YAML/JSON/schema handling stays in Python.
@@ -24,6 +24,26 @@ OSI_VERSION = "0.2.0.dev0"
 OSI_SCHEMA = ROOT / "schemas/osi/0.2.0.dev0/osi-schema.json"
 VALID_PROFILES = {"interoperability", "lossless"}
 OSI_DIALECT = "ANSI_SQL"
+DEFAULT_OSI_DIALECTS = frozenset(
+    {"ANSI_SQL", "SNOWFLAKE", "MDX", "TABLEAU", "DATABRICKS", "MAQL", "BIGQUERY"}
+)
+_ALLOWED_OSI_DIALECTS: set[str] | None = None
+
+
+def allowed_osi_dialects() -> set[str]:
+    """Return dialects from the vendored Ossie schema, with a conservative fallback."""
+    global _ALLOWED_OSI_DIALECTS
+    if _ALLOWED_OSI_DIALECTS is not None:
+        return _ALLOWED_OSI_DIALECTS
+    try:
+        schema = json.loads(OSI_SCHEMA.read_text(encoding="utf-8"))
+        dialects = schema["$defs"]["Dialect"]["enum"]
+        if not isinstance(dialects, list) or not all(isinstance(item, str) for item in dialects):
+            raise ValueError("schema dialect enum is malformed")
+        _ALLOWED_OSI_DIALECTS = set(dialects)
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        _ALLOWED_OSI_DIALECTS = set(DEFAULT_OSI_DIALECTS)
+    return _ALLOWED_OSI_DIALECTS
 
 
 class OsiError(Exception):
@@ -940,7 +960,7 @@ def validate_expression(value: Any, path: str) -> list[str]:
             continue
         if set(dialect) - {"dialect", "expression"}:
             errors.append(f"{dialect_path} contains unsupported keys")
-        if dialect.get("dialect") not in {"ANSI_SQL", "SNOWFLAKE", "MDX", "TABLEAU", "DATABRICKS", "MAQL"}:
+        if dialect.get("dialect") not in allowed_osi_dialects():
             errors.append(f"{dialect_path}.dialect is unsupported: {dialect.get('dialect')}")
         if not isinstance(dialect.get("expression"), str) or not dialect.get("expression"):
             errors.append(f"{dialect_path}.expression must be a non-empty string")
@@ -3190,10 +3210,10 @@ def command_import(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Open Semantic Interchange tooling for Exasol Semantic Views.")
+    parser = argparse.ArgumentParser(description="Apache Ossie / OSI tooling for Exasol Semantic Views.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    export_parser = subparsers.add_parser("export", help="export a semantic model as OSI")
+    export_parser = subparsers.add_parser("export", help="export a semantic model as Apache Ossie / OSI")
     export_parser.add_argument("--model", required=True, help="semantic model name")
     export_parser.add_argument("--object", help="semantic object name for object-scoped interoperability export")
     export_parser.add_argument("--profile", choices=sorted(VALID_PROFILES), default="interoperability")
@@ -3212,17 +3232,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=command_export)
 
-    validate_parser = subparsers.add_parser("validate", help="validate an OSI JSON/YAML file")
+    validate_parser = subparsers.add_parser("validate", help="validate an Apache Ossie / OSI JSON/YAML file")
     validate_parser.add_argument("path", type=Path)
     validate_parser.add_argument("--quiet", action="store_true")
     validate_parser.set_defaults(func=command_validate)
 
-    import_parser = subparsers.add_parser("import", help="plan an OSI import")
+    import_parser = subparsers.add_parser("import", help="plan an Apache Ossie / OSI import")
     import_parser.add_argument("path", type=Path)
     import_parser.add_argument("--dry-run", action="store_true", help="produce a normalized import plan without database writes")
     import_parser.add_argument("--apply", action="store_true", help="apply the normalized import plan to Exasol")
     import_parser.add_argument("--profile", choices=["auto", *sorted(VALID_PROFILES)], default="auto")
-    import_parser.add_argument("--strict", action="store_true", help="treat lossy or ambiguous OSI mapping as blocking")
+    import_parser.add_argument("--strict", action="store_true", help="treat lossy or ambiguous Ossie / OSI mapping as blocking")
     import_parser.add_argument("--warnings-as-errors", action="store_true")
     import_parser.add_argument("--target-model", help="override the imported model name")
     import_parser.add_argument("--published-schema", help="override the imported model published schema")

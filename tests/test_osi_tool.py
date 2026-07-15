@@ -102,6 +102,37 @@ def test_custom_extension_data_must_parse() -> None:
         raise AssertionError("expected invalid extension JSON to fail")
 
 
+def test_allowed_dialects_come_from_schema() -> None:
+    schema = json.loads(osi.OSI_SCHEMA.read_text(encoding="utf-8"))
+    schema_dialects = set(schema["$defs"]["Dialect"]["enum"])
+    assert "BIGQUERY" in schema_dialects
+    assert osi.allowed_osi_dialects() == schema_dialects
+
+
+def test_bigquery_dialect_validates() -> None:
+    document = {
+        "version": "0.2.0.dev0",
+        "semantic_model": [
+            {
+                "name": "bigquery_model",
+                "datasets": [
+                    {
+                        "name": "orders",
+                        "source": "MART.ORDERS",
+                        "fields": [
+                            {
+                                "name": "order_status",
+                                "expression": {"dialects": [{"dialect": "BIGQUERY", "expression": "order_status"}]},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    osi.validate_document(document)
+
+
 def test_json_load_works_when_pyyaml_unavailable() -> None:
     document = {
         "version": "0.2.0.dev0",
@@ -313,7 +344,7 @@ def test_import_plan_lossless_preserves_native_metadata() -> None:
     assert "filter_expr" not in total_revenue["arguments"]
 
 
-def test_import_plan_dialect_fallback_warns_and_strict_blocks() -> None:
+def test_import_plan_bigquery_dialect_fallback_warns_and_strict_blocks() -> None:
     document = {
         "version": "0.2.0.dev0",
         "semantic_model": [
@@ -339,7 +370,7 @@ def test_import_plan_dialect_fallback_warns_and_strict_blocks() -> None:
                         "fields": [
                             {
                                 "name": "order_status",
-                                "expression": {"dialects": [{"dialect": "SNOWFLAKE", "expression": "o.order_status"}]},
+                                "expression": {"dialects": [{"dialect": "BIGQUERY", "expression": "o.order_status"}]},
                                 "dimension": {},
                                 "custom_extensions": [
                                     {
@@ -981,6 +1012,8 @@ def main() -> int:
     test_sales_osi_example_matches_interoperability_fixture()
     test_invalid_version_fails()
     test_custom_extension_data_must_parse()
+    test_allowed_dialects_come_from_schema()
+    test_bigquery_dialect_validates()
     test_json_load_works_when_pyyaml_unavailable()
     test_key_expression_column_extraction()
     test_relationship_parser()
@@ -992,7 +1025,7 @@ def main() -> int:
     test_import_plan_complex_relationship_prefers_native_join_condition()
     test_import_plan_invalid_relationship_fixture_fails_stably()
     test_import_plan_lossless_preserves_native_metadata()
-    test_import_plan_dialect_fallback_warns_and_strict_blocks()
+    test_import_plan_bigquery_dialect_fallback_warns_and_strict_blocks()
     test_import_plan_native_key_extension_precedes_core_keys()
     test_invalid_exasol_extension_envelope_blocks_import_plan()
     test_import_plan_assigns_distinct_names_to_repeated_non_exasol_extensions()

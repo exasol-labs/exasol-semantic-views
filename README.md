@@ -372,7 +372,7 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
   - [Creating metrics](docs/creating-metrics.md)
   - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
   - [Databricks metric views](docs/databricks-metric-views.md)
-  - [OSI import/export](docs/osi-format.md)
+  - [Apache Ossie / OSI import/export](docs/osi-format.md)
   - [Examples](docs/examples.md)
 - Design
   - [Architecture](docs/architecture.md)

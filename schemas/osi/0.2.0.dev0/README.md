@@ -1,13 +1,14 @@
-# OSI Schema Snapshot
+# Apache Ossie / OSI Schema Snapshot
 
-This directory pins the Open Semantic Interchange JSON Schema used by the
-Exasol Semantic Views OSI import/export work.
+This directory pins the Apache Ossie JSON Schema used by the Exasol Semantic
+Views import/export work. The project was previously named Open Semantic
+Interchange (OSI), and the local path keeps `osi` for compatibility with
+existing fixtures, tools, and diagnostic names.
 
 - Version: `0.2.0.dev0`
-- Source: `https://raw.githubusercontent.com/open-semantic-interchange/OSI/main/core-spec/osi-schema.json`
-- Snapshot date: 2026-06-08
+- Source: `https://raw.githubusercontent.com/apache/ossie/main/core-spec/osi-schema.json`
+- Snapshot date: 2026-07-15
 
-The upstream OSI draft is still evolving. Treat this directory as a compatibility
-target for tests and fixtures, not as a promise that later OSI drafts will stay
-schema-compatible.
-
+The upstream Apache Ossie draft is still evolving. Treat this directory as a
+compatibility target for tests and fixtures, not as a promise that later Ossie
+drafts will stay schema-compatible.

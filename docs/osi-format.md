@@ -1,27 +1,27 @@
-# OSI Import And Export
+# Apache Ossie / OSI Import And Export
 
-Exasol Semantic Views supports Open Semantic Interchange (OSI) as an import and
-export format for semantic model lifecycle workflows. OSI is an interchange
-artifact, not the authoritative runtime store. The authoritative model remains
-the Exasol catalog in `SYS_SEMANTIC`, and query-time behavior remains the
-SQL/Lua runtime.
+Exasol Semantic Views supports Apache Ossie, historically Open Semantic
+Interchange (OSI), as an import and export format for semantic model lifecycle
+workflows. Ossie/OSI is an interchange artifact, not the authoritative runtime
+store. The authoritative model remains the Exasol catalog in `SYS_SEMANTIC`,
+and query-time behavior remains the SQL/Lua runtime.
 
-Use OSI for:
+Use Ossie/OSI for:
 
-- exchanging semantic model definitions with OSI-compatible tools.
+- exchanging semantic model definitions with Ossie-compatible tools.
 - reviewing exported model definitions in source control.
 - moving semantic models between Exasol Semantic Views environments.
 - validating semantic model interchange behavior in CI.
 
 ## Supported Version
 
-The supported OSI schema is pinned at:
+The supported Apache Ossie schema is pinned at:
 
 ```text
 schemas/osi/0.2.0.dev0/osi-schema.json
 ```
 
-Only OSI `0.2.0.dev0` is accepted. Documents with other versions, such as
+Only Apache Ossie `0.2.0.dev0` is accepted. Documents with other versions, such as
 `0.1.1`, fail with an unsupported-version diagnostic instead of being partially
 imported.
 
@@ -30,11 +30,11 @@ as the string required by the schema.
 
 ## CLI
 
-The host-side OSI CLI is `tools/osi.py`. It validates OSI documents, exports
-Exasol semantic models, plans imports offline, and applies import plans to
-Exasol.
+The host-side CLI remains `tools/osi.py` for compatibility. It validates
+Ossie/OSI documents, exports Exasol semantic models, plans imports offline, and
+applies import plans to Exasol.
 
-Validate an OSI file offline:
+Validate an Ossie/OSI file offline:
 
 ```sh
 python3 tools/osi.py validate sql/examples/sales_osi.yaml
@@ -103,7 +103,7 @@ Connection defaults match the local Nano setup: `localhost:8563`, user `sys`,
 password `exasol`, with TLS certificate verification disabled. Override them
 with `--host`, `--port`, `--user`, `--password`, and `--tls-verify`.
 
-Optional OSI tool dependencies are listed in:
+Optional Ossie/OSI tool dependencies are listed in:
 
 ```text
 tools/requirements-osi.txt
@@ -111,19 +111,23 @@ tools/requirements-osi.txt
 
 JSON input and output work without optional YAML dependencies. YAML input and
 output require PyYAML. If `jsonschema` is installed, validation uses the
-vendored OSI JSON Schema; otherwise the CLI uses the built-in structural
-validator for the supported `0.2.0.dev0` document shape. In both cases,
+vendored Apache Ossie JSON Schema; otherwise the CLI uses the built-in
+structural validator for the supported `0.2.0.dev0` document shape. The
+built-in validator reads the accepted expression dialects from the vendored
+schema; the current snapshot accepts `ANSI_SQL`, `SNOWFLAKE`, `MDX`,
+`TABLEAU`, `DATABRICKS`, `MAQL`, and `BIGQUERY`. In all validation modes,
 `custom_extensions[].data` must parse as JSON.
 
 ## Profiles
 
 ### Interoperability
 
-Use `--profile interoperability` when the target is a generic OSI consumer.
+Use `--profile interoperability` when the target is a generic Ossie/OSI
+consumer.
 
-This profile writes OSI core fields wherever possible and keeps Exasol-specific
+This profile writes Ossie core fields wherever possible and keeps Exasol-specific
 metadata to the minimum needed for safe import back into Exasol. Native concepts
-that OSI core does not model are omitted or reported as warnings. Examples are
+that Ossie core does not model are omitted or reported as warnings. Examples are
 semantic object membership, private implementation facts, private metrics,
 complex join SQL, expression-based keys, metric filters, materializations,
 validation history, query logs, and privileges.
@@ -137,7 +141,7 @@ context needed by that object.
 Use `--profile lossless` for Exasol-to-Exasol workflows, Git review, backups,
 and migrations between Exasol Semantic Views environments.
 
-The lossless profile writes OSI core plus `custom_extensions` with
+The lossless profile writes Ossie core plus `custom_extensions` with
 `vendor_name: EXASOL`. These extensions preserve native metadata such as:
 
 - published schema and owner metadata.
@@ -160,7 +164,7 @@ block instead of being accepted with best-effort defaults.
 
 ## Import Planning And Apply
 
-Import starts with host-side OSI validation and deterministic planning. The dry
+Import starts with host-side Ossie/OSI validation and deterministic planning. The dry
 run plan contains ordered operations with:
 
 - `operation`
@@ -171,12 +175,12 @@ run plan contains ordered operations with:
 - `diagnostics`
 
 `--dry-run` never connects to Exasol and never mutates the catalog. It is the
-right mode for CI checks, reviews, and diagnosing how an OSI document maps to
+right mode for CI checks, reviews, and diagnosing how an Ossie document maps to
 Exasol.
 
 `--apply` validates and plans the same document, runs live preflight checks, and
 applies the normalized operations to Exasol. The database receives normalized
-Exasol operations, not raw OSI YAML or JSON.
+Exasol operations, not raw Ossie/OSI YAML or JSON.
 
 Apply supports:
 
@@ -228,11 +232,11 @@ applies post-operation metadata patches for:
 
 ## Mapping And Limitations
 
-OSI core does not model every Exasol Semantic Views concept. The converter is
-explicit about what is represented in OSI core, what is preserved in `EXASOL`
-extensions, and what remains outside the OSI artifact.
+Ossie core does not model every Exasol Semantic Views concept. The converter is
+explicit about what is represented in Ossie core, what is preserved in `EXASOL`
+extensions, and what remains outside the Ossie/OSI artifact.
 
-| Exasol semantic information | OSI core support | Behavior |
+| Exasol semantic information | Ossie core support | Behavior |
 | --- | --- | --- |
 | Semantic objects and published views | No direct core concept | `--object` can produce an object-scoped interoperability export. Lossless export stores semantic objects, object membership, visibility, and column order in the model `EXASOL` extension. |
 | Entities and physical sources | Datasets with `source` | Datasets map to entities. Lossless extensions preserve source schema, source object, source alias, primary-key expression, grain description, and native entity metadata. |

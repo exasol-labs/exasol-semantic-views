@@ -60,9 +60,9 @@ python3 tools/verify_databricks_import.py
 See [Databricks metric views](databricks-metric-views.md) for the supported
 UCMV subset, diagnostics, and query compatibility surface.
 
-## OSI Import And Export
+## Apache Ossie / OSI Import And Export
 
-`sql/examples/sales_osi.yaml` is the generated Open Semantic Interchange
+`sql/examples/sales_osi.yaml` is the generated Apache Ossie / OSI
 representation of the sales model. It is meant for documentation, fixture drift
 checks, and simple interoperability import/export trials.
 
@@ -72,7 +72,7 @@ Validate the example offline:
 python3 tools/osi.py validate sql/examples/sales_osi.yaml
 ```
 
-Export the published sales object for a generic OSI consumer:
+Export the published sales object for a generic Ossie/OSI consumer:
 
 ```sh
 python3 tools/osi.py export \
@@ -139,6 +139,6 @@ python3 tools/verify_osi_roundtrip.py
 ```
 
 YAML input and output require PyYAML. JSON validation and JSON import planning
-work without optional YAML dependencies. See [OSI import and export
+work without optional YAML dependencies. See [Apache Ossie / OSI import and export
 format](osi-format.md) for profile guidance, limitations, diagnostics, and
 verification coverage.
