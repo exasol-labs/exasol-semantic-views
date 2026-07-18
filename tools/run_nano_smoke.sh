@@ -13,6 +13,8 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # Fast database-free runtime tests run first so parser/planner regressions fail
 # before the slower clean install and Nano integration suite.
 sh tools/run_lua_tests.sh
+"$PYTHON_BIN" tests/test_osi_tool.py
+"$PYTHON_BIN" tests/test_sql_splitter.py
 
 # Phase 1: install the extension and load the base sales model from scratch.
 # --reset drops all managed schemas so this is always a clean run.
@@ -30,12 +32,18 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_milestone3.py
 "$PYTHON_BIN" tools/verify_milestone4.py
 "$PYTHON_BIN" tools/verify_milestone5.py
+"$PYTHON_BIN" tools/verify_semantic_sql_phase1.py
+"$PYTHON_BIN" tools/verify_group_by_inference.py
+"$PYTHON_BIN" tools/run_sql_files.py tests/sql/validation_smoke.sql tests/sql/compile_request_smoke.sql
 
 # Phase 2: register pre-built aggregates and verify materialization selection.
 "$PYTHON_BIN" tools/run_sql_files.py sql/examples/sales_materializations.sql
 
 "$PYTHON_BIN" tools/verify_milestone6.py
 "$PYTHON_BIN" tools/verify_sql_native_metrics.py
+"$PYTHON_BIN" tools/verify_semantic_sql_phase2.py
+"$PYTHON_BIN" tools/run_sql_files.py tests/sql/materialization_smoke.sql
+"$PYTHON_BIN" tools/verify_security_principals.py
 
 # Concurrent-compile regression (BUG-001): every COMPILE_REQUEST_JSON used to
 # re-run the full validator, causing GlobalTransactionRollback collisions for
@@ -45,6 +53,8 @@ sh tools/run_lua_tests.sh
 # Cold/warm compiler latency, broadest visible request, and dimension
 # cardinality/execution probes. Thresholds are configurable for dedicated
 # large-model CI fixtures; see docs/runtime-testing.md.
+export PERF_MIN_MODEL_FIELDS="${PERF_MIN_MODEL_FIELDS:-9}"
+export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 "$PYTHON_BIN" tools/verify_runtime_performance.py
 
 # Server-side compile cache (BUG-D-002): identical repeat requests should hit

@@ -885,6 +885,9 @@ record_agent_feedback = M.record_agent_feedback
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_AGENT_TEST_API = {
+        normalize_name = normalize_name,
+        normalize_choice = normalize_choice,
+        bool_value = bool_value,
         json_encode = json_encode,
         rows_to_objects = rows_to_objects,
         search_term = search_term,

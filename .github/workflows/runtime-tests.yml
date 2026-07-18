@@ -1,0 +1,36 @@
+name: Runtime tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  database-free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-osi.txt
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: Install host-test dependencies
+        run: python -m pip install -r tools/requirements-osi.txt
+      - name: Run database-free Lua coverage
+        run: LUA_BIN=lua5.4 sh tools/run_lua_tests.sh
+      - name: Run host-side regression tests
+        run: |
+          python tests/test_osi_tool.py
+          python tests/test_sql_splitter.py
+      - name: Verify generated install scripts
+        run: |
+          python tools/package_lua_scripts.py
+          git diff --exit-code

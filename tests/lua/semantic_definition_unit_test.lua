@@ -224,3 +224,213 @@ test("normalized import model discovery deduplicates explicit operations", funct
     assert_equal(names[2], "finance")
     assert_equal(names[3], "marketing")
 end)
+
+local function with_query(mock, fn)
+    local original_query = query
+    query = mock
+    local ok, result = xpcall(fn, debug.traceback)
+    query = original_query
+    if not ok then error(result, 0) end
+    return result
+end
+
+local metric_row = {
+    MODEL_NAME = "sales", OBJECT_NAME = "SALES", METRIC_ID = 30,
+    METRIC_NAME = "total_revenue", DISPLAY_NAME = "Total Revenue",
+    METRIC_KIND = "SIMPLE", METRIC_TYPE = "ADDITIVE",
+    BASE_ENTITY_NAME = "orders", FORMAT_HINT = "currency",
+    IS_CERTIFIED = true, IS_PRIVATE = false, OWNER_ROLE = nil,
+    DESCRIPTION = "Recognized revenue", SYNONYMS = "revenue,sales",
+    EXPRESSION = "SUM(net_revenue)", SEMANTIC_FILTER_EXPR = nil,
+    FILTER_EXPR = nil, DATA_TYPE = "DECIMAL(18,2)", DEFINITION_SOURCE_ID = 90,
+}
+
+test("semantic definition public dry-run and error results preserve catalog", function()
+    local ddl = [[
+        ALTER SEMANTIC VIEW sales.SALES
+        ADD OR REPLACE METRIC total_revenue AS SUM(net_revenue)
+          ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC
+    ]]
+    local dry = apply_semantic_definition(ddl, true)
+    assert_equal(dry[1][1], "DRY_RUN")
+    assert_equal(dry[1][5], 1)
+    assert_contains(dry[1][4], '"total_revenue"')
+
+    local malformed = apply_semantic_definition("ALTER SEMANTIC VIEW sales", false)
+    assert_equal(malformed[1][1], "ERROR")
+    assert_equal(malformed[1][2], "SEMANTIC_DDL_011")
+end)
+
+test("normalized OSI public API dispatches operations and reports failures", function()
+    local calls = {}
+    local applied = with_query(function(sql, params)
+        calls[#calls + 1] = {sql = sql, params = params}
+        if tostring(sql):find("CREATE_MODEL", 1, true) then return {{1}} end
+        error("unexpected OSI query: " .. tostring(sql))
+    end, function()
+        return apply_normalized_osi_import(api.json_encode({
+            operations = {{
+                operation = "create_model",
+                target = "SEMANTIC_ADMIN.CREATE_MODEL",
+                source_path = "$.models[0]",
+                arguments = {model_name = "osi_sales", published_schema = "SEMANTIC_OSI"},
+            }},
+        }), false, false)
+    end)
+    assert_equal(applied[1][1], "OK")
+    assert_equal(applied[1][2], 0)
+    assert_equal(applied[1][6], 1)
+    assert_equal(applied[2][3], "validate_model")
+    assert_equal(#calls, 1)
+
+    local missing = apply_normalized_osi_import("{}", false, false)
+    assert_equal(missing[1][1], "ERROR")
+    assert_contains(missing[1][9], "SEMANTIC_OSI_001")
+    local unsupported = apply_normalized_osi_import(api.json_encode({operations = {{
+        operation = "unknown", target = "SEMANTIC_ADMIN.UNKNOWN", source_path = "$.x",
+    }}}), false, false)
+    assert_equal(unsupported[1][1], "ERROR")
+    assert_equal(unsupported[1][2], 0)
+    assert_contains(unsupported[1][9], "SEMANTIC_OSI_010")
+end)
+
+test("metric describe explain and export APIs expose governed metadata", function()
+    local result = with_query(function(sql)
+        local normalized = tostring(sql):gsub("%s+", " ")
+        if normalized:find("FROM SEMANTIC_CATALOG.METRIC_OVERVIEW mo", 1, true)
+            and normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            return {metric_row}
+        elseif normalized:find("FROM SEMANTIC_CATALOG.METRIC_LINEAGE", 1, true) then
+            return {{"MEASURE", "FACT", "net_revenue"},
+                {"INPUT_METRIC", "METRIC", "base_revenue"}}
+        elseif normalized:find("FROM SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS", 1, true) then
+            return {{"customer_region"}, {"order_month"}}
+        elseif normalized:find("SELECT STATUS FROM SYS_SEMANTIC.VALIDATION_RUNS", 1, true) then
+            return {{"OK"}}
+        end
+        error("unexpected metric metadata query: " .. normalized)
+    end, function()
+        return {
+            described = describe_semantic_metric("sales", "SALES", "total_revenue"),
+            explained = explain_semantic_metric("sales", "SALES", "total_revenue"),
+            exported = export_semantic_definition("sales", "SALES", "total_revenue"),
+        }
+    end)
+    assert_equal(#result.described, 17)
+    assert_equal(result.described[1][3], "sales")
+    assert_equal(result.described[13][3], "PUBLIC")
+    assert_equal(result.explained[4][2], "MEASURE:FACT")
+    assert_equal(result.explained[#result.explained][3], "OK")
+    assert_equal(result.exported[1][1], "METRIC")
+    assert_contains(result.exported[1][3], "ADD OR REPLACE METRIC total_revenue")
+    assert_contains(result.exported[1][3], "SYNONYMS ('revenue', 'sales')")
+end)
+
+test("semantic export supports object and full-model catalog shapes", function()
+    local rows = with_query(function(sql)
+        local normalized = tostring(sql):gsub("%s+", " ")
+        if normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            return {metric_row}
+        elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES e", 1, true) then
+            return {{ENTITY_NAME = "orders", SOURCE_SCHEMA = "MART",
+                SOURCE_OBJECT = "ORDERS", SOURCE_ALIAS = "o",
+                PRIMARY_KEY_EXPR = "order_id", GRAIN_DESCRIPTION = "one order",
+                DESCRIPTION = "Orders"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS r", 1, true) then
+            return {{RELATIONSHIP_NAME = "orders_customer", FROM_ENTITY_NAME = "orders",
+                TO_ENTITY_NAME = "customers", JOIN_CONDITION = "o.customer_id = c.customer_id",
+                RELATIONSHIP_CARDINALITY = "MANY_TO_ONE", JOIN_TYPE = "LEFT"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.FACTS f", 1, true) then
+            return {{FACT_NAME = "net_revenue", ENTITY_NAME = "orders",
+                EXPRESSION = "o.amount", DATA_TYPE = "DECIMAL(18,2)",
+                ADDITIVE_POLICY = "ADDITIVE", DISPLAY_NAME = "Net Revenue",
+                DESCRIPTION = "Revenue", IS_PRIVATE = false, IS_CERTIFIED = true}}
+        elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS d", 1, true) then
+            return {{OBJECT_NAME = "SALES", DIMENSION_NAME = "order_status",
+                ENTITY_NAME = "orders", EXPRESSION = "o.status", DATA_TYPE = "VARCHAR(20)",
+                DISPLAY_NAME = "Order Status", DESCRIPTION = "Status",
+                FORMAT_HINT = nil, IS_CERTIFIED = true}}
+        elseif normalized:find("SELECT OBJECT_NAME, METRIC_NAME", 1, true) then
+            return {{OBJECT_NAME = "SALES", METRIC_NAME = "total_revenue"}}
+        end
+        error("unexpected export query: " .. normalized)
+    end, function()
+        return export_semantic_definition("sales", nil, nil)
+    end)
+    assert_equal(#rows, 5)
+    assert_equal(rows[1][1], "ENTITY")
+    assert_contains(rows[1][3], "ADD_ENTITY")
+    assert_equal(rows[5][1], "METRIC")
+
+    local dimensions = with_query(function(sql)
+        if tostring(sql):find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            return {{DIMENSION_NAME = "order_status", ENTITY_NAME = "orders",
+                EXPRESSION = "o.status", DATA_TYPE = "VARCHAR(20)",
+                DISPLAY_NAME = "Order Status", DESCRIPTION = "Status",
+                IS_CERTIFIED = true}}
+        end
+        if tostring(sql):find("SELECT METRIC_NAME", 1, true) then return {} end
+        error("unexpected object export query")
+    end, function()
+        return export_semantic_definition("sales", "SALES", "DIMENSION")
+    end)
+    assert_equal(#dimensions, 1)
+    assert_equal(dimensions[1][1], "DIMENSION")
+end)
+
+test("semantic preprocessor covers authoring discovery and explain commands", function()
+    local commands = {
+        {"SHOW SEMANTIC VIEWS", "OK", "SEMANTIC_CATALOG.SEMANTIC_OBJECTS"},
+        {"SHOW SEMANTIC VIEW sales.SALES", "OK", "FIELDS_FOR_AGENT"},
+        {"SHOW CERTIFIED SEMANTIC METRICS IN sales.SALES LIKE 'rev'", "OK", "IS_CERTIFIED = TRUE"},
+        {"SHOW SEMANTIC DIMENSIONS FOR METRIC sales.SALES.total_revenue", "OK", "IS_VALID = TRUE"},
+        {"SHOW ALL SEMANTIC DIMENSIONS FOR METRIC sales.SALES.total_revenue", "OK", "REASON_CODE"},
+        {"DESCRIBE SEMANTIC METRIC sales.SALES.total_revenue", "OK", "DESCRIBE_SEMANTIC_METRIC"},
+        {"EXPLAIN SEMANTIC METRIC sales.SALES.total_revenue", "OK", "EXPLAIN_SEMANTIC_METRIC"},
+        {"EXPORT SEMANTIC METRIC sales.SALES.total_revenue", "OK", "EXPORT_SEMANTIC_DEFINITION"},
+        {"EXPORT SEMANTIC VIEW sales.SALES", "OK", "EXPORT_SEMANTIC_DEFINITION"},
+        {"EXPORT SEMANTIC MODEL sales", "OK", "EXPORT_SEMANTIC_DEFINITION"},
+        {"EXPLAIN SEMANTIC QUERY SELECT * FROM SEMANTIC_SALES.SALES", "OK", "COMPILE_SQL_DEBUG"},
+    }
+    for _, case in ipairs(commands) do
+        local result = preprocess_sql(case[1])
+        assert_equal(result.status, case[2])
+        assert_contains(result.generated_sql, case[3])
+    end
+    local definition = preprocess_sql([[ALTER SEMANTIC VIEW sales.SALES
+        ADD OR REPLACE METRIC revenue AS SUM(net_revenue)
+        ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC]])
+    assert_equal(definition.status, "OK")
+    assert_contains(definition.generated_sql, "APPLY_SEMANTIC_DEFINITION")
+    local invalid = preprocess_sql("ALTER SEMANTIC VIEW sales")
+    assert_equal(invalid.status, "ERROR")
+    local unchanged = preprocess_sql("SELECT 1")
+    assert_equal(unchanged.status, "UNCHANGED")
+
+    local errors = {
+        {"SHOW SEMANTIC VIEW sales", "SEMANTIC_DDL_067"},
+        {"SHOW SEMANTIC METRICS", "SEMANTIC_DDL_060"},
+        {"SHOW SEMANTIC DIMENSIONS FOR METRIC sales", "SEMANTIC_DDL_061"},
+        {"DESCRIBE SEMANTIC METRIC sales", "SEMANTIC_DDL_062"},
+        {"EXPLAIN SEMANTIC METRIC sales", "SEMANTIC_DDL_063"},
+        {"EXPORT SEMANTIC METRIC sales", "SEMANTIC_DDL_064"},
+        {"EXPORT SEMANTIC VIEW sales", "SEMANTIC_DDL_065"},
+        {"EXPORT SEMANTIC MODEL", "SEMANTIC_DDL_066"},
+    }
+    for _, case in ipairs(errors) do
+        local result = preprocess_sql(case[1])
+        assert_equal(result.status, "ERROR")
+        assert_equal(result.error_code, case[2])
+    end
+end)
+
+test("Databricks public API returns dry-run plans and stable diagnostics", function()
+    local yaml = read_text("tests/fixtures/databricks/orders_metric_view.yaml")
+    local result = import_databricks_metric_view(yaml, "dbx_public", "semantic_dbx", false)
+    assert_equal(result[1][1], "OK")
+    assert_equal(result[1][4], "dbx_public")
+    assert_contains(result[1][5], "CREATE_MODEL('dbx_public'")
+    local missing = import_databricks_metric_view(yaml, nil, nil, false)
+    assert_equal(missing[1][1], "ERROR")
+    assert_equal(missing[1][2], "DBX_IMPORT_020")
+end)

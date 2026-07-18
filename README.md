@@ -347,7 +347,10 @@ materialization Lua sources with in-memory catalog fixtures. The suite reports
 and enforces per-runtime active-line coverage plus named decision-outcome
 coverage. The full Nano smoke workflow runs this lane first and then verifies
 packaging, installation, compilation, generated SQL execution, concurrency,
-and integrations against Exasol.
+host-side regressions, extended Semantic SQL, SQL fixtures, non-SYS model-role
+grant/revoke and raw-source isolation, and integrations against Exasol. The
+database-free lane and packaging consistency are enforced by the checked-in
+GitHub Actions workflow.
 
 For explicit cold/warm latency, deployed-model breadth, and dimension
 cardinality measurements, run:

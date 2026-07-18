@@ -299,3 +299,307 @@ test("compiler rejects malformed filters and ordering contracts", function()
     assert_equal(direction, nil)
     assert_equal(direction_err.error_code, "SEMANTIC_REQUEST_062")
 end)
+
+local function with_query(mock, fn)
+    local original_query = query
+    query = mock
+    local ok, result, second, third = xpcall(fn, debug.traceback)
+    query = original_query
+    if not ok then error(result, 0) end
+    return result, second, third
+end
+
+local function compiler_query_fixture(options)
+    options = options or {}
+    local state = {
+        cache = {},
+        cache_inserts = 0,
+        cache_touches = 0,
+        model_attempts = 0,
+        request_log_attempts = 0,
+        request_logs = {},
+        query_logs = {},
+    }
+
+    local function mock(sql, params)
+        local normalized = tostring(sql):gsub("%s+", " ")
+        params = params or {}
+
+        if normalized:find("SELECT GENERATED_SQL, PLAN_JSON, VALIDATION_RUN_ID", 1, true) then
+            local cached = state.cache[params.cache_key]
+            return cached and {{cached.generated_sql, cached.plan_json,
+                cached.validation_run_id}} or {}
+        elseif normalized:find("INSERT INTO SYS_SEMANTIC.COMPILE_CACHE", 1, true) then
+            state.cache_inserts = state.cache_inserts + 1
+            if options.cache_insert_error then error("cache insert unavailable") end
+            state.cache[params.cache_key] = {
+                generated_sql = params.generated_sql,
+                plan_json = params.plan_json,
+                validation_run_id = params.validation_run_id,
+            }
+            return {}
+        elseif normalized:find("UPDATE SYS_SEMANTIC.COMPILE_CACHE", 1, true) then
+            state.cache_touches = state.cache_touches + 1
+            if options.cache_touch_error then error("cache touch unavailable") end
+            return {}
+        elseif normalized:find("INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG", 1, true) then
+            state.request_log_attempts = state.request_log_attempts + 1
+            if state.request_log_attempts <= (options.log_collisions or 0) then
+                error("GlobalTransactionRollback while logging")
+            end
+            state.request_logs[#state.request_logs + 1] = params
+            return {}
+        elseif normalized:find("SELECT MAX(AGENT_REQUEST_ID)", 1, true) then
+            return {{501}}
+        elseif normalized:find("INSERT INTO SYS_SEMANTIC.QUERY_LOG", 1, true) then
+            state.query_logs[#state.query_logs + 1] = params
+            return {}
+        elseif normalized:find("SELECT MAX(QUERY_LOG_ID)", 1, true) then
+            return {{601}}
+        elseif normalized:find("WHERE UPPER(m.MODEL_NAME)", 1, true) then
+            state.model_attempts = state.model_attempts + 1
+            if state.model_attempts <= (options.model_collisions or 0) then
+                error("Transaction collision while loading model")
+            end
+            if options.model_missing then return {} end
+            return {{1, 2, 3}}
+        elseif normalized:find("WHERE UPPER(m.PUBLISHED_SCHEMA)", 1, true) then
+            if options.schema_missing or params.schema_name ~= "SEMANTIC_SALES" then
+                return {}
+            end
+            return {{1, "sales", 2, 3}}
+        elseif normalized:find("FROM SYS_SEMANTIC.SEMANTIC_OBJECTS", 1, true) then
+            if options.object_missing then return {} end
+            return {{40, "SALES", 1}}
+        elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1, "orders", "MART", "ORDERS", "o"}}
+        elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
+                "Order Status"}}
+        elseif normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            return {{30, "total_revenue", 1, "SUM(net_revenue)", nil,
+                "ADDITIVE", "DECIMAL(18,2)", "Total Revenue", "SIMPLE"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.FACTS", 1, true) then
+            return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
+            return {}
+        elseif normalized:find("FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
+            return {{"METRIC", 30, "revenue"}, {"DIMENSION", 10, "status"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES", 1, true) then
+            return {{"FACT", 20}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS", 1, true) then
+            return {}
+        elseif normalized:find("FROM SYS_SEMANTIC.VALIDATION_RUNS", 1, true) then
+            if options.no_validation then return {} end
+            return {{77, "OK", 0}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX", 1, true) then
+            if options.missing_matrix then return {} end
+            if options.invalid_matrix then
+                return {{false, "FANOUT_REQUIRES_POLICY", nil}}
+            end
+            return {{true, "OK", "SELF"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS", 1, true) then
+            return {{"MEASURE", "FACT", "net_revenue"}}
+        end
+        error("unexpected compiler fixture query: " .. normalized)
+    end
+    return mock, state
+end
+
+local function compile_with_fixture(request, options)
+    local mock, state = compiler_query_fixture(options)
+    local result = with_query(mock, function()
+        return compile_request_json(api.json_encode(request))
+    end)
+    return result, state, mock
+end
+
+test("structured compiler executes catalog pipeline and reuses cache", function()
+    local mock, state = compiler_query_fixture()
+    local request_json = api.json_encode({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+        dimensions = {"status"},
+        filters = {{field = "status", op = "=", value = "COMPLETE"}},
+        having = {{field = "total_revenue", op = ">", value = 100}},
+        order_by = {{field = "total_revenue", direction = "DESC"}},
+        limit = 25,
+        client = "lua-tests",
+        purpose = "compiler pipeline coverage",
+    })
+
+    local first = with_query(mock, function()
+        return compile_request_json(request_json)
+    end)
+    assert_equal(first.status, "OK")
+    assert_equal(first.agent_request_id, 501)
+    assert_branch("compiler.public.cache", first.cache_hit == true, false)
+    assert_contains(first.generated_sql, 'FROM "MART"."ORDERS" o')
+    assert_contains(first.generated_sql, "UPPER(o.status) = UPPER('COMPLETE')")
+    assert_contains(first.generated_sql, "HAVING SUM((o.amount)) > 100")
+    assert_contains(first.generated_sql, 'ORDER BY "total_revenue" DESC')
+    assert_contains(first.generated_sql, "LIMIT 25")
+    assert_contains(first.plan_json, '"validation_run_id":77')
+    assert_contains(first.plan_json, '"input_roles"')
+    assert_equal(state.cache_inserts, 1)
+    assert_equal(#state.request_logs, 1)
+    assert_equal(state.request_logs[1].client_name, "lua-tests")
+
+    local second = with_query(mock, function()
+        return compile_request_json(request_json)
+    end)
+    assert_equal(second.status, "OK")
+    assert_branch("compiler.public.cache", second.cache_hit == true, true)
+    assert_equal(second.generated_sql, first.generated_sql)
+    assert_equal(second.agent_request_id, 501)
+    assert_equal(state.cache_touches, 1)
+    assert_equal(state.cache_inserts, 1)
+    assert_equal(#state.request_logs, 2)
+end)
+
+test("structured compiler maps request and validation failures", function()
+    local malformed_mock = compiler_query_fixture()
+    local malformed = with_query(malformed_mock, function()
+        return compile_request_json('{"model":]')
+    end)
+    assert_equal(malformed.error_code, "SEMANTIC_REQUEST_001")
+
+    local cases = {
+        {{object = "SALES", metrics = {"revenue"}}, nil, "SEMANTIC_REQUEST_002"},
+        {{model = "sales", metrics = {"revenue"}}, nil, "SEMANTIC_REQUEST_003"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}},
+            {model_missing = true}, "SEMANTIC_REQUEST_011"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}},
+            {object_missing = true}, "SEMANTIC_REQUEST_012"},
+        {{model = "sales", object = "SALES"}, nil, "SEMANTIC_REQUEST_023"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}},
+            {no_validation = true}, "SEMANTIC_REQUEST_010"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"},
+            dimensions = {"status"}}, {missing_matrix = true}, "SEMANTIC_REQUEST_040"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"},
+            dimensions = {"status"}}, {invalid_matrix = true}, "SEMANTIC_REQUEST_041"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}, limit = 0},
+            nil, "SEMANTIC_REQUEST_050"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}, limit = 10001},
+            nil, "SEMANTIC_REQUEST_051"},
+        {{model = "sales", object = "SALES", dimensions = {"status"},
+            having = {{field = "total_revenue", op = ">", value = 1}}},
+            nil, "SEMANTIC_REQUEST_026"},
+    }
+    for _, case in ipairs(cases) do
+        local result, state = compile_with_fixture(case[1], case[2])
+        assert_equal(result.status, "ERROR")
+        assert_equal(result.error_code, case[3])
+        assert_equal(state.cache_inserts, 0)
+        assert_equal(#state.request_logs, 1)
+    end
+end)
+
+test("semantic SQL public APIs compile debug and preserve non-semantic SQL", function()
+    local mock, state = compiler_query_fixture()
+    local semantic_sql = [[
+        SELECT order_status, MEASURE(total_revenue)
+        FROM SEMANTIC_SALES.SALES
+        WHERE order_status = 'COMPLETE'
+        GROUP BY ALL
+        ORDER BY total_revenue DESC
+        LIMIT 5
+    ]]
+    local compiled, request, model = with_query(mock, function()
+        return compile_sql(semantic_sql)
+    end)
+    assert_equal(compiled.status, "OK")
+    assert_equal(model.model_name, "sales")
+    assert_equal(request.metrics[1], "total_revenue")
+    assert_contains(compiled.generated_sql, "GROUP BY o.status")
+    assert_contains(compiled.generated_sql, "LIMIT 5")
+
+    local debugged = with_query(mock, function()
+        return compile_sql_debug(semantic_sql, "lua-debug")
+    end)
+    assert_equal(debugged.status, "OK")
+    assert_equal(debugged.query_log_id, 601)
+    assert_equal(#state.query_logs, 1)
+    assert_equal(state.query_logs[1].client_name, "lua-debug")
+
+    local unchanged = compile_sql_for_preprocessor("UPDATE MART.ORDERS SET amount = 1")
+    assert_equal(unchanged.status, "UNCHANGED")
+    assert_equal(unchanged.generated_sql, "UPDATE MART.ORDERS SET amount = 1")
+
+    local unknown_mock = compiler_query_fixture({schema_missing = true})
+    local unknown = with_query(unknown_mock, function()
+        return compile_sql_for_preprocessor("SELECT * FROM OTHER_SCHEMA.ORDERS")
+    end)
+    assert_equal(unknown.status, "UNCHANGED")
+    assert_equal(unknown.generated_sql, "SELECT * FROM OTHER_SCHEMA.ORDERS")
+
+    local rejected = compile_sql("DELETE FROM SEMANTIC_SALES.SALES")
+    assert_equal(rejected.status, "ERROR")
+    assert_equal(rejected.error_code, "SEMANTIC_QUERY_009")
+end)
+
+test("materialized SQL renders every supported rollup policy", function()
+    local ctx = compiler_context()
+    local dimension = ctx.dimensions[1]
+    local metric = ctx.metrics[1]
+    local materialization = {
+        physical_schema = "MART",
+        physical_object = "SALES_AGG",
+        columns = {
+            [dimension.kind .. ":" .. dimension.id] = {physical_column = "REGION"},
+            [metric.kind .. ":" .. metric.id] = {physical_column = "REVENUE"},
+        },
+        metric_rollup_policies = {},
+    }
+    local expected = {
+        DIRECT = 'mat."REVENUE" AS "total_revenue"',
+        SUM = 'SUM(mat."REVENUE") AS "total_revenue"',
+        MIN = 'MIN(mat."REVENUE") AS "total_revenue"',
+        MAX = 'MAX(mat."REVENUE") AS "total_revenue"',
+        COUNT = 'SUM(mat."REVENUE") AS "total_revenue"',
+    }
+    for policy, fragment in pairs(expected) do
+        materialization.metric_rollup_policies[metric.kind .. ":" .. metric.id] = policy
+        local sql = api.build_materialized_sql(ctx, {dimension}, {metric}, {}, {}, 10,
+            materialization)
+        assert_contains(sql, fragment)
+        assert_contains(sql, 'FROM "MART"."SALES_AGG" mat')
+        if policy == "DIRECT" then
+            assert_equal(sql:find("GROUP BY", 1, true), nil)
+        else
+            assert_contains(sql, 'GROUP BY mat."REGION"')
+        end
+    end
+
+    materialization.metric_rollup_policies[metric.kind .. ":" .. metric.id] = "DIRECT"
+    local filtered = api.build_materialized_sql(ctx, {dimension}, {metric}, {{
+        field_kind = dimension.kind, field_id = dimension.id, op = "=",
+        value = "West", data_type = dimension.data_type,
+    }}, {}, 5, materialization)
+    assert_contains(filtered, 'WHERE UPPER(mat."REGION") = UPPER(\'West\')')
+end)
+
+test("compiler retries collisions and tolerates best-effort cache failures", function()
+    local request = {model = "sales", object = "SALES", metrics = {"revenue"}}
+    local retried, state = compile_with_fixture(request,
+        {model_collisions = 2, log_collisions = 2})
+    assert_equal(retried.status, "OK")
+    assert_equal(retried.agent_request_id, 501)
+    assert_equal(state.model_attempts, 3)
+    assert_equal(state.request_log_attempts, 3)
+
+    local cache_error, cache_state = compile_with_fixture(request,
+        {cache_insert_error = true})
+    assert_equal(cache_error.status, "OK")
+    assert_equal(cache_state.cache_inserts, 1)
+
+    local mock, touch_state = compiler_query_fixture({cache_touch_error = true})
+    local payload = api.json_encode(request)
+    local first = with_query(mock, function() return compile_request_json(payload) end)
+    local second = with_query(mock, function() return compile_request_json(payload) end)
+    assert_equal(first.status, "OK")
+    assert_equal(second.status, "OK")
+    assert_equal(second.cache_hit, true)
+    assert_equal(touch_state.cache_touches, 1)
+end)

@@ -51,7 +51,8 @@ load_runtime("lua/semantic_layer/compiler/materializations.lua", function()
 end)
 load_runtime("lua/semantic_layer/admin/semantic_definition.lua", function()
     return {apply_semantic_definition, apply_normalized_osi_import,
-        import_databricks_metric_view, preprocess_sql,
+        import_databricks_metric_view, describe_semantic_metric,
+        explain_semantic_metric, export_semantic_definition, preprocess_sql,
         ESV_SEMANTIC_DEFINITION_TEST_API}
 end)
 load_runtime("lua/semantic_layer/agent/runtime.lua", function()

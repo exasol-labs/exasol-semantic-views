@@ -2715,6 +2715,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         plan_joins = plan_joins,
         build_order_by = build_order_by,
         build_sql = build_sql,
+        build_materialized_sql = build_materialized_sql,
         sql_tokens = sql_tokens,
         split_top_level = split_top_level,
         unwrap_measure_part = unwrap_measure_part,

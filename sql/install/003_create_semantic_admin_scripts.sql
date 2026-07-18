@@ -2977,20 +2977,21 @@ local dup_rows = query([[
     WHERE MODEL_ID = :model_id AND UPPER(ROLE_NAME) = UPPER(:role_name) AND STATUS = 'ACTIVE'
     LIMIT 1
 ]], {model_id = model_id, role_name = role_name})
+local grant_status = 'GRANTED'
 if dup_rows ~= nil and #dup_rows > 0 then
-    return {{ model_name_actual, role_name, published_schema, 'ALREADY_GRANTED' }}
+    grant_status = 'ALREADY_GRANTED'
+else
+    query([[
+        INSERT INTO SYS_SEMANTIC.MODEL_ROLE_GRANTS (MODEL_ID, MODEL_NAME, ROLE_NAME, PUBLISHED_SCHEMA)
+        VALUES (:model_id, :model_name, :role_name, :published_schema)
+    ]], {model_id = model_id, model_name = model_name_actual, role_name = role_name, published_schema = published_schema})
 end
-
-query([[
-    INSERT INTO SYS_SEMANTIC.MODEL_ROLE_GRANTS (MODEL_ID, MODEL_NAME, ROLE_NAME, PUBLISHED_SCHEMA)
-    VALUES (:model_id, :model_name, :role_name, :published_schema)
-]], {model_id = model_id, model_name = model_name_actual, role_name = role_name, published_schema = published_schema})
 
 if published_schema ~= nil and tostring(published_schema) ~= "" then
     query("GRANT SELECT ON SCHEMA " .. quote_ident(published_schema) .. " TO " .. quote_ident(role_name))
 end
 
-exit({{ model_name_actual, role_name, published_schema, 'GRANTED' }}, [[
+exit({{ model_name_actual, role_name, published_schema, grant_status }}, [[
     MODEL_NAME VARCHAR(256),
     ROLE_NAME VARCHAR(256),
     PUBLISHED_SCHEMA VARCHAR(256),
@@ -4798,11 +4799,17 @@ if rawget(_G, "ESV_TEST_MODE") then
         unsupported_functions = unsupported_functions,
         dependency_tokens = dependency_tokens,
         extract_json_array_values = extract_json_array_values,
+        validate_structural_rules = validate_structural_rules,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
         relationship_edges = relationship_edges,
         find_path = find_path,
+        validate_expressions = validate_expressions,
+        extract_metric_dependencies = extract_metric_dependencies,
         detect_metric_cycles = detect_metric_cycles,
+        validate_agent_metadata = validate_agent_metadata,
+        compute_metric_dimension_matrix = compute_metric_dimension_matrix,
+        validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,
     }
 end
 /
@@ -7816,6 +7823,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         plan_joins = plan_joins,
         build_order_by = build_order_by,
         build_sql = build_sql,
+        build_materialized_sql = build_materialized_sql,
         sql_tokens = sql_tokens,
         split_top_level = split_top_level,
         unwrap_measure_part = unwrap_measure_part,
