@@ -21,6 +21,7 @@ from typing import Any
 
 THREADS = int(os.environ.get("CONCURRENT_THREADS", "6"))
 ITERATIONS = int(os.environ.get("CONCURRENT_ITERATIONS", "8"))
+P95_MAX_MS = float(os.environ.get("CONCURRENT_P95_MAX_MS", "5000"))
 
 
 def connect():
@@ -126,6 +127,12 @@ def main() -> None:
     print(f"ok concurrent compile wall-clock: {wall_clock * 1000:.0f} ms across {THREADS} threads")
     print(f"ok concurrent compile p50/p95/max latency (ms): "
           f"{percentile(latencies, 50):.0f} / {percentile(latencies, 95):.0f} / {max(latencies):.0f}")
+
+    p95 = percentile(latencies, 95)
+    if p95 > P95_MAX_MS:
+        print(f"FAIL concurrent compile p95 {p95:.0f} ms exceeds {P95_MAX_MS:.0f} ms")
+        raise SystemExit(1)
+    print(f"ok concurrent compile p95 threshold: <= {P95_MAX_MS:.0f} ms")
 
     if statuses != {"OK": expected}:
         print(f"FAIL non-OK statuses: {statuses}")

@@ -882,3 +882,15 @@ describe_semantic_object = M.describe_semantic_object
 get_business_glossary = M.get_business_glossary
 explain_compiled_sql = M.explain_compiled_sql
 record_agent_feedback = M.record_agent_feedback
+
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_AGENT_TEST_API = {
+        json_encode = json_encode,
+        rows_to_objects = rows_to_objects,
+        search_term = search_term,
+        like_pattern = like_pattern,
+        json_unescape = json_unescape,
+        extract_selected_materialization = extract_selected_materialization,
+        extract_json_array_text = extract_json_array_text,
+    }
+end

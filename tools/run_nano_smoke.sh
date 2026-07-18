@@ -10,6 +10,10 @@ if [ -z "${PYTHON_BIN:-}" ]; then
 fi
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 
+# Fast database-free runtime tests run first so parser/planner regressions fail
+# before the slower clean install and Nano integration suite.
+sh tools/run_lua_tests.sh
+
 # Phase 1: install the extension and load the base sales model from scratch.
 # --reset drops all managed schemas so this is always a clean run.
 # --example loads sales_physical_model and sales_model_seed.
@@ -37,6 +41,11 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 # re-run the full validator, causing GlobalTransactionRollback collisions for
 # concurrent callers. Asserts every compile in a 6×8 grid returns STATUS=OK.
 "$PYTHON_BIN" tools/verify_concurrent_compile.py
+
+# Cold/warm compiler latency, broadest visible request, and dimension
+# cardinality/execution probes. Thresholds are configurable for dedicated
+# large-model CI fixtures; see docs/runtime-testing.md.
+"$PYTHON_BIN" tools/verify_runtime_performance.py
 
 # Server-side compile cache (BUG-D-002): identical repeat requests should hit
 # the cache, be flagged CACHE_HIT in AGENT_REQUEST_LOG, and be invalidated by

@@ -249,3 +249,11 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
 end
 
 select_materialization = M.select_materialization
+
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_MATERIALIZATION_TEST_API = {
+        select_materialization = M.select_materialization,
+        supported_freshness = supported_freshness,
+        allowed_rollup_policy = allowed_rollup_policy,
+    }
+end

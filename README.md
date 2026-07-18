@@ -334,6 +334,31 @@ PYTHON_BIN=../exasol-json-tables/.venv/bin/python sh tools/run_nano_smoke.sh
 After the smoke test, try the semantic SQL example above in a session after
 enabling semantic SQL.
 
+## Testing
+
+Run the fast database-free Lua runtime suite:
+
+```sh
+sh tools/run_lua_tests.sh
+```
+
+It executes the canonical compiler, validator, semantic-definition, agent, and
+materialization Lua sources with in-memory catalog fixtures. The suite reports
+and enforces per-runtime active-line coverage plus named decision-outcome
+coverage. The full Nano smoke workflow runs this lane first and then verifies
+packaging, installation, compilation, generated SQL execution, concurrency,
+and integrations against Exasol.
+
+For explicit cold/warm latency, deployed-model breadth, and dimension
+cardinality measurements, run:
+
+```sh
+python3 tools/verify_runtime_performance.py
+```
+
+See [Runtime testing](docs/runtime-testing.md) for coverage scope, thresholds,
+and large/high-cardinality CI configuration.
+
 ## Installation
 
 Point the installer at a running Exasol instance and run:
@@ -379,6 +404,7 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
   - [Semantic compiler](docs/semantic-compiler.md)
   - [Semantic SQL preprocessor](docs/semantic-sql-preprocessor.md)
   - [Semantic catalog](docs/semantic-catalog.md)
+  - [Runtime testing](docs/runtime-testing.md)
 - Agents
   - [Agent contract](docs/agent-contract.md)
   - [Analyst skill](skills/exasol-semantic-analyst/SKILL.md) — answering business questions

@@ -22,11 +22,17 @@ def split_exasol_sql(text: str) -> list[str]:
 
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
-        if not in_single and not in_double and line.strip() == "/":
+        # A slash on its own is Exasol's script terminator. Script bodies are
+        # Lua, so SQL quote tracking is not meaningful there (escaped Lua
+        # strings can otherwise leave in_double set and absorb the next
+        # script into the current statement).
+        if line.strip() == "/":
             statement = "\n".join(current).strip()
             if statement:
                 statements.append(statement)
             current = []
+            in_single = False
+            in_double = False
             continue
 
         idx = 0

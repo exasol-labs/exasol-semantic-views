@@ -30,6 +30,16 @@ python3 tools/install.py --example
 sh tools/run_nano_smoke.sh
 ```
 
+**Run database-free Lua runtime tests with coverage:**
+```sh
+sh tools/run_lua_tests.sh
+```
+
+**Run the live cold/warm and scale probe** (requires an installed model):
+```sh
+python3 tools/verify_runtime_performance.py
+```
+
 **Run a single milestone verification:**
 ```sh
 python3 tools/verify_milestone3.py   # structured request compiler

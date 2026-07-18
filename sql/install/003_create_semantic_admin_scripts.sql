@@ -4784,6 +4784,23 @@ function M.validate_model(model_name_arg)
 end
 
 validate_model = M.validate_model
+
+-- Test-only pure helpers. See the equivalent compiler block for why this is
+-- gated instead of becoming part of the installed runtime contract.
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_VALIDATOR_TEST_API = {
+        parse_json_text = parse_json_text,
+        valid_json_text = valid_json_text,
+        strip_string_literals = strip_string_literals,
+        aliases_in_expression = aliases_in_expression,
+        column_refs_in_expression = column_refs_in_expression,
+        schema_qualified_functions = schema_qualified_functions,
+        unsupported_functions = unsupported_functions,
+        dependency_tokens = dependency_tokens,
+        extract_json_array_values = extract_json_array_values,
+        find_path = find_path,
+    }
+end
 /
 -- END GENERATED VALIDATOR_RUNTIME
 
@@ -5067,6 +5084,14 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
 end
 
 select_materialization = M.select_materialization
+
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_MATERIALIZATION_TEST_API = {
+        select_materialization = M.select_materialization,
+        supported_freshness = supported_freshness,
+        allowed_rollup_policy = allowed_rollup_policy,
+    }
+end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
@@ -7759,6 +7784,37 @@ compile_request_json = M.compile_request_json
 compile_sql = M.compile_sql
 compile_sql_debug = M.compile_sql_debug
 compile_sql_for_preprocessor = M.compile_sql_for_preprocessor
+
+-- Database-free tests opt into this deliberately small pure-function surface.
+-- Exasol never defines ESV_TEST_MODE, so the installed runtime's public API is
+-- unchanged. Keeping the seam here lets the unit suite exercise parser,
+-- normalization, expression, and predicate behavior without mocking a whole
+-- database catalog.
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_COMPILER_TEST_API = {
+        json_encode = json_encode,
+        json_decode = json_decode,
+        canonical_request_text = canonical_request_text,
+        compile_cache_key = compile_cache_key,
+        quote_ident = quote_ident,
+        quote_qualified = quote_qualified,
+        sql_literal = sql_literal,
+        strip_string_literals = strip_string_literals,
+        aliases_in_expression = aliases_in_expression,
+        replace_identifiers = replace_identifiers,
+        apply_metric_filter = apply_metric_filter,
+        build_dimension_predicate = build_dimension_predicate,
+        sql_tokens = sql_tokens,
+        split_top_level = split_top_level,
+        unwrap_measure_part = unwrap_measure_part,
+        identifier_from_part = identifier_from_part,
+        alias_from_select_part = alias_from_select_part,
+        literal_from_tokens = literal_from_tokens,
+        find_top_level_clauses = find_top_level_clauses,
+        render_token_slice = render_token_slice,
+        collision_error = collision_error,
+    }
+end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON(
@@ -10540,8 +10596,8 @@ end
 local function dbx_split_lines(text)
     local lines = {}
     for line in string.gmatch(tostring(text) .. "\n", "([^\n]*)\n") do
-        line = string.gsub(line, "\r$", "")
-        lines[#lines + 1] = line
+        local normalized_line = string.gsub(line, "\r$", "")
+        lines[#lines + 1] = normalized_line
     end
     return lines
 end
@@ -11518,6 +11574,24 @@ describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition
 preprocess_sql = M.preprocess_sql
+
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_SEMANTIC_DEFINITION_TEST_API = {
+        json_encode = json_encode,
+        json_decode = json_decode,
+        tokenize = tokenize,
+        split_top_level_text = split_top_level_text,
+        parse_literal_list = parse_literal_list,
+        parse_filter = parse_filter,
+        aggregate_parts = aggregate_parts,
+        parse_definition = parse_definition,
+        parse_databricks_yaml = parse_databricks_yaml,
+        dbx_table_ref = dbx_table_ref,
+        dbx_split_filter = dbx_split_filter,
+        dbx_aggregate = dbx_aggregate,
+        dbx_unwrap_measures = dbx_unwrap_measures,
+    }
+end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(

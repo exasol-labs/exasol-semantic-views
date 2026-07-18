@@ -1720,3 +1720,20 @@ function M.validate_model(model_name_arg)
 end
 
 validate_model = M.validate_model
+
+-- Test-only pure helpers. See the equivalent compiler block for why this is
+-- gated instead of becoming part of the installed runtime contract.
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_VALIDATOR_TEST_API = {
+        parse_json_text = parse_json_text,
+        valid_json_text = valid_json_text,
+        strip_string_literals = strip_string_literals,
+        aliases_in_expression = aliases_in_expression,
+        column_refs_in_expression = column_refs_in_expression,
+        schema_qualified_functions = schema_qualified_functions,
+        unsupported_functions = unsupported_functions,
+        dependency_tokens = dependency_tokens,
+        extract_json_array_values = extract_json_array_values,
+        find_path = find_path,
+    }
+end

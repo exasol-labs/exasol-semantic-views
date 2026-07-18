@@ -2687,3 +2687,34 @@ compile_request_json = M.compile_request_json
 compile_sql = M.compile_sql
 compile_sql_debug = M.compile_sql_debug
 compile_sql_for_preprocessor = M.compile_sql_for_preprocessor
+
+-- Database-free tests opt into this deliberately small pure-function surface.
+-- Exasol never defines ESV_TEST_MODE, so the installed runtime's public API is
+-- unchanged. Keeping the seam here lets the unit suite exercise parser,
+-- normalization, expression, and predicate behavior without mocking a whole
+-- database catalog.
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_COMPILER_TEST_API = {
+        json_encode = json_encode,
+        json_decode = json_decode,
+        canonical_request_text = canonical_request_text,
+        compile_cache_key = compile_cache_key,
+        quote_ident = quote_ident,
+        quote_qualified = quote_qualified,
+        sql_literal = sql_literal,
+        strip_string_literals = strip_string_literals,
+        aliases_in_expression = aliases_in_expression,
+        replace_identifiers = replace_identifiers,
+        apply_metric_filter = apply_metric_filter,
+        build_dimension_predicate = build_dimension_predicate,
+        sql_tokens = sql_tokens,
+        split_top_level = split_top_level,
+        unwrap_measure_part = unwrap_measure_part,
+        identifier_from_part = identifier_from_part,
+        alias_from_select_part = alias_from_select_part,
+        literal_from_tokens = literal_from_tokens,
+        find_top_level_clauses = find_top_level_clauses,
+        render_token_slice = render_token_slice,
+        collision_error = collision_error,
+    }
+end

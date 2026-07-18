@@ -2674,8 +2674,8 @@ end
 local function dbx_split_lines(text)
     local lines = {}
     for line in string.gmatch(tostring(text) .. "\n", "([^\n]*)\n") do
-        line = string.gsub(line, "\r$", "")
-        lines[#lines + 1] = line
+        local normalized_line = string.gsub(line, "\r$", "")
+        lines[#lines + 1] = normalized_line
     end
     return lines
 end
@@ -3652,3 +3652,21 @@ describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition
 preprocess_sql = M.preprocess_sql
+
+if rawget(_G, "ESV_TEST_MODE") then
+    ESV_SEMANTIC_DEFINITION_TEST_API = {
+        json_encode = json_encode,
+        json_decode = json_decode,
+        tokenize = tokenize,
+        split_top_level_text = split_top_level_text,
+        parse_literal_list = parse_literal_list,
+        parse_filter = parse_filter,
+        aggregate_parts = aggregate_parts,
+        parse_definition = parse_definition,
+        parse_databricks_yaml = parse_databricks_yaml,
+        dbx_table_ref = dbx_table_ref,
+        dbx_split_filter = dbx_split_filter,
+        dbx_aggregate = dbx_aggregate,
+        dbx_unwrap_measures = dbx_unwrap_measures,
+    }
+end
