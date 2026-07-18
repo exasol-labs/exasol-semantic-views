@@ -4798,7 +4798,11 @@ if rawget(_G, "ESV_TEST_MODE") then
         unsupported_functions = unsupported_functions,
         dependency_tokens = dependency_tokens,
         extract_json_array_values = extract_json_array_values,
+        validate_custom_extensions = validate_custom_extensions,
+        validate_unique_keys = validate_unique_keys,
+        relationship_edges = relationship_edges,
         find_path = find_path,
+        detect_metric_cycles = detect_metric_cycles,
     }
 end
 /
@@ -7799,11 +7803,19 @@ if rawget(_G, "ESV_TEST_MODE") then
         quote_ident = quote_ident,
         quote_qualified = quote_qualified,
         sql_literal = sql_literal,
+        resolve_field = resolve_field,
+        relationship_edges = relationship_edges,
+        find_path = find_path,
         strip_string_literals = strip_string_literals,
         aliases_in_expression = aliases_in_expression,
         replace_identifiers = replace_identifiers,
+        expand_metric = expand_metric,
         apply_metric_filter = apply_metric_filter,
         build_dimension_predicate = build_dimension_predicate,
+        build_filters = build_filters,
+        plan_joins = plan_joins,
+        build_order_by = build_order_by,
+        build_sql = build_sql,
         sql_tokens = sql_tokens,
         split_top_level = split_top_level,
         unwrap_measure_part = unwrap_measure_part,
@@ -7812,6 +7824,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         literal_from_tokens = literal_from_tokens,
         find_top_level_clauses = find_top_level_clauses,
         render_token_slice = render_token_slice,
+        parse_where_filters = parse_where_filters,
+        parse_order_by = parse_order_by,
         collision_error = collision_error,
     }
 end
@@ -8444,8 +8458,9 @@ end
 local function clause_positions(tokens, start_index)
     local positions = {}
     local ordered = {}
+    local occupied_until = start_index - 1
     for i = start_index, #tokens do
-        if tokens[i].depth == 0 then
+        if i > occupied_until and tokens[i].depth == 0 then
             for _, words in ipairs(CLAUSES) do
                 local ok = true
                 for j, word in ipairs(words) do
@@ -8460,6 +8475,11 @@ local function clause_positions(tokens, start_index)
                         positions[key_name] = {index = i, words = words}
                         ordered[#ordered + 1] = {index = i, words = words, key = key_name}
                     end
+                    -- Longer clauses such as NON ADDITIVE BY contain tokens
+                    -- that are also valid shorter clauses. Once the longest
+                    -- ordered match wins, do not reinterpret its interior.
+                    occupied_until = i + #words - 1
+                    break
                 end
             end
         end
@@ -11585,11 +11605,15 @@ if rawget(_G, "ESV_TEST_MODE") then
         parse_filter = parse_filter,
         aggregate_parts = aggregate_parts,
         parse_definition = parse_definition,
+        model_names_from_plan = model_names_from_plan,
         parse_databricks_yaml = parse_databricks_yaml,
         dbx_table_ref = dbx_table_ref,
+        dbx_rewrite_expr = dbx_rewrite_expr,
         dbx_split_filter = dbx_split_filter,
         dbx_aggregate = dbx_aggregate,
         dbx_unwrap_measures = dbx_unwrap_measures,
+        dbx_translate = dbx_translate,
+        dbx_render_ddl = dbx_render_ddl,
     }
 end
 /

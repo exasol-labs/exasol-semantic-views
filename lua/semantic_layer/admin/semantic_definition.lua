@@ -522,8 +522,9 @@ end
 local function clause_positions(tokens, start_index)
     local positions = {}
     local ordered = {}
+    local occupied_until = start_index - 1
     for i = start_index, #tokens do
-        if tokens[i].depth == 0 then
+        if i > occupied_until and tokens[i].depth == 0 then
             for _, words in ipairs(CLAUSES) do
                 local ok = true
                 for j, word in ipairs(words) do
@@ -538,6 +539,11 @@ local function clause_positions(tokens, start_index)
                         positions[key_name] = {index = i, words = words}
                         ordered[#ordered + 1] = {index = i, words = words, key = key_name}
                     end
+                    -- Longer clauses such as NON ADDITIVE BY contain tokens
+                    -- that are also valid shorter clauses. Once the longest
+                    -- ordered match wins, do not reinterpret its interior.
+                    occupied_until = i + #words - 1
+                    break
                 end
             end
         end
@@ -3663,10 +3669,14 @@ if rawget(_G, "ESV_TEST_MODE") then
         parse_filter = parse_filter,
         aggregate_parts = aggregate_parts,
         parse_definition = parse_definition,
+        model_names_from_plan = model_names_from_plan,
         parse_databricks_yaml = parse_databricks_yaml,
         dbx_table_ref = dbx_table_ref,
+        dbx_rewrite_expr = dbx_rewrite_expr,
         dbx_split_filter = dbx_split_filter,
         dbx_aggregate = dbx_aggregate,
         dbx_unwrap_measures = dbx_unwrap_measures,
+        dbx_translate = dbx_translate,
+        dbx_render_ddl = dbx_render_ddl,
     }
 end

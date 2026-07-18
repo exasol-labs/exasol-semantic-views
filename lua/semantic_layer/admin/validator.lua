@@ -1734,6 +1734,10 @@ if rawget(_G, "ESV_TEST_MODE") then
         unsupported_functions = unsupported_functions,
         dependency_tokens = dependency_tokens,
         extract_json_array_values = extract_json_array_values,
+        validate_custom_extensions = validate_custom_extensions,
+        validate_unique_keys = validate_unique_keys,
+        relationship_edges = relationship_edges,
         find_path = find_path,
+        detect_metric_cycles = detect_metric_cycles,
     }
 end
