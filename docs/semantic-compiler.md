@@ -97,6 +97,20 @@ The structured compiler supports:
 8. Stable structured errors for malformed JSON, unknown fields, invalid limits,
    invalid metric/dimension pairs, and missing relationship paths.
 
+### Optional hierarchical JSON output
+
+The compiler deliberately returns flat relational SQL. For JSON-format nested
+results, an integration can compile and execute one or more governed semantic
+queries at the required grains, materialize those result sets with stable
+parent keys, and pass them to
+[Exasol JSON Tables structured results](https://github.com/exasol-labs/exasol-json-tables/blob/main/docs/structured-results.md).
+Its `structured_shape` contract describes root, object, and array branches; the
+wrapped result can then be emitted recursively with `TO_JSON(*)`. This is an
+optional post-processing layer, not part of `COMPILE_REQUEST_JSON`, and
+`TO_JSON` over an ordinary unwrapped result remains flat. The approach is
+analogous to [Malloy nested views](https://docs.malloydata.dev/documentation/language/nesting),
+which attach per-row subtables to a query result.
+
 Materialization selection is an optimization below both `COMPILE_REQUEST_JSON`
 and `COMPILE_SQL`. The compiler validates the semantic request first, then
 selects an active same-version aggregate materialization only when every

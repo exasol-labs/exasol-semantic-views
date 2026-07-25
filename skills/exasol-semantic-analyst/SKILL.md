@@ -185,6 +185,16 @@ When `STATUS = 'ERROR'`:
   user. Do not guess which field was meant.
 - Do not fall back to physical-table SQL. Return the error.
 
+### Hierarchical output
+
+If the user requests nested or document-shaped output, first compile every
+contributing result set through the semantic layer. When
+[Exasol JSON Tables](https://github.com/exasol-labs/exasol-json-tables) is
+available, its structured-results workflow can materialize those flat results
+as a root/child family and the wrapped surface can emit recursive JSON with
+`TO_JSON(*)`. Treat this as optional post-processing: do not claim that
+`COMPILE_REQUEST_JSON` or `TO_JSON` on an ordinary result creates hierarchy.
+
 ## Semantic SQL Path
 
 When the user has supplied semantic SQL directly, compile it explicitly rather

@@ -28,6 +28,13 @@ Databricks import path instead of manually rebuilding the model.
 Read [authoring-workflows.md](references/authoring-workflows.md) for copyable
 SQL and script examples.
 
+If a consumer requires JSON-format nested or document-shaped output, keep that
+shape outside metric definitions. Model and validate the dimensions and stable
+parent keys needed by each result grain; after semantic compilation,
+[Exasol JSON Tables structured results](https://github.com/exasol-labs/exasol-json-tables/blob/main/docs/structured-results.md)
+can optionally materialize the flat governed results as a root/child family and
+emit recursive JSON with `TO_JSON(*)`.
+
 ## Connection Requirements
 
 All `SEMANTIC_ADMIN` scripts must be called with `EXECUTE SCRIPT`, not

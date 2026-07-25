@@ -163,6 +163,16 @@ The database also exposes this contract in
 `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`, so adapters can discover the
 accepted keys without scraping documentation.
 
+### Optional hierarchical results
+
+When a caller needs JSON-format nested or document-shaped output, keep semantic
+validation and shaping separate: compile every contributing result set through
+this contract, execute the returned `GENERATED_SQL`, then optionally use
+[Exasol JSON Tables structured results](https://github.com/exasol-labs/exasol-json-tables/blob/main/docs/structured-results.md)
+to materialize a root/child result family and emit it with `TO_JSON(*)`.
+`COMPILE_REQUEST_JSON` itself returns flat relational SQL, and `TO_JSON` does
+not make an ordinary unwrapped result hierarchical.
+
 ## Error Codes and Retry
 
 `COMPILE_REQUEST_JSON` and `COMPILE_SQL` return `ERROR_CODE` values in two
