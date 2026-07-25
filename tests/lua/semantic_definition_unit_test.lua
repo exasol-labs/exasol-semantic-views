@@ -294,6 +294,35 @@ test("normalized OSI public API dispatches operations and reports failures", fun
     assert_contains(unsupported[1][9], "SEMANTIC_OSI_010")
 end)
 
+test("normalized OSI import dispatches structured relationship mappings", function()
+    local call = nil
+    local applied = with_query(function(sql, params)
+        call = {sql = sql, params = params}
+        if tostring(sql):find("ADD_RELATIONSHIP_KEY_MAPPING", 1, true) then
+            return {}
+        end
+        error("unexpected relationship mapping query: " .. tostring(sql))
+    end, function()
+        return apply_normalized_osi_import(api.json_encode({
+            operations = {{
+                operation = "add_relationship_key_mapping",
+                target = "SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING",
+                source_path = "$.relationships[0].from_columns[0]",
+                arguments = {
+                    model_name = "sales",
+                    relationship_name = "orders_customer",
+                    from_column_name = "customer_id",
+                    to_column_name = "customer_id",
+                    ordinal_position = 1,
+                },
+            }},
+        }), false, false)
+    end)
+    assert_equal(applied[1][1], "OK")
+    assert_contains(call.sql, "ADD_RELATIONSHIP_KEY_MAPPING")
+    assert_equal(call.params.ordinal_position, 1)
+end)
+
 test("metric describe explain and export APIs expose governed metadata", function()
     local result = with_query(function(sql)
         local normalized = tostring(sql):gsub("%s+", " ")
@@ -339,7 +368,11 @@ test("semantic export supports object and full-model catalog shapes", function()
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS r", 1, true) then
             return {{RELATIONSHIP_NAME = "orders_customer", FROM_ENTITY_NAME = "orders",
                 TO_ENTITY_NAME = "customers", JOIN_CONDITION = "o.customer_id = c.customer_id",
-                RELATIONSHIP_CARDINALITY = "MANY_TO_ONE", JOIN_TYPE = "LEFT"}}
+                RELATIONSHIP_CARDINALITY = "MANY_TO_ONE", JOIN_TYPE = "LEFT",
+                RELATIONSHIP_ID = 70}}
+        elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
+            return {{ORDINAL_POSITION = 1, FROM_COLUMN_NAME = "customer_id",
+                TO_COLUMN_NAME = "customer_id"}}
         elseif normalized:find("FROM SYS_SEMANTIC.FACTS f", 1, true) then
             return {{FACT_NAME = "net_revenue", ENTITY_NAME = "orders",
                 EXPRESSION = "o.amount", DATA_TYPE = "DECIMAL(18,2)",
@@ -360,6 +393,7 @@ test("semantic export supports object and full-model catalog shapes", function()
     assert_equal(#rows, 5)
     assert_equal(rows[1][1], "ENTITY")
     assert_contains(rows[1][3], "ADD_ENTITY")
+    assert_contains(rows[2][3], "ADD_RELATIONSHIP_KEY_MAPPING")
     assert_equal(rows[5][1], "METRIC")
 
     local dimensions = with_query(function(sql)

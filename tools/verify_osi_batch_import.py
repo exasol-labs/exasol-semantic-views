@@ -205,6 +205,18 @@ def main() -> int:
             ),
             3,
         )
+        assert_equal(
+            "structured relationship key mappings",
+            scalar(
+                con,
+                """
+                SELECT COUNT(*)
+                FROM SEMANTIC_CATALOG.RELATIONSHIP_KEY_MAPPINGS
+                WHERE MODEL_NAME = 'sales_osi_batch_import'
+                """,
+            ),
+            3,
+        )
         metric_rows = fetchall(
             con,
             """

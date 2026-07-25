@@ -189,6 +189,22 @@ def test_relationship_parser() -> None:
         ["order_id", "line_id"],
         ["order_id", "line_id"],
     )
+    assert osi.parse_relationship_columns(
+        relationship,
+        entities,
+        [
+            {
+                "ORDINAL_POSITION": 1,
+                "FROM_COLUMN_NAME": "tenant_id",
+                "TO_COLUMN_NAME": "tenant_id",
+            },
+            {
+                "ORDINAL_POSITION": 2,
+                "FROM_COLUMN_NAME": "customer_id",
+                "TO_COLUMN_NAME": "customer_id",
+            },
+        ],
+    ) == (["tenant_id", "customer_id"], ["tenant_id", "customer_id"])
 
 
 def plan_document(
@@ -320,6 +336,28 @@ def test_import_plan_complex_relationship_prefers_native_join_condition() -> Non
         "ol.customer_id = ch.customer_id AND ol.order_date >= ch.valid_from AND ol.order_date < ch.valid_to"
     )
     assert relationship["metadata"]["requires_native_join_condition"] is True
+
+
+def test_import_plan_emits_ordered_relationship_key_mappings() -> None:
+    if yaml is None:
+        return
+    plan = plan_document(
+        load_fixture(ROOT / "tests/fixtures/osi/sales_lossless.yaml"),
+        strict=True,
+    )
+    mappings = [
+        item
+        for item in plan["operations"]
+        if item["operation"] == "add_relationship_key_mapping"
+    ]
+    assert mappings
+    first = mappings[0]["arguments"]
+    assert first["ordinal_position"] == 1
+    assert first["from_column_name"]
+    assert first["to_column_name"]
+    assert osi.render_operation_sql(mappings[0]).startswith(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING("
+    )
 
 
 def test_import_plan_invalid_relationship_fixture_fails_stably() -> None:
@@ -1023,6 +1061,7 @@ def main() -> int:
     test_import_plan_warnings_as_errors_blocks()
     test_import_plan_missing_datatype_strict_blocks()
     test_import_plan_complex_relationship_prefers_native_join_condition()
+    test_import_plan_emits_ordered_relationship_key_mappings()
     test_import_plan_invalid_relationship_fixture_fails_stably()
     test_import_plan_lossless_preserves_native_metadata()
     test_import_plan_bigquery_dialect_fallback_warns_and_strict_blocks()

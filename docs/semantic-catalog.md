@@ -71,6 +71,9 @@ Milestone 1 adds catalog tables used by future Ossie/OSI import/export tooling:
   or preserved for later Ossie/OSI export.
 - `UNIQUE_KEY_COLUMNS`: ordered source columns or expressions that make up a
   unique key.
+- `RELATIONSHIP_KEY_MAPPINGS`: ordered source-column or expression pairs that
+  identify the two endpoints of a relationship without parsing
+  `JOIN_CONDITION`.
 
 The public views are available as:
 
@@ -78,6 +81,7 @@ The public views are available as:
 SEMANTIC_CATALOG.CUSTOM_EXTENSIONS
 SEMANTIC_CATALOG.UNIQUE_KEYS
 SEMANTIC_CATALOG.UNIQUE_KEY_COLUMNS
+SEMANTIC_CATALOG.RELATIONSHIP_KEY_MAPPINGS
 ```
 
 Extension payloads intentionally remain raw JSON strings. This matches Ossie
@@ -93,12 +97,16 @@ SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION
 SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
+SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
 ```
 
 `ADD_CUSTOM_EXTENSION` accepts non-Exasol vendor names without interpretation,
 so import/export can preserve third-party Ossie/OSI extensions. `ADD_UNIQUE_KEY`
 accepts `PRIMARY`, `UNIQUE`, and `ALTERNATE` key kinds. Unique key columns can
 store either a simple source column name or a native expression, but not both.
+Relationship mappings follow the same rule independently for each endpoint.
+They are optional for legacy single-branch compilation but required for
+grain-aware relationship proofs.
 
 ## SQL-Native Metric Definition Metadata
 

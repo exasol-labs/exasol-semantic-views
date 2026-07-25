@@ -372,17 +372,31 @@ local function compiler_query_fixture(options)
             if options.object_missing then return {} end
             return {{40, "SALES", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
-            return {{1, "orders", "MART", "ORDERS", "o"}}
+            return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
+                "One row per order"}}
         elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
             return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
                 "Order Status"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS mi", 1, true) then
+            return {{30, "MEASURE", "FACT", 20, "net_revenue", nil, nil, 1}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS mf", 1, true) then
+            return {{30, "LOCAL", "order_status = 'COMPLETE'",
+                "o.status = 'COMPLETE'", 10, 1, 1}}
         elseif normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
             return {{30, "total_revenue", 1, "SUM(net_revenue)", nil,
-                "ADDITIVE", "DECIMAL(18,2)", "Total Revenue", "SIMPLE"}}
+                "ADDITIVE", "DECIMAL(18,2)", "Total Revenue", "SIMPLE",
+                "SUM", "o.amount", nil, nil, nil, nil, nil,
+                '{"metric_type":"SIMPLE"}'}}
         elseif normalized:find("FROM SYS_SEMANTIC.FACTS", 1, true) then
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
             return {}
+        elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
+            return {}
+        elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEYS", 1, true) then
+            return {{50, 1, "orders_pk", "PRIMARY", "NATIVE"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS", 1, true) then
+            return {{50, 1, "order_id", nil}}
         elseif normalized:find("FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
             return {{"METRIC", 30, "revenue"}, {"DIMENSION", 10, "status"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES", 1, true) then

@@ -39,6 +39,9 @@ local function load_runtime(relative_path, roots)
     module_roots[relative_path] = roots()
 end
 
+load_runtime("lua/semantic_layer/shared/grain_graph.lua", function()
+    return {ESV_GRAIN_GRAPH}
+end)
 load_runtime("lua/semantic_layer/compiler/request_json.lua", function()
     return {compile_request_json, compile_sql, compile_sql_debug,
         compile_sql_for_preprocessor, ESV_COMPILER_TEST_API}
@@ -136,6 +139,7 @@ function assert_branch(name, actual, expected)
 end
 
 local specs = {
+    "tests/lua/grain_graph_unit_test.lua",
     "tests/lua/compiler_unit_test.lua",
     "tests/lua/validator_unit_test.lua",
     "tests/lua/materialization_unit_test.lua",

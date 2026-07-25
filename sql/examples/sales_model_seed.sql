@@ -49,6 +49,41 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
   'Product dimension'
 );
 
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'order_line', 'order_line_pk', 'PRIMARY',
+  'Order-line row grain', 'NATIVE'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'order_line', 'order_line_pk', 'order_id', NULL, 1
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'order_line', 'order_line_pk', 'line_id', NULL, 2
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'order', 'order_pk', 'PRIMARY',
+  'Order row grain', 'NATIVE'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'order', 'order_pk', 'order_id', NULL, 1
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'customer', 'customer_pk', 'PRIMARY',
+  'Customer row grain', 'NATIVE'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'customer', 'customer_pk', 'customer_id', NULL, 1
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'product', 'product_pk', 'PRIMARY',
+  'Product row grain', 'NATIVE'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'product', 'product_pk', 'product_id', NULL, 1
+);
+
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(
   'sales',
   'SALES',
@@ -66,6 +101,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'LEFT',
   NULL
 );
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
+  'sales', 'order_line_to_order', 'order_id', NULL, 'order_id', NULL, 1
+);
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'sales',
@@ -77,6 +115,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'LEFT',
   NULL
 );
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
+  'sales', 'order_to_customer', 'customer_id', NULL, 'customer_id', NULL, 1
+);
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'sales',
@@ -87,6 +128,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'MANY_TO_ONE',
   'LEFT',
   NULL
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
+  'sales', 'order_line_to_product', 'product_id', NULL, 'product_id', NULL, 1
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(

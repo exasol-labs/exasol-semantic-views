@@ -149,5 +149,9 @@ That lane:
 6. Uses the same materialization decision path as explicit agent and SQL
    compilation.
 
+Compilation accepts the latest completed validation run with zero errors.
+Warnings, including legacy relationships that do not yet have structured key
+mappings, do not block the existing single-branch compiler path.
+
 `tools/package_lua_scripts.py` embeds the compiler runtime, materialization
 runtime, and wrappers into `sql/install/003_create_semantic_admin_scripts.sql`.

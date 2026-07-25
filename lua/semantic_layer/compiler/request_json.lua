@@ -1,4 +1,5 @@
 local M = {}
+local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 if type(import) == "function" then
     import("SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME", "materializations")
@@ -721,12 +722,17 @@ local function load_catalog(model, object_name)
         fact_by_id = {},
         fact_by_name = {},
         relationships = {},
+        relationship_by_id = {},
+        unique_keys = {},
+        unique_key_by_id = {},
+        unique_keys_by_entity = {},
         canonical_fields = {},
         synonym_fields = {},
     }
 
     local entity_rows = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS
+        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS,
+               PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION
         FROM SYS_SEMANTIC.ENTITIES
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -740,6 +746,8 @@ local function load_catalog(model, object_name)
             source_schema = row_value(row, "SOURCE_SCHEMA", 3),
             source_object = row_value(row, "SOURCE_OBJECT", 4),
             alias = row_value(row, "SOURCE_ALIAS", 5),
+            primary_key_expr = row_value(row, "PRIMARY_KEY_EXPR", 6),
+            grain_description = row_value(row, "GRAIN_DESCRIPTION", 7),
         }
         ctx.entities[#ctx.entities + 1] = entity
         ctx.entity_by_id[key(entity.id)] = entity
@@ -777,7 +785,11 @@ local function load_catalog(model, object_name)
         SELECT mt.METRIC_ID, mt.METRIC_NAME, mt.BASE_ENTITY_ID, mt.EXPRESSION,
                COALESCE(mt.SQL_FILTER_EXPR, mt.FILTER_EXPR) AS FILTER_EXPR,
                mt.METRIC_TYPE, mt.DATA_TYPE, mt.DISPLAY_NAME,
-               COALESCE(mt.METRIC_KIND, mt.METRIC_TYPE) AS METRIC_KIND
+               COALESCE(mt.METRIC_KIND, mt.METRIC_TYPE) AS METRIC_KIND,
+               mt.AGGREGATION_FUNCTION, mt.MEASURE_EXPR,
+               mt.SEMANTIC_FILTER_EXPR, mt.SQL_FILTER_EXPR,
+               mt.DISTINCT_KEY_EXPR, mt.NON_ADDITIVE_DIMENSION_ID,
+               mt.WINDOW_SPEC_JSON, mt.TYPE_PARAMS_JSON
         FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
         JOIN SYS_SEMANTIC.METRICS mt
           ON mt.METRIC_ID = oc.OBJECT_REF_ID
@@ -799,14 +811,78 @@ local function load_catalog(model, object_name)
             data_type = row_value(row, "DATA_TYPE", 7),
             display_name = row_value(row, "DISPLAY_NAME", 8),
             metric_kind = row_value(row, "METRIC_KIND", 9),
+            aggregation_function = row_value(row, "AGGREGATION_FUNCTION", 10),
+            measure_expr = row_value(row, "MEASURE_EXPR", 11),
+            semantic_filter_expr = row_value(row, "SEMANTIC_FILTER_EXPR", 12),
+            sql_filter_expr = row_value(row, "SQL_FILTER_EXPR", 13),
+            distinct_key_expr = row_value(row, "DISTINCT_KEY_EXPR", 14),
+            non_additive_dimension_id = row_value(row, "NON_ADDITIVE_DIMENSION_ID", 15),
+            window_spec_json = row_value(row, "WINDOW_SPEC_JSON", 16),
+            type_params_json = row_value(row, "TYPE_PARAMS_JSON", 17),
+            inputs = {},
+            filters = {},
         }
         ctx.metrics[#ctx.metrics + 1] = metric
         ctx.metric_by_id[key(metric.id)] = metric
         ctx.canonical_fields[upper(metric.name)] = metric
     end
 
+    local metric_input_rows = query([[
+        SELECT mi.METRIC_ID, mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE,
+               mi.INPUT_OBJECT_ID, mi.EXPRESSION_ALIAS, mi.OFFSET_WINDOW,
+               mi.FILTER_EXPR, mi.ORDINAL_POSITION
+        FROM SYS_SEMANTIC.METRIC_INPUTS mi
+        JOIN SYS_SEMANTIC.METRICS mt
+          ON mt.METRIC_ID = mi.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY mi.METRIC_ID, mi.ORDINAL_POSITION
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(metric_input_rows or {}) do
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.inputs[#metric.inputs + 1] = {
+                role = row_value(row, "INPUT_ROLE", 2),
+                object_type = row_value(row, "INPUT_OBJECT_TYPE", 3),
+                object_id = row_value(row, "INPUT_OBJECT_ID", 4),
+                expression_alias = row_value(row, "EXPRESSION_ALIAS", 5),
+                offset_window = row_value(row, "OFFSET_WINDOW", 6),
+                filter_expr = row_value(row, "FILTER_EXPR", 7),
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 8),
+            }
+        end
+    end
+
+    local metric_filter_rows = query([[
+        SELECT mf.METRIC_ID, mf.FILTER_KIND, mf.FILTER_EXPR,
+               mf.RESOLVED_SQL_EXPR, mf.REQUIRED_DIMENSION_ID,
+               mf.REQUIRED_ENTITY_ID, mf.ORDINAL_POSITION
+        FROM SYS_SEMANTIC.METRIC_FILTERS mf
+        JOIN SYS_SEMANTIC.METRICS mt
+          ON mt.METRIC_ID = mf.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY mf.METRIC_ID, mf.ORDINAL_POSITION
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(metric_filter_rows or {}) do
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.filters[#metric.filters + 1] = {
+                kind = row_value(row, "FILTER_KIND", 2),
+                expression = row_value(row, "FILTER_EXPR", 3),
+                resolved_sql_expr = row_value(row, "RESOLVED_SQL_EXPR", 4),
+                required_dimension_id = row_value(row, "REQUIRED_DIMENSION_ID", 5),
+                required_entity_id = row_value(row, "REQUIRED_ENTITY_ID", 6),
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 7),
+            }
+        end
+    end
+
     local fact_rows = query([[
-        SELECT FACT_ID, FACT_NAME, ENTITY_ID, EXPRESSION, DATA_TYPE
+        SELECT FACT_ID, FACT_NAME, ENTITY_ID, EXPRESSION, DATA_TYPE,
+               ADDITIVE_POLICY
         FROM SYS_SEMANTIC.FACTS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -820,6 +896,7 @@ local function load_catalog(model, object_name)
             entity_id = row_value(row, "ENTITY_ID", 3),
             expression = row_value(row, "EXPRESSION", 4),
             data_type = row_value(row, "DATA_TYPE", 5),
+            additive_policy = row_value(row, "ADDITIVE_POLICY", 6),
         }
         ctx.facts[#ctx.facts + 1] = fact
         ctx.fact_by_id[key(fact.id)] = fact
@@ -837,7 +914,7 @@ local function load_catalog(model, object_name)
         ORDER BY PATH_PRIORITY, RELATIONSHIP_ID
     ]], {model_id = model.model_id, version_id = model.version_id})
     for _, row in ipairs(relationship_rows or {}) do
-        ctx.relationships[#ctx.relationships + 1] = {
+        local relationship = {
             id = row_value(row, "RELATIONSHIP_ID", 1),
             name = row_value(row, "RELATIONSHIP_NAME", 2),
             from_entity_id = row_value(row, "FROM_ENTITY_ID", 3),
@@ -847,7 +924,86 @@ local function load_catalog(model, object_name)
             join_type = row_value(row, "JOIN_TYPE", 7),
             fanout_policy = row_value(row, "FANOUT_POLICY", 8),
             path_priority = row_value(row, "PATH_PRIORITY", 9),
+            key_mappings = {},
         }
+        ctx.relationships[#ctx.relationships + 1] = relationship
+        ctx.relationship_by_id[key(relationship.id)] = relationship
+    end
+
+    local mapping_rows = query([[
+        SELECT rkm.RELATIONSHIP_ID, rkm.ORDINAL_POSITION,
+               rkm.FROM_COLUMN_NAME, rkm.FROM_EXPRESSION,
+               rkm.TO_COLUMN_NAME, rkm.TO_EXPRESSION
+        FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS rkm
+        JOIN SYS_SEMANTIC.RELATIONSHIPS r
+          ON r.RELATIONSHIP_ID = rkm.RELATIONSHIP_ID
+        WHERE r.MODEL_ID = :model_id
+          AND r.VERSION_ID = :version_id
+          AND r.STATUS = 'ACTIVE'
+        ORDER BY rkm.RELATIONSHIP_ID, rkm.ORDINAL_POSITION
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(mapping_rows or {}) do
+        local relationship = ctx.relationship_by_id[key(row_value(row, "RELATIONSHIP_ID", 1))]
+        if relationship ~= nil then
+            relationship.key_mappings[#relationship.key_mappings + 1] = {
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 2),
+                from_column_name = row_value(row, "FROM_COLUMN_NAME", 3),
+                from_expression = row_value(row, "FROM_EXPRESSION", 4),
+                to_column_name = row_value(row, "TO_COLUMN_NAME", 5),
+                to_expression = row_value(row, "TO_EXPRESSION", 6),
+            }
+        end
+    end
+
+    local unique_key_rows = query([[
+        SELECT UNIQUE_KEY_ID, ENTITY_ID, KEY_NAME, KEY_KIND, SOURCE_FORMAT
+        FROM SYS_SEMANTIC.UNIQUE_KEYS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID, UNIQUE_KEY_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(unique_key_rows or {}) do
+        local unique_key = {
+            id = row_value(row, "UNIQUE_KEY_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "KEY_NAME", 3),
+            kind = row_value(row, "KEY_KIND", 4),
+            source_format = row_value(row, "SOURCE_FORMAT", 5),
+            columns = {},
+        }
+        ctx.unique_keys[#ctx.unique_keys + 1] = unique_key
+        ctx.unique_key_by_id[key(unique_key.id)] = unique_key
+        local entity_key = key(unique_key.entity_id)
+        ctx.unique_keys_by_entity[entity_key] = ctx.unique_keys_by_entity[entity_key] or {}
+        ctx.unique_keys_by_entity[entity_key][#ctx.unique_keys_by_entity[entity_key] + 1] = unique_key
+    end
+
+    local unique_key_column_rows = query([[
+        SELECT ukc.UNIQUE_KEY_ID, ukc.ORDINAL_POSITION,
+               ukc.COLUMN_NAME, ukc.EXPRESSION
+        FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS ukc
+        JOIN SYS_SEMANTIC.UNIQUE_KEYS uk
+          ON uk.UNIQUE_KEY_ID = ukc.UNIQUE_KEY_ID
+        WHERE uk.MODEL_ID = :model_id
+          AND uk.VERSION_ID = :version_id
+          AND uk.STATUS = 'ACTIVE'
+        ORDER BY ukc.UNIQUE_KEY_ID, ukc.ORDINAL_POSITION
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(unique_key_column_rows or {}) do
+        local unique_key = ctx.unique_key_by_id[key(row_value(row, "UNIQUE_KEY_ID", 1))]
+        if unique_key ~= nil then
+            unique_key.columns[#unique_key.columns + 1] = {
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 2),
+                column_name = row_value(row, "COLUMN_NAME", 3),
+                expression = row_value(row, "EXPRESSION", 4),
+            }
+        end
+    end
+    for _, unique_key in ipairs(ctx.unique_keys) do
+        local canonical = grain_graph.canonical_key(unique_key)
+        unique_key.columns = canonical.columns
+        unique_key.kind = canonical.kind
     end
 
     local synonym_rows = query([[
@@ -922,68 +1078,34 @@ local function resolve_field(ctx, field_name, expected_kind)
 end
 
 local function relationship_edges(ctx)
-    local edges = {}
-    local function add_edge(from_id, to_id, relationship)
-        local from_key = key(from_id)
-        edges[from_key] = edges[from_key] or {}
-        edges[from_key][#edges[from_key] + 1] = {
-            to_id = to_id,
-            relationship = relationship,
-        }
-    end
-    for _, relationship in ipairs(ctx.relationships) do
-        local cardinality = upper(relationship.cardinality)
-        if cardinality == "ONE_TO_ONE" then
-            add_edge(relationship.from_entity_id, relationship.to_entity_id, relationship)
-            add_edge(relationship.to_entity_id, relationship.from_entity_id, relationship)
-        elseif cardinality == "MANY_TO_ONE" then
-            add_edge(relationship.from_entity_id, relationship.to_entity_id, relationship)
-        elseif cardinality == "ONE_TO_MANY" then
-            add_edge(relationship.to_entity_id, relationship.from_entity_id, relationship)
-        elseif cardinality == "MANY_TO_MANY" and not missing(relationship.fanout_policy) then
-            add_edge(relationship.from_entity_id, relationship.to_entity_id, relationship)
-            add_edge(relationship.to_entity_id, relationship.from_entity_id, relationship)
-        end
-    end
-    return edges
+    local safe_edges = grain_graph.build_edges(ctx.relationships)
+    return safe_edges
 end
 
 local function find_path(ctx, from_id, to_id)
-    if key(from_id) == key(to_id) then
-        return {}
-    end
     local edges = ctx._edges
     if edges == nil then
         edges = relationship_edges(ctx)
         ctx._edges = edges
     end
-    local queue = {{id = from_id, path = {}}}
-    local seen = {[key(from_id)] = true}
-    local index = 1
-    while index <= #queue do
-        local current = queue[index]
-        index = index + 1
-        for _, edge in ipairs(edges[key(current.id)] or {}) do
-            local next_key = key(edge.to_id)
-            if not seen[next_key] then
-                local next_path = {}
-                for _, path_edge in ipairs(current.path) do
-                    next_path[#next_path + 1] = path_edge
-                end
-                next_path[#next_path + 1] = {
-                    from_entity_id = current.id,
-                    to_entity_id = edge.to_id,
-                    relationship = edge.relationship,
-                }
-                if next_key == key(to_id) then
-                    return next_path
-                end
-                seen[next_key] = true
-                queue[#queue + 1] = {id = edge.to_id, path = next_path}
-            end
-        end
+    local proof = grain_graph.prove_path(edges, from_id, to_id, {
+        require_safe = true,
+        reject_ambiguous = true,
+    })
+    if not proof.ok then
+        ctx._last_path_proof = proof
+        return nil
     end
-    return nil
+    local path = {}
+    for _, edge in ipairs(proof.edges) do
+        path[#path + 1] = {
+            from_entity_id = edge.from_id,
+            to_entity_id = edge.to_id,
+            relationship = edge.relationship,
+        }
+    end
+    ctx._last_path_proof = proof
+    return path
 end
 
 local function strip_string_literals(text)
@@ -1287,7 +1409,18 @@ local function plan_joins(ctx, needed_entities)
         local path = find_path(ctx, root_id, entity_id)
         if path == nil then
             local entity = ctx.entity_by_id[entity_id]
-            return nil, nil, error_result("SEMANTIC_REQUEST_042", "No safe relationship path from semantic object root to entity " .. tostring(entity and entity.name or entity_id) .. ".")
+            local proof = ctx._last_path_proof or {}
+            if proof.reason == "AMBIGUOUS_RELATIONSHIP_PATH" then
+                return nil, nil, error_result(
+                    "SEMANTIC_REQUEST_042",
+                    "Ambiguous safe relationship path from semantic object root to entity "
+                        .. tostring(entity and entity.name or entity_id) .. ": "
+                        .. table.concat(proof.candidate_paths or {}, " | ") .. "."
+                )
+            end
+            return nil, nil, error_result("SEMANTIC_REQUEST_042",
+                "No safe relationship path from semantic object root to entity "
+                    .. tostring(entity and entity.name or entity_id) .. ".")
         end
         local path_names = {}
         for _, edge in ipairs(path) do
@@ -1521,7 +1654,7 @@ local function latest_successful_validation(model)
         FROM SYS_SEMANTIC.VALIDATION_RUNS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
-          AND STATUS = 'OK'
+          AND STATUS IN ('OK', 'WARNING')
           AND ERROR_COUNT = 0
         ORDER BY VALIDATION_RUN_ID DESC
         LIMIT 1

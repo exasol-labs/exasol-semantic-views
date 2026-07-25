@@ -24,6 +24,12 @@ The full design is described in:
    proven.
 9. Optional Lua Virtual Schema adapter: later metadata/pushdown extension.
 
+Grain-sensitive relationship traversal is implemented once in
+`lua/semantic_layer/shared/grain_graph.lua` and packaged into both the validator
+and compiler runtimes. See
+[ADR 001](architecture-decisions/001-grain-aware-result-semantics.md) for the
+result-domain and relationship-proof contract.
+
 ## Primary Flows
 
 ### Agent Request

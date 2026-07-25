@@ -12,6 +12,7 @@ AGENT_INSTALL_SQL = ROOT / "sql/install/006_create_semantic_agent_views.sql"
 COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
 VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
+GRAIN_GRAPH_SOURCE = ROOT / "lua/semantic_layer/shared/grain_graph.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
 
@@ -26,15 +27,19 @@ AGENT_END = "-- END GENERATED AGENT_RUNTIME"
 
 
 def validator_block() -> str:
+    graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
     source = VALIDATOR_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{VALIDATOR_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
+{graph_source}
+
 {source}
 /
 {VALIDATOR_END}"""
 
 
 def compiler_block() -> str:
+    graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
     source = COMPILER_SOURCE.read_text(encoding="utf-8").rstrip()
     materializations_source = MATERIALIZATIONS_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{BEGIN}
@@ -43,6 +48,8 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
+{graph_source}
+
 {source}
 /
 

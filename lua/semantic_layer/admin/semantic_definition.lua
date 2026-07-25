@@ -1635,6 +1635,19 @@ local function batch_call(target, args)
                 fanout_policy = batch_arg(args, "fanout_policy"),
             }
         )
+    elseif target == "SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING" then
+        return query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(:model_name, :relationship_name, :from_column_name, :from_expression, :to_column_name, :to_expression, :ordinal_position)",
+            {
+                model_name = batch_arg(args, "model_name"),
+                relationship_name = batch_arg(args, "relationship_name"),
+                from_column_name = batch_arg(args, "from_column_name"),
+                from_expression = batch_arg(args, "from_expression"),
+                to_column_name = batch_arg(args, "to_column_name"),
+                to_expression = batch_arg(args, "to_expression"),
+                ordinal_position = batch_arg(args, "ordinal_position"),
+            }
+        )
     elseif target == "SEMANTIC_ADMIN.ADD_DIMENSION" then
         return query(
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(:model_name, :object_name, :entity_name, :dimension_name, :expression, :data_type, :display_name, :description, :format_hint, :is_certified)",
@@ -2315,8 +2328,9 @@ local function canonical_entity_sql(model_name, row)
         }, ", ") .. ");"
 end
 
-local function canonical_relationship_sql(model_name, row)
-    return "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP("
+local function canonical_relationship_sql(model_name, row, mappings)
+    local lines = {}
+    lines[#lines + 1] = "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP("
         .. table.concat({
             sql_string(model_name),
             sql_string(row_value(row, "RELATIONSHIP_NAME", 1)),
@@ -2327,6 +2341,19 @@ local function canonical_relationship_sql(model_name, row)
             sql_string(row_value(row, "JOIN_TYPE", 6)),
             sql_string(row_value(row, "FANOUT_POLICY", 7)),
         }, ", ") .. ");"
+    for _, mapping in ipairs(mappings or {}) do
+        lines[#lines + 1] = "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING("
+            .. table.concat({
+                sql_string(model_name),
+                sql_string(row_value(row, "RELATIONSHIP_NAME", 1)),
+                sql_string(row_value(mapping, "FROM_COLUMN_NAME", 2)),
+                sql_string(row_value(mapping, "FROM_EXPRESSION", 3)),
+                sql_string(row_value(mapping, "TO_COLUMN_NAME", 4)),
+                sql_string(row_value(mapping, "TO_EXPRESSION", 5)),
+                tostring(row_value(mapping, "ORDINAL_POSITION", 1)),
+            }, ", ") .. ");"
+    end
+    return table.concat(lines, "\n")
 end
 
 local function canonical_fact_sql(model_name, row)
@@ -2396,7 +2423,8 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
         for _, row in ipairs(query([[
             SELECT r.RELATIONSHIP_NAME, fe.ENTITY_NAME AS FROM_ENTITY_NAME,
                    te.ENTITY_NAME AS TO_ENTITY_NAME, r.JOIN_CONDITION,
-                   r.RELATIONSHIP_CARDINALITY, r.JOIN_TYPE, r.FANOUT_POLICY
+                   r.RELATIONSHIP_CARDINALITY, r.JOIN_TYPE, r.FANOUT_POLICY,
+                   r.RELATIONSHIP_ID
             FROM SYS_SEMANTIC.RELATIONSHIPS r
             JOIN SYS_SEMANTIC.MODELS m
               ON m.MODEL_ID = r.MODEL_ID
@@ -2410,7 +2438,19 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
             ORDER BY r.RELATIONSHIP_ID
         ]], {model_name = model_name}) or {}) do
             local name = row_value(row, "RELATIONSHIP_NAME", 1)
-            add_export("RELATIONSHIP", model_name .. "." .. name, canonical_relationship_sql(model_name, row))
+            local relationship_id = row_value(row, "RELATIONSHIP_ID", 8)
+            local mappings = {}
+            if not missing(relationship_id) then
+                mappings = query([[
+                    SELECT ORDINAL_POSITION, FROM_COLUMN_NAME, FROM_EXPRESSION,
+                           TO_COLUMN_NAME, TO_EXPRESSION
+                    FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+                    WHERE RELATIONSHIP_ID = :relationship_id
+                    ORDER BY ORDINAL_POSITION
+                ]], {relationship_id = relationship_id}) or {}
+            end
+            add_export("RELATIONSHIP", model_name .. "." .. name,
+                canonical_relationship_sql(model_name, row, mappings))
         end
         for _, row in ipairs(query([[
             SELECT f.FACT_NAME, e.ENTITY_NAME, f.EXPRESSION, f.DATA_TYPE,

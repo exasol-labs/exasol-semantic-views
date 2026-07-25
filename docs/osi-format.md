@@ -248,6 +248,7 @@ extensions, and what remains outside the Ossie/OSI artifact.
 | Materializations | No core concept | Materialization definitions and selection history are not exported. Imported models can define materializations separately after import. |
 | Privileges and security policies | No core concept | OSI artifacts do not grant privileges or carry Exasol database access policy. Imported models still execute under normal Exasol privileges. |
 | Relationship join SQL | Core relationships use `from_columns` and `to_columns` arrays | Simple equality joins export to core arrays. Complex joins are omitted from core with `OSI_EXPORT_040` and preserved in lossless native relationship metadata. |
+| Relationship endpoint columns | Relationship `from_columns` / `to_columns` | Imported into ordered `RELATIONSHIP_KEY_MAPPINGS` and preferred during export; simple legacy join conditions remain an export fallback. |
 | Relationship cardinality, join type, and path priority | No complete core equivalent | Stored in `EXASOL` relationship extensions. Batch apply preserves path priority and description. |
 | Primary and unique keys | Simple column keys are supported | Simple primary and unique keys export to core. Expression-based keys are preserved in extensions and produce `OSI_EXPORT_030` for the core loss. |
 | Agent instructions | Core `ai_context.instructions` is plain text | Instruction text round-trips. Native kind, priority, and role are not represented in OSI core. |

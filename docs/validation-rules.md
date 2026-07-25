@@ -67,6 +67,9 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_028` | error | Unique key metadata is invalid, references a missing entity, has an unsupported key kind, or has no columns. |
 | `SEMANTIC_MODEL_029` | error | Unique key column metadata is invalid or references an unresolvable source column/expression. |
 | `SEMANTIC_MODEL_030` | error | Visible metric/dimension pair is invalid. |
+| `SEMANTIC_MODEL_031` | warning | Relationship has no structured endpoint mapping; legacy compilation remains available but grain proofs cannot use it. |
+| `SEMANTIC_MODEL_032` | error | Relationship endpoint mapping is malformed, non-contiguous, out of scope, or references an unknown source column. |
+| `SEMANTIC_MODEL_033` | error | Relationship endpoint mappings do not match the unique key required by the declared cardinality. |
 
 ## Metric/Dimension Matrix
 

@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "ENTITIES",
     "UNIQUE_KEYS",
     "UNIQUE_KEY_COLUMNS",
+    "RELATIONSHIP_KEY_MAPPINGS",
     "SEMANTIC_OBJECTS",
     "RELATIONSHIPS",
     "DIMENSIONS",
@@ -48,6 +49,7 @@ EXPECTED_SCRIPTS = {
     "ADD_SEMANTIC_OBJECT",
     "CREATE_SEMANTIC_OBJECT",
     "ADD_RELATIONSHIP",
+    "ADD_RELATIONSHIP_KEY_MAPPING",
     "ADD_DIMENSION",
     "ADD_FACT",
     "ADD_METRIC",
@@ -161,15 +163,17 @@ def main() -> int:
                 con,
                 "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS "
                 "WHERE VIEW_SCHEMA = 'SEMANTIC_CATALOG' "
-                "AND VIEW_NAME IN ('CUSTOM_EXTENSIONS', 'UNIQUE_KEYS', 'UNIQUE_KEY_COLUMNS')",
+                "AND VIEW_NAME IN ('CUSTOM_EXTENSIONS', 'UNIQUE_KEYS', "
+                "'UNIQUE_KEY_COLUMNS', 'RELATIONSHIP_KEY_MAPPINGS')",
             ),
-            3,
+            4,
         )
 
         expected_counts = {
             "SEMANTIC_CATALOG.MODELS WHERE MODEL_NAME = 'sales'": 1,
             "SEMANTIC_CATALOG.ENTITIES WHERE MODEL_NAME = 'sales'": 4,
             "SEMANTIC_CATALOG.RELATIONSHIPS WHERE MODEL_NAME = 'sales'": 3,
+            "SEMANTIC_CATALOG.RELATIONSHIP_KEY_MAPPINGS WHERE MODEL_NAME = 'sales'": 3,
             "SEMANTIC_CATALOG.DIMENSIONS WHERE MODEL_NAME = 'sales'": 4,
             "SEMANTIC_CATALOG.FACTS WHERE MODEL_NAME = 'sales'": 3,
             "SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'": 5,
@@ -265,10 +269,49 @@ def main() -> int:
                 "WHERE MODEL_NAME = 'sales' "
                 "AND RULE_CODE IN ("
                 "'SEMANTIC_MODEL_026', 'SEMANTIC_MODEL_027', "
-                "'SEMANTIC_MODEL_028', 'SEMANTIC_MODEL_029')",
+                "'SEMANTIC_MODEL_028', 'SEMANTIC_MODEL_029', "
+                "'SEMANTIC_MODEL_031', 'SEMANTIC_MODEL_032', "
+                "'SEMANTIC_MODEL_033')",
             ),
             0,
         )
+
+        con.execute(
+            "DELETE FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS "
+            "WHERE RELATIONSHIP_ID = ("
+            "SELECT RELATIONSHIP_ID FROM SYS_SEMANTIC.RELATIONSHIPS "
+            "WHERE RELATIONSHIP_NAME = 'order_line_to_order')"
+        )
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
+        assert_equal(
+            "legacy relationship mapping warning",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES "
+                "WHERE MODEL_NAME = 'sales' "
+                "AND OBJECT_NAME = 'order_line_to_order' "
+                "AND RULE_CODE = 'SEMANTIC_MODEL_031'",
+            ),
+            1,
+        )
+        legacy_compile = con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON("
+            "'{\"model\":\"sales\",\"object\":\"SALES\","
+            "\"metrics\":[\"total_revenue\"],"
+            "\"dimensions\":[\"order_month\"]}')"
+        ).fetchall()
+        if not legacy_compile or legacy_compile[0][0] != "OK":
+            raise AssertionError(
+                "legacy relationship mapping warning must not block single-branch "
+                f"compilation: {legacy_compile!r}"
+            )
+        print("ok legacy relationship warning: compile remains available")
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING("
+            "'sales', 'order_line_to_order', 'order_id', NULL, "
+            "'order_id', NULL, 1)"
+        )
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
     finally:
         con.close()
     return 0

@@ -199,6 +199,11 @@ def load_catalog(con: Any, model_name: str, object_name: str | None) -> dict[str
             "SELECT * FROM SEMANTIC_CATALOG.RELATIONSHIPS "
             f"WHERE {model_filter} AND STATUS = 'ACTIVE' ORDER BY RELATIONSHIP_ID",
         ),
+        "relationship_key_mappings": fetch_dicts(
+            con,
+            "SELECT * FROM SEMANTIC_CATALOG.RELATIONSHIP_KEY_MAPPINGS "
+            f"WHERE {model_filter} ORDER BY RELATIONSHIP_ID, ORDINAL_POSITION",
+        ),
         "object_columns": fetch_dicts(
             con,
             "SELECT * FROM SEMANTIC_CATALOG.OBJECT_COLUMNS "
@@ -284,7 +289,20 @@ def simple_key_columns(expression: str | None, alias: str | None) -> list[str]:
 def parse_relationship_columns(
     relationship: dict[str, Any],
     entity_by_name: dict[str, dict[str, Any]],
+    key_mappings: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str]] | None:
+    if key_mappings:
+        from_columns = []
+        to_columns = []
+        for mapping in key_mappings:
+            from_column = mapping.get("FROM_COLUMN_NAME")
+            to_column = mapping.get("TO_COLUMN_NAME")
+            if not isinstance(from_column, str) or not isinstance(to_column, str):
+                return None
+            from_columns.append(from_column)
+            to_columns.append(to_column)
+        return from_columns, to_columns
+
     from_entity = entity_by_name.get(relationship["FROM_ENTITY_NAME"])
     to_entity = entity_by_name.get(relationship["TO_ENTITY_NAME"])
     if not from_entity or not to_entity:
@@ -780,10 +798,17 @@ def build_document(catalog: dict[str, Any], options: ExportOptions) -> tuple[dic
     relationship_docs = []
     exported_relationship_ids = set()
     entity_names = {row["ENTITY_NAME"] for row in entities}
+    relationship_mappings: dict[Any, list[dict[str, Any]]] = {}
+    for mapping in catalog.get("relationship_key_mappings") or []:
+        relationship_mappings.setdefault(mapping["RELATIONSHIP_ID"], []).append(mapping)
     for relationship in catalog["relationships"]:
         if relationship["FROM_ENTITY_NAME"] not in entity_names or relationship["TO_ENTITY_NAME"] not in entity_names:
             continue
-        parsed_columns = parse_relationship_columns(relationship, entity_by_name)
+        parsed_columns = parse_relationship_columns(
+            relationship,
+            entity_by_name,
+            relationship_mappings.get(relationship["RELATIONSHIP_ID"]),
+        )
         extension_rows = extension_rows_for(extensions_by_scope, "RELATIONSHIP", relationship["RELATIONSHIP_ID"])
         if parsed_columns is None:
             warnings.append(
@@ -2097,6 +2122,27 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
                     "native": clean_json_value(relationship_ext),
                 },
             )
+            from_columns = relationship.get("from_columns")
+            to_columns = relationship.get("to_columns")
+            if isinstance(from_columns, list) and isinstance(to_columns, list):
+                for ordinal, (from_column, to_column) in enumerate(
+                    zip(from_columns, to_columns), start=1
+                ):
+                    add_operation(
+                        operations,
+                        "add_relationship_key_mapping",
+                        "SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING",
+                        f"{relationship_path}.from_columns[{ordinal - 1}]",
+                        {
+                            "model_name": model_name,
+                            "relationship_name": relationship.get("name"),
+                            "from_column_name": from_column,
+                            "from_expression": None,
+                            "to_column_name": to_column,
+                            "to_expression": None,
+                            "ordinal_position": ordinal,
+                        },
+                    )
             catalog_extension_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship_ext.get("catalog_custom_extensions"), f"{relationship_path}.custom_extensions[0].data", operations)
             non_exasol_extension_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship.get("custom_extensions"), relationship_path, operations)
             ai_context_operations(model_name, "RELATIONSHIP", str(relationship.get("name")), relationship.get("ai_context"), relationship_path, operations, diagnostics)
@@ -2329,6 +2375,15 @@ OPERATION_ARGUMENTS = {
         "join_type",
         "fanout_policy",
     ],
+    "SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING": [
+        "model_name",
+        "relationship_name",
+        "from_column_name",
+        "from_expression",
+        "to_column_name",
+        "to_expression",
+        "ordinal_position",
+    ],
     "SEMANTIC_ADMIN.ADD_DIMENSION": [
         "model_name",
         "object_name",
@@ -2551,6 +2606,10 @@ def cleanup_imported_model(con: Any, model_name: str) -> None:
         "UNIQUE_KEY_ID IN (SELECT UNIQUE_KEY_ID FROM SYS_SEMANTIC.UNIQUE_KEYS WHERE "
         f"{model_filter})"
     )
+    relationship_filter = (
+        "RELATIONSHIP_ID IN (SELECT RELATIONSHIP_ID FROM SYS_SEMANTIC.RELATIONSHIPS WHERE "
+        f"{model_filter})"
+    )
     materialization_filter = (
         "MATERIALIZATION_ID IN (SELECT MATERIALIZATION_ID FROM SYS_SEMANTIC.MATERIALIZATIONS WHERE "
         f"{model_filter})"
@@ -2568,6 +2627,7 @@ def cleanup_imported_model(con: Any, model_name: str) -> None:
         f"DELETE FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS WHERE {materialization_filter}",
         f"DELETE FROM SYS_SEMANTIC.CALCULATION_ITEMS WHERE {calculation_group_filter}",
         f"DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS WHERE {unique_key_filter}",
+        f"DELETE FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS WHERE {relationship_filter}",
         f"DELETE FROM SYS_SEMANTIC.METRIC_INPUTS WHERE {metric_filter}",
         f"DELETE FROM SYS_SEMANTIC.METRIC_FILTERS WHERE {metric_filter}",
         f"DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES WHERE {metric_filter}",

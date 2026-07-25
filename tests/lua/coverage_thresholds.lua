@@ -3,6 +3,7 @@
 -- Raise a threshold whenever coverage increases; do not lower one to merge.
 return {
     lines = {
+        ["lua/semantic_layer/shared/grain_graph.lua"] = 80,
         ["lua/semantic_layer/compiler/request_json.lua"] = 79.5,
         ["lua/semantic_layer/admin/validator.lua"] = 92,
         ["lua/semantic_layer/compiler/materializations.lua"] = 91.5,

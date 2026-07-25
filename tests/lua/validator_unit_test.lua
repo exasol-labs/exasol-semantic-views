@@ -172,6 +172,80 @@ test("validator rejects malformed unique-key contracts", function()
     assert_equal(ctx.error_count, 7)
 end)
 
+test("validator accepts composite relationship mappings backed by a unique key", function()
+    local from_entity = {id = 1, name = "orders", alias = "o"}
+    local to_entity = {id = 2, name = "customers", alias = "c"}
+    local customer_key = {
+        id = 8,
+        entity_id = 2,
+        name = "customer_tenant",
+        kind = "PRIMARY",
+        columns = {
+            {ordinal_position = 1, expression = "c.tenant_id"},
+            {ordinal_position = 2, expression = "c.customer_id"},
+        },
+    }
+    local ctx = validation_context({
+        entities = {from_entity, to_entity},
+        entity_by_id = {['1'] = from_entity, ['2'] = to_entity},
+        unique_keys_by_entity = {['2'] = {customer_key}},
+        relationships = {{
+            name = "orders_customer",
+            from_entity_id = 1,
+            to_entity_id = 2,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {
+                {ordinal_position = 1, from_expression = "o.tenant_id",
+                    to_expression = "c.tenant_id"},
+                {ordinal_position = 2, from_expression = "o.customer_id",
+                    to_expression = "c.customer_id"},
+            },
+        }},
+    })
+    api.validate_relationship_key_mappings(ctx)
+    assert_equal(ctx.error_count, 0)
+    assert_equal(ctx.warning_count, 0)
+end)
+
+test("validator distinguishes legacy and invalid relationship mappings", function()
+    local from_entity = {id = 1, name = "orders", alias = "o"}
+    local to_entity = {id = 2, name = "customers", alias = "c"}
+    local legacy = validation_context({
+        entity_by_id = {['1'] = from_entity, ['2'] = to_entity},
+        unique_keys_by_entity = {},
+        relationships = {{
+            name = "legacy",
+            from_entity_id = 1,
+            to_entity_id = 2,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {},
+        }},
+    })
+    api.validate_relationship_key_mappings(legacy)
+    assert_true(has_rule(legacy, "SEMANTIC_MODEL_031"))
+    assert_equal(legacy.error_count, 0)
+
+    local invalid = validation_context({
+        entity_by_id = {['1'] = from_entity, ['2'] = to_entity},
+        unique_keys_by_entity = {},
+        relationships = {{
+            name = "invalid",
+            from_entity_id = 1,
+            to_entity_id = 2,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {{
+                ordinal_position = 2,
+                from_column_name = "customer_id",
+                from_expression = "o.customer_id",
+                to_expression = "x.customer_id",
+            }},
+        }},
+    })
+    api.validate_relationship_key_mappings(invalid)
+    assert_true(has_rule(invalid, "SEMANTIC_MODEL_032"))
+    assert_true(has_rule(invalid, "SEMANTIC_MODEL_033"))
+end)
+
 local function with_query(mock, fn)
     local original = query
     query = mock
@@ -401,7 +475,10 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {{30, "total_revenue", 1, "SUM(net_revenue)", nil, "ADDITIVE",
                 "DECIMAL(18,2)", "Total revenue", "USD", "currency", false, true}}
         elseif contains(sql, "SELECT RELATIONSHIP_ID, RELATIONSHIP_NAME") then
-            return {}
+            return {{70, "orders_identity", 1, 1,
+                "o.order_id = o.order_id", "ONE_TO_ONE", "LEFT", nil, 100}}
+        elseif contains(sql, "FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS") then
+            return {{70, 1, "order_id", nil, "order_id", nil}}
         elseif contains(sql, "SELECT OBJECT_ID, OBJECT_NAME, ROOT_ENTITY_ID") then
             return {{40, "SALES", 1}}
         elseif contains(sql, "SELECT UNIQUE_KEY_ID, ENTITY_ID") then

@@ -1,4 +1,5 @@
 local M = {}
+local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local VALID_CARDINALITIES = {
     ONE_TO_ONE = true,
@@ -675,7 +676,8 @@ local function load_catalog(ctx)
     ctx.entity_name_by_id = {}
     ctx.entity_id_by_name = {}
     local entity_rows = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS
+        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS,
+               PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION
         FROM SYS_SEMANTIC.ENTITIES
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -690,6 +692,8 @@ local function load_catalog(ctx)
             source_schema = row_value(row, "SOURCE_SCHEMA", 3),
             source_object = row_value(row, "SOURCE_OBJECT", 4),
             alias = row_value(row, "SOURCE_ALIAS", 5),
+            primary_key_expr = row_value(row, "PRIMARY_KEY_EXPR", 6),
+            grain_description = row_value(row, "GRAIN_DESCRIPTION", 7),
         }
         table.insert(ctx.entities, entity)
         ctx.entity_by_id[key(id)] = entity
@@ -818,9 +822,35 @@ local function load_catalog(ctx)
             join_type = row_value(row, "JOIN_TYPE", 7),
             fanout_policy = row_value(row, "FANOUT_POLICY", 8),
             path_priority = row_value(row, "PATH_PRIORITY", 9),
+            key_mappings = {},
         }
         table.insert(ctx.relationships, relationship)
         ctx.relationship_by_id[key(id)] = relationship
+    end
+
+    local mapping_rows = query([[
+        SELECT rkm.RELATIONSHIP_ID, rkm.ORDINAL_POSITION,
+               rkm.FROM_COLUMN_NAME, rkm.FROM_EXPRESSION,
+               rkm.TO_COLUMN_NAME, rkm.TO_EXPRESSION
+        FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS rkm
+        JOIN SYS_SEMANTIC.RELATIONSHIPS r
+          ON r.RELATIONSHIP_ID = rkm.RELATIONSHIP_ID
+        WHERE r.MODEL_ID = :model_id
+          AND r.VERSION_ID = :version_id
+          AND r.STATUS = 'ACTIVE'
+        ORDER BY rkm.RELATIONSHIP_ID, rkm.ORDINAL_POSITION
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(mapping_rows or {}) do
+        local relationship = ctx.relationship_by_id[key(row_value(row, "RELATIONSHIP_ID", 1))]
+        if relationship ~= nil then
+            relationship.key_mappings[#relationship.key_mappings + 1] = {
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 2),
+                from_column_name = row_value(row, "FROM_COLUMN_NAME", 3),
+                from_expression = row_value(row, "FROM_EXPRESSION", 4),
+                to_column_name = row_value(row, "TO_COLUMN_NAME", 5),
+                to_expression = row_value(row, "TO_EXPRESSION", 6),
+            }
+        end
     end
 
     -- Semantic objects with root entity IDs - needed to validate that a metric
@@ -888,6 +918,15 @@ local function load_catalog(ctx)
                 expression = row_value(row, "EXPRESSION", 4),
             })
         end
+    end
+    ctx.unique_keys_by_entity = {}
+    for _, unique_key in ipairs(ctx.unique_keys) do
+        local canonical = grain_graph.canonical_key(unique_key)
+        unique_key.columns = canonical.columns
+        unique_key.kind = canonical.kind
+        local entity_key = key(unique_key.entity_id)
+        ctx.unique_keys_by_entity[entity_key] = ctx.unique_keys_by_entity[entity_key] or {}
+        ctx.unique_keys_by_entity[entity_key][#ctx.unique_keys_by_entity[entity_key] + 1] = unique_key
     end
 
     ctx.custom_extensions = {}
@@ -1125,20 +1164,99 @@ local function validate_unique_keys(ctx)
     end
 end
 
-local function relationship_edges(ctx)
-    local edges = {}
-    local all_edges = {}
-    local function add_edge(target, from_id, to_id, relationship, safe, reason)
-        local from_key = key(from_id)
-        target[from_key] = target[from_key] or {}
-        table.insert(target[from_key], {
-            to_id = to_id,
-            name = relationship.name,
-            safe = safe,
-            reason = reason,
-        })
+local function validate_relationship_key_mappings(ctx)
+    local function validate_side(relationship, mapping, side, entity)
+        local column_name = mapping[side .. "_column_name"]
+        local expression = mapping[side .. "_expression"]
+        local has_column = not missing(column_name)
+        local has_expression = not missing(expression)
+        if has_column == has_expression then
+            add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                "SEMANTIC_MODEL_032",
+                "Relationship key mapping " .. tostring(mapping.ordinal_position)
+                    .. " must define exactly one " .. side .. " column or expression.")
+            return
+        end
+        if has_column and entity ~= nil
+            and not source_column_exists(entity.source_schema, entity.source_object, column_name) then
+            add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                "SEMANTIC_MODEL_032",
+                "Relationship key mapping references unknown " .. side
+                    .. " source column: " .. tostring(column_name) .. ".")
+        end
+        if has_expression and entity ~= nil then
+            local expected_alias = upper(entity.alias)
+            for alias, _ in pairs(aliases_in_expression(expression)) do
+                if alias ~= expected_alias then
+                    add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                        "SEMANTIC_MODEL_032",
+                        "Relationship key mapping " .. side
+                            .. " expression references out-of-scope alias: "
+                            .. tostring(alias) .. ".")
+                end
+            end
+        end
     end
 
+    local function side_matches_unique_key(relationship, side, entity_id)
+        for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity_id)] or {}) do
+            if grain_graph.mapping_matches_key(
+                relationship.key_mappings, side, unique_key
+            ) then
+                return true
+            end
+        end
+        return false
+    end
+
+    for _, relationship in ipairs(ctx.relationships) do
+        local mappings = relationship.key_mappings or {}
+        if #mappings == 0 then
+            add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
+                "SEMANTIC_MODEL_031",
+                "Relationship has no structured endpoint key mappings; legacy "
+                    .. "single-branch compilation remains available, but grain "
+                    .. "proofs require ordered mappings.")
+        else
+            local from_entity = ctx.entity_by_id[key(relationship.from_entity_id)]
+            local to_entity = ctx.entity_by_id[key(relationship.to_entity_id)]
+            for index, mapping in ipairs(mappings) do
+                if tonumber(mapping.ordinal_position) ~= index then
+                    add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                        "SEMANTIC_MODEL_032",
+                        "Relationship key mapping ordinals must be contiguous from 1.")
+                end
+                validate_side(relationship, mapping, "from", from_entity)
+                validate_side(relationship, mapping, "to", to_entity)
+            end
+
+            local cardinality = upper(relationship.cardinality)
+            local from_unique = side_matches_unique_key(
+                relationship, "from", relationship.from_entity_id
+            )
+            local to_unique = side_matches_unique_key(
+                relationship, "to", relationship.to_entity_id
+            )
+            local uniqueness_ok = true
+            if cardinality == "MANY_TO_ONE" then
+                uniqueness_ok = to_unique
+            elseif cardinality == "ONE_TO_MANY" then
+                uniqueness_ok = from_unique
+            elseif cardinality == "ONE_TO_ONE" then
+                uniqueness_ok = from_unique and to_unique
+            end
+            if not uniqueness_ok then
+                add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                    "SEMANTIC_MODEL_033",
+                    "Relationship endpoint mappings do not match the declared "
+                        .. "unique key required by cardinality "
+                        .. tostring(relationship.cardinality) .. ".")
+            end
+        end
+    end
+end
+
+local function relationship_edges(ctx)
     for _, relationship in ipairs(ctx.relationships) do
         local from_exists = ctx.entity_name_by_id[key(relationship.from_entity_id)] ~= nil
         local to_exists = ctx.entity_name_by_id[key(relationship.to_entity_id)] ~= nil
@@ -1185,73 +1303,17 @@ local function relationship_edges(ctx)
                 "Join condition must reference the relationship endpoint aliases.")
         end
 
-        if from_exists and to_exists and VALID_CARDINALITIES[cardinality] then
-            if cardinality == "ONE_TO_ONE" then
-                add_edge(edges, relationship.from_entity_id, relationship.to_entity_id, relationship, true, "OK")
-                add_edge(edges, relationship.to_entity_id, relationship.from_entity_id, relationship, true, "OK")
-            elseif cardinality == "MANY_TO_ONE" then
-                add_edge(edges, relationship.from_entity_id, relationship.to_entity_id, relationship, true, "OK")
-                add_edge(all_edges, relationship.to_entity_id, relationship.from_entity_id, relationship, false, "FANOUT_REQUIRES_POLICY")
-            elseif cardinality == "ONE_TO_MANY" then
-                add_edge(edges, relationship.to_entity_id, relationship.from_entity_id, relationship, true, "OK")
-                add_edge(all_edges, relationship.from_entity_id, relationship.to_entity_id, relationship, false, "FANOUT_REQUIRES_POLICY")
-            elseif cardinality == "MANY_TO_MANY" then
-                local safe = not missing(relationship.fanout_policy)
-                local reason = safe and "OK" or "MANY_TO_MANY_REQUIRES_FANOUT"
-                if safe then
-                    add_edge(edges, relationship.from_entity_id, relationship.to_entity_id, relationship, true, reason)
-                    add_edge(edges, relationship.to_entity_id, relationship.from_entity_id, relationship, true, reason)
-                end
-                add_edge(all_edges, relationship.from_entity_id, relationship.to_entity_id, relationship, safe, reason)
-                add_edge(all_edges, relationship.to_entity_id, relationship.from_entity_id, relationship, safe, reason)
-            end
-
-            if cardinality ~= "MANY_TO_MANY" then
-                add_edge(all_edges, relationship.from_entity_id, relationship.to_entity_id, relationship, true, "OK")
-                add_edge(all_edges, relationship.to_entity_id, relationship.from_entity_id, relationship, false, "FANOUT_REQUIRES_POLICY")
-            end
-        end
     end
 
-    return edges, all_edges
+    return grain_graph.build_edges(ctx.relationships)
 end
 
 local function find_path(edge_map, from_id, to_id, require_safe)
-    if missing(from_id) or missing(to_id) then
-        return false, "MISSING_ENTITY", nil
-    end
-    if key(from_id) == key(to_id) then
-        return true, "OK", "SELF"
-    end
-
-    local queue = {{id = from_id, path = {}}}
-    local seen = {[key(from_id)] = true}
-    local first_blocked_reason = nil
-    local index = 1
-    while index <= #queue do
-        local current = queue[index]
-        index = index + 1
-        for _, edge in ipairs(edge_map[key(current.id)] or {}) do
-            if require_safe and not edge.safe then
-                first_blocked_reason = first_blocked_reason or edge.reason
-            else
-                local next_key = key(edge.to_id)
-                if not seen[next_key] then
-                    local next_path = {}
-                    for _, name in ipairs(current.path) do
-                        table.insert(next_path, name)
-                    end
-                    table.insert(next_path, edge.name)
-                    if next_key == key(to_id) then
-                        return true, "OK", table.concat(next_path, " > ")
-                    end
-                    seen[next_key] = true
-                    table.insert(queue, {id = edge.to_id, path = next_path})
-                end
-            end
-        end
-    end
-    return false, first_blocked_reason or "NO_RELATIONSHIP_PATH", nil
+    local proof = grain_graph.prove_path(edge_map, from_id, to_id, {
+        require_safe = require_safe,
+        reject_ambiguous = true,
+    })
+    return proof.ok, proof.reason, proof.path, proof
 end
 
 local function reachable_aliases(ctx, base_entity_id, safe_edges)
@@ -1698,6 +1760,7 @@ function M.validate_model(model_name_arg)
         validate_structural_rules(ctx)
         validate_custom_extensions(ctx)
         validate_unique_keys(ctx)
+        validate_relationship_key_mappings(ctx)
         local safe_edges, all_edges = relationship_edges(ctx)
         validate_expressions(ctx, safe_edges)
         extract_metric_dependencies(ctx)
@@ -1737,6 +1800,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_structural_rules = validate_structural_rules,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
+        validate_relationship_key_mappings = validate_relationship_key_mappings,
         relationship_edges = relationship_edges,
         find_path = find_path,
         validate_expressions = validate_expressions,
