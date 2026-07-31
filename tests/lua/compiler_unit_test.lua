@@ -372,6 +372,16 @@ local function compiler_query_fixture(options)
             if options.object_missing then return {} end
             return {{40, "SALES", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            if options.multi_fact then
+                return {
+                    {1, "orders", "MART", "ORDERS", "o", "o.order_id",
+                        "One row per order"},
+                    {2, "tickets", "MART", "TICKETS", "t", "t.ticket_id",
+                        "One row per ticket"},
+                    {3, "customers", "MART", "CUSTOMERS", "c", "c.customer_id",
+                        "One row per customer"},
+                }
+            end
             if options.strict_target then
                 return {
                     {1, "orders", "MART", "ORDERS", "o", "o.order_id",
@@ -383,6 +393,10 @@ local function compiler_query_fixture(options)
             return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
                 "One row per order"}}
         elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            if options.multi_fact then
+                return {{10, "customer_region", 3, "c.region", "VARCHAR(20)",
+                    "Customer Region"}}
+            end
             if options.strict_target then
                 return {{10, "order_status", 2, "c.status", "VARCHAR(20)",
                     "Order Status"}}
@@ -390,13 +404,33 @@ local function compiler_query_fixture(options)
             return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
                 "Order Status"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS mi", 1, true) then
+            if options.multi_fact then
+                return {
+                    {30, "NUMERATOR", "METRIC", 31, "revenue", nil, nil, 1},
+                    {30, "DENOMINATOR", "METRIC", 32, "tickets", nil, nil, 2},
+                    {31, "MEASURE", "FACT", 20, "revenue", nil, nil, 1},
+                    {32, "MEASURE", "FACT", 21, "tickets", nil, nil, 1},
+                }
+            end
             return {{30, "MEASURE", "FACT", 20, "net_revenue", nil, nil, 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS mf", 1, true) then
+            if options.multi_fact then return {} end
             return {{30, "LOCAL", "order_status = 'COMPLETE'",
                 "o.status = 'COMPLETE'", 10, 1, 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md", 1, true) then
+            if options.multi_fact then
+                return {
+                    {30, "METRIC", 31}, {30, "METRIC", 32},
+                    {31, "FACT", 20}, {32, "FACT", 21},
+                }
+            end
             return {{30, "FACT", 20}}
         elseif normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            if options.multi_fact then
+                return {{30, "activity_ratio", 1, "revenue / tickets", nil,
+                    "RATIO", "DECIMAL(18,4)", "Activity Ratio", "RATIO",
+                    nil, nil, nil, nil, nil, nil, nil, nil}}
+            end
             if options.unsupported_metric then
                 return {{30, "total_revenue", 1, "COUNT(DISTINCT o.customer_id)", nil,
                     "DISTINCT", "DECIMAL(18,0)", "Total Revenue", "DISTINCT",
@@ -408,6 +442,19 @@ local function compiler_query_fixture(options)
                 "SUM", "o.amount", nil, nil, nil, nil, nil,
                 '{"metric_type":"SIMPLE"}'}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRICS", 1, true) then
+            if options.multi_fact then
+                return {
+                    {30, "activity_ratio", 1, "revenue / tickets", nil,
+                        "RATIO", "DECIMAL(18,4)", "Activity Ratio", "RATIO",
+                        nil, nil, nil, nil, nil, nil, nil, nil},
+                    {31, "revenue", 1, "SUM(revenue_fact)", nil,
+                        "ADDITIVE", "DECIMAL(18,2)", "Revenue", "SIMPLE",
+                        "SUM", "o.amount", nil, nil, nil, nil, nil, nil},
+                    {32, "tickets", 2, "COUNT(ticket_fact)", nil,
+                        "ADDITIVE", "DECIMAL(18,0)", "Tickets", "SIMPLE",
+                        "COUNT", "t.ticket_id", nil, nil, nil, nil, nil, nil},
+                }
+            end
             if options.unsupported_metric then
                 return {{30, "total_revenue", 1, "COUNT(DISTINCT o.customer_id)", nil,
                     "DISTINCT", "DECIMAL(18,0)", "Total Revenue", "DISTINCT",
@@ -419,22 +466,61 @@ local function compiler_query_fixture(options)
                 "SUM", "o.amount", nil, nil, nil, nil, nil,
                 '{"metric_type":"SIMPLE"}'}}
         elseif normalized:find("FROM SYS_SEMANTIC.FACTS", 1, true) then
+            if options.multi_fact then
+                return {
+                    {20, "revenue_fact", 1, "o.amount", "DECIMAL(18,2)"},
+                    {21, "ticket_fact", 2, "t.ticket_id", "DECIMAL(18,0)"},
+                }
+            end
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
+            if options.multi_fact then
+                return {
+                    {60, "orders_customer", 1, 3,
+                        "o.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100},
+                    {61, "tickets_customer", 2, 3,
+                        "t.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100},
+                }
+            end
             if options.strict_target then
                 return {{60, "orders_customer", 1, 2,
                     "o.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100}}
             end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
+            if options.multi_fact and not options.missing_multi_mapping then
+                return {
+                    {60, 1, "customer_id", nil, "customer_id", nil},
+                    {61, 1, "customer_id", nil, "customer_id", nil},
+                }
+            end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEYS", 1, true) then
+            if options.multi_fact then
+                return {{50, 3, "customer_pk", "PRIMARY", "NATIVE"}}
+            end
             return {{50, 1, "orders_pk", "PRIMARY", "NATIVE"}}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS", 1, true) then
+            if options.multi_fact then
+                return {{50, 1, "customer_id", nil}}
+            end
             return {{50, 1, "order_id", nil}}
         elseif normalized:find("FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
+            if options.multi_fact then
+                return {{"METRIC", 30, "ratio"}, {"DIMENSION", 10, "region"}}
+            end
             return {{"METRIC", 30, "revenue"}, {"DIMENSION", 10, "status"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES", 1, true) then
+            if options.multi_fact then
+                if tonumber(params.metric_id) == 30 then
+                    return {{"METRIC", 31}, {"METRIC", 32}}
+                elseif tonumber(params.metric_id) == 31 then
+                    return {{"FACT", 20}}
+                elseif tonumber(params.metric_id) == 32 then
+                    return {{"FACT", 21}}
+                end
+                return {}
+            end
             return {{"FACT", 20}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS", 1, true) then
             return {}
@@ -505,6 +591,53 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_equal(state.cache_touches, 1)
     assert_equal(state.cache_inserts, 1)
     assert_equal(#state.request_logs, 2)
+end)
+
+test("C1 compiler returns a versioned plan without multi branch SQL", function()
+    local request = {
+        model = "sales",
+        object = "SALES",
+        metrics = {"activity_ratio"},
+        dimensions = {"customer_region"},
+    }
+    local result, state = compile_with_fixture(request, {multi_fact = true})
+    assert_equal(result.status, "ERROR")
+    assert_equal(result.error_code, "SEMANTIC_REQUEST_073")
+    assert_equal(result.generated_sql, nil)
+    local envelope = api.json_decode(result.plan_json)
+    assert_equal(envelope.plan_version, 3)
+    assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
+    assert_equal(envelope.logical_plan.execution.status, "PLANNING_ONLY")
+    assert_equal(#envelope.logical_plan.branches, 2)
+    assert_equal(#envelope.logical_plan.relationship_proofs, 2)
+    assert_equal(envelope.logical_plan.relationship_proofs[1].status, "PROVEN")
+    assert_equal(state.cache_inserts, 0)
+
+    local rejected = compile_with_fixture(request, {
+        multi_fact = true,
+        missing_multi_mapping = true,
+    })
+    assert_equal(rejected.error_code, "SEMANTIC_REQUEST_074")
+    local rejected_plan = api.json_decode(rejected.plan_json).logical_plan
+    assert_equal(rejected_plan.failure.reason_code, "RELATIONSHIP_MAPPING_MISSING")
+    assert_equal(rejected_plan.failure.dimension_id, 10)
+    assert_equal(rejected_plan.failure.blocking_edge.relationship_id, 60)
+    assert_true(string.match(rejected_plan.failure.proof_id,
+        "^proof:branch:") ~= nil)
+    assert_true(string.match(rejected_plan.failure.rejection_id,
+        ":rejection$") ~= nil)
+
+    local sql_mock = compiler_query_fixture({multi_fact = true})
+    local sql_result = with_query(sql_mock, function()
+        return compile_sql([[
+            SELECT customer_region, MEASURE(activity_ratio)
+            FROM SEMANTIC_SALES.SALES
+            GROUP BY ALL
+        ]])
+    end)
+    assert_equal(sql_result.error_code, "SEMANTIC_QUERY_073")
+    local sql_plan = api.json_decode(sql_result.plan_json).logical_plan
+    assert_equal(api.json_encode(sql_plan), api.json_encode(envelope.logical_plan))
 end)
 
 test("structured compiler maps request and validation failures", function()

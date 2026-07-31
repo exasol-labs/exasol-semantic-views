@@ -17,8 +17,9 @@ lower to the same versioned `QuerySpec`. Planning consumes a detached,
 model-versioned `CatalogSnapshot`, including transitive private metric
 dependencies that are not exposed as query fields.
 
-Phase B introduces a typed single-branch logical plan and keeps the existing
-SQL behavior below it. `PLAN_JSON.plan_version` is `2` and
+Phase B introduced the typed single-branch boundary. Phase C1 extends it with
+planning-only multi-branch validation while keeping existing SQL behavior
+below it. `PLAN_JSON.plan_version` is `3` and
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -30,9 +31,23 @@ SQL behavior below it. `PLAN_JSON.plan_version` is `2` and
 proof-boundary testing and requires column mappings, a matching unique key on
 the cardinality-preserving endpoint, a safe traversal direction, and no
 many-to-many edge. Expression identity returns
-`EXPRESSION_KEY_PROOF_UNSUPPORTED`. Multi-fact execution remains disabled until
-the branch planner is implemented and returns `MULTI_FACT_NOT_ENABLED` rather
-than emitting a joined aggregate.
+`EXPRESSION_KEY_PROOF_UNSUPPORTED`.
+
+For metrics whose normalized aggregate states span multiple fact entities, C1:
+
+- treats structured metric inputs as authoritative and uses dependency rows
+  only as a legacy fallback
+- separates fact inputs, aggregate-state producers, and scalar finalizers
+- binds global, metric-local, and `HAVING` filters before rendering
+- proves every fact branch to every selected or globally filtered dimension
+- assigns stable branch, requirement, proof, key, and rejection identifiers
+- returns a `MULTI_BRANCH` logical plan without generated SQL
+
+A valid planning-only request returns `SEMANTIC_REQUEST_073` or
+`SEMANTIC_QUERY_073` with `MULTI_BRANCH_EXECUTION_NOT_ENABLED` in the plan.
+An invalid strict proof returns `_074` with a path-specific `reason_code` and
+blocking relationship. This prevents the legacy root join planner from
+rendering multi-fact SQL before Phase C2.
 
 These entrypoints are Lua scripts. Call them with `EXECUTE SCRIPT`, not
 `SELECT`:

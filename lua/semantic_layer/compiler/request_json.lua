@@ -1404,6 +1404,7 @@ local function build_filters(ctx, request_filters, selected_dimensions, needed_e
             field = field.name,
             field_id = field.id,
             field_kind = field.kind,
+            entity_id = field.entity_id,
             op = op,
             value = filter.value,
             value_sql = filter.value_sql,
@@ -1885,63 +1886,6 @@ local function compile_request_table(request, options)
         end
     end
 
-    local matrix_err = validate_metric_dimensions(ctx, selected_metrics, all_dimensions)
-    if matrix_err ~= nil then
-        return matrix_err
-    end
-
-    local joins, relationship_paths, join_err = plan_joins(ctx, needed_entities)
-    if join_err ~= nil then
-        return join_err
-    end
-
-    local snapshot = catalog_snapshot_runtime.from_context(ctx, selected_metrics)
-    local relationship_targets = {}
-    for entity_id, _ in pairs(needed_entities) do
-        if entity_id ~= key(ctx.object.root_entity_id) then
-            relationship_targets[#relationship_targets + 1] = {
-                target_entity_id = entity_id,
-            }
-        end
-    end
-    table.sort(relationship_targets, function(left, right)
-        return key(left.target_entity_id) < key(right.target_entity_id)
-    end)
-    local typed_plan, typed_plan_error = metric_plan_runtime.logical_plan(
-        request,
-        snapshot,
-        selected_dimensions,
-        selected_metrics,
-        relationship_targets
-    )
-    if typed_plan == nil then
-        return error_result(error_prefix .. "_070",
-            "Typed planning failed: " .. tostring(typed_plan_error) .. ".")
-    end
-    for _, stage in ipairs(typed_plan.metric_stages or {}) do
-        if string.sub(tostring(stage.state_class), 1, 12) == "UNSUPPORTED_" then
-            local result = error_result(error_prefix .. "_070",
-                "Metric " .. tostring(stage.name) .. " requires unsupported aggregate state "
-                    .. tostring(stage.state_class) .. ".")
-            result.plan_json = json_encode(typed_plan)
-            return result
-        end
-    end
-    if request.proof_mode == "STRICT_GRAIN" then
-        for _, proof in ipairs(typed_plan.relationship_proofs or {}) do
-            if proof.status ~= "PROVEN" then
-                local reason = proof.reason
-                if reason == "NO_RELATIONSHIP_PATH" and #(proof.rejected_edges or {}) > 0 then
-                    reason = proof.rejected_edges[1].reason
-                end
-                local result = error_result(error_prefix .. "_072",
-                    "Strict grain proof failed: " .. tostring(reason) .. ".")
-                result.plan_json = json_encode(typed_plan)
-                return result
-            end
-        end
-    end
-
     local limit = nil
     if not missing(request.limit) then
         limit = tonumber(request.limit)
@@ -1966,6 +1910,7 @@ local function compile_request_table(request, options)
     end
 
     local having_predicates = {}
+    local bound_having_filters = {}
     local having_list = as_array(request.having, "having")
     if #having_list > 0 and #selected_metrics == 0 then
         return error_result("SEMANTIC_REQUEST_026",
@@ -1992,6 +1937,112 @@ local function compile_request_table(request, options)
             return predicate_err
         end
         having_predicates[#having_predicates + 1] = predicate
+        bound_having_filters[#bound_having_filters + 1] = {
+            metric_id = metric_field.id,
+            metric = metric_field.name,
+            op = op,
+            value = having_filter.value,
+            value_sql = having_filter.value_sql,
+            data_type = metric_field.data_type,
+        }
+    end
+
+    local snapshot = catalog_snapshot_runtime.from_context(ctx, selected_metrics)
+    local relationship_targets = {}
+    for entity_id, _ in pairs(needed_entities) do
+        if entity_id ~= key(ctx.object.root_entity_id) then
+            relationship_targets[#relationship_targets + 1] = {
+                target_entity_id = entity_id,
+            }
+        end
+    end
+    table.sort(relationship_targets, function(left, right)
+        return key(left.target_entity_id) < key(right.target_entity_id)
+    end)
+    local bound_query = metric_plan_runtime.bind_query(
+        request,
+        selected_dimensions,
+        selected_metrics,
+        filters,
+        bound_having_filters,
+        relationship_targets
+    )
+    local typed_plan, typed_plan_error = metric_plan_runtime.logical_plan(
+        request,
+        snapshot,
+        bound_query,
+        selected_metrics
+    )
+    if typed_plan == nil then
+        return error_result(error_prefix .. "_070",
+            "Typed planning failed: " .. tostring(typed_plan_error) .. ".")
+    end
+
+    local function plan_error(code, message)
+        local result = error_result(error_prefix .. code, message)
+        local metric_names = {}
+        local dimension_names = {}
+        for _, metric in ipairs(selected_metrics) do
+            metric_names[#metric_names + 1] = metric.name
+        end
+        for _, dimension in ipairs(selected_dimensions) do
+            dimension_names[#dimension_names + 1] = dimension.name
+        end
+        local rejected_materializations = {}
+        if typed_plan.plan_kind == "MULTI_BRANCH" then
+            rejected_materializations[1] = {
+                reason_code = "MATERIALIZATION_BRANCH_INELIGIBLE",
+            }
+        end
+        result.plan_json = json_encode({
+            plan_version = metric_plan_runtime.PLAN_VERSION,
+            logical_plan = typed_plan,
+            model = model.model_name,
+            version_id = model.version_id,
+            version_number = model.version_number,
+            object = ctx.object.name,
+            metrics = metric_names,
+            dimensions = dimension_names,
+            filters = filters,
+            validation_run_id = validation_run_id,
+            selected_materialization = JSON_NULL,
+            materialization_decision = {
+                candidate_count = 0,
+                rejected_materializations = rejected_materializations,
+                selected_materialization = JSON_NULL,
+            },
+            warnings = {},
+        })
+        return result
+    end
+
+    if typed_plan.failure ~= nil then
+        local reason = typed_plan.failure.reason_code or "TYPED_PLANNING_FAILED"
+        local code = string.find(reason, "METRIC_", 1, true) == 1
+            and "_070" or "_074"
+        return plan_error(code, "Typed planning failed: " .. tostring(reason) .. ".")
+    end
+    if typed_plan.plan_kind == "MULTI_BRANCH" then
+        return plan_error("_073",
+            "Multi-branch plan is valid but execution is not enabled until Phase C2.")
+    end
+    if request.proof_mode == "STRICT_GRAIN" then
+        for _, proof in ipairs(typed_plan.relationship_proofs or {}) do
+            if proof.status ~= "PROVEN" then
+                return plan_error("_072", "Strict grain proof failed: "
+                    .. tostring(proof.reason_code or proof.reason) .. ".")
+            end
+        end
+    end
+
+    local matrix_err = validate_metric_dimensions(ctx, selected_metrics, all_dimensions)
+    if matrix_err ~= nil then
+        return matrix_err
+    end
+
+    local joins, relationship_paths, join_err = plan_joins(ctx, needed_entities)
+    if join_err ~= nil then
+        return join_err
     end
 
     local selected_materialization = nil

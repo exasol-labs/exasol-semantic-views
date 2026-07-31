@@ -90,10 +90,12 @@ test("Typed metric DAG classifies aggregate states and orders dependencies", fun
     local ctx, public = base_context()
     local snapshot = snapshots.from_context(ctx, {public})
     local dag = assert(planner.build_dag(snapshot, {public}))
-    assert_equal(#dag.nodes, 3)
-    assert_equal(dag.nodes[1].state_class, "SUM")
-    assert_equal(dag.nodes[3].state_class, "RATIO")
-    assert_equal(dag.nodes[3].stage, "FINALIZE")
+    assert_equal(#dag.nodes, 5)
+    assert_equal(dag.node_by_id["11"].state_class, "SUM")
+    assert_equal(dag.node_by_id["11"].node_kind, "AGGREGATE_STATE")
+    assert_equal(dag.node_by_id["10"].state_class, "RATIO")
+    assert_equal(dag.node_by_id["10"].stage, "FINALIZE")
+    assert_equal(dag.node_by_id["fact:21"].node_kind, "FACT_INPUT")
 
     local distinct = {
         id = 99, name = "users", base_entity_id = 1,
@@ -193,7 +195,7 @@ test("Strict proof rejects many to many and unequal alternative paths", function
     assert_equal(rejected[#rejected].reason, "MANY_TO_MANY_PROOF_UNSUPPORTED")
 end)
 
-test("Logical planner blocks multi fact execution before Phase C", function()
+test("C1 logical planner emits a planning-only multi branch plan", function()
     local ctx, public = base_context()
     ctx.facts[2].entity_id = 2
     local snapshot = snapshots.from_context(ctx, {public})
@@ -201,8 +203,130 @@ test("Logical planner blocks multi fact execution before Phase C", function()
         model = "sales", object = "sales", metrics = {"margin"},
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
-    assert_equal(plan, nil)
-    assert_equal(reason, "MULTI_FACT_NOT_ENABLED")
+    assert_equal(reason, nil)
+    assert_equal(plan.plan_version, 3)
+    assert_equal(plan.plan_kind, "MULTI_BRANCH")
+    assert_equal(plan.proof_mode, "STRICT_GRAIN")
+    assert_equal(plan.execution.status, "PLANNING_ONLY")
+    assert_equal(plan.execution.reason_code, "MULTI_BRANCH_EXECUTION_NOT_ENABLED")
+    assert_equal(#plan.branches, 2)
+    assert_equal(plan.diagnostics[1].reason_code, "BASE_ENTITY_MISMATCH")
+end)
+
+test("C1 structured inputs are authoritative and dependencies are deduplicated", function()
+    local ctx, public = base_context()
+    local profit = ctx.all_metric_by_id["11"]
+    profit.dependencies = {
+        {object_type = "FACT", object_id = 22},
+        {object_type = "FACT", object_id = 22},
+    }
+    local snapshot = snapshots.from_context(ctx, {public})
+    local dag = assert(planner.build_dag(snapshot, {public}))
+    assert_equal(dag.node_by_id["11"].input_source, "STRUCTURED_INPUTS")
+    assert_equal(#dag.node_by_id["11"].inputs, 1)
+    assert_equal(dag.node_by_id["11"].inputs[1].id, 21)
+
+    local fallback = snapshot.metric_by_id["12"]
+    fallback.inputs = {}
+    fallback.dependencies = {
+        {object_type = "FACT", object_id = 22},
+        {object_type = "FACT", object_id = 22},
+    }
+    local fallback_dag = assert(planner.build_dag(snapshot, {fallback}))
+    assert_equal(fallback_dag.node_by_id["12"].input_source, "DEPENDENCY_FALLBACK")
+    assert_equal(#fallback_dag.node_by_id["12"].inputs, 1)
+end)
+
+test("C1 binds global and final filters without rendering them", function()
+    local spec = assert(query_spec.new({
+        model = "sales",
+        object = "sales",
+        metrics = {"margin"},
+        dimensions = {"region"},
+        order_by = {{field = "margin", direction = "DESC"}},
+        limit = 10,
+    }))
+    local bound = planner.bind_query(
+        spec,
+        {{id = 30, name = "region", kind = "DIMENSION", entity_id = 3,
+            data_type = "VARCHAR(20)"}},
+        {{id = 10, name = "margin", kind = "METRIC", data_type = "DECIMAL(18,2)"}},
+        {{field_id = 30, field = "region", entity_id = 3, op = "=",
+            value = "West", data_type = "VARCHAR(20)", predicate = "ignored"}},
+        {{metric_id = 10, metric = "margin", op = ">", value = 0.2,
+            data_type = "DECIMAL(18,2)", predicate = "ignored"}},
+        {{target_entity_id = 3}}
+    )
+    assert_equal(bound.bound_query_version, 1)
+    assert_equal(bound.global_filters[1].scope, "GLOBAL")
+    assert_equal(bound.global_filters[1].entity_id, 3)
+    assert_equal(bound.having_filters[1].scope, "HAVING")
+    assert_equal(bound.having_filters[1].metric_id, 10)
+    assert_equal(bound.limit, 10)
+    assert_equal(bound.relationship_targets[1].target_entity_id, 3)
+end)
+
+test("C1 proves every fact branch to every requested dimension", function()
+    local ctx, public = base_context()
+    ctx.facts[2].entity_id = 2
+    ctx.relationships = {
+        {
+            id = 40, name = "orders_region", from_entity_id = 1, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {{ordinal_position = 1, from_column_name = "region_id",
+                to_column_name = "region_id"}},
+        },
+        {
+            id = 41, name = "customers_region", from_entity_id = 2, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {{ordinal_position = 1, from_column_name = "region_id",
+                to_column_name = "region_id"}},
+        },
+    }
+    ctx.unique_keys = {{
+        id = 50, entity_id = 3, name = "region_pk",
+        columns = {{ordinal_position = 1, column_name = "region_id"}},
+    }}
+    local snapshot = snapshots.from_context(ctx, {public})
+    local spec = assert(query_spec.new({
+        model = "sales", object = "sales", metrics = {"margin"},
+        dimensions = {"region"},
+    }))
+    local bound = planner.bind_query(spec, {ctx.dimensions[1]}, {public}, {}, {}, {})
+    local plan = assert(planner.logical_plan(spec, snapshot, bound, {public}))
+    assert_equal(plan.plan_kind, "MULTI_BRANCH")
+    assert_equal(#plan.relationship_proofs, 2)
+    assert_equal(plan.relationship_proofs[1].status, "PROVEN")
+    assert_equal(plan.relationship_proofs[2].status, "PROVEN")
+    assert_equal(plan.relationship_proofs[1].requirement.scope, "SELECTED")
+    assert_true(string.match(plan.relationship_proofs[1].proof_id,
+        "^proof:branch:") ~= nil)
+    assert_true(string.match(
+        plan.relationship_proofs[1].requirement.requirement_id,
+        "^branch:") ~= nil)
+    assert_equal(plan.relationship_proofs[1].target_unique_key_id, 50)
+    assert_equal(plan.execution.reason_code, "MULTI_BRANCH_EXECUTION_NOT_ENABLED")
+end)
+
+test("C1 reports the path-specific blocking edge", function()
+    local ctx = base_context()
+    ctx.relationships = {{
+        id = 60, name = "order_items", from_entity_id = 1, to_entity_id = 2,
+        cardinality = "ONE_TO_MANY",
+        key_mappings = {{ordinal_position = 1, from_column_name = "order_id",
+            to_column_name = "order_id"}},
+    }}
+    ctx.unique_keys = {{
+        id = 61, entity_id = 1,
+        columns = {{ordinal_position = 1, column_name = "order_id"}},
+    }}
+    local snapshot = snapshots.from_context(ctx, {})
+    local proof = planner.prove_strict(snapshot, 1, 2)
+    assert_equal(proof.status, "REJECTED")
+    assert_equal(proof.reason_code, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
+    assert_equal(proof.blocking_edge.relationship_id, 60)
+    assert_equal(proof.blocking_edge.from_entity_id, 1)
+    assert_equal(proof.blocking_edge.to_entity_id, 2)
 end)
 
 test("Separated renderer preserves legacy single branch SQL shape", function()

@@ -8,6 +8,15 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Grain-aware aggregation Phase C1
+
+- Multi-fact additive requests now lower to a plan-version 3 `MULTI_BRANCH`
+  logical plan with normalized fact/state/finalizer nodes, bound filter scopes,
+  strict branch-to-dimension proofs, and stable requirement/proof/rejection
+  identifiers. Execution remains deliberately disabled until Phase C2; valid
+  plans return `_073`, while path-specific proof failures return `_074`.
+- Single-branch SQL generation remains on the existing renderer.
+
 #### Databricks Unity Catalog Metric View compatibility
 
 - **Databricks UCMV import** — added

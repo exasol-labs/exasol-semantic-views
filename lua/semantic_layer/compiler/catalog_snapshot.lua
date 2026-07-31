@@ -69,8 +69,10 @@ function M.from_context(ctx, selected_metrics)
         unique_keys = clone(ctx.unique_keys or {}),
     }
     snapshot.entity_by_id = index_by(snapshot.entities, "id")
+    snapshot.dimension_by_id = index_by(snapshot.dimensions, "id")
     snapshot.metric_by_id = index_by(snapshot.metrics, "id")
     snapshot.fact_by_id = index_by(snapshot.facts, "id")
+    snapshot.relationship_by_id = index_by(snapshot.relationships, "id")
     snapshot.unique_keys_by_entity = {}
     for _, unique_key in ipairs(snapshot.unique_keys) do
         local entity_key = key(unique_key.entity_id)

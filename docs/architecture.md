@@ -41,6 +41,12 @@ The legacy join proof remains the compatibility path. Strict grain proofs are
 separate values and are the only proof type a future multi-fact branch planner
 may consume.
 
+Phase C1 now produces plan-version 3 `MULTI_BRANCH` plans. It normalizes leaf
+fact inputs, binds filter scopes, and proves each leaf branch to each required
+dimension before the legacy matrix or root join planner runs. These plans are
+intentionally non-executable until Phase C2 adds the typed physical branch
+renderer.
+
 ## Primary Flows
 
 ### Agent Request
