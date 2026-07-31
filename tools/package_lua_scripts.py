@@ -13,6 +13,10 @@ COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
 VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
 GRAIN_GRAPH_SOURCE = ROOT / "lua/semantic_layer/shared/grain_graph.lua"
+QUERY_SPEC_SOURCE = ROOT / "lua/semantic_layer/compiler/query_spec.lua"
+CATALOG_SNAPSHOT_SOURCE = ROOT / "lua/semantic_layer/compiler/catalog_snapshot.lua"
+METRIC_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/metric_plan.lua"
+GRAIN_SQL_SOURCE = ROOT / "lua/semantic_layer/compiler/grain_sql.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
 
@@ -40,6 +44,10 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 
 def compiler_block() -> str:
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
+    query_spec_source = QUERY_SPEC_SOURCE.read_text(encoding="utf-8").rstrip()
+    catalog_snapshot_source = CATALOG_SNAPSHOT_SOURCE.read_text(encoding="utf-8").rstrip()
+    metric_plan_source = METRIC_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
+    grain_sql_source = GRAIN_SQL_SOURCE.read_text(encoding="utf-8").rstrip()
     source = COMPILER_SOURCE.read_text(encoding="utf-8").rstrip()
     materializations_source = MATERIALIZATIONS_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{BEGIN}
@@ -49,6 +57,14 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
 {graph_source}
+
+{query_spec_source}
+
+{catalog_snapshot_source}
+
+{metric_plan_source}
+
+{grain_sql_source}
 
 {source}
 /
@@ -150,6 +166,22 @@ exit({{
   CLARIFICATION_JSON VARCHAR(2000000),
   VALIDATION_RUN_ID DECIMAL(18,0),
   QUERY_LOG_ID DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA(
+  MODEL_NAME
+)
+RETURNS TABLE AS
+import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
+
+local rows = compiler.suggest_grain_metadata(MODEL_NAME)
+
+exit(rows or {{}}, [[
+  SUGGESTION_TYPE VARCHAR(64),
+  OBJECT_NAME VARCHAR(512),
+  REASON_CODE VARCHAR(128),
+  PROPOSED_METADATA_JSON VARCHAR(2000000)
 ]])
 /
 {END}"""

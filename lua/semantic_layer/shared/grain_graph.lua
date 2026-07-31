@@ -146,11 +146,13 @@ function M.prove_path(edge_map, from_id, to_id, options)
     local first_blocked_reason = nil
     local index = 1
 
+    local max_depth = tonumber(options.max_depth) or 64
     while index <= #queue do
         local current = queue[index]
         index = index + 1
         local depth = #current.path
-        if shortest == nil or depth < shortest then
+        if depth < max_depth
+            and (shortest == nil or depth < shortest or options.reject_any_ambiguity) then
             for _, edge in ipairs(edge_map[key(current.id)] or {}) do
                 if options.require_safe and not edge.safe then
                     first_blocked_reason = first_blocked_reason or edge.reason
@@ -162,15 +164,16 @@ function M.prove_path(edge_map, from_id, to_id, options)
                         local next_depth = #next_path
                         if next_key == key(to_id) then
                             shortest = shortest or next_depth
-                            if next_depth == shortest then
+                            if next_depth == shortest or options.reject_any_ambiguity then
                                 local signature = path_signature(next_path)
                                 if not candidate_seen[signature] then
                                     candidate_seen[signature] = true
                                     candidates[#candidates + 1] = next_path
                                 end
                             end
-                        elseif shortest == nil
-                            and (best_depth_by_node[next_key] == nil
+                        elseif (shortest == nil or options.reject_any_ambiguity)
+                            and (options.reject_any_ambiguity
+                                or best_depth_by_node[next_key] == nil
                                 or next_depth <= best_depth_by_node[next_key]) then
                             best_depth_by_node[next_key] = next_depth
                             local visited = {}
@@ -200,6 +203,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
     end
 
     table.sort(candidates, function(left, right)
+        if #left ~= #right then return #left < #right end
         return path_signature(left) < path_signature(right)
     end)
     local ambiguous = #candidates > 1

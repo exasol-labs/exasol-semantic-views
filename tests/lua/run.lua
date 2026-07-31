@@ -42,9 +42,22 @@ end
 load_runtime("lua/semantic_layer/shared/grain_graph.lua", function()
     return {ESV_GRAIN_GRAPH}
 end)
+load_runtime("lua/semantic_layer/compiler/query_spec.lua", function()
+    return {ESV_QUERY_SPEC}
+end)
+load_runtime("lua/semantic_layer/compiler/catalog_snapshot.lua", function()
+    return {ESV_CATALOG_SNAPSHOT}
+end)
+load_runtime("lua/semantic_layer/compiler/metric_plan.lua", function()
+    return {ESV_METRIC_PLAN}
+end)
+load_runtime("lua/semantic_layer/compiler/grain_sql.lua", function()
+    return {ESV_GRAIN_SQL}
+end)
 load_runtime("lua/semantic_layer/compiler/request_json.lua", function()
     return {compile_request_json, compile_sql, compile_sql_debug,
-        compile_sql_for_preprocessor, ESV_COMPILER_TEST_API}
+        compile_sql_for_preprocessor, suggest_grain_metadata,
+        ESV_COMPILER_TEST_API}
 end)
 load_runtime("lua/semantic_layer/admin/validator.lua", function()
     return {validate_model, ESV_VALIDATOR_TEST_API}
@@ -140,6 +153,7 @@ end
 
 local specs = {
     "tests/lua/grain_graph_unit_test.lua",
+    "tests/lua/grain_planner_unit_test.lua",
     "tests/lua/compiler_unit_test.lua",
     "tests/lua/validator_unit_test.lua",
     "tests/lua/materialization_unit_test.lua",

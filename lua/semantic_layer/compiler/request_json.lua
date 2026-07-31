@@ -1,5 +1,9 @@
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local query_spec_runtime = assert(ESV_QUERY_SPEC, "query spec runtime is required")
+local catalog_snapshot_runtime = assert(ESV_CATALOG_SNAPSHOT, "catalog snapshot runtime is required")
+local metric_plan_runtime = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
+local grain_sql_runtime = assert(ESV_GRAIN_SQL, "grain SQL runtime is required")
 
 if type(import) == "function" then
     import("SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME", "materializations")
@@ -447,7 +451,7 @@ end
 -- vanishingly improbable for any realistic dashboard workload.
 
 local CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
-    natural_language_text = true, natural_language = true}
+    natural_language_text = true, natural_language = true, source = true}
 
 local function canonical_value(value)
     if value == nil or value == null or value == JSON_NULL then
@@ -491,7 +495,7 @@ local function canonical_request_text(request)
     if not ok then
         return nil
     end
-    return encoded
+    return "plan=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|" .. encoded
 end
 
 -- 64-bit polynomial hash (two parallel 32-bit polynomials with different bases
@@ -666,7 +670,7 @@ local function collect_referenced_validation_objects(ctx, metrics, dimensions)
                     referenced.FACT[upper(fact.name)] = true
                 end
             elseif dep_type == "METRIC" then
-                local dep_metric = ctx.metric_by_id[key(dep_id)]
+                local dep_metric = (ctx.all_metric_by_id or ctx.metric_by_id)[key(dep_id)]
                 if dep_metric ~= nil then
                     add_metric(dep_metric, seen)
                 end
@@ -718,6 +722,8 @@ local function load_catalog(model, object_name)
         dimension_by_id = {},
         metrics = {},
         metric_by_id = {},
+        all_metrics = {},
+        all_metric_by_id = {},
         facts = {},
         fact_by_id = {},
         fact_by_name = {},
@@ -824,7 +830,59 @@ local function load_catalog(model, object_name)
         }
         ctx.metrics[#ctx.metrics + 1] = metric
         ctx.metric_by_id[key(metric.id)] = metric
+        ctx.all_metrics[#ctx.all_metrics + 1] = metric
+        ctx.all_metric_by_id[key(metric.id)] = metric
         ctx.canonical_fields[upper(metric.name)] = metric
+    end
+
+    -- Planner catalog completeness is independent of field visibility.
+    -- Private metrics stay absent from canonical_fields while remaining
+    -- available for transitive dependency planning.
+    local all_metric_rows = query([[
+        SELECT METRIC_ID, METRIC_NAME, BASE_ENTITY_ID, EXPRESSION,
+               COALESCE(SQL_FILTER_EXPR, FILTER_EXPR) AS FILTER_EXPR,
+               METRIC_TYPE, DATA_TYPE, DISPLAY_NAME,
+               COALESCE(METRIC_KIND, METRIC_TYPE) AS METRIC_KIND,
+               AGGREGATION_FUNCTION, MEASURE_EXPR,
+               SEMANTIC_FILTER_EXPR, SQL_FILTER_EXPR,
+               DISTINCT_KEY_EXPR, NON_ADDITIVE_DIMENSION_ID,
+               WINDOW_SPEC_JSON, TYPE_PARAMS_JSON
+        FROM SYS_SEMANTIC.METRICS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY METRIC_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(all_metric_rows or {}) do
+        local metric_id = row_value(row, "METRIC_ID", 1)
+        if ctx.all_metric_by_id[key(metric_id)] == nil then
+            local metric = {
+                kind = "METRIC",
+                id = metric_id,
+                name = row_value(row, "METRIC_NAME", 2),
+                base_entity_id = row_value(row, "BASE_ENTITY_ID", 3),
+                expression = row_value(row, "EXPRESSION", 4),
+                filter_expr = row_value(row, "FILTER_EXPR", 5),
+                metric_type = row_value(row, "METRIC_TYPE", 6),
+                data_type = row_value(row, "DATA_TYPE", 7),
+                display_name = row_value(row, "DISPLAY_NAME", 8),
+                metric_kind = row_value(row, "METRIC_KIND", 9),
+                aggregation_function = row_value(row, "AGGREGATION_FUNCTION", 10),
+                measure_expr = row_value(row, "MEASURE_EXPR", 11),
+                semantic_filter_expr = row_value(row, "SEMANTIC_FILTER_EXPR", 12),
+                sql_filter_expr = row_value(row, "SQL_FILTER_EXPR", 13),
+                distinct_key_expr = row_value(row, "DISTINCT_KEY_EXPR", 14),
+                non_additive_dimension_id = row_value(row, "NON_ADDITIVE_DIMENSION_ID", 15),
+                window_spec_json = row_value(row, "WINDOW_SPEC_JSON", 16),
+                type_params_json = row_value(row, "TYPE_PARAMS_JSON", 17),
+                inputs = {},
+                filters = {},
+                dependencies = {},
+                visible = false,
+            }
+            ctx.all_metrics[#ctx.all_metrics + 1] = metric
+            ctx.all_metric_by_id[key(metric.id)] = metric
+        end
     end
 
     local metric_input_rows = query([[
@@ -840,7 +898,7 @@ local function load_catalog(model, object_name)
         ORDER BY mi.METRIC_ID, mi.ORDINAL_POSITION
     ]], {model_id = model.model_id, version_id = model.version_id})
     for _, row in ipairs(metric_input_rows or {}) do
-        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        local metric = ctx.all_metric_by_id[key(row_value(row, "METRIC_ID", 1))]
         if metric ~= nil then
             metric.inputs[#metric.inputs + 1] = {
                 role = row_value(row, "INPUT_ROLE", 2),
@@ -867,7 +925,7 @@ local function load_catalog(model, object_name)
         ORDER BY mf.METRIC_ID, mf.ORDINAL_POSITION
     ]], {model_id = model.model_id, version_id = model.version_id})
     for _, row in ipairs(metric_filter_rows or {}) do
-        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        local metric = ctx.all_metric_by_id[key(row_value(row, "METRIC_ID", 1))]
         if metric ~= nil then
             metric.filters[#metric.filters + 1] = {
                 kind = row_value(row, "FILTER_KIND", 2),
@@ -876,6 +934,26 @@ local function load_catalog(model, object_name)
                 required_dimension_id = row_value(row, "REQUIRED_DIMENSION_ID", 5),
                 required_entity_id = row_value(row, "REQUIRED_ENTITY_ID", 6),
                 ordinal_position = row_value(row, "ORDINAL_POSITION", 7),
+            }
+        end
+    end
+
+    local metric_dependency_rows = query([[
+        SELECT md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
+        FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md
+        JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = md.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(metric_dependency_rows or {}) do
+        local metric = ctx.all_metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.dependencies = metric.dependencies or {}
+            metric.dependencies[#metric.dependencies + 1] = {
+                object_type = row_value(row, "DEPENDS_ON_OBJECT_TYPE", 2),
+                object_id = row_value(row, "DEPENDS_ON_OBJECT_ID", 3),
             }
         end
     end
@@ -1211,7 +1289,7 @@ local function collect_metric_entities(ctx, metric, needed_entities, seen_metric
                 needed_entities[key(fact.entity_id)] = true
             end
         elseif dep_type == "METRIC" then
-            local dep_metric = ctx.metric_by_id[key(dep_id)]
+            local dep_metric = (ctx.all_metric_by_id or ctx.metric_by_id)[key(dep_id)]
             if dep_metric ~= nil then
                 collect_metric_entities(ctx, dep_metric, needed_entities, seen_metrics)
             end
@@ -1247,7 +1325,7 @@ local function expand_metric(ctx, metric, stack)
         if fact ~= nil then
             return "(" .. tostring(fact.expression) .. ")"
         end
-        for _, candidate in ipairs(ctx.metrics) do
+        for _, candidate in ipairs(ctx.all_metrics or ctx.metrics) do
             if upper(candidate.name) == normalized then
                 return "(" .. expand_metric(ctx, candidate, stack) .. ")"
             end
@@ -1468,6 +1546,8 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
     local root = ctx.entity_by_id[key(ctx.object.root_entity_id)]
     local select_parts = {}
     local group_parts = {}
+    local join_sql = {}
+    local where_predicates = {}
     for _, dimension in ipairs(dimensions) do
         select_parts[#select_parts + 1] = tostring(dimension.expression) .. " AS " .. quote_alias(dimension.name)
         group_parts[#group_parts + 1] = tostring(dimension.expression)
@@ -1476,35 +1556,26 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
         select_parts[#select_parts + 1] = expand_metric(ctx, metric) .. " AS " .. quote_alias(metric.name)
     end
 
-    local sql_parts = {}
-    sql_parts[#sql_parts + 1] = "SELECT " .. table.concat(select_parts, ", ")
-    sql_parts[#sql_parts + 1] = "FROM " .. quote_qualified(root.source_schema, root.source_object) .. " " .. tostring(root.alias)
     for _, join in ipairs(joins) do
-        sql_parts[#sql_parts + 1] = tostring(join.relationship.join_type or "LEFT") .. " JOIN "
+        join_sql[#join_sql + 1] = tostring(join.relationship.join_type or "LEFT") .. " JOIN "
             .. quote_qualified(join.entity.source_schema, join.entity.source_object)
             .. " " .. tostring(join.entity.alias)
             .. " ON " .. tostring(join.relationship.join_condition)
     end
-    if #filters > 0 then
-        local predicates = {}
-        for _, filter in ipairs(filters) do
-            predicates[#predicates + 1] = filter.predicate
-        end
-        sql_parts[#sql_parts + 1] = "WHERE " .. table.concat(predicates, " AND ")
+    for _, filter in ipairs(filters) do
+        where_predicates[#where_predicates + 1] = filter.predicate
     end
-    if #group_parts > 0 then
-        sql_parts[#sql_parts + 1] = "GROUP BY " .. table.concat(group_parts, ", ")
-    end
-    if having_predicates ~= nil and #having_predicates > 0 then
-        sql_parts[#sql_parts + 1] = "HAVING " .. table.concat(having_predicates, " AND ")
-    end
-    if #order_by > 0 then
-        sql_parts[#sql_parts + 1] = "ORDER BY " .. table.concat(order_by, ", ")
-    end
-    if limit ~= nil then
-        sql_parts[#sql_parts + 1] = "LIMIT " .. tostring(limit)
-    end
-    return table.concat(sql_parts, "\n")
+    return grain_sql_runtime.render_single_branch({
+        select_parts = select_parts,
+        from_sql = quote_qualified(root.source_schema, root.source_object)
+            .. " " .. tostring(root.alias),
+        join_sql = join_sql,
+        where_predicates = where_predicates,
+        group_parts = group_parts,
+        having_predicates = having_predicates or {},
+        order_by = order_by,
+        limit = limit,
+    })
 end
 
 local function build_materialized_sql(ctx, dimensions, metrics, filters, order_by, limit, materialization)
@@ -1687,6 +1758,18 @@ end
 local function compile_request_table(request, options)
     options = options or {}
     local error_prefix = options.error_prefix or "SEMANTIC_REQUEST"
+    local normalized_request, query_spec_error = query_spec_runtime.new(
+        request, options.source or request.source or "JSON"
+    )
+    if normalized_request == nil then
+        return error_result(error_prefix .. "_001",
+            "Invalid canonical query specification: " .. tostring(query_spec_error) .. ".")
+    end
+    request = normalized_request
+    if request.proof_mode ~= "LEGACY_JOIN" and request.proof_mode ~= "STRICT_GRAIN" then
+        return error_result(error_prefix .. "_071",
+            "Unsupported proof_mode: " .. tostring(request.proof_mode) .. ".")
+    end
 
     local ok_model_name, model_name = pcall(normalize_name, request.model, "model")
     if not ok_model_name then
@@ -1812,6 +1895,53 @@ local function compile_request_table(request, options)
         return join_err
     end
 
+    local snapshot = catalog_snapshot_runtime.from_context(ctx, selected_metrics)
+    local relationship_targets = {}
+    for entity_id, _ in pairs(needed_entities) do
+        if entity_id ~= key(ctx.object.root_entity_id) then
+            relationship_targets[#relationship_targets + 1] = {
+                target_entity_id = entity_id,
+            }
+        end
+    end
+    table.sort(relationship_targets, function(left, right)
+        return key(left.target_entity_id) < key(right.target_entity_id)
+    end)
+    local typed_plan, typed_plan_error = metric_plan_runtime.logical_plan(
+        request,
+        snapshot,
+        selected_dimensions,
+        selected_metrics,
+        relationship_targets
+    )
+    if typed_plan == nil then
+        return error_result(error_prefix .. "_070",
+            "Typed planning failed: " .. tostring(typed_plan_error) .. ".")
+    end
+    for _, stage in ipairs(typed_plan.metric_stages or {}) do
+        if string.sub(tostring(stage.state_class), 1, 12) == "UNSUPPORTED_" then
+            local result = error_result(error_prefix .. "_070",
+                "Metric " .. tostring(stage.name) .. " requires unsupported aggregate state "
+                    .. tostring(stage.state_class) .. ".")
+            result.plan_json = json_encode(typed_plan)
+            return result
+        end
+    end
+    if request.proof_mode == "STRICT_GRAIN" then
+        for _, proof in ipairs(typed_plan.relationship_proofs or {}) do
+            if proof.status ~= "PROVEN" then
+                local reason = proof.reason
+                if reason == "NO_RELATIONSHIP_PATH" and #(proof.rejected_edges or {}) > 0 then
+                    reason = proof.rejected_edges[1].reason
+                end
+                local result = error_result(error_prefix .. "_072",
+                    "Strict grain proof failed: " .. tostring(reason) .. ".")
+                result.plan_json = json_encode(typed_plan)
+                return result
+            end
+        end
+    end
+
     local limit = nil
     if not missing(request.limit) then
         limit = tonumber(request.limit)
@@ -1894,6 +2024,8 @@ local function compile_request_table(request, options)
     end
 
     local plan = {
+        plan_version = metric_plan_runtime.PLAN_VERSION,
+        logical_plan = typed_plan,
         model = model.model_name,
         version_id = model.version_id,
         version_number = model.version_number,
@@ -2711,6 +2843,7 @@ local function compile_sql_internal(sql_text, options)
         model = model,
         validate = options.validate,
         error_prefix = "SEMANTIC_QUERY",
+        source = "SEMANTIC_SQL",
     })
     if result ~= nil and result.status ~= "OK" then
         recode_error_prefix(result, "SEMANTIC_QUERY")
@@ -2816,10 +2949,118 @@ function M.compile_request_json(request_json)
     return result
 end
 
+-- Dry-run migration assistance for legacy primary-key and equality-join
+-- metadata. Suggestions are deliberately limited to unambiguous column forms.
+function M.suggest_grain_metadata(model_name)
+    local model = load_model(normalize_name(model_name, "model"))
+    if model == nil then
+        return {{"ERROR", tostring(model_name), "MODEL_NOT_FOUND", null}}
+    end
+    local suggestions = {}
+    local entities = query([[
+        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_ALIAS, PRIMARY_KEY_EXPR
+        FROM SYS_SEMANTIC.ENTITIES
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    local alias_by_id = {}
+    for _, row in ipairs(entities or {}) do
+        local entity_id = row_value(row, "ENTITY_ID", 1)
+        local entity_name = row_value(row, "ENTITY_NAME", 2)
+        local alias = row_value(row, "SOURCE_ALIAS", 3)
+        local expression = row_value(row, "PRIMARY_KEY_EXPR", 4)
+        alias_by_id[key(entity_id)] = alias
+        local clean = tostring(expression or ""):gsub('"', "")
+        local expression_alias, column_name =
+            string.match(clean, "^%s*([A-Za-z_][A-Za-z0-9_]*)%.([A-Za-z_][A-Za-z0-9_]*)%s*$")
+        if expression_alias ~= nil and upper(expression_alias) == upper(alias) then
+            local existing = scalar([[
+                SELECT COUNT(*)
+                FROM SYS_SEMANTIC.UNIQUE_KEYS
+                WHERE MODEL_ID = :model_id
+                  AND VERSION_ID = :version_id
+                  AND ENTITY_ID = :entity_id
+                  AND STATUS = 'ACTIVE'
+            ]], {
+                model_id = model.model_id,
+                version_id = model.version_id,
+                entity_id = entity_id,
+            })
+            if tonumber(existing or 0) == 0 then
+                suggestions[#suggestions + 1] = {
+                    "UNIQUE_KEY",
+                    entity_name,
+                    "LEGACY_PRIMARY_KEY_EXPR",
+                    json_encode({
+                        key_name = tostring(entity_name) .. "_pk",
+                        key_kind = "PRIMARY",
+                        columns = {{ordinal_position = 1, column_name = column_name}},
+                    }),
+                }
+            end
+        end
+    end
+
+    local relationships = query([[
+        SELECT RELATIONSHIP_ID, RELATIONSHIP_NAME, FROM_ENTITY_ID, TO_ENTITY_ID,
+               JOIN_CONDITION
+        FROM SYS_SEMANTIC.RELATIONSHIPS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY RELATIONSHIP_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(relationships or {}) do
+        local relationship_id = row_value(row, "RELATIONSHIP_ID", 1)
+        local relationship_name = row_value(row, "RELATIONSHIP_NAME", 2)
+        local from_entity_id = row_value(row, "FROM_ENTITY_ID", 3)
+        local to_entity_id = row_value(row, "TO_ENTITY_ID", 4)
+        local condition = tostring(row_value(row, "JOIN_CONDITION", 5) or ""):gsub('"', "")
+        local left_alias, left_column, right_alias, right_column =
+            string.match(condition,
+                "^%s*([A-Za-z_][A-Za-z0-9_]*)%.([A-Za-z_][A-Za-z0-9_]*)%s*=%s*([A-Za-z_][A-Za-z0-9_]*)%.([A-Za-z_][A-Za-z0-9_]*)%s*$")
+        if left_alias ~= nil then
+            local from_alias = alias_by_id[key(from_entity_id)]
+            local to_alias = alias_by_id[key(to_entity_id)]
+            local from_column
+            local to_column
+            if upper(left_alias) == upper(from_alias) and upper(right_alias) == upper(to_alias) then
+                from_column, to_column = left_column, right_column
+            elseif upper(right_alias) == upper(from_alias) and upper(left_alias) == upper(to_alias) then
+                from_column, to_column = right_column, left_column
+            end
+            local existing = scalar([[
+                SELECT COUNT(*)
+                FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+                WHERE RELATIONSHIP_ID = :relationship_id
+            ]], {relationship_id = relationship_id})
+            if from_column ~= nil and tonumber(existing or 0) == 0 then
+                suggestions[#suggestions + 1] = {
+                    "RELATIONSHIP_MAPPING",
+                    relationship_name,
+                    "SIMPLE_EQUALITY_JOIN",
+                    json_encode({
+                        ordinal_position = 1,
+                        from_column_name = from_column,
+                        to_column_name = to_column,
+                    }),
+                }
+            end
+        end
+    end
+    if #suggestions == 0 then
+        suggestions[1] = {"NONE", model.model_name, "NO_SAFE_SUGGESTIONS", null}
+    end
+    return suggestions
+end
+
 compile_request_json = M.compile_request_json
 compile_sql = M.compile_sql
 compile_sql_debug = M.compile_sql_debug
 compile_sql_for_preprocessor = M.compile_sql_for_preprocessor
+suggest_grain_metadata = M.suggest_grain_metadata
 
 -- Database-free tests opt into this deliberately small pure-function surface.
 -- Exasol never defines ESV_TEST_MODE, so the installed runtime's public API is

@@ -4,6 +4,10 @@
 return {
     lines = {
         ["lua/semantic_layer/shared/grain_graph.lua"] = 80,
+        ["lua/semantic_layer/compiler/query_spec.lua"] = 85,
+        ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 85,
+        ["lua/semantic_layer/compiler/metric_plan.lua"] = 80,
+        ["lua/semantic_layer/compiler/grain_sql.lua"] = 90,
         ["lua/semantic_layer/compiler/request_json.lua"] = 79.5,
         ["lua/semantic_layer/admin/validator.lua"] = 92,
         ["lua/semantic_layer/compiler/materializations.lua"] = 91.5,

@@ -372,9 +372,21 @@ local function compiler_query_fixture(options)
             if options.object_missing then return {} end
             return {{40, "SALES", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            if options.strict_target then
+                return {
+                    {1, "orders", "MART", "ORDERS", "o", "o.order_id",
+                        "One row per order"},
+                    {2, "customers", "MART", "CUSTOMERS", "c", "c.customer_id",
+                        "One row per customer"},
+                }
+            end
             return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
                 "One row per order"}}
         elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            if options.strict_target then
+                return {{10, "order_status", 2, "c.status", "VARCHAR(20)",
+                    "Order Status"}}
+            end
             return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
                 "Order Status"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS mi", 1, true) then
@@ -382,7 +394,26 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS mf", 1, true) then
             return {{30, "LOCAL", "order_status = 'COMPLETE'",
                 "o.status = 'COMPLETE'", 10, 1, 1}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md", 1, true) then
+            return {{30, "FACT", 20}}
         elseif normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            if options.unsupported_metric then
+                return {{30, "total_revenue", 1, "COUNT(DISTINCT o.customer_id)", nil,
+                    "DISTINCT", "DECIMAL(18,0)", "Total Revenue", "DISTINCT",
+                    "COUNT_DISTINCT", "o.customer_id", nil, nil, "o.customer_id",
+                    nil, nil, nil}}
+            end
+            return {{30, "total_revenue", 1, "SUM(net_revenue)", nil,
+                "ADDITIVE", "DECIMAL(18,2)", "Total Revenue", "SIMPLE",
+                "SUM", "o.amount", nil, nil, nil, nil, nil,
+                '{"metric_type":"SIMPLE"}'}}
+        elseif normalized:find("FROM SYS_SEMANTIC.METRICS", 1, true) then
+            if options.unsupported_metric then
+                return {{30, "total_revenue", 1, "COUNT(DISTINCT o.customer_id)", nil,
+                    "DISTINCT", "DECIMAL(18,0)", "Total Revenue", "DISTINCT",
+                    "COUNT_DISTINCT", "o.customer_id", nil, nil, "o.customer_id",
+                    nil, nil, nil}}
+            end
             return {{30, "total_revenue", 1, "SUM(net_revenue)", nil,
                 "ADDITIVE", "DECIMAL(18,2)", "Total Revenue", "SIMPLE",
                 "SUM", "o.amount", nil, nil, nil, nil, nil,
@@ -390,6 +421,10 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.FACTS", 1, true) then
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
+            if options.strict_target then
+                return {{60, "orders_customer", 1, 2,
+                    "o.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100}}
+            end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
             return {}
@@ -480,6 +515,10 @@ test("structured compiler maps request and validation failures", function()
     assert_equal(malformed.error_code, "SEMANTIC_REQUEST_001")
 
     local cases = {
+        {{model = "sales", object = "SALES", metrics = "revenue"},
+            nil, "SEMANTIC_REQUEST_001"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"},
+            proof_mode = "unproven"}, nil, "SEMANTIC_REQUEST_071"},
         {{object = "SALES", metrics = {"revenue"}}, nil, "SEMANTIC_REQUEST_002"},
         {{model = "sales", metrics = {"revenue"}}, nil, "SEMANTIC_REQUEST_003"},
         {{model = "sales", object = "SALES", metrics = {"revenue"}},
@@ -489,6 +528,11 @@ test("structured compiler maps request and validation failures", function()
         {{model = "sales", object = "SALES"}, nil, "SEMANTIC_REQUEST_023"},
         {{model = "sales", object = "SALES", metrics = {"revenue"}},
             {no_validation = true}, "SEMANTIC_REQUEST_010"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}},
+            {unsupported_metric = true}, "SEMANTIC_REQUEST_070"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"},
+            dimensions = {"status"}, proof_mode = "STRICT_GRAIN"},
+            {strict_target = true}, "SEMANTIC_REQUEST_072"},
         {{model = "sales", object = "SALES", metrics = {"revenue"},
             dimensions = {"status"}}, {missing_matrix = true}, "SEMANTIC_REQUEST_040"},
         {{model = "sales", object = "SALES", metrics = {"revenue"},
@@ -616,4 +660,42 @@ test("compiler retries collisions and tolerates best-effort cache failures", fun
     assert_equal(second.status, "OK")
     assert_equal(second.cache_hit, true)
     assert_equal(touch_state.cache_touches, 1)
+end)
+
+test("grain metadata migration assistant is dry run and conservative", function()
+    local calls = 0
+    local mock = function(sql, params)
+        calls = calls + 1
+        local normalized = tostring(sql):gsub("%s+", " ")
+        if normalized:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{1, 2, 3}}
+        elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {
+                {1, "orders", "o", "o.order_id"},
+                {2, "customers", "c", "UPPER(c.customer_id)"},
+            }
+        elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEYS", 1, true) then
+            return {{0}}
+        elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
+            return {{10, "orders_customer", 1, 2,
+                "c.customer_id = o.customer_id"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
+            return {{0}}
+        end
+        error("unexpected migration query: " .. normalized)
+    end
+    local rows = with_query(mock, function()
+        return suggest_grain_metadata("sales")
+    end)
+    assert_equal(#rows, 2)
+    assert_equal(rows[1][1], "UNIQUE_KEY")
+    assert_contains(rows[1][4], '"column_name":"order_id"')
+    assert_equal(rows[2][1], "RELATIONSHIP_MAPPING")
+    assert_contains(rows[2][4], '"from_column_name":"customer_id"')
+    assert_true(calls > 0)
+
+    local missing = with_query(function() return {} end, function()
+        return suggest_grain_metadata("missing")
+    end)
+    assert_equal(missing[1][1], "ERROR")
 end)

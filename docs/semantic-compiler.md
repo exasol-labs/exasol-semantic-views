@@ -1,16 +1,38 @@
 # Semantic Compiler
 
-The compiler has three installed SQL-facing entrypoints:
+The compiler has four installed SQL-facing entrypoints:
 
 1. `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON`, for structured agent requests.
 2. `SEMANTIC_ADMIN.COMPILE_SQL`, for SQL users, tests, and BI/debug workflows.
 3. `SEMANTIC_ADMIN.COMPILE_SQL_DEBUG`, for opt-in SQL compile logging to
    `SYS_SEMANTIC.QUERY_LOG`.
+4. `SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA`, a read-only migration assistant
+   for simple legacy key expressions and equality joins.
 
-Both entrypoints reuse the same binding, validation, planning, materialization
+The compile entrypoints reuse the same binding, validation, planning, materialization
 selection, metric expansion, and SQL generation core in
 `SEMANTIC_ADMIN.COMPILER_RUNTIME`, packaged from
-`lua/semantic_layer/compiler/request_json.lua`.
+`lua/semantic_layer/compiler/request_json.lua`. JSON and Semantic SQL both
+lower to the same versioned `QuerySpec`. Planning consumes a detached,
+model-versioned `CatalogSnapshot`, including transitive private metric
+dependencies that are not exposed as query fields.
+
+Phase B introduces a typed single-branch logical plan and keeps the existing
+SQL behavior below it. `PLAN_JSON.plan_version` is `2` and
+`PLAN_JSON.logical_plan` records:
+
+- `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
+- leaf entity ids and typed metric stages
+- relationship ids, unique-key ids, and mapping ordinals used by proofs
+- deterministic candidate paths and rejected-edge reasons
+
+`proof_mode` defaults to `LEGACY_JOIN`. `STRICT_GRAIN` is available for
+proof-boundary testing and requires column mappings, a matching unique key on
+the cardinality-preserving endpoint, a safe traversal direction, and no
+many-to-many edge. Expression identity returns
+`EXPRESSION_KEY_PROOF_UNSUPPORTED`. Multi-fact execution remains disabled until
+the branch planner is implemented and returns `MULTI_FACT_NOT_ENABLED` rather
+than emitting a joined aggregate.
 
 These entrypoints are Lua scripts. Call them with `EXECUTE SCRIPT`, not
 `SELECT`:
@@ -24,7 +46,7 @@ The explicit agent and SQL lanes are validation-gated:
 
 - reuses the latest successful `VALIDATE_MODEL` run for the model's active
   version. Compiling does not re-run the validator: `PUBLISH_MODEL` (and the
-  admin DDL scripts after every model mutation) own the writes to
+  admin mutation workflows) own the writes to
   `VALIDATION_RUNS`, `METRIC_DEPENDENCIES`, and `METRIC_DIMENSION_MATRIX`.
   This eliminates the transaction collisions concurrent compile callers
   used to see, and roughly quarters the per-compile latency. A model that
@@ -46,7 +68,8 @@ The explicit agent and SQL lanes are validation-gated:
 
 `SYS_SEMANTIC.COMPILE_CACHE` stores `GENERATED_SQL` + `PLAN_JSON` keyed by
 `(MODEL_VERSION_ID, CACHE_KEY)`. `CACHE_KEY` is a 64-bit polynomial hash
-(computed in Lua) of the canonical parsed request. The compiler is
+(computed in Lua) of the canonical parsed request plus the logical-plan
+version. The compiler is
 deterministic per `(model_version_id, normalized request)`, so a cache hit
 returns the stored result without re-running catalog load, matrix lookup,
 join planning, materialization selection, or SQL emission.
@@ -63,7 +86,11 @@ Normalization rules for the cache key:
 Invalidation: cache entries are dropped on any event that can change compile
 output for a model version: `PUBLISH_MODEL`, `VALIDATE_MODEL` (and therefore
 every admin DDL script that re-validates), `REGISTER_MATERIALIZATION`,
-`ADD_MATERIALIZATION_COLUMN`, and `SET_MATERIALIZATION_STATUS`. Cache writes
+`ADD_MATERIALIZATION_COLUMN`, `SET_MATERIALIZATION_STATUS`,
+`ADD_UNIQUE_KEY`, `ADD_UNIQUE_KEY_COLUMN`, and
+`ADD_RELATIONSHIP_KEY_MAPPING`. Proof-metadata helpers also mark earlier
+successful validation runs `STALE`, so compilation requires a new
+`VALIDATE_MODEL` run after a key or mapping change. Cache writes
 on miss are best-effort: a PK collision from a concurrent identical compile
 is swallowed, since the caller already has the correct result. Only
 `STATUS = OK` results are cached - errors and clarifications are never
@@ -96,6 +123,11 @@ The structured compiler supports:
    and rollup policy requirements.
 8. Stable structured errors for malformed JSON, unknown fields, invalid limits,
    invalid metric/dimension pairs, and missing relationship paths.
+
+The typed planner explicitly rejects distinct, non-additive, and window
+aggregate states until their state and finalization contracts are implemented.
+This prevents the legacy expression renderer from accidentally giving an
+advanced metric unsupported semantics.
 
 ### Optional hierarchical JSON output
 
@@ -155,3 +187,6 @@ mappings, do not block the existing single-branch compiler path.
 
 `tools/package_lua_scripts.py` embeds the compiler runtime, materialization
 runtime, and wrappers into `sql/install/003_create_semantic_admin_scripts.sql`.
+The embedded compiler runtime includes `query_spec.lua`,
+`catalog_snapshot.lua`, `metric_plan.lua`, and `grain_sql.lua` before the
+entrypoint module.

@@ -30,6 +30,17 @@ and compiler runtimes. See
 [ADR 001](architecture-decisions/001-grain-aware-result-semantics.md) for the
 result-domain and relationship-proof contract.
 
+The compiler's Phase B boundary is split into four small modules:
+
+- `query_spec.lua` canonicalizes both input languages
+- `catalog_snapshot.lua` detaches the complete planner catalog
+- `metric_plan.lua` builds the typed DAG and proof-rich logical plan
+- `grain_sql.lua` renders the supported single-branch physical plan
+
+The legacy join proof remains the compatibility path. Strict grain proofs are
+separate values and are the only proof type a future multi-fact branch planner
+may consume.
+
 ## Primary Flows
 
 ### Agent Request

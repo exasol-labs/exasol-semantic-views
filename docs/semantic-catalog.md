@@ -98,6 +98,7 @@ SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
 SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
+SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA
 ```
 
 `ADD_CUSTOM_EXTENSION` accepts non-Exasol vendor names without interpretation,
@@ -107,6 +108,18 @@ store either a simple source column name or a native expression, but not both.
 Relationship mappings follow the same rule independently for each endpoint.
 They are optional for legacy single-branch compilation but required for
 grain-aware relationship proofs.
+
+Every key or relationship-mapping mutation deletes the affected model
+version's compile-cache entries and marks its earlier successful validation
+runs `STALE`. Run `SEMANTIC_ADMIN.VALIDATE_MODEL` after completing a related
+set of changes.
+
+`SUGGEST_GRAIN_METADATA(model_name)` is dry-run only. It proposes a one-column
+primary key when a legacy `PRIMARY_KEY_EXPR` is exactly `alias.column`, and a
+one-column relationship mapping when `JOIN_CONDITION` is exactly one equality
+between the endpoint aliases. It does not canonicalize expressions, infer
+composite keys, execute admin helpers, or change the catalog. Review its
+`PROPOSED_METADATA_JSON` before applying anything.
 
 ## SQL-Native Metric Definition Metadata
 
