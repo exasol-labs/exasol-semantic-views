@@ -8,12 +8,24 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Grain-aware aggregation Phase C2
+
+- Plan-version 4 multi-fact requests now include a typed
+  `PhysicalMultiBranchPlan` with one base-source branch per leaf entity,
+  deterministic state columns, conditional metric-local aggregates, proven
+  joins, typed sparse-state placeholders, and a `UNION ALL` merged-state
+  pipeline.
+- The internal multi-branch renderer is protected by fixed branch-count and
+  generated-SQL-size safeguards. Valid requests remain behind `_073`, expose no
+  generated SQL, and do not populate the compile cache until Phase C3.
+- Physical binding failures return `_075` with a stable plan-level reason.
+
 #### Grain-aware aggregation Phase C1
 
-- Multi-fact additive requests now lower to a plan-version 3 `MULTI_BRANCH`
+- Multi-fact additive requests lower to a `MULTI_BRANCH`
   logical plan with normalized fact/state/finalizer nodes, bound filter scopes,
   strict branch-to-dimension proofs, and stable requirement/proof/rejection
-  identifiers. Execution remains deliberately disabled until Phase C2; valid
+  identifiers. Execution remains deliberately disabled until Phase C3; valid
   plans return `_073`, while path-specific proof failures return `_074`.
 - Single-branch SQL generation remains on the existing renderer.
 

@@ -1,6 +1,7 @@
 local query_spec = ESV_QUERY_SPEC
 local snapshots = ESV_CATALOG_SNAPSHOT
 local planner = ESV_METRIC_PLAN
+local physical_planner = ESV_PHYSICAL_PLAN
 local renderer = ESV_GRAIN_SQL
 
 local function base_context()
@@ -45,6 +46,70 @@ local function base_context()
         relationships = {},
         unique_keys = {},
     }, public
+end
+
+local function multi_physical_fixture()
+    local ctx, public = base_context()
+    ctx.entities[1].source_schema = "MART"
+    ctx.entities[1].source_object = "ORDERS"
+    ctx.entities[1].alias = "o"
+    ctx.entities[2].source_schema = "MART"
+    ctx.entities[2].source_object = "TICKETS"
+    ctx.entities[2].alias = "t"
+    ctx.entities[3].source_schema = "MART"
+    ctx.entities[3].source_object = "REGIONS"
+    ctx.entities[3].alias = "r"
+    ctx.dimensions[1].expression = "r.region_name"
+    ctx.dimensions[1].data_type = "VARCHAR(20)"
+    ctx.facts[1].expression = "o.profit"
+    ctx.facts[1].data_type = "DECIMAL(18,2)"
+    ctx.facts[2].entity_id = 2
+    ctx.facts[2].expression = "t.revenue"
+    ctx.facts[2].data_type = "DECIMAL(18,2)"
+    ctx.all_metric_by_id["11"].data_type = "DECIMAL(18,2)"
+    ctx.all_metric_by_id["12"].data_type = "DECIMAL(18,2)"
+    ctx.all_metric_by_id["11"].filters = {{
+        resolved_sql_expr = "o.status = 'CLOSED'",
+        required_dimension_id = 30,
+        required_entity_id = 3,
+    }}
+    ctx.all_metric_by_id["11"].inputs[1].filter_expr = "o.channel = 'WEB'"
+    ctx.relationships = {
+        {
+            id = 40, name = "orders_region", from_entity_id = 1, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE", join_type = "LEFT",
+            join_condition = "o.region_id = r.region_id",
+            key_mappings = {{ordinal_position = 1, from_column_name = "region_id",
+                to_column_name = "region_id"}},
+        },
+        {
+            id = 41, name = "tickets_region", from_entity_id = 2, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE", join_type = "LEFT",
+            join_condition = "t.region_id = r.region_id",
+            key_mappings = {{ordinal_position = 1, from_column_name = "region_id",
+                to_column_name = "region_id"}},
+        },
+    }
+    ctx.unique_keys = {{
+        id = 50, entity_id = 3, name = "region_pk",
+        columns = {{ordinal_position = 1, column_name = "region_id"}},
+    }}
+    local snapshot = snapshots.from_context(ctx, {public})
+    local spec = assert(query_spec.new({
+        model = "sales", object = "sales", metrics = {"margin"},
+        dimensions = {"region"},
+    }))
+    local bound = planner.bind_query(
+        spec,
+        {ctx.dimensions[1]},
+        {public},
+        {{field_id = 30, field = "region", entity_id = 3, op = "=",
+            value = "West", data_type = "VARCHAR(20)"}},
+        {},
+        {}
+    )
+    local logical = assert(planner.logical_plan(spec, snapshot, bound, {public}))
+    return snapshot, logical
 end
 
 test("QuerySpec canonicalizes both entrypoints without planner state", function()
@@ -204,7 +269,7 @@ test("C1 logical planner emits a planning-only multi branch plan", function()
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
     assert_equal(reason, nil)
-    assert_equal(plan.plan_version, 3)
+    assert_equal(plan.plan_version, 4)
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(plan.proof_mode, "STRICT_GRAIN")
     assert_equal(plan.execution.status, "PLANNING_ONLY")
@@ -327,6 +392,211 @@ test("C1 reports the path-specific blocking edge", function()
     assert_equal(proof.blocking_edge.relationship_id, 60)
     assert_equal(proof.blocking_edge.from_entity_id, 1)
     assert_equal(proof.blocking_edge.to_entity_id, 2)
+end)
+
+test("C2 physical planner binds one typed state branch per leaf", function()
+    local snapshot, logical = multi_physical_fixture()
+    local physical, physical_error = physical_planner.build(logical, snapshot)
+    assert_true(physical ~= nil, physical_error and physical_error.reason_code)
+    assert_equal(physical.physical_plan_version, 1)
+    assert_equal(physical.plan_kind, "MULTI_BRANCH_STATES")
+    assert_equal(#physical.branches, 2)
+    assert_equal(#physical.states, 2)
+    assert_equal(physical.states[1].state_id, "state:metric:11")
+    assert_equal(physical.states[1].ordinal, 1)
+    assert_equal(physical.states[1].placeholder_expression,
+        "CAST(NULL AS DECIMAL(18,2))")
+    assert_equal(physical.branches[1].cte_id, "cte:branch:1")
+    assert_equal(#physical.branches[1].joins, 1)
+    assert_equal(physical.branches[1].joins[1].relationship_id, 40)
+    assert_equal(physical.branches[1].state_columns[1].owner, true)
+    assert_contains(physical.branches[1].state_columns[1].expression,
+        "o.status = 'CLOSED' AND o.channel = 'WEB'")
+    assert_equal(physical.branches[1].state_columns[2].owner, false)
+    assert_equal(physical.branches[1].where_predicates[1].expression,
+        "UPPER(r.region_name) = UPPER('West')")
+    assert_equal(physical.merge.group_dimension_ids[1], 30)
+    assert_equal(physical.merge.state_ids[2], "state:metric:12")
+
+    local sql = renderer.render_multi_branch(physical)
+    assert_contains(sql, '"__esv_b_1" AS (')
+    assert_contains(sql, "LEFT JOIN \"MART\".\"REGIONS\" r")
+    assert_contains(sql, "CAST(NULL AS DECIMAL(18,2)) AS \"__esv_s_12\"")
+    assert_contains(sql, "UNION ALL")
+    assert_contains(sql, 'SUM("__esv_s_11") AS "__esv_s_11"')
+    assert_contains(sql, 'GROUP BY "__esv_d_30"')
+    assert_contains(sql, 'SELECT * FROM "__esv_merged_states"')
+
+    local within_limit = physical_planner.check_sql_size(physical, sql)
+    assert_equal(within_limit, true)
+    assert_equal(physical.safeguards.sql_size_bytes, #sql)
+    physical.safeguards.sql_size_limit = 1
+    local too_large, size_error = physical_planner.check_sql_size(physical, sql)
+    assert_equal(too_large, false)
+    assert_equal(size_error.reason_code, "PLANNER_SQL_SIZE_LIMIT_EXCEEDED")
+end)
+
+test("C2 physical planner validates boundaries and safeguards", function()
+    local snapshot, logical = multi_physical_fixture()
+    local missing, reason = physical_planner.build({plan_kind = "SINGLE_BRANCH"},
+        snapshot)
+    assert_equal(missing, nil)
+    assert_equal(reason.reason_code, "PHYSICAL_MULTI_BRANCH_PLAN_REQUIRED")
+
+    local failed_logical = snapshots.copy(logical)
+    failed_logical.failure = {reason_code = "DIMENSION_NOT_CONFORMED"}
+    missing, reason = physical_planner.build(failed_logical, snapshot)
+    assert_equal(reason.reason_code, "LOGICAL_PLAN_NOT_VALID")
+
+    missing, reason = physical_planner.build(logical, snapshot, {max_branches = 1})
+    assert_equal(reason.reason_code, "PLANNER_BRANCH_LIMIT_EXCEEDED")
+    assert_equal(reason.branch_count, 2)
+
+    local missing_source = snapshots.copy(snapshot)
+    missing_source.entity_by_id["1"].source_schema = nil
+    missing, reason = physical_planner.build(logical, missing_source)
+    assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
+    assert_equal(reason.binding_kind, "SOURCE")
+
+    local missing_dimension = snapshots.copy(snapshot)
+    missing_dimension.dimension_by_id["30"].expression = nil
+    missing, reason = physical_planner.build(logical, missing_dimension)
+    assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
+    assert_equal(reason.binding_kind, "DIMENSION_EXPRESSION")
+
+    local missing_type = snapshots.copy(logical)
+    missing_type.metric_stages[2].state_spec.data_type = nil
+    missing, reason = physical_planner.build(missing_type, snapshot)
+    assert_equal(reason.reason_code, "METRIC_STATE_TYPE_INCOMPATIBLE")
+
+    local missing_fact = snapshots.copy(snapshot)
+    missing_fact.fact_by_id["21"].expression = nil
+    missing, reason = physical_planner.build(logical, missing_fact)
+    assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
+    assert_equal(reason.binding_kind, "FACT_EXPRESSION")
+
+    local ambiguous_input = snapshots.copy(logical)
+    local aggregate = nil
+    for _, node in ipairs(ambiguous_input.metric_stages) do
+        if node.node_kind == "AGGREGATE_STATE" then aggregate = node break end
+    end
+    aggregate.inputs[#aggregate.inputs + 1] = {
+        kind = "FACT", id = 22, entity_id = 2,
+    }
+    missing, reason = physical_planner.build(ambiguous_input, snapshot)
+    assert_equal(reason.reason_code, "METRIC_INPUT_GRAIN_AMBIGUOUS")
+
+    local missing_owner = snapshots.copy(logical)
+    table.remove(missing_owner.branches, 2)
+    missing, reason = physical_planner.build(missing_owner, snapshot)
+    assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
+    assert_equal(reason.binding_kind, "STATE_OWNER")
+end)
+
+test("C2 physical planner keeps a deterministic three leaf layout", function()
+    local snapshot, logical = multi_physical_fixture()
+    local entity = {
+        id = 4, name = "shipments", source_schema = "MART",
+        source_object = "SHIPMENTS", alias = "s",
+    }
+    local fact = {
+        id = 23, name = "shipment_fact", entity_id = 4,
+        expression = "s.shipment_value", data_type = "DECIMAL(18,2)",
+    }
+    local relationship = {
+        id = 42, name = "shipments_region", from_entity_id = 4, to_entity_id = 3,
+        cardinality = "MANY_TO_ONE", join_type = "LEFT",
+        join_condition = "s.region_id = r.region_id",
+        key_mappings = {{ordinal_position = 1, from_column_name = "region_id",
+            to_column_name = "region_id"}},
+    }
+    snapshot.entities[#snapshot.entities + 1] = entity
+    snapshot.entity_by_id["4"] = entity
+    snapshot.facts[#snapshot.facts + 1] = fact
+    snapshot.fact_by_id["23"] = fact
+    snapshot.relationships[#snapshot.relationships + 1] = relationship
+    snapshot.relationship_by_id["42"] = relationship
+    logical.metric_stages[#logical.metric_stages + 1] = {
+        node_id = "metric:13",
+        node_kind = "AGGREGATE_STATE",
+        metric_id = 13,
+        name = "shipment_value",
+        leaf_entity_ids = {4},
+        inputs = {{kind = "FACT", id = 23, entity_id = 4}},
+        local_filters = {},
+        state_spec = {
+            state_kind = "SUM", merge_operator = "SUM",
+            data_type = "DECIMAL(18,2)", empty_behavior = "NULL",
+        },
+    }
+    logical.branches[#logical.branches + 1] = {
+        branch_id = "branch:4",
+        leaf_entity_id = 4,
+        state_node_ids = {"metric:13"},
+        requirements = {},
+        proofs = {{
+            proof_id = "proof:branch:4:region",
+            status = "PROVEN",
+            edges = {{
+                relationship_id = 42,
+                from_entity_id = 4,
+                to_entity_id = 3,
+                unique_key_id = 50,
+            }},
+        }},
+    }
+    local physical = assert(physical_planner.build(logical, snapshot))
+    assert_equal(#physical.branches, 3)
+    assert_equal(#physical.states, 3)
+    assert_equal(physical.branches[3].branch_id, "branch:4")
+    assert_equal(physical.branches[3].state_columns[3].owner, true)
+    assert_equal(physical.safeguards.branch_count, 3)
+end)
+
+test("C2 physical planner binds filter variants and rejects broken proofs", function()
+    local snapshot, logical = multi_physical_fixture()
+    local variants = {
+        {operator = "IN", value = {"West", "East"},
+            expected = "UPPER(r.region_name) IN (UPPER('West'), UPPER('East'))"},
+        {operator = "BETWEEN", value = {"A", "Z"},
+            expected = "r.region_name BETWEEN 'A' AND 'Z'"},
+        {operator = "IS NULL", value = nil,
+            expected = "r.region_name IS NULL"},
+    }
+    for _, variant in ipairs(variants) do
+        local candidate = snapshots.copy(logical)
+        local filter = candidate.bound_query.global_filters[1]
+        filter.operator = variant.operator
+        filter.value = variant.value
+        local physical, physical_error = physical_planner.build(candidate, snapshot)
+        assert_true(physical ~= nil, physical_error and physical_error.reason_code)
+        assert_equal(physical.branches[1].where_predicates[1].expression,
+            variant.expected)
+    end
+
+    local invalid_filter = snapshots.copy(logical)
+    invalid_filter.bound_query.global_filters[1].operator = "REGEXP"
+    local missing, reason = physical_planner.build(invalid_filter, snapshot)
+    assert_equal(reason.reason_code, "PHYSICAL_FILTER_INVALID")
+    assert_equal(reason.issue, "FILTER_OPERATOR_UNSUPPORTED")
+
+    local missing_relationship = snapshots.copy(snapshot)
+    missing_relationship.relationship_by_id["40"] = nil
+    missing, reason = physical_planner.build(logical, missing_relationship)
+    assert_equal(reason.reason_code, "PHYSICAL_PROOF_INVALID")
+    assert_equal(reason.issue, "REFERENCE_MISSING")
+
+    local disconnected = snapshots.copy(logical)
+    disconnected.branches[1].proofs[1].edges[1].from_entity_id = 999
+    missing, reason = physical_planner.build(disconnected, snapshot)
+    assert_equal(reason.reason_code, "PHYSICAL_PROOF_INVALID")
+    assert_equal(reason.issue, "PATH_DISCONNECTED")
+
+    local missing_join = snapshots.copy(snapshot)
+    missing_join.relationship_by_id["40"].join_condition = nil
+    missing, reason = physical_planner.build(logical, missing_join)
+    assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
+    assert_equal(reason.binding_kind, "RELATIONSHIP_JOIN")
 end)
 
 test("Separated renderer preserves legacy single branch SQL shape", function()

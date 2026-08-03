@@ -17,9 +17,10 @@ lower to the same versioned `QuerySpec`. Planning consumes a detached,
 model-versioned `CatalogSnapshot`, including transitive private metric
 dependencies that are not exposed as query fields.
 
-Phase B introduced the typed single-branch boundary. Phase C1 extends it with
-planning-only multi-branch validation while keeping existing SQL behavior
-below it. `PLAN_JSON.plan_version` is `3` and
+Phase B introduced the typed single-branch boundary. Phase C1 added
+multi-branch validation, and Phase C2 adds a typed physical state pipeline
+behind the planning-only feature gate while keeping existing SQL behavior
+below it. `PLAN_JSON.plan_version` is `4` and
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -41,13 +42,22 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
 - binds global, metric-local, and `HAVING` filters before rendering
 - proves every fact branch to every selected or globally filtered dimension
 - assigns stable branch, requirement, proof, key, and rejection identifiers
-- returns a `MULTI_BRANCH` logical plan without generated SQL
+- binds one physical base-source branch per leaf with deterministic dimensions,
+  state columns, typed placeholders, joins, and predicate placement
+- renders and size-checks an internal `UNION ALL` merged-state pipeline
+- returns a `MULTI_BRANCH` plan without public generated SQL or cache insertion
+
+The initial safeguards allow at most eight physical branches and at most
+1,000,000 bytes of internally rendered SQL. Limit failures are reported in the
+plan as `PLANNER_BRANCH_LIMIT_EXCEEDED` or
+`PLANNER_SQL_SIZE_LIMIT_EXCEEDED`.
 
 A valid planning-only request returns `SEMANTIC_REQUEST_073` or
 `SEMANTIC_QUERY_073` with `MULTI_BRANCH_EXECUTION_NOT_ENABLED` in the plan.
 An invalid strict proof returns `_074` with a path-specific `reason_code` and
-blocking relationship. This prevents the legacy root join planner from
-rendering multi-fact SQL before Phase C2.
+blocking relationship. Physical binding or safeguard failures return `_075`.
+This prevents the legacy root join planner or an incomplete multi-branch
+pipeline from becoming executable before Phase C3.
 
 These entrypoints are Lua scripts. Call them with `EXECUTE SCRIPT`, not
 `SELECT`:

@@ -1,6 +1,6 @@
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 3}
+local M = {PLAN_VERSION = 4}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -139,6 +139,8 @@ function M.build_dag(snapshot, selected_metrics)
                     id = dependency.id,
                     node_id = dependency_node.node_id,
                     role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
                 }
                 for _, entity_id in ipairs(dependency_node.leaf_entity_ids or {}) do
                     leaf_set[key(entity_id)] = entity_id
@@ -153,6 +155,8 @@ function M.build_dag(snapshot, selected_metrics)
                     node_id = dependency_node.node_id,
                     entity_id = fact.entity_id,
                     role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
                 }
                 leaf_set[key(fact.entity_id)] = fact.entity_id
             else
@@ -160,6 +164,8 @@ function M.build_dag(snapshot, selected_metrics)
                     kind = input.object_type,
                     id = input.object_id,
                     role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
                 }
             end
         end

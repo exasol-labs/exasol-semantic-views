@@ -6101,7 +6101,7 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 3}
+local M = {PLAN_VERSION = 4}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -6240,6 +6240,8 @@ function M.build_dag(snapshot, selected_metrics)
                     id = dependency.id,
                     node_id = dependency_node.node_id,
                     role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
                 }
                 for _, entity_id in ipairs(dependency_node.leaf_entity_ids or {}) do
                     leaf_set[key(entity_id)] = entity_id
@@ -6254,6 +6256,8 @@ function M.build_dag(snapshot, selected_metrics)
                     node_id = dependency_node.node_id,
                     entity_id = fact.entity_id,
                     role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
                 }
                 leaf_set[key(fact.entity_id)] = fact.entity_id
             else
@@ -6261,6 +6265,8 @@ function M.build_dag(snapshot, selected_metrics)
                     kind = input.object_type,
                     id = input.object_id,
                     role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
                 }
             end
         end
@@ -6807,7 +6813,491 @@ end
 
 ESV_METRIC_PLAN = M
 
--- SQL renderer for the typed single-branch physical plan.
+-- Typed physical planning for proven multi-branch aggregate-state plans.
+
+local M = {
+    VERSION = 1,
+    DEFAULT_MAX_BRANCHES = 8,
+    DEFAULT_MAX_SQL_BYTES = 1000000,
+}
+
+local function key(value) return tostring(value) end
+local function upper(value) return string.upper(tostring(value or "")) end
+local function missing(value) return value == nil or value == null or tostring(value) == "" end
+
+local function quote_ident(value)
+    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
+end
+
+local function quote_qualified(schema_name, object_name)
+    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
+end
+
+local function sql_string(value)
+    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
+end
+
+local function sql_literal(value, data_type)
+    if value == nil or value == null then return "NULL" end
+    if type(value) == "number" then return tostring(value) end
+    if type(value) == "boolean" then return value and "TRUE" or "FALSE" end
+    local text = tostring(value)
+    local dtype = upper(data_type)
+    if string.sub(dtype, 1, 4) == "DATE"
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
+        return "DATE " .. sql_string(text)
+    end
+    if string.find(dtype, "TIMESTAMP", 1, true) == 1
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
+        return "TIMESTAMP " .. sql_string(text)
+    end
+    if string.find(dtype, "DECIMAL", 1, true)
+        or string.find(dtype, "INT", 1, true)
+        or string.find(dtype, "NUMBER", 1, true)
+        or string.find(dtype, "DOUBLE", 1, true) then
+        if string.match(text, "^%-?%d+%.?%d*$") then return text end
+    end
+    return sql_string(text)
+end
+
+local function is_text_type(data_type)
+    local dtype = upper(data_type)
+    return string.find(dtype, "CHAR", 1, true) ~= nil
+        or string.find(dtype, "VARCHAR", 1, true) ~= nil
+end
+
+local function stable_token(value)
+    local token = string.gsub(key(value), "[^%w_]", "_")
+    if token == "" then token = "empty" end
+    return token
+end
+
+local function sorted_copy(values, field)
+    local result = {}
+    for _, value in ipairs(values or {}) do result[#result + 1] = value end
+    table.sort(result, function(left, right)
+        return key(left[field]) < key(right[field])
+    end)
+    return result
+end
+
+local function fail(reason_code, details)
+    details = details or {}
+    details.reason_code = reason_code
+    return nil, details
+end
+
+local function source_sql(entity)
+    if entity == nil or missing(entity.source_schema) or missing(entity.source_object)
+        or missing(entity.alias) then
+        return nil
+    end
+    return quote_qualified(entity.source_schema, entity.source_object)
+        .. " " .. tostring(entity.alias)
+end
+
+local function predicate_sql(filter, dimension)
+    local expression = dimension and dimension.expression
+    if missing(expression) then return nil, "DIMENSION_EXPRESSION_MISSING" end
+    local operator = upper(filter.operator)
+    local rhs = filter.value_sql or sql_literal(filter.value, filter.data_type)
+    if operator == "IS NULL" or operator == "IS NOT NULL" then
+        return tostring(expression) .. " " .. operator
+    end
+    if operator == "IN" then
+        local values = filter.value
+        if type(values) ~= "table" or #values == 0 then
+            return nil, "FILTER_VALUE_INVALID"
+        end
+        local literals = {}
+        for _, value in ipairs(values) do
+            local literal = sql_literal(value, filter.data_type)
+            if is_text_type(filter.data_type) then literal = "UPPER(" .. literal .. ")" end
+            literals[#literals + 1] = literal
+        end
+        local lhs = tostring(expression)
+        if is_text_type(filter.data_type) then lhs = "UPPER(" .. lhs .. ")" end
+        return lhs .. " IN (" .. table.concat(literals, ", ") .. ")"
+    end
+    if operator == "BETWEEN" then
+        local values = filter.value
+        if type(values) ~= "table" or #values ~= 2 then
+            return nil, "FILTER_VALUE_INVALID"
+        end
+        return tostring(expression) .. " BETWEEN "
+            .. sql_literal(values[1], filter.data_type) .. " AND "
+            .. sql_literal(values[2], filter.data_type)
+    end
+    if operator == "=" or operator == "!=" or operator == "<>"
+        or operator == ">" or operator == ">=" or operator == "<"
+        or operator == "<=" or operator == "LIKE" then
+        local lhs = tostring(expression)
+        if is_text_type(filter.data_type)
+            and (operator == "=" or operator == "!=" or operator == "<>"
+                or operator == "LIKE") then
+            lhs = "UPPER(" .. lhs .. ")"
+            rhs = "UPPER(" .. rhs .. ")"
+        end
+        return lhs .. " " .. operator .. " " .. rhs
+    end
+    return nil, "FILTER_OPERATOR_UNSUPPORTED"
+end
+
+local function state_filter_sql(node)
+    local predicates = {}
+    for _, filter in ipairs(node.local_filters or {}) do
+        local expression = filter.resolved_sql_expr
+        if missing(expression) then return nil, "METRIC_FILTER_EXPRESSION_MISSING" end
+        predicates[#predicates + 1] = tostring(expression)
+    end
+    if #predicates == 0 and not missing(node.legacy_filter_expr) then
+        predicates[1] = tostring(node.legacy_filter_expr)
+    end
+    for _, input in ipairs(node.inputs or {}) do
+        if not missing(input.filter_expr) then
+            predicates[#predicates + 1] = tostring(input.filter_expr)
+        end
+    end
+    if #predicates == 0 then return nil end
+    return table.concat(predicates, " AND ")
+end
+
+local function state_expression(state, fact_expression, filter_expression)
+    local value_expression = tostring(fact_expression)
+    if filter_expression ~= nil then
+        value_expression = "CASE WHEN (" .. filter_expression .. ") THEN "
+            .. value_expression .. " ELSE NULL END"
+    end
+    if state.state_kind == "SUM" then return "SUM(" .. value_expression .. ")" end
+    if state.state_kind == "COUNT" then return "COUNT(" .. value_expression .. ")" end
+    return nil
+end
+
+local function collect_states(logical_plan, snapshot)
+    local states = {}
+    local aliases = {}
+    for _, node in ipairs(logical_plan.metric_stages or {}) do
+        if node.node_kind == "AGGREGATE_STATE" then
+            if node.state_spec == nil or missing(node.state_spec.data_type) then
+                return fail("METRIC_STATE_TYPE_INCOMPATIBLE", {
+                    metric_id = node.metric_id,
+                    state_id = node.node_id,
+                })
+            end
+            local fact_input = nil
+            for _, input in ipairs(node.inputs or {}) do
+                if input.kind == "FACT" then
+                    if fact_input ~= nil then
+                        return fail("METRIC_INPUT_GRAIN_AMBIGUOUS", {
+                            metric_id = node.metric_id,
+                            state_id = node.node_id,
+                        })
+                    end
+                    fact_input = input
+                end
+            end
+            local fact = fact_input and (snapshot.fact_by_id or {})[key(fact_input.id)]
+            if fact == nil or missing(fact.expression) then
+                return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                    binding_kind = "FACT_EXPRESSION",
+                    metric_id = node.metric_id,
+                    fact_id = fact_input and fact_input.id,
+                    state_id = node.node_id,
+                })
+            end
+            local state_id = "state:metric:" .. key(node.metric_id)
+            local alias = "__esv_s_" .. stable_token(node.metric_id)
+            if aliases[alias] ~= nil and aliases[alias] ~= state_id then
+                return fail("PHYSICAL_IDENTIFIER_COLLISION", {
+                    state_id = state_id,
+                    conflicting_state_id = aliases[alias],
+                })
+            end
+            aliases[alias] = state_id
+            local filter_expression, filter_error = state_filter_sql(node)
+            if filter_error ~= nil then
+                return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                    binding_kind = "METRIC_FILTER_EXPRESSION",
+                    detail = filter_error,
+                    metric_id = node.metric_id,
+                    state_id = node.node_id,
+                })
+            end
+            states[#states + 1] = {
+                state_id = state_id,
+                node_id = node.node_id,
+                metric_id = node.metric_id,
+                metric = node.name,
+                leaf_entity_id = node.leaf_entity_ids[1],
+                state_kind = node.state_spec.state_kind,
+                merge_operator = node.state_spec.merge_operator,
+                empty_behavior = node.state_spec.empty_behavior,
+                data_type = node.state_spec.data_type,
+                source_fact_id = fact.id,
+                source_expression = fact.expression,
+                filter_expression = filter_expression,
+                column_alias = alias,
+                placeholder_expression = "CAST(NULL AS "
+                    .. tostring(node.state_spec.data_type) .. ")",
+            }
+        end
+    end
+    table.sort(states, function(left, right) return left.state_id < right.state_id end)
+    for ordinal, state in ipairs(states) do state.ordinal = ordinal end
+    return states, nil
+end
+
+local function collect_dimensions(logical_plan, snapshot)
+    local dimensions = {}
+    local aliases = {}
+    for _, reference in ipairs(logical_plan.bound_query.selected_dimensions or {}) do
+        local dimension = (snapshot.dimension_by_id or {})[key(reference.id)]
+        if dimension == nil or missing(dimension.expression) then
+            return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                binding_kind = "DIMENSION_EXPRESSION",
+                dimension_id = reference.id,
+            })
+        end
+        local alias = "__esv_d_" .. stable_token(reference.id)
+        if aliases[alias] ~= nil and aliases[alias] ~= key(reference.id) then
+            return fail("PHYSICAL_IDENTIFIER_COLLISION", {
+                dimension_id = reference.id,
+                conflicting_dimension_id = aliases[alias],
+            })
+        end
+        aliases[alias] = key(reference.id)
+        dimensions[#dimensions + 1] = {
+            dimension_id = reference.id,
+            name = reference.name,
+            entity_id = dimension.entity_id,
+            data_type = dimension.data_type,
+            expression = dimension.expression,
+            column_alias = alias,
+            ordinal = #dimensions + 1,
+        }
+    end
+    return dimensions, nil
+end
+
+local function branch_joins(branch, snapshot)
+    local joins = {}
+    local joined_relationships = {}
+    local joined_entities = {[key(branch.leaf_entity_id)] = true}
+    for _, proof in ipairs(branch.proofs or {}) do
+        for _, proof_edge in ipairs(proof.edges or {}) do
+            local relationship = (snapshot.relationship_by_id or {})[
+                key(proof_edge.relationship_id)]
+            local target = (snapshot.entity_by_id or {})[key(proof_edge.to_entity_id)]
+            if relationship == nil or target == nil then
+                return fail("PHYSICAL_PROOF_INVALID", {
+                    issue = "REFERENCE_MISSING",
+                    branch_id = branch.branch_id,
+                    proof_id = proof.proof_id,
+                    relationship_id = proof_edge.relationship_id,
+                })
+            end
+            if not joined_entities[key(proof_edge.from_entity_id)] then
+                return fail("PHYSICAL_PROOF_INVALID", {
+                    issue = "PATH_DISCONNECTED",
+                    branch_id = branch.branch_id,
+                    proof_id = proof.proof_id,
+                    relationship_id = proof_edge.relationship_id,
+                })
+            end
+            if not joined_relationships[key(relationship.id)] then
+                local target_sql = source_sql(target)
+                if target_sql == nil or missing(relationship.join_condition) then
+                    return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                        binding_kind = "RELATIONSHIP_JOIN",
+                        branch_id = branch.branch_id,
+                        relationship_id = relationship.id,
+                    })
+                end
+                joins[#joins + 1] = {
+                    join_id = "join:relationship:" .. key(relationship.id),
+                    relationship_id = relationship.id,
+                    from_entity_id = proof_edge.from_entity_id,
+                    to_entity_id = proof_edge.to_entity_id,
+                    join_type = upper(relationship.join_type or "LEFT"),
+                    target_sql = target_sql,
+                    condition = relationship.join_condition,
+                }
+                joined_relationships[key(relationship.id)] = true
+                joined_entities[key(proof_edge.to_entity_id)] = true
+            end
+        end
+    end
+    return joins, nil
+end
+
+local function global_predicates(logical_plan, snapshot)
+    local predicates = {}
+    for _, filter in ipairs(logical_plan.bound_query.global_filters or {}) do
+        local dimension = (snapshot.dimension_by_id or {})[key(filter.field_id)]
+        local expression, reason = predicate_sql(filter, dimension)
+        if expression == nil then
+            return fail("PHYSICAL_FILTER_INVALID", {
+                issue = reason,
+                dimension_id = filter.field_id,
+            })
+        end
+        predicates[#predicates + 1] = {
+            filter_id = "global-filter:dimension:" .. key(filter.field_id)
+                .. ":" .. key(#predicates + 1),
+            dimension_id = filter.field_id,
+            expression = expression,
+        }
+    end
+    return predicates, nil
+end
+
+function M.build(logical_plan, snapshot, options)
+    options = options or {}
+    if logical_plan == nil or logical_plan.plan_kind ~= "MULTI_BRANCH" then
+        return fail("PHYSICAL_MULTI_BRANCH_PLAN_REQUIRED")
+    end
+    if logical_plan.failure ~= nil then
+        return fail("LOGICAL_PLAN_NOT_VALID")
+    end
+    local branches = sorted_copy(logical_plan.branches, "branch_id")
+    local max_branches = tonumber(options.max_branches) or M.DEFAULT_MAX_BRANCHES
+    if #branches > max_branches then
+        return fail("PLANNER_BRANCH_LIMIT_EXCEEDED", {
+            branch_count = #branches,
+            branch_limit = max_branches,
+        })
+    end
+
+    local dimensions, dimension_error = collect_dimensions(logical_plan, snapshot)
+    if dimensions == nil then return nil, dimension_error end
+    local states, state_error = collect_states(logical_plan, snapshot)
+    if states == nil then return nil, state_error end
+    local predicates, predicate_error = global_predicates(logical_plan, snapshot)
+    if predicates == nil then return nil, predicate_error end
+
+    local physical = {
+        physical_plan_version = M.VERSION,
+        plan_kind = "MULTI_BRANCH_STATES",
+        logical_plan_version = logical_plan.plan_version,
+        dimensions = dimensions,
+        states = states,
+        branches = {},
+        union = {
+            cte_id = "cte:unioned-states",
+            cte_alias = "__esv_unioned_states",
+        },
+        merge = {
+            cte_id = "cte:merged-states",
+            cte_alias = "__esv_merged_states",
+            group_dimension_ids = {},
+            state_ids = {},
+        },
+        safeguards = {
+            branch_count = #branches,
+            branch_limit = max_branches,
+            sql_size_limit = tonumber(options.max_sql_bytes) or M.DEFAULT_MAX_SQL_BYTES,
+        },
+        execution = {
+            status = "PLANNING_ONLY",
+            reason_code = "MULTI_BRANCH_EXECUTION_NOT_ENABLED",
+        },
+    }
+    for _, dimension in ipairs(dimensions) do
+        physical.merge.group_dimension_ids[#physical.merge.group_dimension_ids + 1] =
+            dimension.dimension_id
+    end
+    for _, state in ipairs(states) do
+        physical.merge.state_ids[#physical.merge.state_ids + 1] = state.state_id
+    end
+
+    local branch_aliases = {}
+    local state_owner_counts = {}
+    for _, state in ipairs(states) do state_owner_counts[state.state_id] = 0 end
+    for _, branch in ipairs(branches) do
+        local entity = (snapshot.entity_by_id or {})[key(branch.leaf_entity_id)]
+        local from_sql = source_sql(entity)
+        if from_sql == nil then
+            return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                binding_kind = "SOURCE",
+                branch_id = branch.branch_id,
+                leaf_entity_id = branch.leaf_entity_id,
+            })
+        end
+        local joins, join_error = branch_joins(branch, snapshot)
+        if joins == nil then return nil, join_error end
+        local cte_alias = "__esv_b_" .. stable_token(branch.leaf_entity_id)
+        if branch_aliases[cte_alias] ~= nil
+            and branch_aliases[cte_alias] ~= branch.branch_id then
+            return fail("PHYSICAL_IDENTIFIER_COLLISION", {
+                branch_id = branch.branch_id,
+                conflicting_branch_id = branch_aliases[cte_alias],
+            })
+        end
+        branch_aliases[cte_alias] = branch.branch_id
+        local physical_branch = {
+            branch_id = branch.branch_id,
+            cte_id = "cte:" .. branch.branch_id,
+            cte_alias = cte_alias,
+            leaf_entity_id = branch.leaf_entity_id,
+            from_sql = from_sql,
+            joins = joins,
+            dimensions = dimensions,
+            where_predicates = predicates,
+            state_columns = {},
+        }
+        for _, state in ipairs(states) do
+            local column = {
+                state_id = state.state_id,
+                column_alias = state.column_alias,
+                data_type = state.data_type,
+                owner = key(state.leaf_entity_id) == key(branch.leaf_entity_id),
+            }
+            if column.owner then
+                state_owner_counts[state.state_id] =
+                    state_owner_counts[state.state_id] + 1
+                column.expression = state_expression(state, state.source_expression,
+                    state.filter_expression)
+                if column.expression == nil then
+                    return fail("METRIC_STATE_UNSUPPORTED", {
+                        branch_id = branch.branch_id,
+                        state_id = state.state_id,
+                    })
+                end
+            else
+                column.expression = state.placeholder_expression
+            end
+            physical_branch.state_columns[#physical_branch.state_columns + 1] = column
+        end
+        physical.branches[#physical.branches + 1] = physical_branch
+    end
+    for _, state in ipairs(states) do
+        if state_owner_counts[state.state_id] ~= 1 then
+            return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                binding_kind = "STATE_OWNER",
+                state_id = state.state_id,
+                owner_count = state_owner_counts[state.state_id],
+            })
+        end
+    end
+    return physical, nil
+end
+
+function M.check_sql_size(physical_plan, sql_text)
+    local actual = #tostring(sql_text or "")
+    physical_plan.safeguards.sql_size_bytes = actual
+    if actual > physical_plan.safeguards.sql_size_limit then
+        return false, {
+            reason_code = "PLANNER_SQL_SIZE_LIMIT_EXCEEDED",
+            sql_size_bytes = actual,
+            sql_size_limit = physical_plan.safeguards.sql_size_limit,
+        }
+    end
+    return true, nil
+end
+
+ESV_PHYSICAL_PLAN = M
+
+-- Decision-free SQL renderer for validated single- and multi-branch plans.
 
 local M = {VERSION = 1}
 
@@ -6832,6 +7322,94 @@ function M.render_single_branch(plan)
     return table.concat(sql, "\n")
 end
 
+local function quote_ident(value)
+    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
+end
+
+local function render_branch(branch)
+    local select_parts = {}
+    local group_parts = {}
+    for _, dimension in ipairs(branch.dimensions or {}) do
+        select_parts[#select_parts + 1] = tostring(dimension.expression)
+            .. " AS " .. quote_ident(dimension.column_alias)
+        group_parts[#group_parts + 1] = tostring(dimension.expression)
+    end
+    for _, state in ipairs(branch.state_columns or {}) do
+        select_parts[#select_parts + 1] = tostring(state.expression)
+            .. " AS " .. quote_ident(state.column_alias)
+    end
+    local sql = {
+        quote_ident(branch.cte_alias) .. " AS (",
+        "  SELECT " .. table.concat(select_parts, ", "),
+        "  FROM " .. tostring(branch.from_sql),
+    }
+    for _, join in ipairs(branch.joins or {}) do
+        sql[#sql + 1] = "  " .. tostring(join.join_type) .. " JOIN "
+            .. tostring(join.target_sql) .. " ON " .. tostring(join.condition)
+    end
+    local predicates = {}
+    for _, predicate in ipairs(branch.where_predicates or {}) do
+        predicates[#predicates + 1] = tostring(predicate.expression)
+    end
+    if #predicates > 0 then
+        sql[#sql + 1] = "  WHERE " .. table.concat(predicates, " AND ")
+    end
+    if #group_parts > 0 then
+        sql[#sql + 1] = "  GROUP BY " .. table.concat(group_parts, ", ")
+    end
+    sql[#sql + 1] = ")"
+    return table.concat(sql, "\n")
+end
+
+function M.render_multi_branch(plan)
+    local ctes = {}
+    for _, branch in ipairs(plan.branches or {}) do
+        ctes[#ctes + 1] = render_branch(branch)
+    end
+
+    local union_columns = {}
+    for _, dimension in ipairs(plan.dimensions or {}) do
+        union_columns[#union_columns + 1] = quote_ident(dimension.column_alias)
+    end
+    for _, state in ipairs(plan.states or {}) do
+        union_columns[#union_columns + 1] = quote_ident(state.column_alias)
+    end
+    local union_queries = {}
+    for _, branch in ipairs(plan.branches or {}) do
+        union_queries[#union_queries + 1] = "  SELECT "
+            .. table.concat(union_columns, ", ") .. " FROM "
+            .. quote_ident(branch.cte_alias)
+    end
+    ctes[#ctes + 1] = quote_ident(plan.union.cte_alias) .. " AS (\n"
+        .. table.concat(union_queries, "\n  UNION ALL\n") .. "\n)"
+
+    local merge_parts = {}
+    local group_parts = {}
+    for _, dimension in ipairs(plan.dimensions or {}) do
+        local alias = quote_ident(dimension.column_alias)
+        merge_parts[#merge_parts + 1] = alias
+        group_parts[#group_parts + 1] = alias
+    end
+    for _, state in ipairs(plan.states or {}) do
+        local alias = quote_ident(state.column_alias)
+        merge_parts[#merge_parts + 1] = tostring(state.merge_operator)
+            .. "(" .. alias .. ") AS " .. alias
+    end
+    local merge_sql = {
+        quote_ident(plan.merge.cte_alias) .. " AS (",
+        "  SELECT " .. table.concat(merge_parts, ", "),
+        "  FROM " .. quote_ident(plan.union.cte_alias),
+    }
+    if #group_parts > 0 then
+        merge_sql[#merge_sql + 1] = "  GROUP BY " .. table.concat(group_parts, ", ")
+    end
+    merge_sql[#merge_sql + 1] = ")"
+    ctes[#ctes + 1] = table.concat(merge_sql, "\n")
+
+    return "WITH\n" .. table.concat(ctes, ",\n")
+        .. "\nSELECT * FROM " .. quote_ident(plan.merge.cte_alias)
+end
+
 ESV_GRAIN_SQL = M
 
 local M = {}
@@ -6839,6 +7417,7 @@ local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is requi
 local query_spec_runtime = assert(ESV_QUERY_SPEC, "query spec runtime is required")
 local catalog_snapshot_runtime = assert(ESV_CATALOG_SNAPSHOT, "catalog snapshot runtime is required")
 local metric_plan_runtime = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
+local physical_plan_runtime = assert(ESV_PHYSICAL_PLAN, "physical plan runtime is required")
 local grain_sql_runtime = assert(ESV_GRAIN_SQL, "grain SQL runtime is required")
 
 if type(import) == "function" then
@@ -8814,41 +9393,72 @@ local function compile_request_table(request, options)
             "Typed planning failed: " .. tostring(typed_plan_error) .. ".")
     end
 
-    local function plan_error(code, message)
-        local result = error_result(error_prefix .. code, message)
-        local metric_names = {}
-        local dimension_names = {}
-        for _, metric in ipairs(selected_metrics) do
-            metric_names[#metric_names + 1] = metric.name
-        end
-        for _, dimension in ipairs(selected_dimensions) do
-            dimension_names[#dimension_names + 1] = dimension.name
-        end
-        local rejected_materializations = {}
-        if typed_plan.plan_kind == "MULTI_BRANCH" then
-            rejected_materializations[1] = {
-                reason_code = "MATERIALIZATION_BRANCH_INELIGIBLE",
-            }
-        end
-        result.plan_json = json_encode({
+    local function plan_envelope(materialization_decision, selected_materialization,
+        relationship_paths)
+        materialization_decision = materialization_decision or {
+            candidate_count = 0,
+            rejected_materializations = typed_plan.plan_kind == "MULTI_BRANCH"
+                and {{reason_code = "MATERIALIZATION_BRANCH_INELIGIBLE"}} or {},
+            selected_materialization = JSON_NULL,
+        }
+        local plan = {
             plan_version = metric_plan_runtime.PLAN_VERSION,
             logical_plan = typed_plan,
             model = model.model_name,
             version_id = model.version_id,
             version_number = model.version_number,
             object = ctx.object.name,
-            metrics = metric_names,
-            dimensions = dimension_names,
+            metrics = {},
+            metric_details = {},
+            dimensions = {},
             filters = filters,
-            validation_run_id = validation_run_id,
+            relationship_paths = relationship_paths or {},
             selected_materialization = JSON_NULL,
-            materialization_decision = {
-                candidate_count = 0,
-                rejected_materializations = rejected_materializations,
-                selected_materialization = JSON_NULL,
-            },
+            materialization_decision = materialization_decision,
+            validation_run_id = validation_run_id,
             warnings = {},
-        })
+        }
+        if selected_materialization ~= nil then
+            plan.selected_materialization = {
+                materialization_id = selected_materialization.materialization_id,
+                materialization_name = selected_materialization.materialization_name,
+                physical_schema = selected_materialization.physical_schema,
+                physical_object = selected_materialization.physical_object,
+                materialization_type = selected_materialization.materialization_type,
+                rollup_required = selected_materialization.rollup_required,
+            }
+        end
+        for _, metric in ipairs(selected_metrics) do
+            plan.metrics[#plan.metrics + 1] = metric.name
+            local detail = {
+                name = metric.name,
+                metric_kind = metric.metric_kind or metric.metric_type,
+                metric_type = metric.metric_type,
+                input_roles = {},
+            }
+            for _, row in ipairs(query([[
+                SELECT INPUT_ROLE, INPUT_OBJECT_TYPE, EXPRESSION_ALIAS
+                FROM SYS_SEMANTIC.METRIC_INPUTS
+                WHERE METRIC_ID = :metric_id
+                ORDER BY ORDINAL_POSITION
+            ]], {metric_id = metric.id}) or {}) do
+                detail.input_roles[#detail.input_roles + 1] = {
+                    role = row_value(row, "INPUT_ROLE", 1),
+                    object_type = row_value(row, "INPUT_OBJECT_TYPE", 2),
+                    alias = row_value(row, "EXPRESSION_ALIAS", 3),
+                }
+            end
+            plan.metric_details[#plan.metric_details + 1] = detail
+        end
+        for _, dimension in ipairs(selected_dimensions) do
+            plan.dimensions[#plan.dimensions + 1] = dimension.name
+        end
+        return plan
+    end
+
+    local function plan_error(code, message)
+        local result = error_result(error_prefix .. code, message)
+        result.plan_json = json_encode(plan_envelope())
         return result
     end
 
@@ -8859,8 +9469,28 @@ local function compile_request_table(request, options)
         return plan_error(code, "Typed planning failed: " .. tostring(reason) .. ".")
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
+        local physical_plan, physical_error = physical_plan_runtime.build(
+            typed_plan,
+            snapshot
+        )
+        if physical_plan == nil then
+            typed_plan.failure = physical_error
+            return plan_error("_075", "Physical planning failed: "
+                .. tostring(physical_error.reason_code) .. ".")
+        end
+        typed_plan.physical_plan = physical_plan
+        local internal_sql = grain_sql_runtime.render_multi_branch(physical_plan)
+        local within_limit, size_error = physical_plan_runtime.check_sql_size(
+            physical_plan,
+            internal_sql
+        )
+        if not within_limit then
+            typed_plan.failure = size_error
+            return plan_error("_075", "Physical planning failed: "
+                .. tostring(size_error.reason_code) .. ".")
+        end
         return plan_error("_073",
-            "Multi-branch plan is valid but execution is not enabled until Phase C2.")
+            "Multi-branch physical plan is valid but execution is not enabled until Phase C3.")
     end
     if request.proof_mode == "STRICT_GRAIN" then
         for _, proof in ipairs(typed_plan.relationship_proofs or {}) do
@@ -8910,58 +9540,8 @@ local function compile_request_table(request, options)
         sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
     end
 
-    local plan = {
-        plan_version = metric_plan_runtime.PLAN_VERSION,
-        logical_plan = typed_plan,
-        model = model.model_name,
-        version_id = model.version_id,
-        version_number = model.version_number,
-        object = ctx.object.name,
-        metrics = {},
-        metric_details = {},
-        dimensions = {},
-        filters = filters,
-        relationship_paths = relationship_paths,
-        selected_materialization = JSON_NULL,
-        materialization_decision = materialization_decision,
-        validation_run_id = validation_run_id,
-        warnings = {},
-    }
-    if selected_materialization ~= nil then
-        plan.selected_materialization = {
-            materialization_id = selected_materialization.materialization_id,
-            materialization_name = selected_materialization.materialization_name,
-            physical_schema = selected_materialization.physical_schema,
-            physical_object = selected_materialization.physical_object,
-            materialization_type = selected_materialization.materialization_type,
-            rollup_required = selected_materialization.rollup_required,
-        }
-    end
-    for _, metric in ipairs(selected_metrics) do
-        plan.metrics[#plan.metrics + 1] = metric.name
-        local detail = {
-            name = metric.name,
-            metric_kind = metric.metric_kind or metric.metric_type,
-            metric_type = metric.metric_type,
-            input_roles = {},
-        }
-        for _, row in ipairs(query([[
-            SELECT INPUT_ROLE, INPUT_OBJECT_TYPE, EXPRESSION_ALIAS
-            FROM SYS_SEMANTIC.METRIC_INPUTS
-            WHERE METRIC_ID = :metric_id
-            ORDER BY ORDINAL_POSITION
-        ]], {metric_id = metric.id}) or {}) do
-            detail.input_roles[#detail.input_roles + 1] = {
-                role = row_value(row, "INPUT_ROLE", 1),
-                object_type = row_value(row, "INPUT_OBJECT_TYPE", 2),
-                alias = row_value(row, "EXPRESSION_ALIAS", 3),
-            }
-        end
-        plan.metric_details[#plan.metric_details + 1] = detail
-    end
-    for _, dimension in ipairs(selected_dimensions) do
-        plan.dimensions[#plan.dimensions + 1] = dimension.name
-    end
+    local plan = plan_envelope(materialization_decision, selected_materialization,
+        relationship_paths)
     local result = ok_result(sql_text, plan, validation_run_id)
     if cache_key ~= nil then
         cache_store(model.version_id, cache_key, result)

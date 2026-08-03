@@ -374,7 +374,8 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
             if options.multi_fact then
                 return {
-                    {1, "orders", "MART", "ORDERS", "o", "o.order_id",
+                    {1, "orders", options.missing_multi_source and "" or "MART",
+                        "ORDERS", "o", "o.order_id",
                         "One row per order"},
                     {2, "tickets", "MART", "TICKETS", "t", "t.ticket_id",
                         "One row per ticket"},
@@ -605,9 +606,14 @@ test("C1 compiler returns a versioned plan without multi branch SQL", function()
     assert_equal(result.error_code, "SEMANTIC_REQUEST_073")
     assert_equal(result.generated_sql, nil)
     local envelope = api.json_decode(result.plan_json)
-    assert_equal(envelope.plan_version, 3)
+    assert_equal(envelope.plan_version, 4)
     assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
     assert_equal(envelope.logical_plan.execution.status, "PLANNING_ONLY")
+    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 1)
+    assert_equal(envelope.logical_plan.physical_plan.plan_kind,
+        "MULTI_BRANCH_STATES")
+    assert_true(envelope.logical_plan.physical_plan.safeguards.sql_size_bytes > 0)
+    assert_equal(envelope.metric_details[1].name, "activity_ratio")
     assert_equal(#envelope.logical_plan.branches, 2)
     assert_equal(#envelope.logical_plan.relationship_proofs, 2)
     assert_equal(envelope.logical_plan.relationship_proofs[1].status, "PROVEN")
@@ -626,6 +632,17 @@ test("C1 compiler returns a versioned plan without multi branch SQL", function()
         "^proof:branch:") ~= nil)
     assert_true(string.match(rejected_plan.failure.rejection_id,
         ":rejection$") ~= nil)
+
+    local physical_rejected = compile_with_fixture(request, {
+        multi_fact = true,
+        missing_multi_source = true,
+    })
+    assert_equal(physical_rejected.error_code, "SEMANTIC_REQUEST_075")
+    assert_equal(physical_rejected.generated_sql, nil)
+    local physical_failure = api.json_decode(
+        physical_rejected.plan_json).logical_plan.failure
+    assert_equal(physical_failure.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
+    assert_equal(physical_failure.binding_kind, "SOURCE")
 
     local sql_mock = compiler_query_fixture({multi_fact = true})
     local sql_result = with_query(sql_mock, function()

@@ -16,6 +16,7 @@ GRAIN_GRAPH_SOURCE = ROOT / "lua/semantic_layer/shared/grain_graph.lua"
 QUERY_SPEC_SOURCE = ROOT / "lua/semantic_layer/compiler/query_spec.lua"
 CATALOG_SNAPSHOT_SOURCE = ROOT / "lua/semantic_layer/compiler/catalog_snapshot.lua"
 METRIC_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/metric_plan.lua"
+PHYSICAL_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/physical_plan.lua"
 GRAIN_SQL_SOURCE = ROOT / "lua/semantic_layer/compiler/grain_sql.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
@@ -47,6 +48,7 @@ def compiler_block() -> str:
     query_spec_source = QUERY_SPEC_SOURCE.read_text(encoding="utf-8").rstrip()
     catalog_snapshot_source = CATALOG_SNAPSHOT_SOURCE.read_text(encoding="utf-8").rstrip()
     metric_plan_source = METRIC_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
+    physical_plan_source = PHYSICAL_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
     grain_sql_source = GRAIN_SQL_SOURCE.read_text(encoding="utf-8").rstrip()
     source = COMPILER_SOURCE.read_text(encoding="utf-8").rstrip()
     materializations_source = MATERIALIZATIONS_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -63,6 +65,8 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
 {catalog_snapshot_source}
 
 {metric_plan_source}
+
+{physical_plan_source}
 
 {grain_sql_source}
 

@@ -64,7 +64,7 @@ def main() -> int:
         legacy = compile_request(con, request)
         assert_equal("legacy compile", legacy[0], "OK")
         plan = json.loads(legacy[5])
-        assert_equal("logical plan version", plan["plan_version"], 3)
+        assert_equal("logical plan version", plan["plan_version"], 4)
         assert_equal("logical plan kind", plan["logical_plan"]["plan_kind"], "SINGLE_BRANCH")
         assert_equal("legacy proof mode", plan["logical_plan"]["proof_mode"], "LEGACY_JOIN")
         assert_true("typed metric stages", bool(plan["logical_plan"]["metric_stages"]))

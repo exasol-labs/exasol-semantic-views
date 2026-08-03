@@ -3,6 +3,7 @@ local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is requi
 local query_spec_runtime = assert(ESV_QUERY_SPEC, "query spec runtime is required")
 local catalog_snapshot_runtime = assert(ESV_CATALOG_SNAPSHOT, "catalog snapshot runtime is required")
 local metric_plan_runtime = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
+local physical_plan_runtime = assert(ESV_PHYSICAL_PLAN, "physical plan runtime is required")
 local grain_sql_runtime = assert(ESV_GRAIN_SQL, "grain SQL runtime is required")
 
 if type(import) == "function" then
@@ -1978,41 +1979,72 @@ local function compile_request_table(request, options)
             "Typed planning failed: " .. tostring(typed_plan_error) .. ".")
     end
 
-    local function plan_error(code, message)
-        local result = error_result(error_prefix .. code, message)
-        local metric_names = {}
-        local dimension_names = {}
-        for _, metric in ipairs(selected_metrics) do
-            metric_names[#metric_names + 1] = metric.name
-        end
-        for _, dimension in ipairs(selected_dimensions) do
-            dimension_names[#dimension_names + 1] = dimension.name
-        end
-        local rejected_materializations = {}
-        if typed_plan.plan_kind == "MULTI_BRANCH" then
-            rejected_materializations[1] = {
-                reason_code = "MATERIALIZATION_BRANCH_INELIGIBLE",
-            }
-        end
-        result.plan_json = json_encode({
+    local function plan_envelope(materialization_decision, selected_materialization,
+        relationship_paths)
+        materialization_decision = materialization_decision or {
+            candidate_count = 0,
+            rejected_materializations = typed_plan.plan_kind == "MULTI_BRANCH"
+                and {{reason_code = "MATERIALIZATION_BRANCH_INELIGIBLE"}} or {},
+            selected_materialization = JSON_NULL,
+        }
+        local plan = {
             plan_version = metric_plan_runtime.PLAN_VERSION,
             logical_plan = typed_plan,
             model = model.model_name,
             version_id = model.version_id,
             version_number = model.version_number,
             object = ctx.object.name,
-            metrics = metric_names,
-            dimensions = dimension_names,
+            metrics = {},
+            metric_details = {},
+            dimensions = {},
             filters = filters,
-            validation_run_id = validation_run_id,
+            relationship_paths = relationship_paths or {},
             selected_materialization = JSON_NULL,
-            materialization_decision = {
-                candidate_count = 0,
-                rejected_materializations = rejected_materializations,
-                selected_materialization = JSON_NULL,
-            },
+            materialization_decision = materialization_decision,
+            validation_run_id = validation_run_id,
             warnings = {},
-        })
+        }
+        if selected_materialization ~= nil then
+            plan.selected_materialization = {
+                materialization_id = selected_materialization.materialization_id,
+                materialization_name = selected_materialization.materialization_name,
+                physical_schema = selected_materialization.physical_schema,
+                physical_object = selected_materialization.physical_object,
+                materialization_type = selected_materialization.materialization_type,
+                rollup_required = selected_materialization.rollup_required,
+            }
+        end
+        for _, metric in ipairs(selected_metrics) do
+            plan.metrics[#plan.metrics + 1] = metric.name
+            local detail = {
+                name = metric.name,
+                metric_kind = metric.metric_kind or metric.metric_type,
+                metric_type = metric.metric_type,
+                input_roles = {},
+            }
+            for _, row in ipairs(query([[
+                SELECT INPUT_ROLE, INPUT_OBJECT_TYPE, EXPRESSION_ALIAS
+                FROM SYS_SEMANTIC.METRIC_INPUTS
+                WHERE METRIC_ID = :metric_id
+                ORDER BY ORDINAL_POSITION
+            ]], {metric_id = metric.id}) or {}) do
+                detail.input_roles[#detail.input_roles + 1] = {
+                    role = row_value(row, "INPUT_ROLE", 1),
+                    object_type = row_value(row, "INPUT_OBJECT_TYPE", 2),
+                    alias = row_value(row, "EXPRESSION_ALIAS", 3),
+                }
+            end
+            plan.metric_details[#plan.metric_details + 1] = detail
+        end
+        for _, dimension in ipairs(selected_dimensions) do
+            plan.dimensions[#plan.dimensions + 1] = dimension.name
+        end
+        return plan
+    end
+
+    local function plan_error(code, message)
+        local result = error_result(error_prefix .. code, message)
+        result.plan_json = json_encode(plan_envelope())
         return result
     end
 
@@ -2023,8 +2055,28 @@ local function compile_request_table(request, options)
         return plan_error(code, "Typed planning failed: " .. tostring(reason) .. ".")
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
+        local physical_plan, physical_error = physical_plan_runtime.build(
+            typed_plan,
+            snapshot
+        )
+        if physical_plan == nil then
+            typed_plan.failure = physical_error
+            return plan_error("_075", "Physical planning failed: "
+                .. tostring(physical_error.reason_code) .. ".")
+        end
+        typed_plan.physical_plan = physical_plan
+        local internal_sql = grain_sql_runtime.render_multi_branch(physical_plan)
+        local within_limit, size_error = physical_plan_runtime.check_sql_size(
+            physical_plan,
+            internal_sql
+        )
+        if not within_limit then
+            typed_plan.failure = size_error
+            return plan_error("_075", "Physical planning failed: "
+                .. tostring(size_error.reason_code) .. ".")
+        end
         return plan_error("_073",
-            "Multi-branch plan is valid but execution is not enabled until Phase C2.")
+            "Multi-branch physical plan is valid but execution is not enabled until Phase C3.")
     end
     if request.proof_mode == "STRICT_GRAIN" then
         for _, proof in ipairs(typed_plan.relationship_proofs or {}) do
@@ -2074,58 +2126,8 @@ local function compile_request_table(request, options)
         sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
     end
 
-    local plan = {
-        plan_version = metric_plan_runtime.PLAN_VERSION,
-        logical_plan = typed_plan,
-        model = model.model_name,
-        version_id = model.version_id,
-        version_number = model.version_number,
-        object = ctx.object.name,
-        metrics = {},
-        metric_details = {},
-        dimensions = {},
-        filters = filters,
-        relationship_paths = relationship_paths,
-        selected_materialization = JSON_NULL,
-        materialization_decision = materialization_decision,
-        validation_run_id = validation_run_id,
-        warnings = {},
-    }
-    if selected_materialization ~= nil then
-        plan.selected_materialization = {
-            materialization_id = selected_materialization.materialization_id,
-            materialization_name = selected_materialization.materialization_name,
-            physical_schema = selected_materialization.physical_schema,
-            physical_object = selected_materialization.physical_object,
-            materialization_type = selected_materialization.materialization_type,
-            rollup_required = selected_materialization.rollup_required,
-        }
-    end
-    for _, metric in ipairs(selected_metrics) do
-        plan.metrics[#plan.metrics + 1] = metric.name
-        local detail = {
-            name = metric.name,
-            metric_kind = metric.metric_kind or metric.metric_type,
-            metric_type = metric.metric_type,
-            input_roles = {},
-        }
-        for _, row in ipairs(query([[
-            SELECT INPUT_ROLE, INPUT_OBJECT_TYPE, EXPRESSION_ALIAS
-            FROM SYS_SEMANTIC.METRIC_INPUTS
-            WHERE METRIC_ID = :metric_id
-            ORDER BY ORDINAL_POSITION
-        ]], {metric_id = metric.id}) or {}) do
-            detail.input_roles[#detail.input_roles + 1] = {
-                role = row_value(row, "INPUT_ROLE", 1),
-                object_type = row_value(row, "INPUT_OBJECT_TYPE", 2),
-                alias = row_value(row, "EXPRESSION_ALIAS", 3),
-            }
-        end
-        plan.metric_details[#plan.metric_details + 1] = detail
-    end
-    for _, dimension in ipairs(selected_dimensions) do
-        plan.dimensions[#plan.dimensions + 1] = dimension.name
-    end
+    local plan = plan_envelope(materialization_decision, selected_materialization,
+        relationship_paths)
     local result = ok_result(sql_text, plan, validation_run_id)
     if cache_key ~= nil then
         cache_store(model.version_id, cache_key, result)

@@ -51,6 +51,9 @@ end)
 load_runtime("lua/semantic_layer/compiler/metric_plan.lua", function()
     return {ESV_METRIC_PLAN}
 end)
+load_runtime("lua/semantic_layer/compiler/physical_plan.lua", function()
+    return {ESV_PHYSICAL_PLAN}
+end)
 load_runtime("lua/semantic_layer/compiler/grain_sql.lua", function()
     return {ESV_GRAIN_SQL}
 end)
