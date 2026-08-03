@@ -594,30 +594,48 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_equal(#state.request_logs, 2)
 end)
 
-test("C1 compiler returns a versioned plan without multi branch SQL", function()
+test("C3 compiler activates a versioned multi branch query", function()
     local request = {
         model = "sales",
         object = "SALES",
         metrics = {"activity_ratio"},
         dimensions = {"customer_region"},
+        having = {{field = "activity_ratio", op = ">", value = 1}},
+        order_by = {{field = "activity_ratio", direction = "DESC"}},
+        limit = 10,
     }
-    local result, state = compile_with_fixture(request, {multi_fact = true})
-    assert_equal(result.status, "ERROR")
-    assert_equal(result.error_code, "SEMANTIC_REQUEST_073")
-    assert_equal(result.generated_sql, nil)
+    local result, state, mock = compile_with_fixture(request, {multi_fact = true})
+    assert_equal(result.status, "OK")
+    assert_equal(result.error_code, nil)
+    assert_contains(result.generated_sql, "UNION ALL")
+    assert_contains(result.generated_sql, 'COALESCE(ms."__esv_s_32", 0)')
+    assert_contains(result.generated_sql,
+        'f."__esv_m_30" AS "activity_ratio"')
+    assert_contains(result.generated_sql, 'WHERE f."__esv_m_30" > 1')
+    assert_contains(result.generated_sql, 'ORDER BY "activity_ratio" DESC')
+    assert_contains(result.generated_sql, "LIMIT 10")
     local envelope = api.json_decode(result.plan_json)
-    assert_equal(envelope.plan_version, 4)
+    assert_equal(envelope.plan_version, 5)
     assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
-    assert_equal(envelope.logical_plan.execution.status, "PLANNING_ONLY")
-    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 1)
+    assert_equal(envelope.logical_plan.execution.status, "EXECUTABLE")
+    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 2)
     assert_equal(envelope.logical_plan.physical_plan.plan_kind,
-        "MULTI_BRANCH_STATES")
+        "MULTI_BRANCH_QUERY")
     assert_true(envelope.logical_plan.physical_plan.safeguards.sql_size_bytes > 0)
     assert_equal(envelope.metric_details[1].name, "activity_ratio")
     assert_equal(#envelope.logical_plan.branches, 2)
     assert_equal(#envelope.logical_plan.relationship_proofs, 2)
     assert_equal(envelope.logical_plan.relationship_proofs[1].status, "PROVEN")
-    assert_equal(state.cache_inserts, 0)
+    assert_equal(state.cache_inserts, 1)
+
+    local cached = with_query(mock, function()
+        return compile_request_json(api.json_encode(request))
+    end)
+    assert_equal(cached.status, "OK")
+    assert_equal(cached.cache_hit, true)
+    assert_equal(cached.generated_sql, result.generated_sql)
+    assert_equal(state.cache_inserts, 1)
+    assert_equal(state.cache_touches, 1)
 
     local rejected = compile_with_fixture(request, {
         multi_fact = true,
@@ -650,9 +668,14 @@ test("C1 compiler returns a versioned plan without multi branch SQL", function()
             SELECT customer_region, MEASURE(activity_ratio)
             FROM SEMANTIC_SALES.SALES
             GROUP BY ALL
+            HAVING activity_ratio > 1
+            ORDER BY activity_ratio DESC
+            LIMIT 10
         ]])
     end)
-    assert_equal(sql_result.error_code, "SEMANTIC_QUERY_073")
+    assert_equal(sql_result.status, "OK")
+    assert_equal(sql_result.error_code, nil)
+    assert_contains(sql_result.generated_sql, "UNION ALL")
     local sql_plan = api.json_decode(sql_result.plan_json).logical_plan
     assert_equal(api.json_encode(sql_plan), api.json_encode(envelope.logical_plan))
 end)

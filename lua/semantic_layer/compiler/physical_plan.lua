@@ -1,7 +1,7 @@
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 1,
+    VERSION = 2,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -55,6 +55,43 @@ local function stable_token(value)
     local token = string.gsub(key(value), "[^%w_]", "_")
     if token == "" then token = "empty" end
     return token
+end
+
+local function replace_identifiers(text, replace_fn)
+    local out = {}
+    local value = tostring(text or "")
+    local index = 1
+    local in_quote = false
+    while index <= #value do
+        local char = string.sub(value, index, index)
+        if char == "'" then
+            out[#out + 1] = char
+            local next_char = string.sub(value, index + 1, index + 1)
+            if in_quote and next_char == "'" then
+                out[#out + 1] = next_char
+                index = index + 2
+            else
+                in_quote = not in_quote
+                index = index + 1
+            end
+        elseif in_quote then
+            out[#out + 1] = char
+            index = index + 1
+        elseif string.match(char, "[A-Za-z_]") then
+            local finish = index + 1
+            while finish <= #value
+                and string.match(string.sub(value, finish, finish), "[A-Za-z0-9_]") do
+                finish = finish + 1
+            end
+            local token = string.sub(value, index, finish - 1)
+            out[#out + 1] = replace_fn(token) or token
+            index = finish
+        else
+            out[#out + 1] = char
+            index = index + 1
+        end
+    end
+    return table.concat(out)
 end
 
 local function sorted_copy(values, field)
@@ -336,6 +373,167 @@ local function global_predicates(logical_plan, snapshot)
     return predicates, nil
 end
 
+local function metric_column_alias(metric_id)
+    return "__esv_m_" .. stable_token(metric_id)
+end
+
+local function qualified_column(source_alias, column_alias)
+    return tostring(source_alias) .. "." .. quote_ident(column_alias)
+end
+
+local function collect_finalization(logical_plan, states, dimensions, options)
+    local finalization = {
+        base = {
+            cte_id = "cte:metrics:0",
+            cte_alias = "__esv_metrics_0",
+            source_alias = "ms",
+            metric_columns = {},
+        },
+        layers = {},
+        outputs = {dimensions = {}, metrics = {}},
+        having_predicates = {},
+        order_by = options.output_order_by or {},
+        limit = options.limit,
+    }
+    local metric_columns = {}
+    local metric_names = {}
+    for _, state in ipairs(states) do
+        local column_alias = metric_column_alias(state.metric_id)
+        local state_reference = qualified_column(finalization.base.source_alias,
+            state.column_alias)
+        local expression = state_reference
+        if state.empty_behavior == "ZERO" then
+            expression = "COALESCE(" .. state_reference .. ", 0)"
+        end
+        local column = {
+            metric_id = state.metric_id,
+            metric = state.metric,
+            data_type = state.data_type,
+            column_alias = column_alias,
+            expression = expression,
+            source_state_id = state.state_id,
+            empty_behavior = state.empty_behavior,
+        }
+        finalization.base.metric_columns[#finalization.base.metric_columns + 1] = column
+        metric_columns[key(state.metric_id)] = column
+        metric_names[upper(state.metric)] = column
+    end
+
+    local previous_cte_alias = finalization.base.cte_alias
+    local layer_ordinal = 0
+    for _, node in ipairs(logical_plan.metric_stages or {}) do
+        if node.node_kind == "SCALAR_FINALIZER" then
+            for _, input in ipairs(node.inputs or {}) do
+                if input.kind == "METRIC" and metric_columns[key(input.id)] == nil then
+                    return fail("PHYSICAL_FINALIZER_INVALID", {
+                        issue = "DEPENDENCY_NOT_AVAILABLE",
+                        metric_id = node.metric_id,
+                        dependency_metric_id = input.id,
+                    })
+                end
+            end
+            if missing(node.expression) then
+                return fail("PHYSICAL_FINALIZER_INVALID", {
+                    issue = "EXPRESSION_MISSING",
+                    metric_id = node.metric_id,
+                })
+            end
+            layer_ordinal = layer_ordinal + 1
+            local source_alias = "p"
+            local input_aliases = {}
+            for _, input in ipairs(node.inputs or {}) do
+                if input.kind == "METRIC" and not missing(input.expression_alias) then
+                    input_aliases[upper(input.expression_alias)] =
+                        metric_columns[key(input.id)]
+                end
+            end
+            local expression = replace_identifiers(node.expression, function(token)
+                local dependency = input_aliases[upper(token)]
+                    or metric_names[upper(token)]
+                if dependency ~= nil then
+                    return "(" .. qualified_column(source_alias,
+                        dependency.column_alias) .. ")"
+                end
+                return nil
+            end)
+            local column = {
+                metric_id = node.metric_id,
+                metric = node.name,
+                data_type = node.data_type,
+                column_alias = metric_column_alias(node.metric_id),
+                expression = expression,
+            }
+            local layer = {
+                layer_id = "finalizer:metric:" .. key(node.metric_id),
+                cte_id = "cte:metrics:" .. key(layer_ordinal),
+                cte_alias = "__esv_metrics_" .. key(layer_ordinal),
+                input_cte_alias = previous_cte_alias,
+                source_alias = source_alias,
+                metric_column = column,
+            }
+            finalization.layers[#finalization.layers + 1] = layer
+            previous_cte_alias = layer.cte_alias
+            metric_columns[key(node.metric_id)] = column
+            metric_names[upper(node.name)] = column
+        end
+    end
+    finalization.result_cte_alias = previous_cte_alias
+    finalization.result_source_alias = "f"
+
+    for _, dimension in ipairs(dimensions) do
+        finalization.outputs.dimensions[#finalization.outputs.dimensions + 1] = {
+            dimension_id = dimension.dimension_id,
+            name = dimension.name,
+            source_expression = qualified_column(finalization.result_source_alias,
+                dimension.column_alias),
+            output_alias = dimension.name,
+        }
+    end
+    for _, reference in ipairs(logical_plan.bound_query.selected_metrics or {}) do
+        local column = metric_columns[key(reference.id)]
+        if column == nil then
+            return fail("PHYSICAL_FINALIZER_INVALID", {
+                issue = "OUTPUT_METRIC_NOT_AVAILABLE",
+                metric_id = reference.id,
+            })
+        end
+        finalization.outputs.metrics[#finalization.outputs.metrics + 1] = {
+            metric_id = reference.id,
+            name = reference.name,
+            source_expression = qualified_column(finalization.result_source_alias,
+                column.column_alias),
+            output_alias = reference.name,
+        }
+    end
+    for _, filter in ipairs(logical_plan.bound_query.having_filters or {}) do
+        local column = metric_columns[key(filter.metric_id)]
+        if column == nil then
+            return fail("PHYSICAL_FINALIZER_INVALID", {
+                issue = "HAVING_METRIC_NOT_AVAILABLE",
+                metric_id = filter.metric_id,
+            })
+        end
+        local expression, reason = predicate_sql(filter, {
+            expression = qualified_column(finalization.result_source_alias,
+                column.column_alias),
+        })
+        if expression == nil then
+            return fail("PHYSICAL_FILTER_INVALID", {
+                issue = reason,
+                metric_id = filter.metric_id,
+                scope = "HAVING",
+            })
+        end
+        finalization.having_predicates[#finalization.having_predicates + 1] = {
+            filter_id = "having:metric:" .. key(filter.metric_id) .. ":"
+                .. key(#finalization.having_predicates + 1),
+            metric_id = filter.metric_id,
+            expression = expression,
+        }
+    end
+    return finalization, nil
+end
+
 function M.build(logical_plan, snapshot, options)
     options = options or {}
     if logical_plan == nil or logical_plan.plan_kind ~= "MULTI_BRANCH" then
@@ -362,7 +560,7 @@ function M.build(logical_plan, snapshot, options)
 
     local physical = {
         physical_plan_version = M.VERSION,
-        plan_kind = "MULTI_BRANCH_STATES",
+        plan_kind = "MULTI_BRANCH_QUERY",
         logical_plan_version = logical_plan.plan_version,
         dimensions = dimensions,
         states = states,
@@ -394,6 +592,11 @@ function M.build(logical_plan, snapshot, options)
     for _, state in ipairs(states) do
         physical.merge.state_ids[#physical.merge.state_ids + 1] = state.state_id
     end
+
+    local finalization, finalization_error = collect_finalization(
+        logical_plan, states, dimensions, options)
+    if finalization == nil then return nil, finalization_error end
+    physical.finalization = finalization
 
     local branch_aliases = {}
     local state_owner_counts = {}

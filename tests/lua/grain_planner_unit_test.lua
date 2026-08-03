@@ -269,7 +269,7 @@ test("C1 logical planner emits a planning-only multi branch plan", function()
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
     assert_equal(reason, nil)
-    assert_equal(plan.plan_version, 4)
+    assert_equal(plan.plan_version, 5)
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(plan.proof_mode, "STRICT_GRAIN")
     assert_equal(plan.execution.status, "PLANNING_ONLY")
@@ -398,8 +398,8 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local snapshot, logical = multi_physical_fixture()
     local physical, physical_error = physical_planner.build(logical, snapshot)
     assert_true(physical ~= nil, physical_error and physical_error.reason_code)
-    assert_equal(physical.physical_plan_version, 1)
-    assert_equal(physical.plan_kind, "MULTI_BRANCH_STATES")
+    assert_equal(physical.physical_plan_version, 2)
+    assert_equal(physical.plan_kind, "MULTI_BRANCH_QUERY")
     assert_equal(#physical.branches, 2)
     assert_equal(#physical.states, 2)
     assert_equal(physical.states[1].state_id, "state:metric:11")
@@ -417,6 +417,10 @@ test("C2 physical planner binds one typed state branch per leaf", function()
         "UPPER(r.region_name) = UPPER('West')")
     assert_equal(physical.merge.group_dimension_ids[1], 30)
     assert_equal(physical.merge.state_ids[2], "state:metric:12")
+    assert_equal(#physical.finalization.layers, 1)
+    assert_equal(physical.finalization.layers[1].metric_column.metric_id, 10)
+    assert_contains(physical.finalization.layers[1].metric_column.expression,
+        'p."__esv_m_11"')
 
     local sql = renderer.render_multi_branch(physical)
     assert_contains(sql, '"__esv_b_1" AS (')
@@ -425,7 +429,10 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     assert_contains(sql, "UNION ALL")
     assert_contains(sql, 'SUM("__esv_s_11") AS "__esv_s_11"')
     assert_contains(sql, 'GROUP BY "__esv_d_30"')
-    assert_contains(sql, 'SELECT * FROM "__esv_merged_states"')
+    assert_contains(sql, '"__esv_metrics_0" AS (')
+    assert_contains(sql, 'AS "__esv_m_10"')
+    assert_contains(sql, 'f."__esv_d_30" AS "region"')
+    assert_contains(sql, 'f."__esv_m_10" AS "margin"')
 
     local within_limit = physical_planner.check_sql_size(physical, sql)
     assert_equal(within_limit, true)
@@ -434,6 +441,53 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local too_large, size_error = physical_planner.check_sql_size(physical, sql)
     assert_equal(too_large, false)
     assert_equal(size_error.reason_code, "PLANNER_SQL_SIZE_LIMIT_EXCEEDED")
+end)
+
+test("C3 finalization applies empty states having ordering and limit last", function()
+    local snapshot, logical = multi_physical_fixture()
+    for _, node in ipairs(logical.metric_stages) do
+        if node.metric_id == 12 then
+            node.state_spec.state_kind = "COUNT"
+            node.state_spec.empty_behavior = "ZERO"
+        end
+    end
+    logical.bound_query.having_filters = {{
+        metric_id = 10,
+        metric = "margin",
+        operator = ">",
+        value = 0.5,
+        data_type = "DECIMAL(18,2)",
+    }}
+    local physical = assert(physical_planner.build(logical, snapshot, {
+        output_order_by = {'"margin" DESC'},
+        limit = 5,
+    }))
+    assert_equal(physical.states[2].empty_behavior, "ZERO")
+    assert_contains(physical.finalization.base.metric_columns[2].expression,
+        "COALESCE(")
+    assert_equal(physical.finalization.having_predicates[1].metric_id, 10)
+    local sql = renderer.render_multi_branch(physical)
+    assert_contains(sql, 'WHERE f."__esv_m_10" > 0.5')
+    assert_contains(sql, 'ORDER BY "margin" DESC')
+    assert_contains(sql, "LIMIT 5")
+    assert_true(string.find(sql, "WHERE f.", 1, true)
+        > string.find(sql, '"__esv_metrics_1" AS', 1, true))
+end)
+
+test("C3 finalization resolves structured metric input aliases", function()
+    local snapshot, logical = multi_physical_fixture()
+    for _, node in ipairs(logical.metric_stages) do
+        if node.metric_id == 10 then
+            node.expression = "numerator / denominator"
+            node.inputs[1].expression_alias = "numerator"
+            node.inputs[2].expression_alias = "denominator"
+        end
+    end
+    local physical = assert(physical_planner.build(logical, snapshot))
+    local expression = physical.finalization.layers[1].metric_column.expression
+    assert_contains(expression, 'p."__esv_m_11"')
+    assert_contains(expression, 'p."__esv_m_12"')
+    assert_true(string.find(expression, "numerator", 1, true) == nil)
 end)
 
 test("C2 physical planner validates boundaries and safeguards", function()

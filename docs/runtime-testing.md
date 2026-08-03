@@ -59,6 +59,20 @@ non-SYS security-principal test. The security test verifies model role
 grant/revoke behavior, published discovery access, and denial of direct access
 to the bundled physical source table.
 
+The grain-aware compiler also has focused live verifiers for its stable
+single-branch boundary and executable multi-branch finalization:
+
+```sh
+python3 tools/verify_grain_phase_b.py
+python3 tools/verify_grain_phase_c3.py
+```
+
+The C3 verifier installs an idempotent two-fact fixture, compiles equivalent
+JSON and Semantic SQL requests, executes both generated queries, and checks
+derived metrics plus sparse `COUNT`/`SUM` behavior. It also exercises a private
+state metric to ensure internal dependencies do not become visible object
+columns.
+
 `tools/verify_concurrent_compile.py` enforces a configurable concurrency p95
 limit. Defaults and overrides:
 

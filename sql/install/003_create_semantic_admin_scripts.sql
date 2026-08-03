@@ -6101,7 +6101,7 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 4}
+local M = {PLAN_VERSION = 5}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -6292,6 +6292,7 @@ function M.build_dag(snapshot, selected_metrics)
             node_kind = node_kind,
             metric_id = metric.id,
             name = metric.name,
+            expression = metric.expression,
             data_type = metric.data_type,
             state_class = state_class,
             state_spec = state,
@@ -6816,7 +6817,7 @@ ESV_METRIC_PLAN = M
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 1,
+    VERSION = 2,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -6870,6 +6871,43 @@ local function stable_token(value)
     local token = string.gsub(key(value), "[^%w_]", "_")
     if token == "" then token = "empty" end
     return token
+end
+
+local function replace_identifiers(text, replace_fn)
+    local out = {}
+    local value = tostring(text or "")
+    local index = 1
+    local in_quote = false
+    while index <= #value do
+        local char = string.sub(value, index, index)
+        if char == "'" then
+            out[#out + 1] = char
+            local next_char = string.sub(value, index + 1, index + 1)
+            if in_quote and next_char == "'" then
+                out[#out + 1] = next_char
+                index = index + 2
+            else
+                in_quote = not in_quote
+                index = index + 1
+            end
+        elseif in_quote then
+            out[#out + 1] = char
+            index = index + 1
+        elseif string.match(char, "[A-Za-z_]") then
+            local finish = index + 1
+            while finish <= #value
+                and string.match(string.sub(value, finish, finish), "[A-Za-z0-9_]") do
+                finish = finish + 1
+            end
+            local token = string.sub(value, index, finish - 1)
+            out[#out + 1] = replace_fn(token) or token
+            index = finish
+        else
+            out[#out + 1] = char
+            index = index + 1
+        end
+    end
+    return table.concat(out)
 end
 
 local function sorted_copy(values, field)
@@ -7151,6 +7189,167 @@ local function global_predicates(logical_plan, snapshot)
     return predicates, nil
 end
 
+local function metric_column_alias(metric_id)
+    return "__esv_m_" .. stable_token(metric_id)
+end
+
+local function qualified_column(source_alias, column_alias)
+    return tostring(source_alias) .. "." .. quote_ident(column_alias)
+end
+
+local function collect_finalization(logical_plan, states, dimensions, options)
+    local finalization = {
+        base = {
+            cte_id = "cte:metrics:0",
+            cte_alias = "__esv_metrics_0",
+            source_alias = "ms",
+            metric_columns = {},
+        },
+        layers = {},
+        outputs = {dimensions = {}, metrics = {}},
+        having_predicates = {},
+        order_by = options.output_order_by or {},
+        limit = options.limit,
+    }
+    local metric_columns = {}
+    local metric_names = {}
+    for _, state in ipairs(states) do
+        local column_alias = metric_column_alias(state.metric_id)
+        local state_reference = qualified_column(finalization.base.source_alias,
+            state.column_alias)
+        local expression = state_reference
+        if state.empty_behavior == "ZERO" then
+            expression = "COALESCE(" .. state_reference .. ", 0)"
+        end
+        local column = {
+            metric_id = state.metric_id,
+            metric = state.metric,
+            data_type = state.data_type,
+            column_alias = column_alias,
+            expression = expression,
+            source_state_id = state.state_id,
+            empty_behavior = state.empty_behavior,
+        }
+        finalization.base.metric_columns[#finalization.base.metric_columns + 1] = column
+        metric_columns[key(state.metric_id)] = column
+        metric_names[upper(state.metric)] = column
+    end
+
+    local previous_cte_alias = finalization.base.cte_alias
+    local layer_ordinal = 0
+    for _, node in ipairs(logical_plan.metric_stages or {}) do
+        if node.node_kind == "SCALAR_FINALIZER" then
+            for _, input in ipairs(node.inputs or {}) do
+                if input.kind == "METRIC" and metric_columns[key(input.id)] == nil then
+                    return fail("PHYSICAL_FINALIZER_INVALID", {
+                        issue = "DEPENDENCY_NOT_AVAILABLE",
+                        metric_id = node.metric_id,
+                        dependency_metric_id = input.id,
+                    })
+                end
+            end
+            if missing(node.expression) then
+                return fail("PHYSICAL_FINALIZER_INVALID", {
+                    issue = "EXPRESSION_MISSING",
+                    metric_id = node.metric_id,
+                })
+            end
+            layer_ordinal = layer_ordinal + 1
+            local source_alias = "p"
+            local input_aliases = {}
+            for _, input in ipairs(node.inputs or {}) do
+                if input.kind == "METRIC" and not missing(input.expression_alias) then
+                    input_aliases[upper(input.expression_alias)] =
+                        metric_columns[key(input.id)]
+                end
+            end
+            local expression = replace_identifiers(node.expression, function(token)
+                local dependency = input_aliases[upper(token)]
+                    or metric_names[upper(token)]
+                if dependency ~= nil then
+                    return "(" .. qualified_column(source_alias,
+                        dependency.column_alias) .. ")"
+                end
+                return nil
+            end)
+            local column = {
+                metric_id = node.metric_id,
+                metric = node.name,
+                data_type = node.data_type,
+                column_alias = metric_column_alias(node.metric_id),
+                expression = expression,
+            }
+            local layer = {
+                layer_id = "finalizer:metric:" .. key(node.metric_id),
+                cte_id = "cte:metrics:" .. key(layer_ordinal),
+                cte_alias = "__esv_metrics_" .. key(layer_ordinal),
+                input_cte_alias = previous_cte_alias,
+                source_alias = source_alias,
+                metric_column = column,
+            }
+            finalization.layers[#finalization.layers + 1] = layer
+            previous_cte_alias = layer.cte_alias
+            metric_columns[key(node.metric_id)] = column
+            metric_names[upper(node.name)] = column
+        end
+    end
+    finalization.result_cte_alias = previous_cte_alias
+    finalization.result_source_alias = "f"
+
+    for _, dimension in ipairs(dimensions) do
+        finalization.outputs.dimensions[#finalization.outputs.dimensions + 1] = {
+            dimension_id = dimension.dimension_id,
+            name = dimension.name,
+            source_expression = qualified_column(finalization.result_source_alias,
+                dimension.column_alias),
+            output_alias = dimension.name,
+        }
+    end
+    for _, reference in ipairs(logical_plan.bound_query.selected_metrics or {}) do
+        local column = metric_columns[key(reference.id)]
+        if column == nil then
+            return fail("PHYSICAL_FINALIZER_INVALID", {
+                issue = "OUTPUT_METRIC_NOT_AVAILABLE",
+                metric_id = reference.id,
+            })
+        end
+        finalization.outputs.metrics[#finalization.outputs.metrics + 1] = {
+            metric_id = reference.id,
+            name = reference.name,
+            source_expression = qualified_column(finalization.result_source_alias,
+                column.column_alias),
+            output_alias = reference.name,
+        }
+    end
+    for _, filter in ipairs(logical_plan.bound_query.having_filters or {}) do
+        local column = metric_columns[key(filter.metric_id)]
+        if column == nil then
+            return fail("PHYSICAL_FINALIZER_INVALID", {
+                issue = "HAVING_METRIC_NOT_AVAILABLE",
+                metric_id = filter.metric_id,
+            })
+        end
+        local expression, reason = predicate_sql(filter, {
+            expression = qualified_column(finalization.result_source_alias,
+                column.column_alias),
+        })
+        if expression == nil then
+            return fail("PHYSICAL_FILTER_INVALID", {
+                issue = reason,
+                metric_id = filter.metric_id,
+                scope = "HAVING",
+            })
+        end
+        finalization.having_predicates[#finalization.having_predicates + 1] = {
+            filter_id = "having:metric:" .. key(filter.metric_id) .. ":"
+                .. key(#finalization.having_predicates + 1),
+            metric_id = filter.metric_id,
+            expression = expression,
+        }
+    end
+    return finalization, nil
+end
+
 function M.build(logical_plan, snapshot, options)
     options = options or {}
     if logical_plan == nil or logical_plan.plan_kind ~= "MULTI_BRANCH" then
@@ -7177,7 +7376,7 @@ function M.build(logical_plan, snapshot, options)
 
     local physical = {
         physical_plan_version = M.VERSION,
-        plan_kind = "MULTI_BRANCH_STATES",
+        plan_kind = "MULTI_BRANCH_QUERY",
         logical_plan_version = logical_plan.plan_version,
         dimensions = dimensions,
         states = states,
@@ -7209,6 +7408,11 @@ function M.build(logical_plan, snapshot, options)
     for _, state in ipairs(states) do
         physical.merge.state_ids[#physical.merge.state_ids + 1] = state.state_id
     end
+
+    local finalization, finalization_error = collect_finalization(
+        logical_plan, states, dimensions, options)
+    if finalization == nil then return nil, finalization_error end
+    physical.finalization = finalization
 
     local branch_aliases = {}
     local state_owner_counts = {}
@@ -7406,8 +7610,66 @@ function M.render_multi_branch(plan)
     merge_sql[#merge_sql + 1] = ")"
     ctes[#ctes + 1] = table.concat(merge_sql, "\n")
 
-    return "WITH\n" .. table.concat(ctes, ",\n")
-        .. "\nSELECT * FROM " .. quote_ident(plan.merge.cte_alias)
+    local finalization = plan.finalization
+    if finalization == nil then
+        return "WITH\n" .. table.concat(ctes, ",\n")
+            .. "\nSELECT * FROM " .. quote_ident(plan.merge.cte_alias)
+    end
+
+    local base_parts = {}
+    for _, dimension in ipairs(plan.dimensions or {}) do
+        local alias = quote_ident(dimension.column_alias)
+        base_parts[#base_parts + 1] = tostring(finalization.base.source_alias)
+            .. "." .. alias .. " AS " .. alias
+    end
+    for _, metric in ipairs(finalization.base.metric_columns or {}) do
+        base_parts[#base_parts + 1] = tostring(metric.expression)
+            .. " AS " .. quote_ident(metric.column_alias)
+    end
+    ctes[#ctes + 1] = quote_ident(finalization.base.cte_alias) .. " AS (\n"
+        .. "  SELECT " .. table.concat(base_parts, ", ") .. "\n"
+        .. "  FROM " .. quote_ident(plan.merge.cte_alias) .. " "
+        .. tostring(finalization.base.source_alias) .. "\n)"
+
+    for _, layer in ipairs(finalization.layers or {}) do
+        ctes[#ctes + 1] = quote_ident(layer.cte_alias) .. " AS (\n"
+            .. "  SELECT " .. tostring(layer.source_alias) .. ".*, "
+            .. tostring(layer.metric_column.expression) .. " AS "
+            .. quote_ident(layer.metric_column.column_alias) .. "\n"
+            .. "  FROM " .. quote_ident(layer.input_cte_alias) .. " "
+            .. tostring(layer.source_alias) .. "\n)"
+    end
+
+    local output_parts = {}
+    for _, dimension in ipairs(finalization.outputs.dimensions or {}) do
+        output_parts[#output_parts + 1] = tostring(dimension.source_expression)
+            .. " AS " .. quote_ident(dimension.output_alias)
+    end
+    for _, metric in ipairs(finalization.outputs.metrics or {}) do
+        output_parts[#output_parts + 1] = tostring(metric.source_expression)
+            .. " AS " .. quote_ident(metric.output_alias)
+    end
+    local final_sql = {
+        "SELECT " .. table.concat(output_parts, ", "),
+        "FROM " .. quote_ident(finalization.result_cte_alias) .. " "
+            .. tostring(finalization.result_source_alias),
+    }
+    local having = {}
+    for _, predicate in ipairs(finalization.having_predicates or {}) do
+        having[#having + 1] = tostring(predicate.expression)
+    end
+    if #having > 0 then
+        final_sql[#final_sql + 1] = "WHERE " .. table.concat(having, " AND ")
+    end
+    if #(finalization.order_by or {}) > 0 then
+        final_sql[#final_sql + 1] = "ORDER BY "
+            .. table.concat(finalization.order_by, ", ")
+    end
+    if finalization.limit ~= nil then
+        final_sql[#final_sql + 1] = "LIMIT " .. tostring(finalization.limit)
+    end
+    return "WITH\n" .. table.concat(ctes, ",\n") .. "\n"
+        .. table.concat(final_sql, "\n")
 end
 
 ESV_GRAIN_SQL = M
@@ -9326,6 +9588,11 @@ local function compile_request_table(request, options)
 
     local having_predicates = {}
     local bound_having_filters = {}
+    local planning_metrics = {}
+    local planning_metric_seen = {}
+    for _, metric in ipairs(selected_metrics) do
+        add_unique(planning_metrics, planning_metric_seen, metric)
+    end
     local having_list = as_array(request.having, "having")
     if #having_list > 0 and #selected_metrics == 0 then
         return error_result("SEMANTIC_REQUEST_026",
@@ -9345,6 +9612,7 @@ local function compile_request_table(request, options)
         if having_err ~= nil then
             return having_err
         end
+        add_unique(planning_metrics, planning_metric_seen, metric_field)
         local op = upper(having_filter.op or having_filter.operator or "=")
         local expr = expand_metric(ctx, metric_field)
         local predicate, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
@@ -9362,7 +9630,7 @@ local function compile_request_table(request, options)
         }
     end
 
-    local snapshot = catalog_snapshot_runtime.from_context(ctx, selected_metrics)
+    local snapshot = catalog_snapshot_runtime.from_context(ctx, planning_metrics)
     local relationship_targets = {}
     for entity_id, _ in pairs(needed_entities) do
         if entity_id ~= key(ctx.object.root_entity_id) then
@@ -9386,7 +9654,7 @@ local function compile_request_table(request, options)
         request,
         snapshot,
         bound_query,
-        selected_metrics
+        planning_metrics
     )
     if typed_plan == nil then
         return error_result(error_prefix .. "_070",
@@ -9471,7 +9739,8 @@ local function compile_request_table(request, options)
     if typed_plan.plan_kind == "MULTI_BRANCH" then
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,
-            snapshot
+            snapshot,
+            {output_order_by = order_by, limit = limit}
         )
         if physical_plan == nil then
             typed_plan.failure = physical_error
@@ -9489,8 +9758,14 @@ local function compile_request_table(request, options)
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(size_error.reason_code) .. ".")
         end
-        return plan_error("_073",
-            "Multi-branch physical plan is valid but execution is not enabled until Phase C3.")
+        typed_plan.execution = {status = "EXECUTABLE"}
+        physical_plan.execution = {status = "EXECUTABLE"}
+        local plan = plan_envelope()
+        local result = ok_result(internal_sql, plan, validation_run_id)
+        if cache_key ~= nil then
+            cache_store(model.version_id, cache_key, result)
+        end
+        return result, request, model
     end
     if request.proof_mode == "STRICT_GRAIN" then
         for _, proof in ipairs(typed_plan.relationship_proofs or {}) do
@@ -11997,7 +12272,8 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND UPPER(METRIC_NAME) = UPPER(:metric_name)
         ]], {model_id = model.model_id, version_id = model.version_id, metric_name = metric.name})
     end
-    add_object_column(object_id_value, "METRIC", existing_id, metric.name, true)
+    add_object_column(object_id_value, "METRIC", existing_id, metric.name,
+        not metric.is_private)
     refresh_metric_inputs(model, existing_id, metric)
     upsert_synonyms(model, existing_id, metric.synonyms)
     return existing_id

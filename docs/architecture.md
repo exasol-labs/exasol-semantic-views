@@ -44,9 +44,9 @@ may consume.
 Phase C1 normalizes leaf fact inputs, binds filter scopes, and proves each leaf
 branch to each required dimension before the legacy matrix or root join planner
 runs. Phase C2 adds a separate typed physical planner and decision-free
-multi-branch state renderer. Plan-version 4 exposes this physical plan for
-inspection but keeps it behind the `_073` feature gate: no multi-branch SQL is
-returned or cached until Phase C3 adds finalization and activates execution.
+multi-branch state renderer. Phase C3 uses plan-version 5 to finalize states
+and derived metrics after the merge, apply final query operations, and activate
+SQL generation and caching through both compiler input lanes.
 
 ## Primary Flows
 

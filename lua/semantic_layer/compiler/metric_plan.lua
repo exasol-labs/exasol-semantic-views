@@ -1,6 +1,6 @@
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 4}
+local M = {PLAN_VERSION = 5}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -191,6 +191,7 @@ function M.build_dag(snapshot, selected_metrics)
             node_kind = node_kind,
             metric_id = metric.id,
             name = metric.name,
+            expression = metric.expression,
             data_type = metric.data_type,
             state_class = state_class,
             state_spec = state,

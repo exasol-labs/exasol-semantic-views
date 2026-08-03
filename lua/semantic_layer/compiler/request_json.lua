@@ -1912,6 +1912,11 @@ local function compile_request_table(request, options)
 
     local having_predicates = {}
     local bound_having_filters = {}
+    local planning_metrics = {}
+    local planning_metric_seen = {}
+    for _, metric in ipairs(selected_metrics) do
+        add_unique(planning_metrics, planning_metric_seen, metric)
+    end
     local having_list = as_array(request.having, "having")
     if #having_list > 0 and #selected_metrics == 0 then
         return error_result("SEMANTIC_REQUEST_026",
@@ -1931,6 +1936,7 @@ local function compile_request_table(request, options)
         if having_err ~= nil then
             return having_err
         end
+        add_unique(planning_metrics, planning_metric_seen, metric_field)
         local op = upper(having_filter.op or having_filter.operator or "=")
         local expr = expand_metric(ctx, metric_field)
         local predicate, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
@@ -1948,7 +1954,7 @@ local function compile_request_table(request, options)
         }
     end
 
-    local snapshot = catalog_snapshot_runtime.from_context(ctx, selected_metrics)
+    local snapshot = catalog_snapshot_runtime.from_context(ctx, planning_metrics)
     local relationship_targets = {}
     for entity_id, _ in pairs(needed_entities) do
         if entity_id ~= key(ctx.object.root_entity_id) then
@@ -1972,7 +1978,7 @@ local function compile_request_table(request, options)
         request,
         snapshot,
         bound_query,
-        selected_metrics
+        planning_metrics
     )
     if typed_plan == nil then
         return error_result(error_prefix .. "_070",
@@ -2057,7 +2063,8 @@ local function compile_request_table(request, options)
     if typed_plan.plan_kind == "MULTI_BRANCH" then
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,
-            snapshot
+            snapshot,
+            {output_order_by = order_by, limit = limit}
         )
         if physical_plan == nil then
             typed_plan.failure = physical_error
@@ -2075,8 +2082,14 @@ local function compile_request_table(request, options)
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(size_error.reason_code) .. ".")
         end
-        return plan_error("_073",
-            "Multi-branch physical plan is valid but execution is not enabled until Phase C3.")
+        typed_plan.execution = {status = "EXECUTABLE"}
+        physical_plan.execution = {status = "EXECUTABLE"}
+        local plan = plan_envelope()
+        local result = ok_result(internal_sql, plan, validation_run_id)
+        if cache_key ~= nil then
+            cache_store(model.version_id, cache_key, result)
+        end
+        return result, request, model
     end
     if request.proof_mode == "STRICT_GRAIN" then
         for _, proof in ipairs(typed_plan.relationship_proofs or {}) do

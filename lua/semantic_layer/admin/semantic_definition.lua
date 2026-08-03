@@ -1304,7 +1304,8 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND UPPER(METRIC_NAME) = UPPER(:metric_name)
         ]], {model_id = model.model_id, version_id = model.version_id, metric_name = metric.name})
     end
-    add_object_column(object_id_value, "METRIC", existing_id, metric.name, true)
+    add_object_column(object_id_value, "METRIC", existing_id, metric.name,
+        not metric.is_private)
     refresh_metric_inputs(model, existing_id, metric)
     upsert_synonyms(model, existing_id, metric.synonyms)
     return existing_id

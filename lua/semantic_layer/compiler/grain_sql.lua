@@ -107,8 +107,66 @@ function M.render_multi_branch(plan)
     merge_sql[#merge_sql + 1] = ")"
     ctes[#ctes + 1] = table.concat(merge_sql, "\n")
 
-    return "WITH\n" .. table.concat(ctes, ",\n")
-        .. "\nSELECT * FROM " .. quote_ident(plan.merge.cte_alias)
+    local finalization = plan.finalization
+    if finalization == nil then
+        return "WITH\n" .. table.concat(ctes, ",\n")
+            .. "\nSELECT * FROM " .. quote_ident(plan.merge.cte_alias)
+    end
+
+    local base_parts = {}
+    for _, dimension in ipairs(plan.dimensions or {}) do
+        local alias = quote_ident(dimension.column_alias)
+        base_parts[#base_parts + 1] = tostring(finalization.base.source_alias)
+            .. "." .. alias .. " AS " .. alias
+    end
+    for _, metric in ipairs(finalization.base.metric_columns or {}) do
+        base_parts[#base_parts + 1] = tostring(metric.expression)
+            .. " AS " .. quote_ident(metric.column_alias)
+    end
+    ctes[#ctes + 1] = quote_ident(finalization.base.cte_alias) .. " AS (\n"
+        .. "  SELECT " .. table.concat(base_parts, ", ") .. "\n"
+        .. "  FROM " .. quote_ident(plan.merge.cte_alias) .. " "
+        .. tostring(finalization.base.source_alias) .. "\n)"
+
+    for _, layer in ipairs(finalization.layers or {}) do
+        ctes[#ctes + 1] = quote_ident(layer.cte_alias) .. " AS (\n"
+            .. "  SELECT " .. tostring(layer.source_alias) .. ".*, "
+            .. tostring(layer.metric_column.expression) .. " AS "
+            .. quote_ident(layer.metric_column.column_alias) .. "\n"
+            .. "  FROM " .. quote_ident(layer.input_cte_alias) .. " "
+            .. tostring(layer.source_alias) .. "\n)"
+    end
+
+    local output_parts = {}
+    for _, dimension in ipairs(finalization.outputs.dimensions or {}) do
+        output_parts[#output_parts + 1] = tostring(dimension.source_expression)
+            .. " AS " .. quote_ident(dimension.output_alias)
+    end
+    for _, metric in ipairs(finalization.outputs.metrics or {}) do
+        output_parts[#output_parts + 1] = tostring(metric.source_expression)
+            .. " AS " .. quote_ident(metric.output_alias)
+    end
+    local final_sql = {
+        "SELECT " .. table.concat(output_parts, ", "),
+        "FROM " .. quote_ident(finalization.result_cte_alias) .. " "
+            .. tostring(finalization.result_source_alias),
+    }
+    local having = {}
+    for _, predicate in ipairs(finalization.having_predicates or {}) do
+        having[#having + 1] = tostring(predicate.expression)
+    end
+    if #having > 0 then
+        final_sql[#final_sql + 1] = "WHERE " .. table.concat(having, " AND ")
+    end
+    if #(finalization.order_by or {}) > 0 then
+        final_sql[#final_sql + 1] = "ORDER BY "
+            .. table.concat(finalization.order_by, ", ")
+    end
+    if finalization.limit ~= nil then
+        final_sql[#final_sql + 1] = "LIMIT " .. tostring(finalization.limit)
+    end
+    return "WITH\n" .. table.concat(ctes, ",\n") .. "\n"
+        .. table.concat(final_sql, "\n")
 end
 
 ESV_GRAIN_SQL = M

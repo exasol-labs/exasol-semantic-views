@@ -18,9 +18,8 @@ model-versioned `CatalogSnapshot`, including transitive private metric
 dependencies that are not exposed as query fields.
 
 Phase B introduced the typed single-branch boundary. Phase C1 added
-multi-branch validation, and Phase C2 adds a typed physical state pipeline
-behind the planning-only feature gate while keeping existing SQL behavior
-below it. `PLAN_JSON.plan_version` is `4` and
+multi-branch validation, Phase C2 added the typed physical state pipeline, and
+Phase C3 activates the finalized query. `PLAN_JSON.plan_version` is `5` and
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -45,19 +44,23 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
 - binds one physical base-source branch per leaf with deterministic dimensions,
   state columns, typed placeholders, joins, and predicate placement
 - renders and size-checks an internal `UNION ALL` merged-state pipeline
-- returns a `MULTI_BRANCH` plan without public generated SQL or cache insertion
+- finalizes state metrics and dependency-ordered scalar metrics after merging
+- applies final `HAVING`, ordering, and limit against finalized metric columns
+- returns executable multi-branch SQL and participates in the compile cache
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the
 plan as `PLANNER_BRANCH_LIMIT_EXCEEDED` or
 `PLANNER_SQL_SIZE_LIMIT_EXCEEDED`.
 
-A valid planning-only request returns `SEMANTIC_REQUEST_073` or
-`SEMANTIC_QUERY_073` with `MULTI_BRANCH_EXECUTION_NOT_ENABLED` in the plan.
 An invalid strict proof returns `_074` with a path-specific `reason_code` and
-blocking relationship. Physical binding or safeguard failures return `_075`.
-This prevents the legacy root join planner or an incomplete multi-branch
-pipeline from becoming executable before Phase C3.
+blocking relationship. Physical binding, finalization, or safeguard failures
+return `_075`. A successful multi-branch request returns the same `OK` envelope
+as a single-branch request, including generated SQL and plan JSON.
+
+The initial state finalizers map missing `COUNT` state to zero with `COALESCE`.
+Missing `SUM` state remains null. Derived arithmetic is emitted in ordered CTE
+layers so every derived metric is computed once after state merging.
 
 These entrypoints are Lua scripts. Call them with `EXECUTE SCRIPT`, not
 `SELECT`:

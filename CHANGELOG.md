@@ -8,6 +8,20 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Grain-aware aggregation Phase C3
+
+- Plan-version 5 multi-fact requests now finalize mergeable states after the
+  cross-branch rollup, compute derived metrics in dependency-ordered CTEs, and
+  return executable SQL through both structured JSON and Semantic SQL.
+- Final `COUNT` states use zero for groups supplied only by another branch;
+  `SUM` states retain SQL nullability. `HAVING`, output ordering, and limits are
+  applied only after scalar finalization.
+- Successful multi-branch compiles now use the normal versioned compile cache.
+  Existing single-branch SQL continues to use the legacy-compatible renderer.
+- Private metrics now remain hidden in semantic-object column metadata. They can
+  therefore serve as transitive state dependencies without expanding the
+  object's public compatibility surface.
+
 #### Grain-aware aggregation Phase C2
 
 - Plan-version 4 multi-fact requests now include a typed
@@ -15,9 +29,8 @@ All notable changes to Exasol Semantic Views are documented here.
   deterministic state columns, conditional metric-local aggregates, proven
   joins, typed sparse-state placeholders, and a `UNION ALL` merged-state
   pipeline.
-- The internal multi-branch renderer is protected by fixed branch-count and
-  generated-SQL-size safeguards. Valid requests remain behind `_073`, expose no
-  generated SQL, and do not populate the compile cache until Phase C3.
+- The multi-branch renderer is protected by fixed branch-count and
+  generated-SQL-size safeguards.
 - Physical binding failures return `_075` with a stable plan-level reason.
 
 #### Grain-aware aggregation Phase C1
@@ -25,8 +38,8 @@ All notable changes to Exasol Semantic Views are documented here.
 - Multi-fact additive requests lower to a `MULTI_BRANCH`
   logical plan with normalized fact/state/finalizer nodes, bound filter scopes,
   strict branch-to-dimension proofs, and stable requirement/proof/rejection
-  identifiers. Execution remains deliberately disabled until Phase C3; valid
-  plans return `_073`, while path-specific proof failures return `_074`.
+  identifiers. C1 initially kept valid plans behind `_073`; path-specific proof
+  failures return `_074`.
 - Single-branch SQL generation remains on the existing renderer.
 
 #### Databricks Unity Catalog Metric View compatibility
