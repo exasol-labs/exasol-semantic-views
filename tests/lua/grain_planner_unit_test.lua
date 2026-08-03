@@ -269,7 +269,7 @@ test("C1 logical planner emits a planning-only multi branch plan", function()
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
     assert_equal(reason, nil)
-    assert_equal(plan.plan_version, 5)
+    assert_equal(plan.plan_version, 6)
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(plan.proof_mode, "STRICT_GRAIN")
     assert_equal(plan.execution.status, "PLANNING_ONLY")
@@ -334,6 +334,11 @@ end)
 test("C1 proves every fact branch to every requested dimension", function()
     local ctx, public = base_context()
     ctx.facts[2].entity_id = 2
+    ctx.all_metric_by_id["12"].filters = {{
+        resolved_sql_expr = "t.priority = 'URGENT'",
+        required_dimension_id = null,
+        required_entity_id = null,
+    }}
     ctx.relationships = {
         {
             id = 40, name = "orders_region", from_entity_id = 1, to_entity_id = 3,
@@ -361,6 +366,7 @@ test("C1 proves every fact branch to every requested dimension", function()
     local plan = assert(planner.logical_plan(spec, snapshot, bound, {public}))
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(#plan.relationship_proofs, 2)
+    assert_equal(#plan.branches[2].requirements, 1)
     assert_equal(plan.relationship_proofs[1].status, "PROVEN")
     assert_equal(plan.relationship_proofs[2].status, "PROVEN")
     assert_equal(plan.relationship_proofs[1].requirement.scope, "SELECTED")
@@ -398,7 +404,7 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local snapshot, logical = multi_physical_fixture()
     local physical, physical_error = physical_planner.build(logical, snapshot)
     assert_true(physical ~= nil, physical_error and physical_error.reason_code)
-    assert_equal(physical.physical_plan_version, 2)
+    assert_equal(physical.physical_plan_version, 3)
     assert_equal(physical.plan_kind, "MULTI_BRANCH_QUERY")
     assert_equal(#physical.branches, 2)
     assert_equal(#physical.states, 2)
@@ -407,6 +413,9 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     assert_equal(physical.states[1].placeholder_expression,
         "CAST(NULL AS DECIMAL(18,2))")
     assert_equal(physical.branches[1].cte_id, "cte:branch:1")
+    assert_equal(physical.branches[1].source.source_kind, "BASE")
+    assert_equal(physical.branches[1].source.entity_id, 1)
+    assert_equal(physical.branches[1].source.physical_object, "ORDERS")
     assert_equal(#physical.branches[1].joins, 1)
     assert_equal(physical.branches[1].joins[1].relationship_id, 40)
     assert_equal(physical.branches[1].state_columns[1].owner, true)

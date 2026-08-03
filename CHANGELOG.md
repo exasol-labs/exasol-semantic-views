@@ -8,6 +8,20 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Grain-aware aggregation Phase D1
+
+- Multi-branch physical plans now identify every branch's physical source as a
+  deterministic base-source contract and expose measured branch-count and SQL
+  size safeguards under plan version 6 / physical-plan version 3.
+- Successful compiler calls record planner runtime in the existing
+  `AGENT_REQUEST_LOG.RUNTIME_MS` and `QUERY_LOG.RUNTIME_MS` fields without
+  putting nondeterministic timing into cached plan JSON.
+- The maintained live multi-fact lane now covers differential and metamorphic
+  correctness before materialized branch substitution is introduced.
+- Leaf-local metric predicates no longer create a false conformance proof
+  requirement, while legacy single-branch non-mergeable aggregates retain
+  their compatibility renderer and strict or multi-branch plans reject them.
+
 #### Grain-aware aggregation Phase C3
 
 - Plan-version 5 multi-fact requests now finalize mergeable states after the

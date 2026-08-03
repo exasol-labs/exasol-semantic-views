@@ -5,6 +5,7 @@ local M = {VERSION = 1}
 local function key(value) return tostring(value) end
 
 local function clone(value, seen)
+    if value == null then return null end
     if type(value) ~= "table" then return value end
     seen = seen or {}
     if seen[value] then return seen[value] end

@@ -6012,6 +6012,7 @@ local M = {VERSION = 1}
 local function key(value) return tostring(value) end
 
 local function clone(value, seen)
+    if value == null then return null end
     if type(value) ~= "table" then return value end
     seen = seen or {}
     if seen[value] then return seen[value] end
@@ -6101,12 +6102,15 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 5}
+local M = {PLAN_VERSION = 6}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
 local function upper(value) return string.upper(tostring(value or "")) end
-local function missing(value) return value == nil or value == null or tostring(value) == "" end
+local function missing(value)
+    return value == nil or value == null or type(value) == "userdata"
+        or tostring(value) == ""
+end
 
 local function sorted_keys(values)
     local out = {}
@@ -6673,14 +6677,20 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
     local aggregate_nodes = {}
     local leaf_set = {}
     local failure = nil
+    local legacy_state_failure = nil
     for _, node in ipairs(dag.nodes) do
-        if node.node_kind == "UNSUPPORTED" and failure == nil then
-            failure = {
-                reason_code = "METRIC_STATE_UNSUPPORTED",
-                metric_id = node.metric_id,
-                metric = node.name,
-                state_class = node.state_class,
-            }
+        if node.node_kind == "UNSUPPORTED" or node.node_kind == "LEGACY_AGGREGATE" then
+            if legacy_state_failure == nil then
+                legacy_state_failure = {
+                    reason_code = "METRIC_STATE_UNSUPPORTED",
+                    metric_id = node.metric_id,
+                    metric = node.name,
+                    state_class = node.state_class,
+                }
+            end
+            for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
+                leaf_set[key(entity_id)] = entity_id
+            end
         elseif node.node_kind == "AGGREGATE_STATE" then
             aggregate_nodes[#aggregate_nodes + 1] = node
             if node.invalid_reason ~= nil and failure == nil then
@@ -6701,6 +6711,14 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
         leaf_entities[#leaf_entities + 1] = leaf_set[entity_key]
     end
     local plan_kind = #leaf_entities > 1 and "MULTI_BRANCH" or "SINGLE_BRANCH"
+    -- Non-mergeable legacy aggregates remain valid on the unchanged
+    -- single-branch compatibility renderer. They are rejected when a caller
+    -- explicitly requests the strict typed boundary or when multiple leaves
+    -- would require state merging.
+    if failure == nil and legacy_state_failure ~= nil
+        and (plan_kind == "MULTI_BRANCH" or spec.proof_mode == "STRICT_GRAIN") then
+        failure = legacy_state_failure
+    end
     local plan = {
         plan_version = M.PLAN_VERSION,
         plan_kind = plan_kind,
@@ -6747,14 +6765,25 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
                 if #node.leaf_entity_ids == 1
                     and key(node.leaf_entity_ids[1]) == key(leaf_entity_id) then
                     for _, filter in ipairs(node.local_filters or {}) do
-                        local dimension = (snapshot.dimension_by_id or {})[
-                            key(filter.required_dimension_id)]
-                        add_requirement(branch.requirements, requirement_seen,
-                            filter.required_entity_id or (dimension and dimension.entity_id),
-                            filter.required_dimension_id,
-                            dimension and dimension.name or nil,
-                            "METRIC_LOCAL",
-                            node.metric_id)
+                        local dimension_id = not missing(filter.required_dimension_id)
+                            and filter.required_dimension_id or nil
+                        local dimension = dimension_id ~= nil
+                            and (snapshot.dimension_by_id or {})[key(dimension_id)] or nil
+                        local entity_id = not missing(filter.required_entity_id)
+                            and filter.required_entity_id
+                            or (dimension and dimension.entity_id)
+                        -- A metric-local predicate expressed directly against
+                        -- its owning leaf needs no relationship proof. Only a
+                        -- semantic dimension dependency adds a branch
+                        -- requirement.
+                        if not missing(entity_id) then
+                            add_requirement(branch.requirements, requirement_seen,
+                                entity_id,
+                                dimension_id,
+                                dimension and dimension.name or nil,
+                                "METRIC_LOCAL",
+                                node.metric_id)
+                        end
                     end
                 end
             end
@@ -6817,7 +6846,7 @@ ESV_METRIC_PLAN = M
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 2,
+    VERSION = 3,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -7443,6 +7472,13 @@ function M.build(logical_plan, snapshot, options)
             cte_id = "cte:" .. branch.branch_id,
             cte_alias = cte_alias,
             leaf_entity_id = branch.leaf_entity_id,
+            source = {
+                source_kind = "BASE",
+                entity_id = entity.id,
+                entity_name = entity.name,
+                physical_schema = entity.source_schema,
+                physical_object = entity.source_object,
+            },
             from_sql = from_sql,
             joins = joins,
             dimensions = dimensions,
@@ -8120,6 +8156,21 @@ local function ok_result(sql_text, plan, validation_run_id)
     }
 end
 
+local function monotonic_ms()
+    if os ~= nil and type(os.clock) == "function" then
+        return math.floor(os.clock() * 1000 + 0.5)
+    end
+    return nil
+end
+
+local function attach_planning_runtime(result, started_ms)
+    local finished_ms = monotonic_ms()
+    if result ~= nil and started_ms ~= nil and finished_ms ~= nil then
+        result.planning_runtime_ms = math.max(0, finished_ms - started_ms)
+    end
+    return result
+end
+
 -- Compile-result cache (BUG-D-002). The compiler is deterministic per
 -- (model_version_id, normalized request), so a successful compile is reused
 -- until PUBLISH_MODEL drops cache entries for the model version. The parsed
@@ -8271,6 +8322,7 @@ local function cached_ok_result(cached)
         query_log_id = nil,
         materialization_used = plan_materialization_name(plan),
         cache_hit = true,
+        planning_runtime_ms = 0,
     }
 end
 
@@ -9331,11 +9383,11 @@ local function log_request(result, request_json, request, model)
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
           MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
           PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE,
-          CACHE_HIT, FINISHED_AT
+          CACHE_HIT, FINISHED_AT, RUNTIME_MS
         ) VALUES (
           :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
           :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message,
-          :cache_hit, CURRENT_TIMESTAMP
+          :cache_hit, CURRENT_TIMESTAMP, :runtime_ms
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -9351,6 +9403,7 @@ local function log_request(result, request_json, request, model)
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
         cache_hit = result.cache_hit == true,
+        runtime_ms = null_if_missing(result.planning_runtime_ms),
     })
     result.agent_request_id = scalar([[
         SELECT MAX(AGENT_REQUEST_ID)
@@ -9369,12 +9422,12 @@ local function log_query_result(result, original_sql, request, model, client_nam
           MODEL_ID, VERSION_ID, CLIENT_NAME, ORIGINAL_SQL, GENERATED_SQL,
           PLAN_JSON, REQUESTED_DIMENSIONS, REQUESTED_METRICS, MATERIALIZATION_USED,
           STATUS, ERROR_CODE,
-          ERROR_MESSAGE, FINISHED_AT
+          ERROR_MESSAGE, FINISHED_AT, RUNTIME_MS
         ) VALUES (
           :model_id, :version_id, :client_name, :original_sql, :generated_sql,
           :plan_json, :requested_dimensions, :requested_metrics, :materialization_used,
           :status, :error_code,
-          :error_message, CURRENT_TIMESTAMP
+          :error_message, CURRENT_TIMESTAMP, :runtime_ms
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -9389,6 +9442,7 @@ local function log_query_result(result, original_sql, request, model, client_nam
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
+        runtime_ms = null_if_missing(result.planning_runtime_ms),
     })
     result.query_log_id = scalar([[
         SELECT MAX(QUERY_LOG_ID)
@@ -9483,6 +9537,7 @@ local function compile_request_table(request, options)
         end
     end
 
+    local planning_started_ms = monotonic_ms()
     local ctx, load_code, load_message = load_catalog(model, object_name)
     if ctx == nil then
         return error_result(load_code, load_message)
@@ -9761,7 +9816,8 @@ local function compile_request_table(request, options)
         typed_plan.execution = {status = "EXECUTABLE"}
         physical_plan.execution = {status = "EXECUTABLE"}
         local plan = plan_envelope()
-        local result = ok_result(internal_sql, plan, validation_run_id)
+        local result = attach_planning_runtime(
+            ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
         if cache_key ~= nil then
             cache_store(model.version_id, cache_key, result)
         end
@@ -9817,7 +9873,8 @@ local function compile_request_table(request, options)
 
     local plan = plan_envelope(materialization_decision, selected_materialization,
         relationship_paths)
-    local result = ok_result(sql_text, plan, validation_run_id)
+    local result = attach_planning_runtime(
+        ok_result(sql_text, plan, validation_run_id), planning_started_ms)
     if cache_key ~= nil then
         cache_store(model.version_id, cache_key, result)
     end

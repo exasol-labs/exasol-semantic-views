@@ -444,6 +444,21 @@ local function ok_result(sql_text, plan, validation_run_id)
     }
 end
 
+local function monotonic_ms()
+    if os ~= nil and type(os.clock) == "function" then
+        return math.floor(os.clock() * 1000 + 0.5)
+    end
+    return nil
+end
+
+local function attach_planning_runtime(result, started_ms)
+    local finished_ms = monotonic_ms()
+    if result ~= nil and started_ms ~= nil and finished_ms ~= nil then
+        result.planning_runtime_ms = math.max(0, finished_ms - started_ms)
+    end
+    return result
+end
+
 -- Compile-result cache (BUG-D-002). The compiler is deterministic per
 -- (model_version_id, normalized request), so a successful compile is reused
 -- until PUBLISH_MODEL drops cache entries for the model version. The parsed
@@ -595,6 +610,7 @@ local function cached_ok_result(cached)
         query_log_id = nil,
         materialization_used = plan_materialization_name(plan),
         cache_hit = true,
+        planning_runtime_ms = 0,
     }
 end
 
@@ -1655,11 +1671,11 @@ local function log_request(result, request_json, request, model)
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
           MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
           PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE,
-          CACHE_HIT, FINISHED_AT
+          CACHE_HIT, FINISHED_AT, RUNTIME_MS
         ) VALUES (
           :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
           :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message,
-          :cache_hit, CURRENT_TIMESTAMP
+          :cache_hit, CURRENT_TIMESTAMP, :runtime_ms
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -1675,6 +1691,7 @@ local function log_request(result, request_json, request, model)
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
         cache_hit = result.cache_hit == true,
+        runtime_ms = null_if_missing(result.planning_runtime_ms),
     })
     result.agent_request_id = scalar([[
         SELECT MAX(AGENT_REQUEST_ID)
@@ -1693,12 +1710,12 @@ local function log_query_result(result, original_sql, request, model, client_nam
           MODEL_ID, VERSION_ID, CLIENT_NAME, ORIGINAL_SQL, GENERATED_SQL,
           PLAN_JSON, REQUESTED_DIMENSIONS, REQUESTED_METRICS, MATERIALIZATION_USED,
           STATUS, ERROR_CODE,
-          ERROR_MESSAGE, FINISHED_AT
+          ERROR_MESSAGE, FINISHED_AT, RUNTIME_MS
         ) VALUES (
           :model_id, :version_id, :client_name, :original_sql, :generated_sql,
           :plan_json, :requested_dimensions, :requested_metrics, :materialization_used,
           :status, :error_code,
-          :error_message, CURRENT_TIMESTAMP
+          :error_message, CURRENT_TIMESTAMP, :runtime_ms
         )
     ]], {
         model_id = null_if_missing(request_model_id),
@@ -1713,6 +1730,7 @@ local function log_query_result(result, original_sql, request, model, client_nam
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
+        runtime_ms = null_if_missing(result.planning_runtime_ms),
     })
     result.query_log_id = scalar([[
         SELECT MAX(QUERY_LOG_ID)
@@ -1807,6 +1825,7 @@ local function compile_request_table(request, options)
         end
     end
 
+    local planning_started_ms = monotonic_ms()
     local ctx, load_code, load_message = load_catalog(model, object_name)
     if ctx == nil then
         return error_result(load_code, load_message)
@@ -2085,7 +2104,8 @@ local function compile_request_table(request, options)
         typed_plan.execution = {status = "EXECUTABLE"}
         physical_plan.execution = {status = "EXECUTABLE"}
         local plan = plan_envelope()
-        local result = ok_result(internal_sql, plan, validation_run_id)
+        local result = attach_planning_runtime(
+            ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
         if cache_key ~= nil then
             cache_store(model.version_id, cache_key, result)
         end
@@ -2141,7 +2161,8 @@ local function compile_request_table(request, options)
 
     local plan = plan_envelope(materialization_decision, selected_materialization,
         relationship_paths)
-    local result = ok_result(sql_text, plan, validation_run_id)
+    local result = attach_planning_runtime(
+        ok_result(sql_text, plan, validation_run_id), planning_started_ms)
     if cache_key ~= nil then
         cache_store(model.version_id, cache_key, result)
     end

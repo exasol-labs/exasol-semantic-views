@@ -19,7 +19,7 @@ dependencies that are not exposed as query fields.
 
 Phase B introduced the typed single-branch boundary. Phase C1 added
 multi-branch validation, Phase C2 added the typed physical state pipeline, and
-Phase C3 activates the finalized query. `PLAN_JSON.plan_version` is `5` and
+Phase D1 hardens the finalized query. `PLAN_JSON.plan_version` is `6` and
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -47,16 +47,27 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
 - finalizes state metrics and dependency-ordered scalar metrics after merging
 - applies final `HAVING`, ordering, and limit against finalized metric columns
 - returns executable multi-branch SQL and participates in the compile cache
+- records a deterministic `source` contract with `source_kind = BASE` for each
+  physical branch under physical-plan version 3
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the
 plan as `PLANNER_BRANCH_LIMIT_EXCEEDED` or
 `PLANNER_SQL_SIZE_LIMIT_EXCEEDED`.
 
+Planner runtime is stored in the existing `RUNTIME_MS` column for JSON agent
+request logs and Semantic SQL debug query logs. Timing is deliberately excluded
+from `PLAN_JSON`, so equivalent input lanes and cached results retain identical
+plans. Cache hits record zero planner milliseconds.
+
 An invalid strict proof returns `_074` with a path-specific `reason_code` and
 blocking relationship. Physical binding, finalization, or safeguard failures
 return `_075`. A successful multi-branch request returns the same `OK` envelope
 as a single-branch request, including generated SQL and plan JSON.
+
+Non-mergeable aggregate forms such as `COUNT DISTINCT` remain supported by the
+legacy renderer for ordinary single-branch requests. They are rejected when an
+explicit strict or multi-branch plan would require a mergeable state contract.
 
 The initial state finalizers map missing `COUNT` state to zero with `COALESCE`.
 Missing `SUM` state remains null. Derived arithmetic is emitted in ordered CTE

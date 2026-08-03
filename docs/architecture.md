@@ -38,15 +38,18 @@ The compiler's Phase B boundary is split into four small modules:
 - `grain_sql.lua` renders the supported single-branch physical plan
 
 The legacy join proof remains the compatibility path. Strict grain proofs are
-separate values and are the only proof type a future multi-fact branch planner
-may consume.
+separate values and are the only proof type the multi-fact branch planner may
+consume.
 
 Phase C1 normalizes leaf fact inputs, binds filter scopes, and proves each leaf
 branch to each required dimension before the legacy matrix or root join planner
 runs. Phase C2 adds a separate typed physical planner and decision-free
-multi-branch state renderer. Phase C3 uses plan-version 5 to finalize states
-and derived metrics after the merge, apply final query operations, and activate
-SQL generation and caching through both compiler input lanes.
+multi-branch state renderer. Phase C3 finalizes states and derived metrics after
+the merge, applies final query operations, and activates SQL generation and
+caching through both compiler input lanes. Phase D1 uses
+plan-version 6 / physical-plan version 3 to identify every branch's base source
+explicitly and records planner runtime without making cached plans
+nondeterministic.
 
 ## Primary Flows
 

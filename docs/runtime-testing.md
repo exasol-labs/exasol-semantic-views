@@ -67,11 +67,12 @@ python3 tools/verify_grain_phase_b.py
 python3 tools/verify_grain_phase_c3.py
 ```
 
-The C3 verifier installs an idempotent two-fact fixture, compiles equivalent
-JSON and Semantic SQL requests, executes both generated queries, and checks
-derived metrics plus sparse `COUNT`/`SUM` behavior. It also exercises a private
-state metric to ensure internal dependencies do not become visible object
-columns.
+The maintained C3/D1 verifier uses an isolated `grain_d1` model with three fact
+branches. It compares JSON and Semantic SQL results with independently
+aggregated reference SQL and covers grand totals, global filters, same-leaf
+filtered states, equal labels, sparse branches, orphan/null keys, and the rule
+that mutating one branch cannot alter another branch's state. It also reports
+planner runtime and SQL size for one-, two-, and three-branch shapes.
 
 `tools/verify_concurrent_compile.py` enforces a configurable concurrency p95
 limit. Defaults and overrides:

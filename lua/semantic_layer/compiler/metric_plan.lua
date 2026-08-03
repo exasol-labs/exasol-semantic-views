@@ -1,11 +1,14 @@
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 5}
+local M = {PLAN_VERSION = 6}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
 local function upper(value) return string.upper(tostring(value or "")) end
-local function missing(value) return value == nil or value == null or tostring(value) == "" end
+local function missing(value)
+    return value == nil or value == null or type(value) == "userdata"
+        or tostring(value) == ""
+end
 
 local function sorted_keys(values)
     local out = {}
@@ -572,14 +575,20 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
     local aggregate_nodes = {}
     local leaf_set = {}
     local failure = nil
+    local legacy_state_failure = nil
     for _, node in ipairs(dag.nodes) do
-        if node.node_kind == "UNSUPPORTED" and failure == nil then
-            failure = {
-                reason_code = "METRIC_STATE_UNSUPPORTED",
-                metric_id = node.metric_id,
-                metric = node.name,
-                state_class = node.state_class,
-            }
+        if node.node_kind == "UNSUPPORTED" or node.node_kind == "LEGACY_AGGREGATE" then
+            if legacy_state_failure == nil then
+                legacy_state_failure = {
+                    reason_code = "METRIC_STATE_UNSUPPORTED",
+                    metric_id = node.metric_id,
+                    metric = node.name,
+                    state_class = node.state_class,
+                }
+            end
+            for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
+                leaf_set[key(entity_id)] = entity_id
+            end
         elseif node.node_kind == "AGGREGATE_STATE" then
             aggregate_nodes[#aggregate_nodes + 1] = node
             if node.invalid_reason ~= nil and failure == nil then
@@ -600,6 +609,14 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
         leaf_entities[#leaf_entities + 1] = leaf_set[entity_key]
     end
     local plan_kind = #leaf_entities > 1 and "MULTI_BRANCH" or "SINGLE_BRANCH"
+    -- Non-mergeable legacy aggregates remain valid on the unchanged
+    -- single-branch compatibility renderer. They are rejected when a caller
+    -- explicitly requests the strict typed boundary or when multiple leaves
+    -- would require state merging.
+    if failure == nil and legacy_state_failure ~= nil
+        and (plan_kind == "MULTI_BRANCH" or spec.proof_mode == "STRICT_GRAIN") then
+        failure = legacy_state_failure
+    end
     local plan = {
         plan_version = M.PLAN_VERSION,
         plan_kind = plan_kind,
@@ -646,14 +663,25 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
                 if #node.leaf_entity_ids == 1
                     and key(node.leaf_entity_ids[1]) == key(leaf_entity_id) then
                     for _, filter in ipairs(node.local_filters or {}) do
-                        local dimension = (snapshot.dimension_by_id or {})[
-                            key(filter.required_dimension_id)]
-                        add_requirement(branch.requirements, requirement_seen,
-                            filter.required_entity_id or (dimension and dimension.entity_id),
-                            filter.required_dimension_id,
-                            dimension and dimension.name or nil,
-                            "METRIC_LOCAL",
-                            node.metric_id)
+                        local dimension_id = not missing(filter.required_dimension_id)
+                            and filter.required_dimension_id or nil
+                        local dimension = dimension_id ~= nil
+                            and (snapshot.dimension_by_id or {})[key(dimension_id)] or nil
+                        local entity_id = not missing(filter.required_entity_id)
+                            and filter.required_entity_id
+                            or (dimension and dimension.entity_id)
+                        -- A metric-local predicate expressed directly against
+                        -- its owning leaf needs no relationship proof. Only a
+                        -- semantic dimension dependency adds a branch
+                        -- requirement.
+                        if not missing(entity_id) then
+                            add_requirement(branch.requirements, requirement_seen,
+                                entity_id,
+                                dimension_id,
+                                dimension and dimension.name or nil,
+                                "METRIC_LOCAL",
+                                node.metric_id)
+                        end
                     end
                 end
             end

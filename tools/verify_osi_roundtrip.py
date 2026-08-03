@@ -151,6 +151,16 @@ def prepare_roundtrip_catalog(con) -> None:
         "'sales', 'METRIC', 'total_revenue', 'DEFINITION', "
         "'Use total_revenue for recognized net revenue analysis.', NULL, 10)",
     ).fetchall()
+    # These metadata writes intentionally stale the active validation. Make the
+    # fixture self-contained instead of relying on an older compile-cache entry
+    # to mask that state transition.
+    validation = con.execute(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')"
+    ).fetchall()
+    assert_true(
+        "round-trip source revalidated",
+        all(issue[0] != "ERROR" for issue in validation),
+    )
 
 
 def export_lossless(con, model_name: str) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 2,
+    VERSION = 3,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -627,6 +627,13 @@ function M.build(logical_plan, snapshot, options)
             cte_id = "cte:" .. branch.branch_id,
             cte_alias = cte_alias,
             leaf_entity_id = branch.leaf_entity_id,
+            source = {
+                source_kind = "BASE",
+                entity_id = entity.id,
+                entity_name = entity.name,
+                physical_schema = entity.source_schema,
+                physical_object = entity.source_object,
+            },
             from_sql = from_sql,
             joins = joins,
             dimensions = dimensions,

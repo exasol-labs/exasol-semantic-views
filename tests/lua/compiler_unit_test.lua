@@ -581,6 +581,7 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_equal(state.cache_inserts, 1)
     assert_equal(#state.request_logs, 1)
     assert_equal(state.request_logs[1].client_name, "lua-tests")
+    assert_true(type(state.request_logs[1].runtime_ms) == "number")
 
     local second = with_query(mock, function()
         return compile_request_json(request_json)
@@ -615,13 +616,15 @@ test("C3 compiler activates a versioned multi branch query", function()
     assert_contains(result.generated_sql, 'ORDER BY "activity_ratio" DESC')
     assert_contains(result.generated_sql, "LIMIT 10")
     local envelope = api.json_decode(result.plan_json)
-    assert_equal(envelope.plan_version, 5)
+    assert_equal(envelope.plan_version, 6)
     assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
     assert_equal(envelope.logical_plan.execution.status, "EXECUTABLE")
-    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 2)
+    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 3)
     assert_equal(envelope.logical_plan.physical_plan.plan_kind,
         "MULTI_BRANCH_QUERY")
     assert_true(envelope.logical_plan.physical_plan.safeguards.sql_size_bytes > 0)
+    assert_equal(envelope.logical_plan.physical_plan.branches[1].source.source_kind,
+        "BASE")
     assert_equal(envelope.metric_details[1].name, "activity_ratio")
     assert_equal(#envelope.logical_plan.branches, 2)
     assert_equal(#envelope.logical_plan.relationship_proofs, 2)
@@ -701,7 +704,8 @@ test("structured compiler maps request and validation failures", function()
         {{model = "sales", object = "SALES"}, nil, "SEMANTIC_REQUEST_023"},
         {{model = "sales", object = "SALES", metrics = {"revenue"}},
             {no_validation = true}, "SEMANTIC_REQUEST_010"},
-        {{model = "sales", object = "SALES", metrics = {"revenue"}},
+        {{model = "sales", object = "SALES", metrics = {"revenue"},
+            proof_mode = "STRICT_GRAIN"},
             {unsupported_metric = true}, "SEMANTIC_REQUEST_070"},
         {{model = "sales", object = "SALES", metrics = {"revenue"},
             dimensions = {"status"}, proof_mode = "STRICT_GRAIN"},
@@ -725,6 +729,12 @@ test("structured compiler maps request and validation failures", function()
         assert_equal(state.cache_inserts, 0)
         assert_equal(#state.request_logs, 1)
     end
+
+    local legacy_unsupported = compile_with_fixture(
+        {model = "sales", object = "SALES", metrics = {"revenue"}},
+        {unsupported_metric = true})
+    assert_equal(legacy_unsupported.status, "OK")
+    assert_contains(legacy_unsupported.generated_sql, "COUNT(DISTINCT")
 end)
 
 test("semantic SQL public APIs compile debug and preserve non-semantic SQL", function()
@@ -753,6 +763,7 @@ test("semantic SQL public APIs compile debug and preserve non-semantic SQL", fun
     assert_equal(debugged.query_log_id, 601)
     assert_equal(#state.query_logs, 1)
     assert_equal(state.query_logs[1].client_name, "lua-debug")
+    assert_true(type(state.query_logs[1].runtime_ms) == "number")
 
     local unchanged = compile_sql_for_preprocessor("UPDATE MART.ORDERS SET amount = 1")
     assert_equal(unchanged.status, "UNCHANGED")

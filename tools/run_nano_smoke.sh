@@ -36,6 +36,12 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_group_by_inference.py
 "$PYTHON_BIN" tools/run_sql_files.py tests/sql/validation_smoke.sql tests/sql/compile_request_smoke.sql
 
+# Grain-aware D1 baseline: build an isolated three-fact model, compare both
+# compiler input lanes with independently aggregated reference SQL, exercise
+# sparse/orphan/filter/grand-total behavior, and report one/two/three-branch
+# planner measurements before D2 materialization substitution.
+"$PYTHON_BIN" tools/verify_grain_phase_c3.py
+
 # Phase 2: register pre-built aggregates and verify materialization selection.
 "$PYTHON_BIN" tools/run_sql_files.py sql/examples/sales_materializations.sql
 
