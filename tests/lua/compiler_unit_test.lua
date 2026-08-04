@@ -694,6 +694,8 @@ test("structured compiler maps request and validation failures", function()
         {{model = "sales", object = "SALES", metrics = "revenue"},
             nil, "SEMANTIC_REQUEST_001"},
         {{model = "sales", object = "SALES", metrics = {"revenue"},
+            output = {shape = "nested"}}, nil, "SEMANTIC_REQUEST_004"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"},
             proof_mode = "unproven"}, nil, "SEMANTIC_REQUEST_071"},
         {{object = "SALES", metrics = {"revenue"}}, nil, "SEMANTIC_REQUEST_002"},
         {{model = "sales", metrics = {"revenue"}}, nil, "SEMANTIC_REQUEST_003"},
@@ -729,6 +731,15 @@ test("structured compiler maps request and validation failures", function()
         assert_equal(state.cache_inserts, 0)
         assert_equal(#state.request_logs, 1)
     end
+
+    local unknown_keys = compile_with_fixture(
+        {model = "sales", object = "SALES", metrics = {"revenue"},
+            zebra = true, output = {shape = "nested"}})
+    assert_equal(unknown_keys.error_code, "SEMANTIC_REQUEST_004")
+    assert_contains(unknown_keys.error_message,
+        "Unknown top-level request key(s): output, zebra.")
+    assert_contains(unknown_keys.error_message,
+        "Allowed keys: client, dimensions, filters")
 
     local legacy_unsupported = compile_with_fixture(
         {model = "sales", object = "SALES", metrics = {"revenue"}},

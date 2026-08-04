@@ -262,6 +262,36 @@ WHERE res.SEVERITY = 'ERROR';
 
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT AS
 SELECT
+  'REQUEST_KEY' AS CONTRACT_SECTION,
+  'model' AS NAME,
+  'Semantic model name.' AS DESCRIPTION,
+  TRUE AS IS_REQUIRED,
+  CAST('string' AS VARCHAR(50)) AS VALUE_TYPE,
+  CAST(NULL AS VARCHAR(500)) AS ALLOWED_VALUES
+UNION ALL
+SELECT 'REQUEST_KEY', 'object', 'Semantic object name.', TRUE, 'string', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'metrics', 'Selected metric names. At least one metric or dimension is required.', FALSE, 'array<string>', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'dimensions', 'Selected dimension names. At least one metric or dimension is required.', FALSE, 'array<string>', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'filters', 'Dimension predicates applied before aggregation.', FALSE, 'array<object>', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'having', 'Metric predicates applied after aggregation.', FALSE, 'array<object>', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'order_by', 'Ordering over selected output fields.', FALSE, 'array<object>', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'limit', 'Positive integer result limit, up to the configured maximum.', FALSE, 'integer', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'client', 'Optional caller name recorded in request history.', FALSE, 'string', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'purpose', 'Optional caller purpose recorded in request history.', FALSE, 'string', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'natural_language_text', 'Optional originating question retained as request metadata.', FALSE, 'string', NULL
+UNION ALL
+SELECT 'REQUEST_KEY', 'proof_mode', 'Optional grain-proof mode.', FALSE, 'string', 'LEGACY_JOIN, STRICT_GRAIN'
+UNION ALL
+SELECT
   'FILTER_KEYS' AS CONTRACT_SECTION,
   'field, dimension, column, name' AS NAME,
   'Use field for canonical requests. dimension, column, and name are accepted aliases.' AS DESCRIPTION,

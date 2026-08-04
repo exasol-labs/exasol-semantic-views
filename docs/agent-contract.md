@@ -145,6 +145,13 @@ Autonomous agents should prefer this JSON form:
 }
 ```
 
+The top-level request object is a closed contract. Accepted keys are `model`,
+`object`, `metrics`, `dimensions`, `filters`, `having`, `order_by`, `limit`,
+`client`, `purpose`, `natural_language_text`, and `proof_mode`. Unknown keys
+are rejected with `SEMANTIC_REQUEST_004`; they are never silently ignored.
+This prevents an agent from assuming that an unsupported capability such as
+`output: {"shape": "nested"}` was applied to an otherwise valid request.
+
 Filter field aliases are `field`, `dimension`, `column`, and `name`. Operator
 aliases are `op` and `operator`. Supported operators are `=`, `!=`, `<>`, `>`,
 `>=`, `<`, `<=`, `LIKE`, `IN`, and `BETWEEN`; `BETWEEN` expects a two-element

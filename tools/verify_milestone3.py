@@ -123,10 +123,16 @@ def main() -> int:
         assert_status_ok("revenue by region compile", revenue_by_region)
         assert_equal("compile request original sql is null", revenue_by_region["original_sql"], None)
         sql = revenue_by_region["generated_sql"]
-        assert_contains("revenue SQL selects region", sql, 'c.region AS "customer_region"')
-        assert_contains("revenue SQL expands fact", sql, "SUM((ol.quantity * ol.net_unit_price))")
-        assert_contains("revenue SQL joins customers", sql, '"MART"."CUSTOMERS" c ON o.customer_id = c.customer_id')
-        assert_contains("revenue SQL groups", sql, "GROUP BY c.region")
+        plan = json.loads(revenue_by_region["plan_json"])
+        if plan.get("selected_materialization"):
+            assert_contains("revenue SQL uses selected materialization", sql, '"MART"."SALES_REVENUE_BY_REGION"')
+            assert_contains("revenue SQL selects materialized region", sql, 'mat."CUSTOMER_REGION" AS "customer_region"')
+            assert_contains("revenue SQL rolls up materialized state", sql, 'SUM(mat."TOTAL_REVENUE")')
+        else:
+            assert_contains("revenue SQL selects region", sql, 'c.region AS "customer_region"')
+            assert_contains("revenue SQL expands fact", sql, "SUM((ol.quantity * ol.net_unit_price))")
+            assert_contains("revenue SQL joins customers", sql, '"MART"."CUSTOMERS" c ON o.customer_id = c.customer_id')
+            assert_contains("revenue SQL groups", sql, "GROUP BY c.region")
         assert_contains("revenue SQL orders", sql, 'ORDER BY "total_revenue" DESC')
 
         revenue_rows = fetchall(con, sql)
@@ -135,7 +141,6 @@ def main() -> int:
             revenue_rows,
             [("North", "3635"), ("West", "1500")],
         )
-        plan = json.loads(revenue_by_region["plan_json"])
         assert_equal("plan validation id", plan["validation_run_id"], int(revenue_by_region["validation_run_id"]))
         assert_equal("plan metric", plan["metrics"], ["total_revenue"])
 
@@ -212,6 +217,21 @@ def main() -> int:
         assert_equal("unknown field status", unknown["status"], "ERROR")
         assert_equal("unknown field code", unknown["error_code"], "SEMANTIC_REQUEST_020")
 
+        unknown_key = compile_request(
+            con,
+            {
+                "model": "sales",
+                "object": "SALES",
+                "metrics": ["total_revenue"],
+                "dimensions": ["customer_region"],
+                "output": {"shape": "nested"},
+                "client": "verify_milestone3",
+            },
+        )
+        assert_equal("unknown request key status", unknown_key["status"], "ERROR")
+        assert_equal("unknown request key code", unknown_key["error_code"], "SEMANTIC_REQUEST_004")
+        assert_contains("unknown request key message", unknown_key["error_message"], "output")
+
         bad_limit = compile_request(
             con,
             {
@@ -259,7 +279,7 @@ def main() -> int:
         assert_equal("bad having structure code", bad_having["error_code"], "SEMANTIC_REQUEST_025")
 
         after_logs = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_REQUEST_LOG")
-        assert_equal("agent request logs", after_logs - before_logs, 9)
+        assert_equal("agent request logs", after_logs - before_logs, 10)
     finally:
         con.close()
     return 0

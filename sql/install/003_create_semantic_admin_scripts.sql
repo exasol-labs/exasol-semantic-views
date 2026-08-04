@@ -8459,6 +8459,38 @@ end
 local CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
     natural_language_text = true, natural_language = true, source = true}
 
+-- COMPILE_REQUEST_JSON is a closed contract. Silently dropping misspelled or
+-- future-looking keys is unsafe for autonomous callers: a request can return
+-- STATUS=OK while not doing what the caller asked. Keep this list aligned with
+-- SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT.
+local STRUCTURED_REQUEST_KEY_NAMES = {
+    "client", "dimensions", "filters", "having", "limit", "metrics",
+    "model", "natural_language_text", "object", "order_by", "proof_mode",
+    "purpose",
+}
+local STRUCTURED_REQUEST_KEYS = {}
+for _, request_key in ipairs(STRUCTURED_REQUEST_KEY_NAMES) do
+    STRUCTURED_REQUEST_KEYS[request_key] = true
+end
+
+local function validate_structured_request_keys(request)
+    local unknown = {}
+    for request_key, _ in pairs(request) do
+        if type(request_key) ~= "string" or not STRUCTURED_REQUEST_KEYS[request_key] then
+            unknown[#unknown + 1] = tostring(request_key)
+        end
+    end
+    if #unknown == 0 then
+        return nil
+    end
+    table.sort(unknown)
+    return error_result(
+        "SEMANTIC_REQUEST_004",
+        "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
+            .. ". Allowed keys: " .. table.concat(STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
+    )
+end
+
 local function canonical_value(value)
     if value == nil or value == null or value == JSON_NULL then
         return null
@@ -10184,6 +10216,10 @@ local function compile_internal(request_json)
     end
     if type(request) ~= "table" or is_array(request) then
         return error_result("SEMANTIC_REQUEST_001", "Request JSON must be an object.")
+    end
+    local request_key_error = validate_structured_request_keys(request)
+    if request_key_error ~= nil then
+        return request_key_error, request, nil
     end
     -- Compile reuses the latest successful validation run for the active model version.
     -- PUBLISH_MODEL (and VALIDATE_MODEL) own the writes to VALIDATION_RUNS,

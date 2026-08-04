@@ -6,6 +6,18 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+#### Strict structured-request keys
+
+- `COMPILE_REQUEST_JSON` now rejects unknown top-level keys with
+  `SEMANTIC_REQUEST_004` instead of silently dropping them during `QuerySpec`
+  normalization.
+- `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes all 12 accepted top-level keys so
+  autonomous callers can validate capability assumptions before compiling.
+- Regression coverage includes nested-output requests, deterministic unknown-key
+  diagnostics, request logging, and the live database contract.
+
 ### Added
 
 #### Grain-aware aggregation Phase D2

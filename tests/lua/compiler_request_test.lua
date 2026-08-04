@@ -30,5 +30,6 @@ return {
         unknown_field = "SEMANTIC_REQUEST_020",
         limit_too_large = "SEMANTIC_REQUEST_051",
         malformed_json = "SEMANTIC_REQUEST_001",
+        unknown_request_key = "SEMANTIC_REQUEST_004",
     },
 }

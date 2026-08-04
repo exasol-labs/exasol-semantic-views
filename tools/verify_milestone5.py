@@ -273,7 +273,7 @@ def main() -> int:
             scalar(
                 con,
                 "SELECT COUNT(*) FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT "
-                "WHERE MODEL_NAME = 'sales' AND QUERY_NAME = 'Revenue by region'",
+                f"WHERE VERIFIED_QUERY_ID = {int(verified_rows[0][0])}",
             ),
             1,
         )
@@ -462,6 +462,29 @@ def main() -> int:
                 "WHERE CONTRACT_SECTION = 'FILTER_OPERATOR' AND NAME = 'BETWEEN'",
             ),
             1,
+        )
+
+        assert_equal(
+            "schema view lists exactly the accepted request keys",
+            fetchall(
+                con,
+                "SELECT NAME FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT "
+                "WHERE CONTRACT_SECTION = 'REQUEST_KEY' ORDER BY NAME",
+            ),
+            [
+                ("client",),
+                ("dimensions",),
+                ("filters",),
+                ("having",),
+                ("limit",),
+                ("metrics",),
+                ("model",),
+                ("natural_language_text",),
+                ("object",),
+                ("order_by",),
+                ("proof_mode",),
+                ("purpose",),
+            ],
         )
     finally:
         con.close()

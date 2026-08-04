@@ -139,7 +139,12 @@ a stale cache row.
 
 The structured compiler supports:
 
-0. **Dimension-only discovery requests.** A request with `dimensions` set
+1. **A closed top-level request contract.** The accepted keys are `model`,
+   `object`, `metrics`, `dimensions`, `filters`, `having`, `order_by`, `limit`,
+   `client`, `purpose`, `natural_language_text`, and `proof_mode`. Any other
+   key returns `SEMANTIC_REQUEST_004` with the unknown and allowed keys rather
+   than silently changing the request's meaning.
+2. **Dimension-only discovery requests.** A request with `dimensions` set
    and `metrics` empty compiles to `SELECT dim1, dim2, ... FROM <root>
    [JOIN ...] [WHERE filters] GROUP BY dim1, dim2, ...`. This is the
    intended shape for populating facet filters or any other distinct-values
@@ -147,21 +152,21 @@ The structured compiler supports:
    `SEMANTIC_REQUEST_026` if supplied alongside zero metrics) and
    aggregate materializations are skipped, since they exist to serve
    aggregations.
-1. Metrics and dimensions by canonical names or visible synonyms.
-2. Dimension filters with `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`,
+3. Metrics and dimensions by canonical names or visible synonyms.
+4. Dimension filters with `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`,
    `IN`, and `BETWEEN`. Text `=`, `!=`, `<>`, `LIKE`, and `IN` filters compile
    case-insensitively. Structured request filters accept `field`, `dimension`,
    `column`, or `name` for the field key, and `op` or `operator` for the
    operator key.
-3. `ORDER BY` over selected output fields.
-4. `LIMIT` up to the configured maximum.
-5. Additive metrics, filtered metrics using `CASE`, and derived metrics as
+5. `ORDER BY` over selected output fields.
+6. `LIMIT` up to the configured maximum.
+7. Additive metrics, filtered metrics using `CASE`, and derived metrics as
    arithmetic over expanded aggregate expressions.
-6. Relationship planning from the semantic object root to required entities.
-7. Optional materialized aggregate selection when registered catalog metadata
+8. Relationship planning from the semantic object root to required entities.
+9. Optional materialized aggregate selection when registered catalog metadata
    fully covers the selected metrics, selected dimensions, filter dimensions,
    and rollup policy requirements.
-8. Stable structured errors for malformed JSON, unknown fields, invalid limits,
+10. Stable structured errors for malformed JSON, unknown fields, invalid limits,
    invalid metric/dimension pairs, and missing relationship paths.
 
 The typed planner explicitly rejects distinct, non-additive, and window
