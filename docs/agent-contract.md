@@ -1,7 +1,5 @@
 # Agent Contract
 
-Milestone 5 installs the first agent-facing database contract.
-
 Agents should discover semantic context through `SEMANTIC_AGENT` views and
 compile structured requests through `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON`.
 External MCP, REST, or application agents should wrap this database contract

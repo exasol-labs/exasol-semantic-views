@@ -9,7 +9,7 @@
 [![Agent-first](https://img.shields.io/badge/agent--first-COMPILE__REQUEST__JSON-blueviolet)](#agent-first-by-design)
 [![Semantic SQL](https://img.shields.io/badge/Semantic%20SQL-preprocessor-success)](#a-concrete-example)
 
-**[Quickstart](#quickstart-with-exasol-nano) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example)**
+**[Quickstart](#quickstart-with-exasol-personal) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example)**
 
 </div>
 
@@ -300,7 +300,7 @@ requests, plans, durable handles, explanations, or feedback. See the
 [MCP integration guide](docs/mcp-server-integration.md) for the exact workflow
 and reconnect and result-limit caveats.
 
-The repository includes two Codex-compatible agent skills:
+The repository includes two agent skills:
 
 - [**exasol-semantic-analyst**](skills/exasol-semantic-analyst/SKILL.md) — for
   agents answering business questions against an existing model. Covers
@@ -311,36 +311,38 @@ The repository includes two Codex-compatible agent skills:
   relationship modelling, fact and dimension authoring, SQL-native metric DDL,
   validation, publication, and governance configuration.
 
-## Quickstart With Exasol Nano
+## Quickstart With Exasol Personal
 
-Start or check Nano from the parent workspace:
-
-```sh
-../nano/exanano status
-```
-
-Run the full local smoke test:
+Install the [Exasol Personal](https://github.com/exasol/exasol-personal)
+launcher, then create a local deployment:
 
 ```sh
-sh tools/run_nano_smoke.sh
+exasol install local
+exasol status
 ```
 
-The smoke test packages the Lua runtime into install SQL, resets the development
-schemas, installs the extension, creates the sales example with SQL-native
-metric definitions, validates the model, publishes `SEMANTIC_SALES.SALES`,
-verifies semantic SQL execution, checks the agent context and feedback surface,
-tests materialization selection, and verifies Semantic SQL authoring,
-introspection, export, and Databricks UCMV compatibility.
-
-If your default Python does not have `pyexasol`, point `PYTHON_BIN` at a
-virtualenv Python that does:
+Create a Python environment, install the client dependency, and install ESV with its sales example:
 
 ```sh
-PYTHON_BIN=../exasol-json-tables/.venv/bin/python sh tools/run_nano_smoke.sh
+python3 -m venv .venv
+.venv/bin/pip install pyexasol
+.venv/bin/python tools/install.py --example
 ```
 
-After the smoke test, try the semantic SQL example above in a session after
-enabling semantic SQL.
+Run a first semantic query through the SQL client. Enabling Semantic SQL and
+querying in the same invocation keeps the preprocessor active for that session:
+
+```sh
+exasol connect -c "
+EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL();
+SELECT customer_region, total_revenue
+FROM SEMANTIC_SALES.SALES
+GROUP BY customer_region
+ORDER BY total_revenue DESC;
+"
+```
+
+Use `exasol stop` and `exasol start` to suspend and resume the deployment.
 
 ## Testing
 
@@ -353,8 +355,8 @@ sh tools/run_lua_tests.sh
 It executes the canonical compiler, validator, semantic-definition, agent, and
 materialization Lua sources with in-memory catalog fixtures. The suite reports
 and enforces per-runtime active-line coverage plus named decision-outcome
-coverage. The full Nano smoke workflow runs this lane first and then verifies
-packaging, installation, compilation, generated SQL execution, concurrency,
+coverage. The full database-backed smoke workflow runs this lane first and then
+verifies packaging, installation, compilation, generated SQL execution, concurrency,
 host-side regressions, extended Semantic SQL, SQL fixtures, non-SYS model-role
 grant/revoke and raw-source isolation, and integrations against Exasol. The
 database-free lane and packaging consistency are enforced by the checked-in
