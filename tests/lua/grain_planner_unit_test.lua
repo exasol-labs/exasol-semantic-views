@@ -269,7 +269,7 @@ test("C1 logical planner emits a planning-only multi branch plan", function()
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
     assert_equal(reason, nil)
-    assert_equal(plan.plan_version, 6)
+    assert_equal(plan.plan_version, 7)
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(plan.proof_mode, "STRICT_GRAIN")
     assert_equal(plan.execution.status, "PLANNING_ONLY")
@@ -404,7 +404,7 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local snapshot, logical = multi_physical_fixture()
     local physical, physical_error = physical_planner.build(logical, snapshot)
     assert_true(physical ~= nil, physical_error and physical_error.reason_code)
-    assert_equal(physical.physical_plan_version, 3)
+    assert_equal(physical.physical_plan_version, 4)
     assert_equal(physical.plan_kind, "MULTI_BRANCH_QUERY")
     assert_equal(#physical.branches, 2)
     assert_equal(#physical.states, 2)
@@ -450,6 +450,46 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local too_large, size_error = physical_planner.check_sql_size(physical, sql)
     assert_equal(too_large, false)
     assert_equal(size_error.reason_code, "PLANNER_SQL_SIZE_LIMIT_EXCEEDED")
+end)
+
+test("D2 physical rebinding replaces one complete branch source", function()
+    local snapshot, logical = multi_physical_fixture()
+    local physical = assert(physical_planner.build(logical, snapshot))
+    local branch = physical.branches[1]
+    local selected = {
+        candidate = {
+            materialization_id = 90,
+            materialization_name = "orders_by_region",
+            physical_schema = "MART",
+            physical_object = "ORDERS_BY_REGION",
+        },
+        dimension_columns = {
+            ["DIMENSION:30"] = {physical_column = "REGION"},
+        },
+        state_columns = {
+            ["state:metric:11"] = {
+                physical_column = "ORDER_STATE", rollup_policy = "SUM",
+            },
+        },
+        extra_dimension_count = 0,
+    }
+    local rebound, rebound_error = physical_planner.apply_branch_sources(
+        physical, {[branch.branch_id] = selected})
+    assert_true(rebound ~= nil, rebound_error and rebound_error.reason_code)
+    assert_equal(rebound.branches[1].source.source_kind, "MATERIALIZATION")
+    assert_equal(rebound.branches[1].source.materialization_id, 90)
+    assert_equal(#rebound.branches[1].joins, 0)
+    assert_equal(rebound.branches[1].dimensions[1].expression,
+        'mat_90."REGION"')
+    assert_equal(rebound.branches[1].state_columns[1].expression,
+        'SUM(mat_90."ORDER_STATE")')
+    assert_equal(rebound.branches[1].where_predicates[1].expression,
+        'UPPER(mat_90."REGION") = UPPER(\'West\')')
+    assert_equal(rebound.branches[2].source.source_kind, "BASE")
+    local sql = renderer.render_multi_branch(rebound)
+    assert_contains(sql, 'FROM "MART"."ORDERS_BY_REGION" mat_90')
+    assert_contains(sql, 'SUM(mat_90."ORDER_STATE")')
+    assert_contains(sql, 'FROM "MART"."TICKETS" t')
 end)
 
 test("C3 finalization applies empty states having ordering and limit last", function()

@@ -67,12 +67,15 @@ python3 tools/verify_grain_phase_b.py
 python3 tools/verify_grain_phase_c3.py
 ```
 
-The maintained C3/D1 verifier uses an isolated `grain_d1` model with three fact
+The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently
-aggregated reference SQL and covers grand totals, global filters, same-leaf
-filtered states, equal labels, sparse branches, orphan/null keys, and the rule
-that mutating one branch cannot alter another branch's state. It also reports
-planner runtime and SQL size for one-, two-, and three-branch shapes.
+aggregated reference SQL across all-base, hybrid, and fully materialized plans.
+Coverage includes private state producers, complete-source fallback, rejected
+filtered and finalized-only candidates, grand totals, global filters, `HAVING`,
+equal labels, sparse branches, orphan/null keys, deterministic cache results,
+and the rule that mutating one branch cannot alter another branch's state. It
+also reports planner runtime and SQL size for one-, two-, and three-branch
+shapes.
 
 `tools/verify_concurrent_compile.py` enforces a configurable concurrency p95
 limit. Defaults and overrides:

@@ -5499,6 +5499,91 @@ local function count_extra_dimensions(candidate, selected_dimension_keys)
     return count
 end
 
+local function sorted_states_for_branch(physical_plan, branch)
+    local result = {}
+    for _, state in ipairs(physical_plan.states or {}) do
+        if key(state.leaf_entity_id) == key(branch.leaf_entity_id) then
+            result[#result + 1] = state
+        end
+    end
+    table.sort(result, function(left, right)
+        return key(left.state_id) < key(right.state_id)
+    end)
+    return result
+end
+
+local function required_branch_dimensions(physical_plan)
+    local result = {}
+    for _, dimension in ipairs(physical_plan.dimensions or {}) do
+        result["DIMENSION:" .. key(dimension.dimension_id)] = true
+    end
+    for _, predicate in ipairs(physical_plan.global_filters or {}) do
+        result["DIMENSION:" .. key(predicate.dimension_id)] = true
+    end
+    return result
+end
+
+local function branch_candidate(candidate, physical_plan, branch,
+    required_dimensions, states)
+    if upper(candidate.status) ~= "ACTIVE" then
+        return nil, "INACTIVE", "Materialization status is not ACTIVE."
+    end
+    if upper(candidate.materialization_type) ~= "AGGREGATE" then
+        return nil, "UNSUPPORTED_TYPE",
+            "Only AGGREGATE materializations can provide branch states."
+    end
+    if not supported_freshness(candidate.freshness_policy) then
+        return nil, "UNSUPPORTED_FRESHNESS_POLICY",
+            "Freshness policy is not supported by the deterministic selector."
+    end
+    local dimension_columns = {}
+    local dimension_keys = {}
+    for dimension_key, _ in pairs(required_dimensions) do
+        dimension_keys[#dimension_keys + 1] = dimension_key
+    end
+    table.sort(dimension_keys)
+    for _, dimension_key in ipairs(dimension_keys) do
+        local column = candidate.columns[dimension_key]
+        if column == nil then
+            return nil, "MISSING_DIMENSION",
+                "A selected or globally filtered dimension is not present."
+        end
+        dimension_columns[dimension_key] = column
+    end
+
+    local state_columns = {}
+    for _, state in ipairs(states) do
+        if not missing(state.filter_expression) then
+            return nil, "FILTERED_STATE_UNSUPPORTED",
+                "Metric-local filters do not yet have a materialized-state identity contract."
+        end
+        if upper(state.merge_operator) ~= "SUM" then
+            return nil, "STATE_MERGE_UNSUPPORTED",
+                "The materialized state requires an unsupported merge operator."
+        end
+        local column = candidate.columns["METRIC:" .. key(state.metric_id)]
+        if column == nil then
+            return nil, "MISSING_STATE",
+                "A complete aggregate-state producer metric is not present."
+        end
+        local policy = missing(column.rollup_policy)
+            and "DIRECT" or upper(column.rollup_policy)
+        if policy ~= upper(state.merge_operator) then
+            return nil, "ROLLUP_POLICY_UNSAFE",
+                "The state column rollup policy does not match its merge operator."
+        end
+        state_columns[key(state.state_id)] = column
+    end
+
+    return {
+        candidate = candidate,
+        dimension_columns = dimension_columns,
+        state_columns = state_columns,
+        extra_dimension_count = count_extra_dimensions(candidate,
+            required_dimensions),
+    }
+end
+
 local function materialization_column(candidate, field)
     return candidate.columns[field_key(field)]
 end
@@ -5606,11 +5691,88 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
     return selected, diagnostics
 end
 
+-- Select one complete aggregate-state source for each physical leaf. A
+-- rejected or partial candidate never changes the already proven base branch.
+function M.select_branch_sources(ctx, physical_plan)
+    local candidates = load_candidates(ctx)
+    local required_dimensions = required_branch_dimensions(physical_plan)
+    local selections = {}
+    local diagnostics = {
+        candidate_count = #candidates,
+        rejected_materializations = {},
+        selected_materialization = null,
+        selected_materializations = {},
+        branches = {},
+    }
+
+    for _, branch in ipairs(physical_plan.branches or {}) do
+        local branch_diagnostic = {
+            branch_id = branch.branch_id,
+            leaf_entity_id = branch.leaf_entity_id,
+            candidate_count = #candidates,
+            rejected_materializations = {},
+            selected_materialization = null,
+            fallback_reason = "NO_ELIGIBLE_MATERIALIZATION",
+        }
+        local eligible = {}
+        local states = sorted_states_for_branch(physical_plan, branch)
+        for _, candidate in ipairs(candidates) do
+            local selection, reason_code, reason_message = branch_candidate(
+                candidate, physical_plan, branch, required_dimensions, states)
+            if selection == nil then
+                local rejection = {
+                    branch_id = branch.branch_id,
+                    materialization_id = candidate.materialization_id,
+                    materialization_name = candidate.materialization_name,
+                    reason_code = reason_code,
+                    reason_message = reason_message,
+                }
+                branch_diagnostic.rejected_materializations[
+                    #branch_diagnostic.rejected_materializations + 1] = rejection
+                diagnostics.rejected_materializations[
+                    #diagnostics.rejected_materializations + 1] = rejection
+            else
+                eligible[#eligible + 1] = selection
+            end
+        end
+        table.sort(eligible, function(left, right)
+            if left.extra_dimension_count ~= right.extra_dimension_count then
+                return left.extra_dimension_count < right.extra_dimension_count
+            end
+            return tonumber(left.candidate.materialization_id)
+                < tonumber(right.candidate.materialization_id)
+        end)
+        if #eligible > 0 then
+            local selected = eligible[1]
+            selections[key(branch.branch_id)] = selected
+            branch_diagnostic.selected_materialization =
+                selected.candidate.materialization_name
+            branch_diagnostic.selected_materialization_id =
+                selected.candidate.materialization_id
+            branch_diagnostic.extra_dimension_count =
+                selected.extra_dimension_count
+            branch_diagnostic.fallback_reason = null
+            diagnostics.selected_materializations[
+                #diagnostics.selected_materializations + 1] = {
+                branch_id = branch.branch_id,
+                leaf_entity_id = branch.leaf_entity_id,
+                materialization_id = selected.candidate.materialization_id,
+                materialization_name = selected.candidate.materialization_name,
+                extra_dimension_count = selected.extra_dimension_count,
+            }
+        end
+        diagnostics.branches[#diagnostics.branches + 1] = branch_diagnostic
+    end
+    return selections, diagnostics
+end
+
 select_materialization = M.select_materialization
+select_branch_sources = M.select_branch_sources
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_MATERIALIZATION_TEST_API = {
         select_materialization = M.select_materialization,
+        select_branch_sources = M.select_branch_sources,
         supported_freshness = supported_freshness,
         allowed_rollup_policy = allowed_rollup_policy,
     }
@@ -6102,7 +6264,7 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 6}
+local M = {PLAN_VERSION = 7}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -6846,7 +7008,7 @@ ESV_METRIC_PLAN = M
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 3,
+    VERSION = 4,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -7213,6 +7375,10 @@ local function global_predicates(logical_plan, snapshot)
                 .. ":" .. key(#predicates + 1),
             dimension_id = filter.field_id,
             expression = expression,
+            operator = filter.operator,
+            value = filter.value,
+            value_sql = filter.value_sql,
+            data_type = filter.data_type,
         }
     end
     return predicates, nil
@@ -7409,6 +7575,7 @@ function M.build(logical_plan, snapshot, options)
         logical_plan_version = logical_plan.plan_version,
         dimensions = dimensions,
         states = states,
+        global_filters = predicates,
         branches = {},
         union = {
             cte_id = "cte:unioned-states",
@@ -7520,6 +7687,106 @@ function M.build(logical_plan, snapshot, options)
         end
     end
     return physical, nil
+end
+
+local function materialized_column_expression(source_alias, column)
+    return tostring(source_alias) .. "." .. quote_ident(column.physical_column)
+end
+
+-- Rebind only complete, pre-selected leaf sources. The selector is deliberately
+-- separate from physical construction so an ineligible candidate leaves the
+-- proven base branch byte-for-byte intact.
+function M.apply_branch_sources(physical_plan, selections)
+    for _, branch in ipairs(physical_plan.branches or {}) do
+        local selected = selections and selections[key(branch.branch_id)]
+        if selected ~= nil then
+            local candidate = selected.candidate
+            local source_alias = "mat_" .. stable_token(candidate.materialization_id)
+            branch.source = {
+                source_kind = "MATERIALIZATION",
+                materialization_id = candidate.materialization_id,
+                materialization_name = candidate.materialization_name,
+                physical_schema = candidate.physical_schema,
+                physical_object = candidate.physical_object,
+                extra_dimension_count = selected.extra_dimension_count,
+            }
+            branch.from_sql = quote_qualified(candidate.physical_schema,
+                candidate.physical_object) .. " " .. source_alias
+            branch.joins = {}
+
+            local rebound_dimensions = {}
+            for _, dimension in ipairs(branch.dimensions or {}) do
+                local column = selected.dimension_columns[
+                    "DIMENSION:" .. key(dimension.dimension_id)]
+                if column == nil then
+                    return fail("MATERIALIZATION_BINDING_INCOMPLETE", {
+                        branch_id = branch.branch_id,
+                        dimension_id = dimension.dimension_id,
+                    })
+                end
+                local rebound = {}
+                for name, value in pairs(dimension) do rebound[name] = value end
+                rebound.expression = materialized_column_expression(source_alias,
+                    column)
+                rebound.source_column = column.physical_column
+                rebound_dimensions[#rebound_dimensions + 1] = rebound
+            end
+            branch.dimensions = rebound_dimensions
+
+            local rebound_predicates = {}
+            for _, predicate in ipairs(branch.where_predicates or {}) do
+                local column = selected.dimension_columns[
+                    "DIMENSION:" .. key(predicate.dimension_id)]
+                if column == nil then
+                    return fail("MATERIALIZATION_BINDING_INCOMPLETE", {
+                        branch_id = branch.branch_id,
+                        dimension_id = predicate.dimension_id,
+                        binding_kind = "FILTER_DIMENSION",
+                    })
+                end
+                local expression, reason = predicate_sql(predicate, {
+                    expression = materialized_column_expression(source_alias,
+                        column),
+                })
+                if expression == nil then
+                    return fail("PHYSICAL_FILTER_INVALID", {
+                        branch_id = branch.branch_id,
+                        dimension_id = predicate.dimension_id,
+                        issue = reason,
+                    })
+                end
+                rebound_predicates[#rebound_predicates + 1] = {
+                    filter_id = predicate.filter_id,
+                    dimension_id = predicate.dimension_id,
+                    expression = expression,
+                    operator = predicate.operator,
+                    value = predicate.value,
+                    value_sql = predicate.value_sql,
+                    data_type = predicate.data_type,
+                }
+            end
+            branch.where_predicates = rebound_predicates
+
+            for _, state_column in ipairs(branch.state_columns or {}) do
+                if state_column.owner then
+                    local column = selected.state_columns[key(state_column.state_id)]
+                    if column == nil then
+                        return fail("MATERIALIZATION_BINDING_INCOMPLETE", {
+                            branch_id = branch.branch_id,
+                            state_id = state_column.state_id,
+                            binding_kind = "STATE_COLUMN",
+                        })
+                    end
+                    state_column.expression = "SUM("
+                        .. materialized_column_expression(source_alias, column)
+                        .. ")"
+                    state_column.source_column = column.physical_column
+                    state_column.source_rollup_policy = upper(column.rollup_policy)
+                end
+            end
+        end
+    end
+    return physical_plan, nil
 end
 
 function M.check_sql_size(physical_plan, sql_text)
@@ -8132,10 +8399,21 @@ local function recode_error_prefix(result, prefix)
 end
 
 local function plan_materialization_name(plan)
-    if type(plan) ~= "table" or plan.selected_materialization == nil or plan.selected_materialization == JSON_NULL then
+    if type(plan) ~= "table" then
         return nil
     end
-    if type(plan.selected_materialization) == "table" then
+    if type(plan.selected_materializations) == "table"
+        and #plan.selected_materializations > 0 then
+        local names = {}
+        for _, selected in ipairs(plan.selected_materializations) do
+            names[#names + 1] = tostring(selected.materialization_name)
+        end
+        return table.concat(names, ",")
+    end
+    if plan.selected_materialization == nil
+        or plan.selected_materialization == JSON_NULL then
+        return nil
+    elseif type(plan.selected_materialization) == "table" then
         return plan.selected_materialization.materialization_name
     end
     return tostring(plan.selected_materialization)
@@ -9737,6 +10015,8 @@ local function compile_request_table(request, options)
             filters = filters,
             relationship_paths = relationship_paths or {},
             selected_materialization = JSON_NULL,
+            selected_materializations = materialization_decision.selected_materializations
+                or {},
             materialization_decision = materialization_decision,
             validation_run_id = validation_run_id,
             warnings = {},
@@ -9802,6 +10082,22 @@ local function compile_request_table(request, options)
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(physical_error.reason_code) .. ".")
         end
+        local branch_decision = nil
+        if materialization_runtime ~= nil
+            and type(materialization_runtime.select_branch_sources) == "function" then
+            local selections
+            selections, branch_decision =
+                materialization_runtime.select_branch_sources(ctx, physical_plan)
+            local rebound_plan, rebound_error =
+                physical_plan_runtime.apply_branch_sources(physical_plan, selections)
+            if rebound_plan == nil then
+                typed_plan.failure = rebound_error
+                return plan_error("_075", "Physical planning failed: "
+                    .. tostring(rebound_error.reason_code) .. ".")
+            end
+            physical_plan = rebound_plan
+            physical_plan.source_selection = branch_decision
+        end
         typed_plan.physical_plan = physical_plan
         local internal_sql = grain_sql_runtime.render_multi_branch(physical_plan)
         local within_limit, size_error = physical_plan_runtime.check_sql_size(
@@ -9815,7 +10111,7 @@ local function compile_request_table(request, options)
         end
         typed_plan.execution = {status = "EXECUTABLE"}
         physical_plan.execution = {status = "EXECUTABLE"}
-        local plan = plan_envelope()
+        local plan = plan_envelope(branch_decision)
         local result = attach_planning_runtime(
             ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
         if cache_key ~= nil then

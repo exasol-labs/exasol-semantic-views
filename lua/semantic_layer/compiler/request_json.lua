@@ -420,10 +420,21 @@ local function recode_error_prefix(result, prefix)
 end
 
 local function plan_materialization_name(plan)
-    if type(plan) ~= "table" or plan.selected_materialization == nil or plan.selected_materialization == JSON_NULL then
+    if type(plan) ~= "table" then
         return nil
     end
-    if type(plan.selected_materialization) == "table" then
+    if type(plan.selected_materializations) == "table"
+        and #plan.selected_materializations > 0 then
+        local names = {}
+        for _, selected in ipairs(plan.selected_materializations) do
+            names[#names + 1] = tostring(selected.materialization_name)
+        end
+        return table.concat(names, ",")
+    end
+    if plan.selected_materialization == nil
+        or plan.selected_materialization == JSON_NULL then
+        return nil
+    elseif type(plan.selected_materialization) == "table" then
         return plan.selected_materialization.materialization_name
     end
     return tostring(plan.selected_materialization)
@@ -2025,6 +2036,8 @@ local function compile_request_table(request, options)
             filters = filters,
             relationship_paths = relationship_paths or {},
             selected_materialization = JSON_NULL,
+            selected_materializations = materialization_decision.selected_materializations
+                or {},
             materialization_decision = materialization_decision,
             validation_run_id = validation_run_id,
             warnings = {},
@@ -2090,6 +2103,22 @@ local function compile_request_table(request, options)
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(physical_error.reason_code) .. ".")
         end
+        local branch_decision = nil
+        if materialization_runtime ~= nil
+            and type(materialization_runtime.select_branch_sources) == "function" then
+            local selections
+            selections, branch_decision =
+                materialization_runtime.select_branch_sources(ctx, physical_plan)
+            local rebound_plan, rebound_error =
+                physical_plan_runtime.apply_branch_sources(physical_plan, selections)
+            if rebound_plan == nil then
+                typed_plan.failure = rebound_error
+                return plan_error("_075", "Physical planning failed: "
+                    .. tostring(rebound_error.reason_code) .. ".")
+            end
+            physical_plan = rebound_plan
+            physical_plan.source_selection = branch_decision
+        end
         typed_plan.physical_plan = physical_plan
         local internal_sql = grain_sql_runtime.render_multi_branch(physical_plan)
         local within_limit, size_error = physical_plan_runtime.check_sql_size(
@@ -2103,7 +2132,7 @@ local function compile_request_table(request, options)
         end
         typed_plan.execution = {status = "EXECUTABLE"}
         physical_plan.execution = {status = "EXECUTABLE"}
-        local plan = plan_envelope()
+        local plan = plan_envelope(branch_decision)
         local result = attach_planning_runtime(
             ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
         if cache_key ~= nil then

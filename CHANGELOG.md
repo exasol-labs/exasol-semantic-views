@@ -8,6 +8,21 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Grain-aware aggregation Phase D2
+
+- Plan version 7 / physical-plan version 4 can replace one complete proven
+  multi-fact leaf with an aggregate materialization while leaving other leaves
+  on their base sources.
+- Branch candidates must provide every required dimension and mergeable state
+  with a matching `SUM` rollup policy. Selection prefers the least excess
+  dimensionality and then the stable materialization ID.
+- Private aggregate-state producers are eligible without becoming public
+  object columns. Partial, filtered-state, finalized-only, inactive, and unsafe
+  candidates produce deterministic diagnostics and whole-leaf base fallback.
+- The maintained live lane compares all-base, hybrid, and fully materialized
+  results, including sparse states, ratios, filters, `HAVING`, grand totals,
+  cache determinism, and metamorphic branch isolation.
+
 #### Grain-aware aggregation Phase D1
 
 - Multi-branch physical plans now identify every branch's physical source as a

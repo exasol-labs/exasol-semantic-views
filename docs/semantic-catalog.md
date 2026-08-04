@@ -161,6 +161,11 @@ SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS
 
 The compiler treats this registry as an optimizer input. It never uses a
 materialization to make an invalid metric/dimension request valid.
+For a multi-fact plan, one registry entry may replace one complete leaf branch
+when it maps every required dimension and aggregate-state producer with the
+state's merge policy. Producer metrics may be private. A partial or unsafe
+entry leaves the entire branch on its already proven base source; branches are
+never split across sources.
 
 ## Agent Views
 

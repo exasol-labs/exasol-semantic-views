@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the maintained C3/D1 multi-fact baseline against Exasol.
+"""Verify the maintained D1/D2 multi-fact execution lane against Exasol.
 
 The fixture is isolated from the bundled sales model. It exercises three fact
 branches and compares ESV output with an independently aggregated reference
-query before Phase D2 is allowed to substitute materialized branch sources.
+query across base, hybrid, and materialized branch-source plans.
 """
 
 from __future__ import annotations
@@ -125,7 +125,16 @@ def relationship_mapping_count(con, relationship_name: str) -> int:
 
 def reset_physical_fixture(con) -> None:
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {DATA_SCHEMA}")
-    for table in ("D1_ORDERS", "D1_TICKETS", "D1_PAYMENTS", "D1_CUSTOMERS"):
+    for table in (
+        "D2_FINAL_RATIO_BY_REGION",
+        "D2_PAYMENTS_BY_REGION",
+        "D2_TICKETS_BY_REGION",
+        "D2_ORDERS_BY_REGION",
+        "D1_ORDERS",
+        "D1_TICKETS",
+        "D1_PAYMENTS",
+        "D1_CUSTOMERS",
+    ):
         con.execute(f"DROP TABLE IF EXISTS {DATA_SCHEMA}.{table}")
     con.execute(
         f"CREATE TABLE {DATA_SCHEMA}.D1_CUSTOMERS ("
@@ -165,6 +174,79 @@ def reset_physical_fixture(con) -> None:
         f"INSERT INTO {DATA_SCHEMA}.D1_PAYMENTS VALUES "
         "(20, 1, 80), (21, 3, 60), (22, 4, 20), (23, 999, 5)"
     )
+    con.execute(
+        f"CREATE TABLE {DATA_SCHEMA}.D2_ORDERS_BY_REGION AS "
+        "SELECT c.region AS customer_region, SUM(o.amount) AS order_revenue "
+        f"FROM {DATA_SCHEMA}.D1_ORDERS o LEFT JOIN {DATA_SCHEMA}.D1_CUSTOMERS c "
+        "ON o.customer_id = c.customer_id GROUP BY c.region"
+    )
+    con.execute(
+        f"CREATE TABLE {DATA_SCHEMA}.D2_TICKETS_BY_REGION AS "
+        "SELECT c.region AS customer_region, COUNT(t.ticket_id) AS ticket_count_state "
+        f"FROM {DATA_SCHEMA}.D1_TICKETS t LEFT JOIN {DATA_SCHEMA}.D1_CUSTOMERS c "
+        "ON t.customer_id = c.customer_id GROUP BY c.region"
+    )
+    con.execute(
+        f"CREATE TABLE {DATA_SCHEMA}.D2_PAYMENTS_BY_REGION AS "
+        "SELECT c.region AS customer_region, SUM(p.amount) AS payment_total_state "
+        f"FROM {DATA_SCHEMA}.D1_PAYMENTS p LEFT JOIN {DATA_SCHEMA}.D1_CUSTOMERS c "
+        "ON p.customer_id = c.customer_id GROUP BY c.region"
+    )
+    con.execute(
+        f"CREATE TABLE {DATA_SCHEMA}.D2_FINAL_RATIO_BY_REGION AS "
+        "SELECT customer_region, CAST(NULL AS DECIMAL(18,6)) AS revenue_per_ticket "
+        f"FROM {DATA_SCHEMA}.D2_ORDERS_BY_REGION"
+    )
+
+
+def materialization_column_count(
+    con, materialization_name: str, object_type: str, object_name: str
+) -> int:
+    return int(
+        rows(
+            con,
+            "SELECT COUNT(*) FROM SEMANTIC_CATALOG.MATERIALIZATION_COLUMNS "
+            f"WHERE MODEL_NAME = {sql_string(MODEL)} "
+            f"AND MATERIALIZATION_NAME = {sql_string(materialization_name)} "
+            f"AND OBJECT_TYPE = {sql_string(object_type)} "
+            f"AND OBJECT_NAME = {sql_string(object_name)}",
+        )[0][0]
+    )
+
+
+def ensure_materialization(
+    con, name: str, physical_object: str, columns: tuple[tuple[str, str, str, str], ...]
+) -> None:
+    if active_count(con, "MATERIALIZATIONS", "MATERIALIZATION_NAME", name) == 0:
+        execute_script(
+            con,
+            "SEMANTIC_ADMIN.REGISTER_MATERIALIZATION("
+            f"'{MODEL}', '{name}', '{DATA_SCHEMA}', '{physical_object}', "
+            "'AGGREGATE', 'MANUAL')",
+        )
+    for object_type, object_name, physical_column, rollup_policy in columns:
+        if materialization_column_count(
+            con, name, object_type, object_name
+        ) == 0:
+            execute_script(
+                con,
+                "SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN("
+                f"'{MODEL}', '{name}', '{object_type}', '{object_name}', "
+                f"'{physical_column}', '{rollup_policy}')",
+            )
+
+
+def set_materializations(con, status: str) -> None:
+    for name in (
+        "d2_orders_by_region",
+        "d2_tickets_by_region",
+        "d2_payments_by_region",
+        "d2_final_ratio_by_region",
+    ):
+        execute_script(
+            con,
+            f"SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS('{MODEL}', '{name}', '{status}')",
+        )
 
 
 def ensure_model_fixture(con) -> None:
@@ -319,6 +401,43 @@ REPLACE METRICS (
         "isolated model validation",
         all(issue[0] != "ERROR" for issue in validation),
     )
+    ensure_materialization(
+        con,
+        "d2_orders_by_region",
+        "D2_ORDERS_BY_REGION",
+        (
+            ("DIMENSION", "customer_region", "CUSTOMER_REGION", "DIRECT"),
+            ("METRIC", "order_revenue", "ORDER_REVENUE", "SUM"),
+        ),
+    )
+    ensure_materialization(
+        con,
+        "d2_tickets_by_region",
+        "D2_TICKETS_BY_REGION",
+        (
+            ("DIMENSION", "customer_region", "CUSTOMER_REGION", "DIRECT"),
+            ("METRIC", "ticket_count_state", "TICKET_COUNT_STATE", "SUM"),
+        ),
+    )
+    ensure_materialization(
+        con,
+        "d2_payments_by_region",
+        "D2_PAYMENTS_BY_REGION",
+        (
+            ("DIMENSION", "customer_region", "CUSTOMER_REGION", "DIRECT"),
+            ("METRIC", "payment_total_state", "PAYMENT_TOTAL_STATE", "SUM"),
+        ),
+    )
+    ensure_materialization(
+        con,
+        "d2_final_ratio_by_region",
+        "D2_FINAL_RATIO_BY_REGION",
+        (
+            ("DIMENSION", "customer_region", "CUSTOMER_REGION", "DIRECT"),
+            ("METRIC", "revenue_per_ticket", "REVENUE_PER_TICKET", "SUM"),
+        ),
+    )
+    set_materializations(con, "INACTIVE")
 
 
 def compile_json(con, request: dict[str, Any]) -> tuple[Any, ...]:
@@ -500,8 +619,8 @@ def main() -> int:
 
         plan = json.loads(compiled[5])
         physical = plan["logical_plan"]["physical_plan"]
-        assert_equal("plan version", plan["plan_version"], 6)
-        assert_equal("physical plan version", physical["physical_plan_version"], 3)
+        assert_equal("plan version", plan["plan_version"], 7)
+        assert_equal("physical plan version", physical["physical_plan_version"], 4)
         assert_equal("branch count", physical["safeguards"]["branch_count"], 3)
         assert_equal("conservative branch limit", physical["safeguards"]["branch_limit"], 8)
         assert_equal(
@@ -544,6 +663,131 @@ GROUP BY ALL"""
             query_runtime is not None and int(query_runtime) >= 0,
         )
 
+        set_materializations(con, "ACTIVE")
+        hybrid_compiled = compile_json(con, request)
+        hybrid_actual = normalized_by_region(execute_compiled(con, hybrid_compiled))
+        assert_equal("hybrid source differential result", hybrid_actual, expected)
+        hybrid_plan = json.loads(hybrid_compiled[5])
+        hybrid_physical = hybrid_plan["logical_plan"]["physical_plan"]
+        source_by_object = {
+            branch["source"]["physical_object"]: branch["source"]["source_kind"]
+            for branch in hybrid_physical["branches"]
+        }
+        assert_equal(
+            "hybrid complete-source substitution",
+            source_by_object,
+            {
+                "D2_ORDERS_BY_REGION": "MATERIALIZATION",
+                "D1_TICKETS": "BASE",
+                "D2_PAYMENTS_BY_REGION": "MATERIALIZATION",
+            },
+        )
+        assert_true(
+            "hybrid SQL skips substituted base tables",
+            '"D1_ORDERS"' not in hybrid_compiled[4]
+            and '"D1_PAYMENTS"' not in hybrid_compiled[4]
+            and '"D1_TICKETS"' in hybrid_compiled[4],
+        )
+        hybrid_semantic = compile_sql_debug(con, semantic_sql)
+        assert_equal(
+            "hybrid Semantic SQL differential result",
+            normalized_by_region(execute_compiled(con, hybrid_semantic)),
+            expected,
+        )
+        logged_materializations = rows(
+            con,
+            "SELECT MATERIALIZATION_USED FROM SYS_SEMANTIC.QUERY_LOG "
+            f"WHERE QUERY_LOG_ID = {int(hybrid_semantic[8])}",
+        )[0][0]
+        assert_equal(
+            "hybrid materializations logged",
+            set(str(logged_materializations).split(",")),
+            {"d2_orders_by_region", "d2_payments_by_region"},
+        )
+        selection = hybrid_plan["materialization_decision"]
+        ticket_diagnostics = next(
+            branch
+            for branch in selection["branches"]
+            if branch["selected_materialization"] is None
+        )
+        assert_true(
+            "partial filtered-state candidate causes whole-leaf fallback",
+            any(
+                rejection["materialization_name"] == "d2_tickets_by_region"
+                and rejection["reason_code"] == "FILTERED_STATE_UNSUPPORTED"
+                for rejection in ticket_diagnostics["rejected_materializations"]
+            ),
+        )
+        assert_true(
+            "finalized ratio candidate rejected as state source",
+            any(
+                rejection["materialization_name"] == "d2_final_ratio_by_region"
+                and rejection["reason_code"] == "MISSING_STATE"
+                for rejection in selection["rejected_materializations"]
+            ),
+        )
+
+        unfiltered_request = {
+            "model": MODEL,
+            "object": OBJECT,
+            "metrics": [
+                "ticket_count",
+                "order_revenue",
+                "payment_total",
+                "revenue_per_ticket",
+            ],
+            "dimensions": ["customer_region"],
+        }
+        all_materialized = compile_json(con, unfiltered_request)
+        all_materialized_rows = {
+            region: (
+                int(ticket_count),
+                decimal_value(revenue),
+                decimal_value(payment_total),
+                decimal_value(ratio),
+            )
+            for region, ticket_count, revenue, payment_total, ratio
+            in execute_compiled(con, all_materialized)
+        }
+        expected_unfiltered = {
+            region: (values[0], values[2], values[3], values[4])
+            for region, values in expected.items()
+        }
+        assert_equal(
+            "fully materialized private-state differential result",
+            all_materialized_rows,
+            expected_unfiltered,
+        )
+        all_materialized_plan = json.loads(all_materialized[5])
+        cached_materialized = compile_json(con, unfiltered_request)
+        assert_true(
+            "source selection deterministic across cache",
+            json.loads(cached_materialized[5]) == all_materialized_plan,
+        )
+        assert_equal(
+            "one complete materialization per leaf",
+            sorted(
+                branch["source"]["source_kind"]
+                for branch in all_materialized_plan["logical_plan"]["physical_plan"]["branches"]
+            ),
+            ["MATERIALIZATION", "MATERIALIZATION", "MATERIALIZATION"],
+        )
+        assert_equal(
+            "private producer selected",
+            sorted(
+                selected["materialization_name"]
+                for selected in all_materialized_plan["selected_materializations"]
+            ),
+            [
+                "d2_orders_by_region",
+                "d2_payments_by_region",
+                "d2_tickets_by_region",
+            ],
+        )
+
+        actual = hybrid_actual
+        plan = hybrid_plan
+
         assert_equal("equal-label rollup revenue", actual["North"][2], Decimal("175"))
         assert_equal("same-leaf total count", actual["North"][0], 3)
         assert_equal("same-leaf filtered count", actual["North"][1], 2)
@@ -571,6 +815,18 @@ GROUP BY ALL"""
             tuple(decimal_value(value) for value in grand),
             tuple(decimal_value(value) for value in grand_reference),
         )
+
+        having_request = base_request()
+        having_request["having"] = [
+            {"field": "ticket_count", "op": ">", "value": 1}
+        ]
+        having_rows = normalized_by_region(
+            execute_compiled(con, compile_json(con, having_request))
+        )
+        having_expected = {
+            region: values for region, values in expected.items() if values[0] > 1
+        }
+        assert_equal("hybrid HAVING differential result", having_rows, having_expected)
 
         con.execute(
             f"INSERT INTO {DATA_SCHEMA}.D1_TICKETS VALUES (99, 2, 'URGENT')"

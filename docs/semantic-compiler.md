@@ -19,7 +19,8 @@ dependencies that are not exposed as query fields.
 
 Phase B introduced the typed single-branch boundary. Phase C1 added
 multi-branch validation, Phase C2 added the typed physical state pipeline, and
-Phase D1 hardens the finalized query. `PLAN_JSON.plan_version` is `6` and
+Phase D2 adds complete leaf-source substitution. `PLAN_JSON.plan_version` is
+`7` and
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -41,14 +42,14 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
 - binds global, metric-local, and `HAVING` filters before rendering
 - proves every fact branch to every selected or globally filtered dimension
 - assigns stable branch, requirement, proof, key, and rejection identifiers
-- binds one physical base-source branch per leaf with deterministic dimensions,
-  state columns, typed placeholders, joins, and predicate placement
+- binds one physical branch per leaf with deterministic dimensions, state
+  columns, typed placeholders, joins, and predicate placement
 - renders and size-checks an internal `UNION ALL` merged-state pipeline
 - finalizes state metrics and dependency-ordered scalar metrics after merging
 - applies final `HAVING`, ordering, and limit against finalized metric columns
 - returns executable multi-branch SQL and participates in the compile cache
-- records a deterministic `source` contract with `source_kind = BASE` for each
-  physical branch under physical-plan version 3
+- records a deterministic `source` contract with `source_kind = BASE` or
+  `MATERIALIZATION` for each physical branch under physical-plan version 4
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the
@@ -191,6 +192,19 @@ materializations, and non-additive rollup attempts fall back to base-source SQL.
 The selected materialization and rejected-candidate diagnostics are recorded in
 `PLAN_JSON`; SQL debug logging also stores the selected name in
 `SYS_SEMANTIC.QUERY_LOG.MATERIALIZATION_USED`.
+
+For a multi-branch plan, selection happens independently per proven leaf but is
+atomic within that leaf. A candidate must contain every selected or globally
+filtered dimension and every unfiltered aggregate-state producer owned by the
+branch. Its state-column rollup policy must match the state's merge operator;
+the initial `SUM` and `COUNT` states both require `SUM`. Eligible candidates are
+ranked by least excess dimensionality and stable materialization ID. Private
+producer metrics are valid mappings, while derived/finalized-only or partial
+candidates cannot satisfy a branch. Metric-local filtered materializations wait
+for an explicit semantic filter-identity contract and currently cause
+whole-leaf base fallback. Branch decisions and rejection reasons are exposed in
+`materialization_decision` and each physical branch's `source`; all selected
+names are also listed in `selected_materializations`.
 
 `COMPILE_SQL` parses a deliberately small semantic SQL subset and translates it
 into the same request shape before invoking the shared compiler core. Its errors

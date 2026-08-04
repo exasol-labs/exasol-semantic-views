@@ -1,7 +1,7 @@
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 3,
+    VERSION = 4,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -368,6 +368,10 @@ local function global_predicates(logical_plan, snapshot)
                 .. ":" .. key(#predicates + 1),
             dimension_id = filter.field_id,
             expression = expression,
+            operator = filter.operator,
+            value = filter.value,
+            value_sql = filter.value_sql,
+            data_type = filter.data_type,
         }
     end
     return predicates, nil
@@ -564,6 +568,7 @@ function M.build(logical_plan, snapshot, options)
         logical_plan_version = logical_plan.plan_version,
         dimensions = dimensions,
         states = states,
+        global_filters = predicates,
         branches = {},
         union = {
             cte_id = "cte:unioned-states",
@@ -675,6 +680,106 @@ function M.build(logical_plan, snapshot, options)
         end
     end
     return physical, nil
+end
+
+local function materialized_column_expression(source_alias, column)
+    return tostring(source_alias) .. "." .. quote_ident(column.physical_column)
+end
+
+-- Rebind only complete, pre-selected leaf sources. The selector is deliberately
+-- separate from physical construction so an ineligible candidate leaves the
+-- proven base branch byte-for-byte intact.
+function M.apply_branch_sources(physical_plan, selections)
+    for _, branch in ipairs(physical_plan.branches or {}) do
+        local selected = selections and selections[key(branch.branch_id)]
+        if selected ~= nil then
+            local candidate = selected.candidate
+            local source_alias = "mat_" .. stable_token(candidate.materialization_id)
+            branch.source = {
+                source_kind = "MATERIALIZATION",
+                materialization_id = candidate.materialization_id,
+                materialization_name = candidate.materialization_name,
+                physical_schema = candidate.physical_schema,
+                physical_object = candidate.physical_object,
+                extra_dimension_count = selected.extra_dimension_count,
+            }
+            branch.from_sql = quote_qualified(candidate.physical_schema,
+                candidate.physical_object) .. " " .. source_alias
+            branch.joins = {}
+
+            local rebound_dimensions = {}
+            for _, dimension in ipairs(branch.dimensions or {}) do
+                local column = selected.dimension_columns[
+                    "DIMENSION:" .. key(dimension.dimension_id)]
+                if column == nil then
+                    return fail("MATERIALIZATION_BINDING_INCOMPLETE", {
+                        branch_id = branch.branch_id,
+                        dimension_id = dimension.dimension_id,
+                    })
+                end
+                local rebound = {}
+                for name, value in pairs(dimension) do rebound[name] = value end
+                rebound.expression = materialized_column_expression(source_alias,
+                    column)
+                rebound.source_column = column.physical_column
+                rebound_dimensions[#rebound_dimensions + 1] = rebound
+            end
+            branch.dimensions = rebound_dimensions
+
+            local rebound_predicates = {}
+            for _, predicate in ipairs(branch.where_predicates or {}) do
+                local column = selected.dimension_columns[
+                    "DIMENSION:" .. key(predicate.dimension_id)]
+                if column == nil then
+                    return fail("MATERIALIZATION_BINDING_INCOMPLETE", {
+                        branch_id = branch.branch_id,
+                        dimension_id = predicate.dimension_id,
+                        binding_kind = "FILTER_DIMENSION",
+                    })
+                end
+                local expression, reason = predicate_sql(predicate, {
+                    expression = materialized_column_expression(source_alias,
+                        column),
+                })
+                if expression == nil then
+                    return fail("PHYSICAL_FILTER_INVALID", {
+                        branch_id = branch.branch_id,
+                        dimension_id = predicate.dimension_id,
+                        issue = reason,
+                    })
+                end
+                rebound_predicates[#rebound_predicates + 1] = {
+                    filter_id = predicate.filter_id,
+                    dimension_id = predicate.dimension_id,
+                    expression = expression,
+                    operator = predicate.operator,
+                    value = predicate.value,
+                    value_sql = predicate.value_sql,
+                    data_type = predicate.data_type,
+                }
+            end
+            branch.where_predicates = rebound_predicates
+
+            for _, state_column in ipairs(branch.state_columns or {}) do
+                if state_column.owner then
+                    local column = selected.state_columns[key(state_column.state_id)]
+                    if column == nil then
+                        return fail("MATERIALIZATION_BINDING_INCOMPLETE", {
+                            branch_id = branch.branch_id,
+                            state_id = state_column.state_id,
+                            binding_kind = "STATE_COLUMN",
+                        })
+                    end
+                    state_column.expression = "SUM("
+                        .. materialized_column_expression(source_alias, column)
+                        .. ")"
+                    state_column.source_column = column.physical_column
+                    state_column.source_rollup_policy = upper(column.rollup_policy)
+                end
+            end
+        end
+    end
+    return physical_plan, nil
 end
 
 function M.check_sql_size(physical_plan, sql_text)

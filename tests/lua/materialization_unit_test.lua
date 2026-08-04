@@ -73,3 +73,66 @@ test("materialization selector remains deterministic with a large registry", fun
     assert_equal(diagnostics.candidate_count, 1000)
     assert_equal(selected.materialization_id, 1000)
 end)
+
+local function branch_plan(filtered)
+    return {
+        dimensions = {{dimension_id = 10}},
+        global_filters = {},
+        states = {
+            {state_id = "state:metric:20", metric_id = 20,
+                leaf_entity_id = 1, merge_operator = "SUM",
+                filter_expression = filtered and "o.status = 'COMPLETE'" or nil},
+            {state_id = "state:metric:22", metric_id = 22,
+                leaf_entity_id = 2, merge_operator = "SUM"},
+        },
+        branches = {
+            {branch_id = "branch:1", leaf_entity_id = 1},
+            {branch_id = "branch:2", leaf_entity_id = 2},
+        },
+    }
+end
+
+test("D2 selector chooses one complete state source per leaf", function()
+    install_catalog({
+        {1, "orders_wide", "MART", "ORDERS_WIDE", "AGGREGATE", "ALWAYS", "ACTIVE"},
+        {2, "orders_exact", "MART", "ORDERS_EXACT", "AGGREGATE", "ALWAYS", "ACTIVE"},
+        {3, "final_ratio_only", "MART", "RATIO", "AGGREGATE", "ALWAYS", "ACTIVE"},
+    }, {
+        {1, "DIMENSION", 10, "REGION", "DIRECT"},
+        {1, "DIMENSION", 11, "MONTH", "DIRECT"},
+        {1, "METRIC", 20, "REVENUE_STATE", "SUM"},
+        {2, "DIMENSION", 10, "REGION", "DIRECT"},
+        {2, "METRIC", 20, "REVENUE_STATE", "SUM"},
+        {3, "DIMENSION", 10, "REGION", "DIRECT"},
+        {3, "METRIC", 21, "FINAL_RATIO", "SUM"},
+    })
+    local selected, diagnostics = api.select_branch_sources(ctx, branch_plan(false))
+    assert_equal(selected["branch:1"].candidate.materialization_name,
+        "orders_exact")
+    assert_equal(selected["branch:1"].extra_dimension_count, 0)
+    assert_true(selected["branch:2"] == nil)
+    assert_equal(diagnostics.branches[2].fallback_reason,
+        "NO_ELIGIBLE_MATERIALIZATION")
+    assert_equal(diagnostics.branches[2].rejected_materializations[1].reason_code,
+        "MISSING_STATE")
+    assert_equal(#diagnostics.selected_materializations, 1)
+end)
+
+test("D2 selector rejects filtered and unsafe state columns atomically", function()
+    install_catalog({
+        {1, "orders", "MART", "ORDERS", "AGGREGATE", "ALWAYS", "ACTIVE"},
+    }, {
+        {1, "DIMENSION", 10, "REGION", "DIRECT"},
+        {1, "METRIC", 20, "REVENUE_STATE", "DIRECT"},
+    })
+    local selected, diagnostics = api.select_branch_sources(ctx, branch_plan(true))
+    assert_true(selected["branch:1"] == nil)
+    assert_equal(diagnostics.branches[1].rejected_materializations[1].reason_code,
+        "FILTERED_STATE_UNSUPPORTED")
+
+    local unfiltered = branch_plan(false)
+    selected, diagnostics = api.select_branch_sources(ctx, unfiltered)
+    assert_true(selected["branch:1"] == nil)
+    assert_equal(diagnostics.branches[1].rejected_materializations[1].reason_code,
+        "ROLLUP_POLICY_UNSAFE")
+end)

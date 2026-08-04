@@ -141,6 +141,91 @@ local function count_extra_dimensions(candidate, selected_dimension_keys)
     return count
 end
 
+local function sorted_states_for_branch(physical_plan, branch)
+    local result = {}
+    for _, state in ipairs(physical_plan.states or {}) do
+        if key(state.leaf_entity_id) == key(branch.leaf_entity_id) then
+            result[#result + 1] = state
+        end
+    end
+    table.sort(result, function(left, right)
+        return key(left.state_id) < key(right.state_id)
+    end)
+    return result
+end
+
+local function required_branch_dimensions(physical_plan)
+    local result = {}
+    for _, dimension in ipairs(physical_plan.dimensions or {}) do
+        result["DIMENSION:" .. key(dimension.dimension_id)] = true
+    end
+    for _, predicate in ipairs(physical_plan.global_filters or {}) do
+        result["DIMENSION:" .. key(predicate.dimension_id)] = true
+    end
+    return result
+end
+
+local function branch_candidate(candidate, physical_plan, branch,
+    required_dimensions, states)
+    if upper(candidate.status) ~= "ACTIVE" then
+        return nil, "INACTIVE", "Materialization status is not ACTIVE."
+    end
+    if upper(candidate.materialization_type) ~= "AGGREGATE" then
+        return nil, "UNSUPPORTED_TYPE",
+            "Only AGGREGATE materializations can provide branch states."
+    end
+    if not supported_freshness(candidate.freshness_policy) then
+        return nil, "UNSUPPORTED_FRESHNESS_POLICY",
+            "Freshness policy is not supported by the deterministic selector."
+    end
+    local dimension_columns = {}
+    local dimension_keys = {}
+    for dimension_key, _ in pairs(required_dimensions) do
+        dimension_keys[#dimension_keys + 1] = dimension_key
+    end
+    table.sort(dimension_keys)
+    for _, dimension_key in ipairs(dimension_keys) do
+        local column = candidate.columns[dimension_key]
+        if column == nil then
+            return nil, "MISSING_DIMENSION",
+                "A selected or globally filtered dimension is not present."
+        end
+        dimension_columns[dimension_key] = column
+    end
+
+    local state_columns = {}
+    for _, state in ipairs(states) do
+        if not missing(state.filter_expression) then
+            return nil, "FILTERED_STATE_UNSUPPORTED",
+                "Metric-local filters do not yet have a materialized-state identity contract."
+        end
+        if upper(state.merge_operator) ~= "SUM" then
+            return nil, "STATE_MERGE_UNSUPPORTED",
+                "The materialized state requires an unsupported merge operator."
+        end
+        local column = candidate.columns["METRIC:" .. key(state.metric_id)]
+        if column == nil then
+            return nil, "MISSING_STATE",
+                "A complete aggregate-state producer metric is not present."
+        end
+        local policy = missing(column.rollup_policy)
+            and "DIRECT" or upper(column.rollup_policy)
+        if policy ~= upper(state.merge_operator) then
+            return nil, "ROLLUP_POLICY_UNSAFE",
+                "The state column rollup policy does not match its merge operator."
+        end
+        state_columns[key(state.state_id)] = column
+    end
+
+    return {
+        candidate = candidate,
+        dimension_columns = dimension_columns,
+        state_columns = state_columns,
+        extra_dimension_count = count_extra_dimensions(candidate,
+            required_dimensions),
+    }
+end
+
 local function materialization_column(candidate, field)
     return candidate.columns[field_key(field)]
 end
@@ -248,11 +333,88 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
     return selected, diagnostics
 end
 
+-- Select one complete aggregate-state source for each physical leaf. A
+-- rejected or partial candidate never changes the already proven base branch.
+function M.select_branch_sources(ctx, physical_plan)
+    local candidates = load_candidates(ctx)
+    local required_dimensions = required_branch_dimensions(physical_plan)
+    local selections = {}
+    local diagnostics = {
+        candidate_count = #candidates,
+        rejected_materializations = {},
+        selected_materialization = null,
+        selected_materializations = {},
+        branches = {},
+    }
+
+    for _, branch in ipairs(physical_plan.branches or {}) do
+        local branch_diagnostic = {
+            branch_id = branch.branch_id,
+            leaf_entity_id = branch.leaf_entity_id,
+            candidate_count = #candidates,
+            rejected_materializations = {},
+            selected_materialization = null,
+            fallback_reason = "NO_ELIGIBLE_MATERIALIZATION",
+        }
+        local eligible = {}
+        local states = sorted_states_for_branch(physical_plan, branch)
+        for _, candidate in ipairs(candidates) do
+            local selection, reason_code, reason_message = branch_candidate(
+                candidate, physical_plan, branch, required_dimensions, states)
+            if selection == nil then
+                local rejection = {
+                    branch_id = branch.branch_id,
+                    materialization_id = candidate.materialization_id,
+                    materialization_name = candidate.materialization_name,
+                    reason_code = reason_code,
+                    reason_message = reason_message,
+                }
+                branch_diagnostic.rejected_materializations[
+                    #branch_diagnostic.rejected_materializations + 1] = rejection
+                diagnostics.rejected_materializations[
+                    #diagnostics.rejected_materializations + 1] = rejection
+            else
+                eligible[#eligible + 1] = selection
+            end
+        end
+        table.sort(eligible, function(left, right)
+            if left.extra_dimension_count ~= right.extra_dimension_count then
+                return left.extra_dimension_count < right.extra_dimension_count
+            end
+            return tonumber(left.candidate.materialization_id)
+                < tonumber(right.candidate.materialization_id)
+        end)
+        if #eligible > 0 then
+            local selected = eligible[1]
+            selections[key(branch.branch_id)] = selected
+            branch_diagnostic.selected_materialization =
+                selected.candidate.materialization_name
+            branch_diagnostic.selected_materialization_id =
+                selected.candidate.materialization_id
+            branch_diagnostic.extra_dimension_count =
+                selected.extra_dimension_count
+            branch_diagnostic.fallback_reason = null
+            diagnostics.selected_materializations[
+                #diagnostics.selected_materializations + 1] = {
+                branch_id = branch.branch_id,
+                leaf_entity_id = branch.leaf_entity_id,
+                materialization_id = selected.candidate.materialization_id,
+                materialization_name = selected.candidate.materialization_name,
+                extra_dimension_count = selected.extra_dimension_count,
+            }
+        end
+        diagnostics.branches[#diagnostics.branches + 1] = branch_diagnostic
+    end
+    return selections, diagnostics
+end
+
 select_materialization = M.select_materialization
+select_branch_sources = M.select_branch_sources
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_MATERIALIZATION_TEST_API = {
         select_materialization = M.select_materialization,
+        select_branch_sources = M.select_branch_sources,
         supported_freshness = supported_freshness,
         allowed_rollup_policy = allowed_rollup_policy,
     }

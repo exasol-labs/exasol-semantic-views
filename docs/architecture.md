@@ -35,7 +35,7 @@ The compiler's Phase B boundary is split into four small modules:
 - `query_spec.lua` canonicalizes both input languages
 - `catalog_snapshot.lua` detaches the complete planner catalog
 - `metric_plan.lua` builds the typed DAG and proof-rich logical plan
-- `grain_sql.lua` renders the supported single-branch physical plan
+- `grain_sql.lua` renders supported single- and multi-branch physical plans
 
 The legacy join proof remains the compatibility path. Strict grain proofs are
 separate values and are the only proof type the multi-fact branch planner may
@@ -46,10 +46,11 @@ branch to each required dimension before the legacy matrix or root join planner
 runs. Phase C2 adds a separate typed physical planner and decision-free
 multi-branch state renderer. Phase C3 finalizes states and derived metrics after
 the merge, applies final query operations, and activates SQL generation and
-caching through both compiler input lanes. Phase D1 uses
-plan-version 6 / physical-plan version 3 to identify every branch's base source
-explicitly and records planner runtime without making cached plans
-nondeterministic.
+caching through both compiler input lanes. Phase D1 identifies every branch's
+base source explicitly and records planner runtime without making cached plans
+nondeterministic. Phase D2 uses plan version 7 / physical-plan version 4 to
+substitute at most one complete aggregate materialization per leaf without
+changing the proven merge and finalization pipeline.
 
 ## Primary Flows
 
