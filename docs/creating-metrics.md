@@ -588,8 +588,9 @@ The response includes generated SQL and plan JSON so the caller can explain
 which metrics, dimensions, joins, validation run, and warnings were involved.
 Filter objects also accept `dimension`, `column`, or `name` as aliases for
 `field`, and `operator` as an alias for `op`. Supported operators are `=`,
-`!=`, `<>`, `>`, `>=`, `<`, `<=`, `LIKE`, `IN`, and `BETWEEN`; `BETWEEN` uses a
-two-value array.
+`!=`, `<>`, `>`, `>=`, `<`, `<=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`, and
+`IS NOT NULL`; `BETWEEN` uses a two-value array, while null predicates omit
+`value` and `value_sql`.
 
 ## Metric Design Guidelines
 

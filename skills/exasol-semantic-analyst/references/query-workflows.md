@@ -208,9 +208,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
 ```
 
 Accepted semantic SQL includes `SELECT *`, `HAVING` metric predicates,
-`WHERE` metric predicates auto-routed to `HAVING`, `BETWEEN`, `ORDER BY`
-aliases or ordinals, `GROUP BY ALL`, and `MEASURE(metric)` / `agg(metric)` in
-`SELECT`, `HAVING`, and `ORDER BY`.
+`WHERE` metric predicates auto-routed to `HAVING`, `BETWEEN`, `IS NULL`,
+`IS NOT NULL`, `ORDER BY` aliases or ordinals, `GROUP BY ALL`, and
+`MEASURE(metric)` / `agg(metric)` in `SELECT`, `HAVING`, and `ORDER BY`.
 
 ## Expected Response Shape
 

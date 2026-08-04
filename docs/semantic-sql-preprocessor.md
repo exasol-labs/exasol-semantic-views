@@ -81,10 +81,11 @@ metric wrappers `MEASURE(metric)` and `agg(metric)`. `MEASURE()` / `agg()` may
 only wrap metrics; wrapping a dimension returns `SEMANTIC_QUERY_006`.
 
 Supported `WHERE` predicates are dimension predicates with `=`, `!=`, `<>`,
-`<`, `<=`, `>`, `>=`, `LIKE`, `IN`, and `BETWEEN`. Text equality,
-inequality, `LIKE`, and `IN` predicates compile case-insensitively. Single-value
-comparison predicates may use a literal or a SQL expression on the right side,
-which allows date expressions such as
+`<`, `<=`, `>`, `>=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`, and `IS NOT NULL`.
+Text equality, inequality, `LIKE`, and `IN` predicates compile
+case-insensitively. Null predicates are unary. Single-value comparison
+predicates may use a literal or a SQL expression on the right side, which
+allows date expressions such as
 `ADD_MONTHS(TRUNC(CURRENT_DATE, 'MM'), -1)`. `IN` requires a literal list, and
 `BETWEEN` requires literal lower and upper values.
 

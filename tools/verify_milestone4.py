@@ -244,6 +244,24 @@ def main() -> int:
             len(fetchall(con, "SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES")),
             3,
         )
+        null_sql = compile_sql(
+            con,
+            "SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES "
+            "WHERE customer_region IS NULL GROUP BY customer_region",
+        )
+        assert_status_ok("Semantic SQL IS NULL", null_sql)
+        assert_contains("Semantic SQL IS NULL predicate", null_sql["generated_sql"], " IS NULL")
+        assert_equal("Semantic SQL IS NULL rows", fetchall(con, null_sql["generated_sql"]), [])
+
+        non_null_sql = compile_sql(
+            con,
+            "SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES "
+            "WHERE customer_region IS NOT NULL GROUP BY customer_region "
+            "HAVING total_revenue IS NOT NULL",
+        )
+        assert_status_ok("Semantic SQL IS NOT NULL", non_null_sql)
+        assert_contains("Semantic SQL IS NOT NULL WHERE", non_null_sql["generated_sql"], " IS NOT NULL")
+        assert_contains("Semantic SQL IS NOT NULL HAVING", non_null_sql["generated_sql"], "IS NOT NULL")
     finally:
         try:
             con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()")

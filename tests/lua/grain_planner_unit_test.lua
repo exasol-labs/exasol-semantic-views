@@ -665,6 +665,8 @@ test("C2 physical planner binds filter variants and rejects broken proofs", func
             expected = "r.region_name BETWEEN 'A' AND 'Z'"},
         {operator = "IS NULL", value = nil,
             expected = "r.region_name IS NULL"},
+        {operator = "IS NOT NULL", value = nil,
+            expected = "r.region_name IS NOT NULL"},
     }
     for _, variant in ipairs(variants) do
         local candidate = snapshots.copy(logical)

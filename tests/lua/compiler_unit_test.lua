@@ -83,6 +83,10 @@ test("SQL literals and predicates preserve semantic types", function()
     assert_equal(predicate, "UPPER(c.region) = UPPER('west')")
     local between = api.build_dimension_predicate("o.amount", "BETWEEN", {10, 20}, "DECIMAL(18,2)")
     assert_equal(between, "o.amount BETWEEN 10 AND 20")
+    local is_null = api.build_dimension_predicate("c.region", "IS NULL", nil, "VARCHAR(20)")
+    assert_equal(is_null, "c.region IS NULL")
+    local is_not_null = api.build_dimension_predicate("c.region", "IS NOT NULL", nil, "VARCHAR(20)")
+    assert_equal(is_not_null, "c.region IS NOT NULL")
 end)
 
 test("metric filter rewriting covers supported and fallback aggregates", function()
@@ -103,6 +107,23 @@ local function parse_where(text)
     local tokens = api.sql_tokens(text)
     return api.parse_where_filters(tokens, 1, #tokens)
 end
+
+test("WHERE parser supports unary null predicates", function()
+    local filters, err = parse_where(
+        "region IS NULL AND status IS NOT NULL AND amount >= 10")
+    assert_equal(err, nil)
+    assert_equal(#filters, 3)
+    assert_equal(filters[1].field, "region")
+    assert_equal(filters[1].op, "IS NULL")
+    assert_equal(filters[1].value, nil)
+    assert_equal(filters[2].field, "status")
+    assert_equal(filters[2].op, "IS NOT NULL")
+    assert_equal(filters[2].value, nil)
+
+    local invalid, invalid_err = parse_where("region IS NOT")
+    assert_equal(invalid, nil)
+    assert_equal(invalid_err.error_code, "SEMANTIC_QUERY_036")
+end)
 
 test("WHERE parser preserves conjunctions ranges lists and expressions", function()
     local filters, err = parse_where(
@@ -202,6 +223,17 @@ local function compiler_context()
         metric_by_id = {['30'] = revenue},
     }, region, revenue
 end
+
+test("HAVING parser supports unary null predicates", function()
+    local ctx = compiler_context()
+    local tokens = api.sql_tokens("total_revenue IS NOT NULL")
+    local filters, err = api.parse_having_filters(ctx, tokens, 1, #tokens)
+    assert_equal(err, nil)
+    assert_equal(#filters, 1)
+    assert_equal(filters[1].field, "total_revenue")
+    assert_equal(filters[1].op, "IS NOT NULL")
+    assert_equal(filters[1].value, nil)
+end)
 
 test("compiler field resolution handles canonical synonyms and ambiguity", function()
     local ctx = compiler_context()
@@ -593,6 +625,20 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_equal(state.cache_touches, 1)
     assert_equal(state.cache_inserts, 1)
     assert_equal(#state.request_logs, 2)
+end)
+
+test("structured compiler renders unary null filters and having", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+        dimensions = {"status"},
+        filters = {{field = "status", op = "IS NULL"}},
+        having = {{field = "total_revenue", op = "IS NOT NULL"}},
+    })
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, "WHERE o.status IS NULL")
+    assert_contains(result.generated_sql, "HAVING SUM((o.amount)) IS NOT NULL")
 end)
 
 test("C3 compiler activates a versioned multi branch query", function()

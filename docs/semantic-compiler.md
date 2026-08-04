@@ -154,10 +154,11 @@ The structured compiler supports:
    aggregations.
 3. Metrics and dimensions by canonical names or visible synonyms.
 4. Dimension filters with `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`,
-   `IN`, and `BETWEEN`. Text `=`, `!=`, `<>`, `LIKE`, and `IN` filters compile
-   case-insensitively. Structured request filters accept `field`, `dimension`,
-   `column`, or `name` for the field key, and `op` or `operator` for the
-   operator key.
+   `IN`, `BETWEEN`, `IS NULL`, and `IS NOT NULL`. Text `=`, `!=`, `<>`, `LIKE`,
+   and `IN` filters compile case-insensitively. Null predicates are unary and
+   omit `value` and `value_sql`. Structured request filters accept `field`,
+   `dimension`, `column`, or `name` for the field key, and `op` or `operator`
+   for the operator key.
 5. `ORDER BY` over selected output fields.
 6. `LIMIT` up to the configured maximum.
 7. Additive metrics, filtered metrics using `CASE`, and derived metrics as

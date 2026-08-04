@@ -182,7 +182,8 @@ A standard request:
 Filter field key aliases: `field`, `dimension`, `column`, `name`.
 Operator key aliases: `op`, `operator`.
 Supported operators: `=`, `!=`, `<>`, `>`, `>=`, `<`, `<=`, `LIKE`, `IN`,
-`BETWEEN` (two-value array).
+`BETWEEN` (two-value array), `IS NULL`, `IS NOT NULL`. Omit `value` and
+`value_sql` for unary null predicates.
 Text equality, `!=`, `LIKE`, and `IN` are compiled case-insensitively.
 Metric predicates use the optional `having` array with the same object shape as
 `filters`; each `having` entry must reference a metric.

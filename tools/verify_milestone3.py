@@ -264,6 +264,37 @@ def main() -> int:
         assert_equal("missing filter value status", missing_value["status"], "ERROR")
         assert_equal("missing filter value code", missing_value["error_code"], "SEMANTIC_REQUEST_015")
 
+        null_filter = compile_request(
+            con,
+            {
+                "model": "sales",
+                "object": "SALES",
+                "metrics": ["total_revenue"],
+                "dimensions": ["customer_region"],
+                "filters": [{"field": "customer_region", "op": "IS NULL"}],
+                "client": "verify_milestone3",
+            },
+        )
+        assert_status_ok("IS NULL structured filter", null_filter)
+        assert_contains("IS NULL structured SQL", null_filter["generated_sql"], " IS NULL")
+        assert_equal("IS NULL structured rows", fetchall(con, null_filter["generated_sql"]), [])
+
+        non_null_filter = compile_request(
+            con,
+            {
+                "model": "sales",
+                "object": "SALES",
+                "metrics": ["total_revenue"],
+                "dimensions": ["customer_region"],
+                "filters": [{"field": "customer_region", "op": "IS NOT NULL"}],
+                "having": [{"field": "total_revenue", "op": "IS NOT NULL"}],
+                "client": "verify_milestone3",
+            },
+        )
+        assert_status_ok("IS NOT NULL structured filters", non_null_filter)
+        assert_contains("IS NOT NULL structured WHERE", non_null_filter["generated_sql"], " IS NOT NULL")
+        assert_contains("IS NOT NULL structured HAVING", non_null_filter["generated_sql"], "IS NOT NULL")
+
         bad_having = compile_request(
             con,
             {
@@ -279,7 +310,7 @@ def main() -> int:
         assert_equal("bad having structure code", bad_having["error_code"], "SEMANTIC_REQUEST_025")
 
         after_logs = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_REQUEST_LOG")
-        assert_equal("agent request logs", after_logs - before_logs, 10)
+        assert_equal("agent request logs", after_logs - before_logs, 12)
     finally:
         con.close()
     return 0

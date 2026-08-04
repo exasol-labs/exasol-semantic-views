@@ -1397,6 +1397,9 @@ local function expand_metric(ctx, metric, stack)
 end
 
 local function build_dimension_predicate(expression, op, value, data_type, value_sql)
+    if op == "IS NULL" or op == "IS NOT NULL" then
+        return expression .. " " .. op, nil
+    end
     local rhs = value_sql or sql_literal(value, data_type)
     local text_compare = value_sql == nil and is_text_type(data_type)
     if op == "=" or op == "!=" or op == "<>" or op == ">" or op == ">=" or op == "<" or op == "<=" or op == "LIKE" then
@@ -1428,7 +1431,7 @@ local function build_dimension_predicate(expression, op, value, data_type, value
         end
         return expression .. " BETWEEN " .. sql_literal(values[1], data_type) .. " AND " .. sql_literal(values[2], data_type), nil
     end
-    return nil, error_result("SEMANTIC_REQUEST_033", "Unsupported filter operator: " .. tostring(op) .. ". Supported operators: =, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN.")
+    return nil, error_result("SEMANTIC_REQUEST_033", "Unsupported filter operator: " .. tostring(op) .. ". Supported operators: =, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL.")
 end
 
 local function build_filters(ctx, request_filters, selected_dimensions, needed_entities)
@@ -2000,6 +2003,12 @@ local function compile_request_table(request, options)
         end
         add_unique(planning_metrics, planning_metric_seen, metric_field)
         local op = upper(having_filter.op or having_filter.operator or "=")
+        if missing(having_filter.value) and missing(having_filter.value_sql)
+            and op ~= "IS NULL" and op ~= "IS NOT NULL" then
+            return error_result("SEMANTIC_REQUEST_015",
+                "Having filter for field '" .. tostring(metric_field.name)
+                .. "' requires a value or value_sql key.")
+        end
         local expr = expand_metric(ctx, metric_field)
         local predicate, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
         if predicate_err ~= nil then
@@ -2533,6 +2542,30 @@ local function render_token_slice(tokens)
     return table.concat(parts, " ")
 end
 
+local binary_predicate_operators = {
+    ["IN"] = true, ["BETWEEN"] = true, ["LIKE"] = true,
+    ["="] = true, ["!="] = true, ["<>"] = true,
+    [">"] = true, [">="] = true, ["<"] = true, ["<="] = true,
+}
+
+local function predicate_operator_at(tokens, index)
+    local current = token_upper(tokens[index])
+    if current == "IS" then
+        if token_upper(tokens[index + 1]) == "NULL" then
+            return "IS NULL"
+        end
+        if token_upper(tokens[index + 1]) == "NOT"
+            and token_upper(tokens[index + 2]) == "NULL" then
+            return "IS NOT NULL"
+        end
+        return "IS"
+    end
+    if binary_predicate_operators[current] then
+        return current
+    end
+    return nil
+end
+
 local function parse_where_filters(tokens, start_index, end_index)
     local filters = {}
     local chunks = {}
@@ -2571,10 +2604,10 @@ local function parse_where_filters(tokens, start_index, end_index)
         local op_index = nil
         local op = nil
         for idx = first, last do
-            local u = token_upper(tokens[idx])
-            if u == "IN" or u == "BETWEEN" or u == "LIKE" or u == "=" or u == "!=" or u == "<>" or u == ">" or u == ">=" or u == "<" or u == "<=" then
+            local candidate = predicate_operator_at(tokens, idx)
+            if candidate ~= nil then
                 op_index = idx
-                op = u
+                op = candidate
                 break
             end
         end
@@ -2585,7 +2618,17 @@ local function parse_where_filters(tokens, start_index, end_index)
         if field == nil then
             return nil, error_result("SEMANTIC_QUERY_031", "WHERE predicate must start with a semantic dimension.")
         end
-        if op == "IN" then
+        if op == "IS NULL" or op == "IS NOT NULL" then
+            local expected_last = op_index + (op == "IS NULL" and 1 or 2)
+            if last ~= expected_last then
+                return nil, error_result("SEMANTIC_QUERY_036",
+                    "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
+            end
+            filters[#filters + 1] = {field = field, op = op}
+        elseif op == "IS" then
+            return nil, error_result("SEMANTIC_QUERY_036",
+                "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
+        elseif op == "IN" then
             if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "(" or tokens[last].text ~= ")" then
                 return nil, error_result("SEMANTIC_QUERY_032", "IN predicate requires a literal list.")
             end
@@ -2668,10 +2711,10 @@ local function parse_having_filters(ctx, tokens, start_index, end_index)
         local op_index = nil
         local op = nil
         for idx = first, last do
-            local u = token_upper(tokens[idx])
-            if u == "IN" or u == "BETWEEN" or u == "LIKE" or u == "=" or u == "!=" or u == "<>" or u == ">" or u == ">=" or u == "<" or u == "<=" then
+            local candidate = predicate_operator_at(tokens, idx)
+            if candidate ~= nil then
                 op_index = idx
-                op = u
+                op = candidate
                 break
             end
         end
@@ -2689,7 +2732,17 @@ local function parse_having_filters(ctx, tokens, start_index, end_index)
         if resolved.kind ~= "METRIC" then
             return nil, error_result("SEMANTIC_QUERY_040", "HAVING supports metric predicates only. Use WHERE for dimension filters.")
         end
-        if op == "IN" then
+        if op == "IS NULL" or op == "IS NOT NULL" then
+            local expected_last = op_index + (op == "IS NULL" and 1 or 2)
+            if last ~= expected_last then
+                return nil, error_result("SEMANTIC_QUERY_036",
+                    "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
+            end
+            filters[#filters + 1] = {field = resolved.name, op = op}
+        elseif op == "IS" then
+            return nil, error_result("SEMANTIC_QUERY_036",
+                "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
+        elseif op == "IN" then
             if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "(" or tokens[last].text ~= ")" then
                 return nil, error_result("SEMANTIC_QUERY_032", "IN predicate requires a literal list.")
             end
@@ -3251,6 +3304,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         find_top_level_clauses = find_top_level_clauses,
         render_token_slice = render_token_slice,
         parse_where_filters = parse_where_filters,
+        parse_having_filters = parse_having_filters,
         parse_order_by = parse_order_by,
         collision_error = collision_error,
     }

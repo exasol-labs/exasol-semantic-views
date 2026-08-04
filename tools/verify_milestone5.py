@@ -465,6 +465,17 @@ def main() -> int:
         )
 
         assert_equal(
+            "schema view includes both unary null operators",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT "
+                "WHERE CONTRACT_SECTION = 'FILTER_OPERATOR' "
+                "AND NAME IN ('IS NULL', 'IS NOT NULL')",
+            ),
+            2,
+        )
+
+        assert_equal(
             "schema view lists exactly the accepted request keys",
             fetchall(
                 con,

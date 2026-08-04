@@ -323,6 +323,10 @@ SELECT 'FILTER_OPERATOR', 'IN', 'Use an array value.', FALSE, 'string', '=, !=, 
 UNION ALL
 SELECT 'FILTER_OPERATOR', 'BETWEEN', 'Use a two-element array value: [lower, upper].', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
 UNION ALL
+SELECT 'FILTER_OPERATOR', 'IS NULL', 'Unary null test; omit value and value_sql.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
+UNION ALL
+SELECT 'FILTER_OPERATOR', 'IS NOT NULL', 'Unary non-null test; omit value and value_sql.', FALSE, 'string', '=, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL'
+UNION ALL
 SELECT 'ORDER_BY_KEYS', 'field, direction', 'direction accepts ASC or DESC.', TRUE, 'string', 'ASC, DESC'
 UNION ALL
 SELECT 'HAVING_KEYS', 'field, op, value', 'Use the having array to filter on aggregated metric values after GROUP BY. Same shape as filters but field must be a METRIC.', FALSE, 'object', NULL

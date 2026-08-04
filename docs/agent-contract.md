@@ -158,8 +158,9 @@ This prevents an agent from assuming that an unsupported capability such as
 
 Filter field aliases are `field`, `dimension`, `column`, and `name`. Operator
 aliases are `op` and `operator`. Supported operators are `=`, `!=`, `<>`, `>`,
-`>=`, `<`, `<=`, `LIKE`, `IN`, and `BETWEEN`; `BETWEEN` expects a two-element
-array. `ORDER BY` fields must refer to selected metrics or dimensions.
+`>=`, `<`, `<=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`, and `IS NOT NULL`.
+`BETWEEN` expects a two-element array. Null predicates are unary: omit `value`
+and `value_sql`. `ORDER BY` fields must refer to selected metrics or dimensions.
 
 A request must include at least one `metric` or one `dimension`. A request
 with only `dimensions` (no `metrics`) compiles to a deduplicated `GROUP BY`

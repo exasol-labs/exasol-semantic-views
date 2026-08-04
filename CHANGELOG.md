@@ -8,6 +8,13 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Unary null predicates
+
+- Structured filters and `having`, plus Semantic SQL `WHERE` and `HAVING`, now
+  support unary `IS NULL` and `IS NOT NULL` predicates without a value.
+- The machine-readable agent contract now exposes explicit entries for both
+  operators, matching the runtime compiler.
+
 #### Strict structured-request keys
 
 - `COMPILE_REQUEST_JSON` now rejects unknown top-level keys with
