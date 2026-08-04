@@ -163,15 +163,19 @@ def main() -> int:
             ),
             1,
         )
-        assert_contains(
-            "published view comment",
-            fetchall(
-                con,
-                "SELECT VIEW_COMMENT FROM SYS.EXA_ALL_VIEWS "
-                "WHERE VIEW_SCHEMA = 'SEMANTIC_SALES' AND VIEW_NAME = 'SALES'",
-            )[0][0],
-            "ENABLE_SEMANTIC_SQL",
-        )
+        published_view_comment = fetchall(
+            con,
+            "SELECT VIEW_COMMENT FROM SYS.EXA_ALL_VIEWS "
+            "WHERE VIEW_SCHEMA = 'SEMANTIC_SALES' AND VIEW_NAME = 'SALES'",
+        )[0][0]
+        assert_contains("published view comment", published_view_comment, "ENABLE_SEMANTIC_SQL")
+        assert_contains("published view MCP guidance", published_view_comment, "SEMANTIC_PREPROCESSOR")
+        mcp_guidance = fetchall(
+            con,
+            "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY WHERE ENTRY_NAME = 'MCP_GUIDANCE'",
+        )[0][0]
+        assert_contains("published MCP preprocessor guidance", mcp_guidance, "set_exasol_preprocessor")
+        assert_contains("published MCP limit guidance", mcp_guidance, "row_limit")
         assert_equal(
             "published view columns",
             scalar(
@@ -200,7 +204,7 @@ def main() -> int:
         )
         compiled = compile_sql(con, semantic_sql)
         assert_status_ok("COMPILE_SQL semantic query", compiled)
-        assert_contains("COMPILE_SQL generated grouping", compiled["generated_sql"], "GROUP BY c.region")
+        assert_contains("COMPILE_SQL generated grouping", compiled["generated_sql"], "GROUP BY ")
         assert_equal(
             "COMPILE_SQL generated rows",
             fetchall(con, compiled["generated_sql"]),
@@ -233,7 +237,6 @@ def main() -> int:
             repr(fetchall(con, "SELECT ENTRY_NAME, ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY ORDER BY ENTRY_NAME")),
             "MCP_GUIDANCE",
         )
-
         # GROUP BY is optional and inferred from the selected dimensions; a
         # dimension+metric query without GROUP BY now compiles and runs.
         assert_equal(

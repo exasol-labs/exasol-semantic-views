@@ -31,18 +31,22 @@ Use the narrowest rollout that satisfies the user workflow:
 | BI connection init | Run `ENABLE_SEMANTIC_SQL()` when the pool opens a connection | Pilot groups and tools with connection hooks |
 | Database-wide | `ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT = ...` | Production BI environments where semantic SQL should be on by default |
 
-Agents and MCP-style tools should still prefer `COMPILE_REQUEST_JSON` or
-`COMPILE_SQL` through a semantic adapter. They should not depend on an ambient
-session preprocessor unless they are intentionally emulating a BI SQL session.
+Agents that need structured plans or durable handles should prefer
+`COMPILE_REQUEST_JSON` or `COMPILE_SQL` through a semantic adapter. For ordinary
+semantic SQL, the official Exasol MCP Server can explicitly activate and verify
+the session preprocessor as described below.
 
-## Effect On Generic MCP Servers
+## MCP Servers
 
-Database-wide activation mitigates one common MCP failure mode: a generic
-SELECT-only MCP SQL tool cannot run
-`EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()`, so it cannot enable the
-preprocessor for itself. If the semantic preprocessor is configured with
-`ALTER SYSTEM`, new database sessions opened by that MCP server inherit semantic
-SQL support and can run SELECT queries against published semantic views:
+The official Exasol MCP Server exposes `list_exasol_preprocessors` and
+`set_exasol_preprocessor` by default. It can therefore activate
+`SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR` for its pooled session and query
+published semantic views without database-wide activation. Use the session
+workflow in [Exasol MCP Server Integration](mcp-server-integration.md) first.
+
+Database-wide activation is an alternative for MCP servers that expose only a
+SELECT tool and have no preprocessor control. New database sessions opened by
+such a server inherit semantic SQL support:
 
 ```sql
 SELECT customer_region, total_revenue
@@ -51,7 +55,7 @@ GROUP BY customer_region
 ORDER BY total_revenue DESC;
 ```
 
-This is a mitigation, not a complete MCP integration:
+Neither route exposes the complete structured agent contract:
 
 - Existing MCP database connections may need to be reconnected before they pick
   up the system setting. For pooled servers, restart the MCP server or recycle
@@ -62,15 +66,15 @@ This is a mitigation, not a complete MCP integration:
   `COMPILE_REQUEST_JSON`, `COMPILE_SQL`, `EXPLAIN_COMPILED_SQL`, or
   `RECORD_AGENT_FEEDBACK`.
 
-For agent-grade conversational analytics, use a semantic MCP adapter that maps
-tool calls to the database-resident semantic scripts. Database-wide
-preprocessing makes the generic SELECT path more usable for BI-style questions,
-but it does not replace semantic MCP tools.
+For structured compilation, plans, durable handles, explanations, and feedback,
+use a semantic MCP adapter that maps tools to the database-resident scripts.
+That adapter is an enhancement over the working official semantic SQL path,
+not a prerequisite for conversational querying.
 
 ## MCP Hardening Checklist
 
-For a generic MCP server that can list tables and run SELECT statements, admins
-can improve the experience without changing the MCP server:
+For an MCP server without preprocessor tools, admins can improve the experience
+without changing the server:
 
 1. Publish every semantic model that should be visible:
 

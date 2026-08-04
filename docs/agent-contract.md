@@ -15,9 +15,13 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON('<request-json>');
 ```
 
 A generic SQL tool that accepts only `SELECT` statements can inspect the
-`SEMANTIC_AGENT` and `SEMANTIC_CATALOG` views, but it cannot compile requests,
-enable Semantic SQL, explain compiled handles, or record feedback. MCP and REST
-adapters should expose dedicated semantic tools for those script calls.
+`SEMANTIC_AGENT` and `SEMANTIC_CATALOG` views, but it cannot call the structured
+compile, explanation, or feedback scripts. The official Exasol MCP Server can
+nevertheless execute governed semantic SQL because it exposes session-level
+preprocessor tools by default. Follow
+[Exasol MCP Server Integration](mcp-server-integration.md). MCP and REST
+adapters should expose dedicated semantic tools only when callers need the
+richer script contracts and their plans or durable handles.
 
 Milestone 4 adds a second deterministic surface for SQL clients:
 `SEMANTIC_ADMIN.COMPILE_SQL`. Autonomous agents should still prefer structured
@@ -226,6 +230,13 @@ maintenance tooling; internal tables deliberately use implementation-oriented
 ids and do not duplicate every display column such as `MODEL_NAME`.
 
 ## MCP Semantic Mode
+
+For ordinary semantic SQL, first consider the official MCP server's supported
+`set_exasol_preprocessor` plus `execute_exasol_query` workflow. It does not
+expose `COMPILE_REQUEST_JSON`, plan metadata, explanations, or feedback through
+the SELECT-only read tool, but a custom adapter is not required merely to query
+published semantic views. See
+[Exasol MCP Server Integration](mcp-server-integration.md).
 
 A thin MCP adapter should map common semantic tools onto the database-resident
 surface:

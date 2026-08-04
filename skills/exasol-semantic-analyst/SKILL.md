@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-analyst
-description: Use when an autonomous agent needs to answer business questions through an existing Exasol Semantic Views model. Covers metric and dimension discovery, valid combination checking, structured request compilation with COMPILE_REQUEST_JSON, semantic SQL compilation including Databricks-style MEASURE()/GROUP BY ALL compatibility, result execution, plan explanation, and feedback capture. Assumes the semantic model is already built and published.
+description: Use when an autonomous agent needs to answer business questions through an existing Exasol Semantic Views model, including through the official Exasol MCP Server. Covers MCP preprocessor activation, metric and dimension discovery, compatibility checking, structured request compilation, semantic SQL, result execution, plan explanation, and feedback capture. Assumes the semantic model is already built and published.
 ---
 
 # Exasol Semantic Analyst
@@ -15,10 +15,14 @@ Prefer this order:
 
 1. Discover available models, objects, and fields.
 2. Check metric/dimension compatibility before compiling.
-3. Compile a structured request with `COMPILE_REQUEST_JSON`.
-4. Execute only the returned `GENERATED_SQL` under the caller's privileges.
-5. Attach `PLAN_JSON` and `AGENT_REQUEST_ID` to the answer for traceability.
-6. Record feedback after delivering results.
+3. Choose the strongest available path: structured compilation when scripts are
+   callable, or the official MCP preprocessor path when only MCP read tools are
+   available.
+4. Execute only governed semantic SQL or compiler-generated SQL under the
+   caller's privileges.
+5. Attach `PLAN_JSON` and `AGENT_REQUEST_ID` when the structured path provides
+   them.
+6. Record feedback when the feedback script is callable.
 
 Read [query-workflows.md](references/query-workflows.md) for copyable SQL and
 JSON examples.
@@ -29,9 +33,37 @@ Compile, explain, and feedback entrypoints are Exasol Lua scripts. They must
 be called with `EXECUTE SCRIPT`, not `SELECT`.
 
 If your only available tool accepts only `SELECT`, use it for discovery through
-`SEMANTIC_AGENT` views. Do not write physical-table SQL as a workaround. Ask
-for a semantic adapter that exposes `COMPILE_REQUEST_JSON`,
-`EXPLAIN_COMPILED_SQL`, and `RECORD_AGENT_FEEDBACK` as callable tools.
+`SEMANTIC_AGENT` views. If it is the official Exasol MCP Server, first inspect
+its tools: `list_exasol_preprocessors` and `set_exasol_preprocessor` are enabled
+by default and provide a governed semantic SQL path. Do not write physical-table
+SQL as a workaround.
+
+Ask for a semantic adapter only when the task requires structured compilation,
+`PLAN_JSON`, durable handles, explanation, or feedback and the corresponding
+`EXECUTE SCRIPT` entrypoints are unavailable.
+
+## Official Exasol MCP Server Path
+
+When `tools/list` exposes `list_exasol_preprocessors`,
+`set_exasol_preprocessor`, and `execute_exasol_query`:
+
+1. Call `list_exasol_preprocessors` and confirm that
+   `SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR` exists.
+2. Call `set_exasol_preprocessor` with schema `SEMANTIC_ADMIN` and script
+   `SEMANTIC_PREPROCESSOR`.
+3. Call `list_exasol_preprocessors` again. Require
+   `current_preprocessor = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR`.
+4. Discover fields and compatibility through SELECTs against `SEMANTIC_AGENT`.
+5. Execute semantic SQL against the published `SEMANTIC_<MODEL>.<OBJECT>` view.
+6. Put `LIMIT` in the semantic SQL. Do not pass MCP `row_limit`, because it
+   wraps the semantic query in an unsupported outer SELECT.
+7. After a connection error, authentication refresh, or server restart, verify
+   the current preprocessor and set it again before retrying.
+
+If `execute_exasol_query` is absent, ask the operator to enable
+`enable_read_query`. If view discovery is disabled, query the physical
+`SEMANTIC_<MODEL>.SEMANTIC_DISCOVERY` table or known `SEMANTIC_AGENT` views
+directly.
 
 ## Discovery
 
@@ -70,9 +102,10 @@ ORDER BY FIELD_KIND, FIELD_NAME;
 **Compiler contract (accepted keys, operators, handle types):**
 
 ```sql
-SELECT CONTRACT_SECTION, KEY_NAME, KEY_ALIAS, DESCRIPTION
+SELECT CONTRACT_SECTION, NAME, DESCRIPTION,
+       IS_REQUIRED, VALUE_TYPE, ALLOWED_VALUES
 FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT
-ORDER BY DISPLAY_ORDER;
+ORDER BY CONTRACT_SECTION, NAME;
 ```
 
 **Current blocking errors (stop if any exist for the target model):**
@@ -197,8 +230,10 @@ as a root/child family and the wrapped surface can emit recursive JSON with
 
 ## Semantic SQL Path
 
-When the user has supplied semantic SQL directly, compile it explicitly rather
-than relying on a session preprocessor. The SQL surface accepts selected
+When the user has supplied semantic SQL directly and scripts are callable,
+compile it explicitly. When only the official MCP read path is available, set
+and verify the session preprocessor and execute the same semantic SQL directly.
+The SQL surface accepts selected
 semantic fields, `SELECT *`, optional `GROUP BY` inference from selected
 dimensions, `GROUP BY ALL`, metric predicates in `HAVING`, metric predicates in
 `WHERE` auto-routed to `HAVING`, `BETWEEN`, selected-field aliases or ordinals
@@ -335,4 +370,5 @@ constructing a novel request when the question is the same.
 - Do not mutate catalog objects (metrics, dimensions, entities) from the
   analyst role. That is the modeler's responsibility.
 - Treat the session preprocessor as syntax support, not a security boundary.
-  Prefer `COMPILE_REQUEST_JSON` over relying on preprocessor state.
+  Prefer `COMPILE_REQUEST_JSON` when it is callable; otherwise use the official
+  MCP preprocessor workflow and verify session state after reconnects.

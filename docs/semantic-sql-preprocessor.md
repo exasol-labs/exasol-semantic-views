@@ -38,6 +38,13 @@ semantic SQL directly must enable it on each connection. Agents and MCP
 adapters should prefer `COMPILE_REQUEST_JSON` or `COMPILE_SQL` when they cannot
 control session initialization.
 
+The official Exasol MCP Server can control this state directly with its
+`list_exasol_preprocessors` and `set_exasol_preprocessor` tools, which are
+enabled by default. Agents should set and verify
+`SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR`, then use `execute_exasol_query`. See
+[Exasol MCP Server Integration](mcp-server-integration.md) for the exact
+workflow and the current `row_limit` caveat.
+
 For production BI environments, admins can also roll out the same preprocessor
 as a system setting. See
 [Admin setup for database-wide Semantic SQL](admin-db-wide-setup.md) for the

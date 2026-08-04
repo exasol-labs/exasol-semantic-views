@@ -3,6 +3,35 @@
 Use these examples when answering business questions through an Exasol
 Semantic Views model. All `SEMANTIC_ADMIN` calls require `EXECUTE SCRIPT`.
 
+## Query Through The Official Exasol MCP Server
+
+Use this path when MCP exposes preprocessor and read-query tools but cannot call
+`EXECUTE SCRIPT`:
+
+```text
+list_exasol_preprocessors()
+
+set_exasol_preprocessor(
+  schema_name="SEMANTIC_ADMIN",
+  script_name="SEMANTIC_PREPROCESSOR"
+)
+
+list_exasol_preprocessors()
+# Require current_preprocessor = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR
+
+execute_exasol_query(
+  query="SELECT customer_region, total_revenue
+         FROM SEMANTIC_SALES.SALES
+         GROUP BY customer_region
+         ORDER BY total_revenue DESC
+         LIMIT 10"
+)
+```
+
+Do not pass MCP `row_limit`; put `LIMIT` in semantic SQL. Verify and reapply the
+preprocessor after a database reconnect. This path returns governed results but
+does not return the structured compiler's `PLAN_JSON` or durable handles.
+
 ## Check Model Readiness
 
 ```sql

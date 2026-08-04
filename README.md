@@ -90,6 +90,13 @@ The installed admin APIs are Exasol Lua scripts, so callers must use
 `EXECUTE SCRIPT SEMANTIC_ADMIN.<script>(...)`. Do not call them as scalar
 functions with `SELECT SEMANTIC_ADMIN.<script>(...)`.
 
+The official Exasol MCP Server can query published semantic views without a
+custom adapter: enable its read-query tool, activate
+`SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR` with `set_exasol_preprocessor`, verify
+the session setting, and run semantic SQL with `execute_exasol_query`. See
+[Exasol MCP Server integration](docs/mcp-server-integration.md) for setup,
+agent behavior, reconnect handling, and the structured-adapter boundary.
+
 ## A Concrete Example
 
 The included sales model starts with the physical sales tables already modeled
@@ -207,9 +214,10 @@ guard error instead of returning misleading placeholder data.
 The preprocessor can be enabled per session, through BI connection
 initialization, or as a database-wide operator setting. See
 [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md) for
-rollout and rollback guidance. Tools that cannot run `EXECUTE SCRIPT` should
-call `COMPILE_SQL` or `COMPILE_REQUEST_JSON` through a semantic adapter instead
-of querying the guarded view directly.
+rollout and rollback guidance. The official Exasol MCP Server can activate the
+same session preprocessor with `set_exasol_preprocessor`; tools without either
+script execution or preprocessor controls need database-wide activation or a
+semantic adapter.
 
 Modelers can inspect the same definitions without leaving SQL:
 
@@ -284,13 +292,13 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
 `COMPILE_SQL_DEBUG` is available when you explicitly want SQL compile logging in
 `SYS_SEMANTIC.QUERY_LOG`; the normal preprocessor path avoids hot-path logging.
 
-For agents connected through MCP or another tool layer, the adapter must expose
-semantic operations that can execute the database scripts. A generic
-SELECT-only SQL tool can still read `SEMANTIC_AGENT` and `SEMANTIC_CATALOG`
-views, but it cannot compile structured requests or enable the SQL
-preprocessor by itself. Database-wide preprocessor activation can mitigate that
-for simple generic MCP `SELECT` queries against published semantic views, but it
-does not fix MCP metadata listing gaps or add script execution support.
+For agents using the official Exasol MCP Server, the default preprocessor tools
+provide a direct semantic SQL path: list, set, and verify
+`SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR`, then query the published view with
+`execute_exasol_query`. A dedicated adapter is needed only for structured
+requests, plans, durable handles, explanations, or feedback. See the
+[MCP integration guide](docs/mcp-server-integration.md) for the exact workflow
+and reconnect and result-limit caveats.
 
 The repository includes two Codex-compatible agent skills:
 
@@ -398,6 +406,7 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
 
 - Usage
   - [Creating metrics](docs/creating-metrics.md)
+  - [Exasol MCP Server integration](docs/mcp-server-integration.md)
   - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
   - [Databricks metric views](docs/databricks-metric-views.md)
   - [Apache Ossie / OSI import/export](docs/osi-format.md)

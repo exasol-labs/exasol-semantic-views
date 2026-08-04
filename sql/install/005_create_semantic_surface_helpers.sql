@@ -123,7 +123,7 @@ query([[
 
 query("CREATE SCHEMA IF NOT EXISTS " .. quote_ident(model.published_schema))
 query("COMMENT ON SCHEMA " .. quote_ident(model.published_schema) .. " IS "
-    .. sql_string("Published semantic model schema for " .. tostring(model.name) .. ". Query semantic views with SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL or COMPILE_REQUEST_JSON."))
+    .. sql_string("Published semantic model schema for " .. tostring(model.name) .. ". Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON."))
 query("CREATE TABLE IF NOT EXISTS " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY") .. " (ENTRY_NAME VARCHAR(256), ENTRY_VALUE VARCHAR(2000000))")
 query("COMMENT ON TABLE " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY") .. " IS "
     .. sql_string("MCP-visible discovery table for semantic model " .. tostring(model.name)
@@ -135,7 +135,7 @@ query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOV
     .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('QUERY_ENTRYPOINT', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()')")
 query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
     .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('MCP_GUIDANCE', "
-    .. sql_string("Generic MCP tools may list this physical table even when they omit semantic views. Query SEMANTIC_AGENT.FIELDS_FOR_AGENT for fields and use database-wide preprocessing for SELECT queries against published semantic views.") .. ")")
+    .. sql_string("With the official Exasol MCP Server, call set_exasol_preprocessor for SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR, verify it with list_exasol_preprocessors, then query published semantic views with execute_exasol_query. Put LIMIT in semantic SQL instead of using MCP row_limit. Query SEMANTIC_AGENT.FIELDS_FOR_AGENT for fields.") .. ")")
 query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
     .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('FIELD_DISCOVERY_QUERY', "
     .. sql_string("SELECT FIELD_KIND, FIELD_NAME, DATA_TYPE, DESCRIPTION FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT WHERE MODEL_NAME = '" .. tostring(model.name) .. "' ORDER BY OBJECT_NAME, FIELD_KIND, FIELD_NAME") .. ")")
@@ -199,7 +199,7 @@ for _, object_row in ipairs(object_rows or {}) do
         .. " AS\nSELECT\n  " .. table.concat(select_parts, ",\n  ") .. "\nFROM DUAL\nCOMMENT IS "
         .. sql_string("Published semantic view for model " .. tostring(model.name)
             .. "." .. tostring(object_name)
-            .. ". Enable semantic SQL with EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL(), or use COMPILE_REQUEST_JSON."))
+            .. ". Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON."))
 
     output_rows[#output_rows + 1] = {
         model.name,

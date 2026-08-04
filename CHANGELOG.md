@@ -20,6 +20,18 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Official Exasol MCP Server integration
+
+- Added a user and autonomous-agent workflow for discovering, activating, and
+  verifying `SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR` through the official MCP
+  server before executing governed semantic SQL.
+- Documented server settings, reconnect behavior, view-discovery fallbacks, and
+  the requirement to put `LIMIT` in semantic SQL instead of using MCP
+  `row_limit`.
+- Published MCP guidance with each semantic model and updated the semantic
+  analyst skill to distinguish the direct MCP path from the optional structured
+  semantic adapter.
+
 #### Grain-aware aggregation Phase D2
 
 - Plan version 7 / physical-plan version 4 can replace one complete proven
