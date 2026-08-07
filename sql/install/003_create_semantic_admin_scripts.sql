@@ -12490,6 +12490,50 @@ local function identifiers_in_expression(expression)
     return identifiers
 end
 
+local AGGREGATE_FUNCTIONS = {
+    SUM = true, COUNT = true, AVG = true, MIN = true, MAX = true,
+}
+
+local function contains_aggregate_call(expression)
+    local tokens = tokenize(expression or "")
+    for index, token in ipairs(tokens) do
+        if token.kind == "word"
+                and AGGREGATE_FUNCTIONS[upper(token.text)]
+                and tokens[index + 1] ~= nil
+                and tokens[index + 1].text == "(" then
+            return true
+        end
+    end
+    return false
+end
+
+local function inline_ratio_parts(expression)
+    local text = tostring(expression or "")
+    local tokens = tokenize(text)
+    local depth = 0
+    local division = nil
+    local division_depth = nil
+    for _, token in ipairs(tokens) do
+        if token.text == "(" then
+            depth = depth + 1
+        elseif token.text == ")" then
+            depth = depth - 1
+        elseif token.text == "/" and (division_depth == nil or depth < division_depth) then
+            division = token
+            division_depth = depth
+        end
+    end
+    if division == nil then
+        return nil, nil
+    end
+    local numerator = trim(string.sub(text, 1, division.start_pos - 1))
+    local denominator = trim(string.sub(text, division.end_pos + 1))
+    if not contains_aggregate_call(numerator) or not contains_aggregate_call(denominator) then
+        return nil, nil
+    end
+    return numerator, denominator
+end
+
 local function validate_metric_shape(model, metric)
     if metric.metric_type == "RATIO" then
         local metric_input_count = 0
@@ -12498,8 +12542,9 @@ local function validate_metric_shape(model, metric)
                 metric_input_count = metric_input_count + 1
             end
         end
-        if metric_input_count < 2 then
-            error("SEMANTIC_DDL_070: RATIO metric " .. metric.name .. " must reference at least two aggregate metrics")
+        local numerator, denominator = inline_ratio_parts(metric.expression)
+        if metric_input_count < 2 and (numerator == nil or denominator == nil) then
+            error("SEMANTIC_DDL_070: RATIO metric " .. metric.name .. " must reference at least two aggregate metrics or divide two aggregate expressions")
         end
     elseif metric.metric_kind == "DISTINCT" then
         if missing(metric.distinct_key_expr) then
@@ -12524,12 +12569,28 @@ local function refresh_metric_inputs(model, metric_id, metric)
     query("DELETE FROM SYS_SEMANTIC.METRIC_INPUTS WHERE METRIC_ID = :metric_id", {metric_id = metric_id})
     query("DELETE FROM SYS_SEMANTIC.METRIC_FILTERS WHERE METRIC_ID = :metric_id", {metric_id = metric_id})
     local ordinal = 1
+    local ratio_numerator, ratio_denominator = inline_ratio_parts(metric.expression)
+    local numerator_identifiers = {}
+    local denominator_identifiers = {}
+    for _, identifier in ipairs(identifiers_in_expression(ratio_numerator)) do
+        numerator_identifiers[upper(identifier)] = true
+    end
+    for _, identifier in ipairs(identifiers_in_expression(ratio_denominator)) do
+        denominator_identifiers[upper(identifier)] = true
+    end
     for _, identifier in ipairs(identifiers_in_expression(metric.expression)) do
         local object_type = nil
         local object_id_value = object_id_by_name(model, "FACT", identifier)
         local input_role = "MEASURE"
         if object_id_value ~= nil then
             object_type = "FACT"
+            if metric.metric_type == "RATIO" then
+                if numerator_identifiers[upper(identifier)] then
+                    input_role = "NUMERATOR"
+                elseif denominator_identifiers[upper(identifier)] then
+                    input_role = "DENOMINATOR"
+                end
+            end
         else
             object_id_value = object_id_by_name(model, "METRIC", identifier)
             if object_id_value ~= nil then
@@ -14055,7 +14116,7 @@ function M.preprocess_sql(sql_text)
                 error_message = message,
             }
         end
-        return {status = "OK", generated_sql = "EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(" .. sql_string(text) .. ", FALSE)"}
+        return {status = "OK", generated_sql = "EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION_OR_FAIL(" .. sql_string(text) .. ", FALSE)"}
     elseif string.match(u, "^SHOW%s+SEMANTIC%s+VIEW%s+") then
         local model_name, object_name = parse_object_ref_from_command(text)
         if model_name == nil then
@@ -15120,6 +15181,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         parse_literal_list = parse_literal_list,
         parse_filter = parse_filter,
         aggregate_parts = aggregate_parts,
+        inline_ratio_parts = inline_ratio_parts,
         parse_definition = parse_definition,
         model_names_from_plan = model_names_from_plan,
         parse_databricks_yaml = parse_databricks_yaml,
@@ -15142,6 +15204,34 @@ RETURNS TABLE AS
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 
 local rows = semantic_definition.apply_semantic_definition(DEFINITION_SQL, DRY_RUN)
+
+exit(rows or {}, [[
+  STATUS VARCHAR(32),
+  ERROR_CODE VARCHAR(128),
+  MESSAGE VARCHAR(2000000),
+  NORMALIZED_JSON VARCHAR(2000000),
+  OPERATION_COUNT DECIMAL(18,0),
+  VALIDATION_RUN_ID DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION_OR_FAIL(
+  DEFINITION_SQL,
+  DRY_RUN
+)
+RETURNS TABLE AS
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+
+local rows = semantic_definition.apply_semantic_definition(DEFINITION_SQL, DRY_RUN)
+local first = rows ~= nil and rows[1] or nil
+if first ~= nil and first[1] == "ERROR" then
+    local code = first[2] or "SEMANTIC_DDL_999"
+    local message = tostring(first[3] or "Semantic definition apply failed.")
+    if string.find(message, code, 1, true) == nil then
+        message = code .. ": " .. message
+    end
+    error(message, 0)
+end
 
 exit(rows or {}, [[
   STATUS VARCHAR(32),

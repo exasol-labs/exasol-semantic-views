@@ -15,6 +15,18 @@ test("semantic definition parses aggregate structure", function()
     assert_branch("definition.aggregate", absent ~= nil, false)
 end)
 
+test("semantic definition recognizes inline aggregate ratios", function()
+    local numerator, denominator = api.inline_ratio_parts(
+        "SUM(line_revenue) / NULLIF(SUM(line_units), 0)")
+    assert_equal(numerator, "SUM(line_revenue)")
+    assert_equal(denominator, "NULLIF(SUM(line_units), 0)")
+
+    local invalid_numerator = api.inline_ratio_parts("line_revenue / SUM(line_units)")
+    local invalid_denominator = api.inline_ratio_parts("SUM(line_revenue) / 10")
+    assert_equal(invalid_numerator, nil)
+    assert_equal(invalid_denominator, nil)
+end)
+
 test("Databricks helpers parse table references filters and measures", function()
     local schema, object = api.dbx_table_ref("catalog.sales.orders")
     assert_equal(schema, "SALES")
@@ -435,7 +447,7 @@ test("semantic preprocessor covers authoring discovery and explain commands", fu
         ADD OR REPLACE METRIC revenue AS SUM(net_revenue)
         ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC]])
     assert_equal(definition.status, "OK")
-    assert_contains(definition.generated_sql, "APPLY_SEMANTIC_DEFINITION")
+    assert_contains(definition.generated_sql, "APPLY_SEMANTIC_DEFINITION_OR_FAIL")
     local invalid = preprocess_sql("ALTER SEMANTIC VIEW sales")
     assert_equal(invalid.status, "ERROR")
     local unchanged = preprocess_sql("SELECT 1")

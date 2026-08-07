@@ -164,9 +164,23 @@ Because this fallback passes Semantic SQL as a SQL string literal, any single
 quotes inside the definition must be doubled. Enabling Semantic SQL and running
 `ALTER SEMANTIC VIEW` directly avoids that string-literal escaping step.
 
+`RATIO` accepts either references to two aggregate metrics or a division whose
+numerator and denominator are aggregate expressions. For example:
+
+```sql
+METRIC avg_line_value
+  AS SUM(line_revenue) / SUM(line_units)
+  ON ENTITY order_line
+  RETURNS DECIMAL(18,2)
+  RATIO PUBLIC CERTIFIED
+```
+
 If an apply fails model validation, the admin runtime rejects the definition and
 restores the previous catalog state. Check
 `SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES` for the latest validation details.
+Semantic SQL statements also raise the apply error to the SQL client; direct
+calls to `APPLY_SEMANTIC_DEFINITION` return the same error as a structured
+`STATUS = 'ERROR'` result row.
 
 For single-metric edits, use:
 

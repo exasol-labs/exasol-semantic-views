@@ -109,6 +109,18 @@ ADD OR REPLACE METRIC bad_ratio
   RATIO PUBLIC"""
 
 
+INLINE_AGGREGATE_RATIO = """ALTER SEMANTIC VIEW sales.SALES
+REPLACE METRICS (
+  METRIC avg_line_value
+    AS SUM(net_revenue) / SUM(quantity)
+    ON ENTITY order_line
+    RETURNS DECIMAL(18,2)
+    FORMAT 'currency'
+    DISPLAY 'Average Line Value'
+    RATIO PUBLIC CERTIFIED
+)"""
+
+
 COMPOUND_AGGREGATE_METRIC = """ALTER SEMANTIC VIEW sales.SALES
 ADD OR REPLACE METRIC avg_order_value_probe
   AS SUM(net_revenue) / NULLIF(COUNT(DISTINCT order_id), 0)
@@ -245,10 +257,11 @@ def main() -> int:
                 "WHERE SCRIPT_SCHEMA = 'SEMANTIC_ADMIN' "
                 "AND SCRIPT_NAME IN ("
                 "'SEMANTIC_DEFINITION_RUNTIME', 'APPLY_SEMANTIC_DEFINITION', "
+                "'APPLY_SEMANTIC_DEFINITION_OR_FAIL', "
                 "'DESCRIBE_SEMANTIC_METRIC', 'EXPLAIN_SEMANTIC_METRIC', "
                 "'EXPORT_SEMANTIC_DEFINITION', 'ENABLE_SEMANTIC_SQL', 'DISABLE_SEMANTIC_SQL')",
             ),
-            7,
+            8,
         )
 
         dry_run = apply_definition(con, SEMANTIC_DEFINITION, True)
@@ -265,6 +278,23 @@ def main() -> int:
         assert_status_ok("semantic definition apply", applied)
         reapplied = apply_definition(con, SEMANTIC_DEFINITION, False)
         assert_status_ok("semantic definition idempotent apply", reapplied)
+
+        inline_ratio = apply_definition(con, INLINE_AGGREGATE_RATIO, False)
+        assert_status_ok("inline aggregate ratio apply", inline_ratio)
+        assert_equal(
+            "inline aggregate ratio lineage",
+            fetchall(
+                con,
+                "SELECT INPUT_ROLE, INPUT_OBJECT_TYPE, INPUT_OBJECT_NAME "
+                "FROM SEMANTIC_CATALOG.METRIC_LINEAGE "
+                "WHERE MODEL_NAME = 'sales' AND METRIC_NAME = 'avg_line_value' "
+                "ORDER BY ORDINAL_POSITION",
+            ),
+            [("NUMERATOR", "FACT", "net_revenue"), ("DENOMINATOR", "FACT", "quantity")],
+        )
+        cleanup_metrics(con, ["avg_line_value"])
+        restored = apply_definition(con, SEMANTIC_DEFINITION, False)
+        assert_status_ok("restore semantic definition after inline ratio", restored)
 
         assert_equal(
             "object fact and metric columns",
@@ -413,6 +443,12 @@ REPLACE METRICS (
 
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()")
         try:
+            assert_fails_with(
+                con,
+                "preprocessed semantic DDL surfaces apply errors",
+                INVALID_RATIO,
+                "SEMANTIC_DDL_070",
+            )
             assert_equal(
                 "preprocessor works after rejected add metric",
                 len(fetchall(
