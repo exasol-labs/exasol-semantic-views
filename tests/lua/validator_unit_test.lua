@@ -15,6 +15,22 @@ test("validator expression inspection ignores strings and permits qualified UDFs
     assert_true(not unsupported.PREDICT)
 end)
 
+test("validator accepts date truncation and ignores CAST target type parameters", function()
+    local supported = api.unsupported_functions(
+        "TRUNC(o.order_ts, 'MM') + CAST(YEAR(o.order_ts) AS VARCHAR(4)) || LPAD('8', 2, '0')")
+    assert_equal(next(supported), nil)
+
+    local decimal_cast = api.unsupported_functions("CAST(o.amount AS DECIMAL(18,2))")
+    assert_equal(next(decimal_cast), nil)
+
+    local invalid_constructor = api.unsupported_functions("VARCHAR(4)")
+    assert_true(invalid_constructor.VARCHAR)
+
+    local dependencies = api.dependency_tokens("TRUNC(order_ts, 'MM') || LPAD(month_no, 2, '0')")
+    assert_equal(dependencies.TRUNC, nil)
+    assert_equal(dependencies.LPAD, nil)
+end)
+
 test("validator extracts dependency identifiers without SQL words", function()
     local deps = api.dependency_tokens("gross_margin / NULLIF(total_revenue, 0)")
     assert_equal(deps.GROSS_MARGIN, "gross_margin")

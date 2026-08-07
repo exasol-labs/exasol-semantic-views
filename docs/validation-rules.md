@@ -54,7 +54,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_012` | error | Metric dependencies contain a cycle. |
 | `SEMANTIC_MODEL_013` | error | Dimension, fact, or filter expression uses an out-of-scope alias. |
 | `SEMANTIC_MODEL_014` | error | Metric base entity is missing. |
-| `SEMANTIC_MODEL_016` | error | Expression uses an unsupported MVP function. |
+| `SEMANTIC_MODEL_016` | error | Expression uses an unsupported function. Cast target types such as `VARCHAR(10)` are not interpreted as function calls; supported date bucketing includes `TRUNC` and `DATE_TRUNC`. |
 | `SEMANTIC_MODEL_017` | error | Expression references an unknown source column. |
 | `SEMANTIC_MODEL_020` | warning | Public metric is missing a description. |
 | `SEMANTIC_MODEL_021` | error | Certified synonym is ambiguous. |

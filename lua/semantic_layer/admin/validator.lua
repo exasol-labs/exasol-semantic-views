@@ -82,6 +82,7 @@ local SQL_WORDS = {
     INT = true,
     INTEGER = true,
     IS = true,
+    LPAD = true,
     MAX = true,
     MIN = true,
     MINUTE = true,
@@ -102,6 +103,7 @@ local SQL_WORDS = {
     THEN = true,
     TIMESTAMP = true,
     TRUE = true,
+    TRUNC = true,
     VARCHAR = true,
     WHEN = true,
     WHERE = true,
@@ -121,6 +123,7 @@ local ALLOWED_FUNCTIONS = {
     DAY = true,
     EXTRACT = true,
     FLOOR = true,
+    LPAD = true,
     MAX = true,
     MIN = true,
     MONTH = true,
@@ -129,7 +132,32 @@ local ALLOWED_FUNCTIONS = {
     SUM = true,
     TO_CHAR = true,
     TO_DATE = true,
+    TRUNC = true,
     YEAR = true,
+}
+
+local CAST_TARGET_TYPES = {
+    BIGINT = true,
+    BOOLEAN = true,
+    CHAR = true,
+    DATE = true,
+    DEC = true,
+    DECIMAL = true,
+    DOUBLE = true,
+    FLOAT = true,
+    GEOMETRY = true,
+    HASHTYPE = true,
+    INT = true,
+    INTEGER = true,
+    INTERVAL = true,
+    NUMBER = true,
+    NUMERIC = true,
+    REAL = true,
+    SMALLINT = true,
+    TIMESTAMP = true,
+    TINYINT = true,
+    VARCHAR = true,
+    VARCHAR2 = true,
 }
 
 local function missing(value)
@@ -580,19 +608,21 @@ local function unsupported_functions(expression)
         return found
     end
     local text = strip_string_literals(tostring(expression))
-    local qualified = schema_qualified_functions(expression)
-    for fn in string.gmatch(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%(") do
-        local normalized = upper(fn)
-        local schema_qualified = false
-        for qualified_name, _ in pairs(qualified) do
-            if string.match(qualified_name, "%." .. normalized .. "$") then
-                schema_qualified = true
-                break
-            end
+    local pos = 1
+    while true do
+        local start_pos, end_pos, fn = string.find(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%(", pos)
+        if start_pos == nil then
+            break
         end
-        if not schema_qualified and not ALLOWED_FUNCTIONS[normalized] then
+        local normalized = upper(fn)
+        local prefix = string.sub(text, 1, start_pos - 1)
+        local schema_qualified = string.match(prefix, "[A-Za-z_][A-Za-z0-9_]*%s*%.%s*$") ~= nil
+        local previous_word = string.match(prefix, "([A-Za-z_][A-Za-z0-9_]*)%s*$")
+        local cast_target = CAST_TARGET_TYPES[normalized] and upper(previous_word or "") == "AS"
+        if not schema_qualified and not cast_target and not ALLOWED_FUNCTIONS[normalized] then
             found[normalized] = true
         end
+        pos = end_pos + 1
     end
     return found
 end

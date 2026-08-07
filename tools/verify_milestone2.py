@@ -244,6 +244,28 @@ def main() -> int:
             "DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE DIMENSION_NAME = 'quarter_test'",
             "SEMANTIC_MODEL_016",
         )
+
+        execute(
+            con,
+            "INSERT INTO SYS_SEMANTIC.DIMENSIONS ("
+            "  MODEL_ID, VERSION_ID, DIMENSION_NAME, EXPRESSION, DATA_TYPE, ENTITY_ID, STATUS"
+            ") "
+            "SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, 'bug010_expression_test', "
+            "  'TO_CHAR(TRUNC(o.order_date, ''MM''), ''YYYY-MM'') || ''-'' || "
+            "LPAD(CAST(YEAR(o.order_date) AS VARCHAR(4)), 4, ''0'')', "
+            "  'VARCHAR(20)', "
+            "  (SELECT e.ENTITY_ID FROM SYS_SEMANTIC.ENTITIES e "
+            "   WHERE UPPER(e.ENTITY_NAME) = 'ORDER' "
+            "   AND e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID), "
+            "  'ACTIVE' "
+            "FROM SYS_SEMANTIC.MODELS m "
+            "WHERE m.MODEL_NAME = 'sales'",
+        )
+        try:
+            assert_no_errors("TRUNC and parameterized CAST target", validate(con))
+        finally:
+            execute(con, "DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE DIMENSION_NAME = 'bug010_expression_test'")
+            assert_no_errors("TRUNC and parameterized CAST target restored", validate(con))
     finally:
         con.close()
     return 0
