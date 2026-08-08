@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-modeler
-description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema inspection and autonomous metric derivation from physical tables, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration (agent instructions, verified queries, synonyms).
+description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema and catalog-comment inspection, autonomous metric derivation from physical tables, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration.
 ---
 
 # Exasol Semantic Modeler
@@ -15,8 +15,8 @@ propagates ambiguity into every answer.
 
 Prefer this order:
 
-1. Inspect the physical schema and identify entities, relationships, and
-   candidate facts.
+1. Inspect physical structure, table/view comments, and column comments; then
+   identify entities, relationships, and candidate facts.
 2. Create the model and register entities, relationships, and dimensions.
 3. Author metrics in order of dependency: additive first, then ratio/derived.
 4. Validate and inspect issues after every structural change.
@@ -66,6 +66,24 @@ FROM EXA_ALL_COLUMNS
 WHERE COLUMN_SCHEMA = 'MART'
 ORDER BY TABLE_NAME, ORDINAL_POSITION;
 ```
+
+Also inventory commented source views when they are in scope:
+
+```sql
+SELECT VIEW_NAME, VIEW_COMMENT
+FROM EXA_ALL_VIEWS
+WHERE VIEW_SCHEMA = 'MART'
+ORDER BY VIEW_NAME;
+```
+
+Treat comments as first-class business evidence before inferring meaning from
+names or samples. Use table/view comments to seed model, entity, grain, and
+semantic-object descriptions. Use column comments to seed fact and dimension
+descriptions and to detect units, currencies, time semantics, exclusions, and
+sensitivity. Preserve useful wording, but do not copy contradictory or stale
+comments blindly: verify grain, keys, cardinality, and formulas from constraints,
+profiles, and sample data. Surface conflicts for review instead of silently
+choosing one interpretation.
 
 Sample a few rows from each candidate table to understand actual values:
 
@@ -153,8 +171,9 @@ Build metrics in this order to satisfy dependency resolution:
 5. **WINDOW** (`LAG`, `RANK`, period-over-period) — derived from additive +
    time dimension.
 
-Propose names in `snake_case`. Write a business `COMMENT` for every metric —
-downstream agents depend on descriptions to resolve ambiguity.
+Propose names in `snake_case`. Write a business `COMMENT` for every metric.
+Reuse verified source-comment terminology and add aggregation, filter, unit,
+and exclusion semantics that are not explicit upstream.
 
 ### Step 7 — Validate and iterate
 
@@ -345,6 +364,25 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('<model>');
 
 `PUBLISH_MODEL` validates internally and aborts if any errors remain.
 Publishing creates the guarded views in `SEMANTIC_<MODEL>` schema.
+It also publishes model and semantic-object descriptions as schema/view
+comments. Field descriptions remain available through
+`SEMANTIC_AGENT.FIELDS_FOR_AGENT`, because Exasol does not support assigning
+independent comments to view columns. After publishing, verify both surfaces:
+
+```sql
+SELECT VIEW_NAME, VIEW_COMMENT
+FROM EXA_ALL_VIEWS
+WHERE VIEW_SCHEMA = 'SEMANTIC_<MODEL>';
+
+SELECT FIELD_KIND, FIELD_NAME, DESCRIPTION
+FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
+WHERE MODEL_NAME = '<model>' AND OBJECT_NAME = '<object>';
+```
+
+During maintenance, re-read source comments and compare them with semantic
+descriptions. Treat changed comments as drift requiring review; update the
+semantic catalog deliberately and republish rather than mutating generated
+view comments directly.
 
 ## Governance Metadata
 

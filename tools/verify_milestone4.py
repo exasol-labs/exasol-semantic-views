@@ -168,8 +168,25 @@ def main() -> int:
             "SELECT VIEW_COMMENT FROM SYS.EXA_ALL_VIEWS "
             "WHERE VIEW_SCHEMA = 'SEMANTIC_SALES' AND VIEW_NAME = 'SALES'",
         )[0][0]
+        assert_contains("published view semantic description", published_view_comment, "Sales metrics and dimensions")
         assert_contains("published view comment", published_view_comment, "ENABLE_SEMANTIC_SQL")
         assert_contains("published view MCP guidance", published_view_comment, "SEMANTIC_PREPROCESSOR")
+        published_schema_comment = fetchall(
+            con,
+            "SELECT SCHEMA_COMMENT FROM SYS.EXA_ALL_SCHEMAS WHERE SCHEMA_NAME = 'SEMANTIC_SALES'",
+        )[0][0]
+        assert_contains("published schema semantic description", published_schema_comment, "Certified semantic sales model")
+        model_description = fetchall(
+            con,
+            "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY WHERE ENTRY_NAME = 'MODEL_DESCRIPTION'",
+        )[0][0]
+        assert_equal("published discovery model description", model_description, "Certified semantic sales model")
+        object_description = fetchall(
+            con,
+            "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY "
+            "WHERE ENTRY_NAME = 'SEMANTIC_OBJECT_DESCRIPTION'",
+        )[0][0]
+        assert_contains("published discovery object description", object_description, "Sales metrics and dimensions")
         mcp_guidance = fetchall(
             con,
             "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY WHERE ENTRY_NAME = 'MCP_GUIDANCE'",

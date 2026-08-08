@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-analyst
-description: Use when an autonomous agent needs to answer business questions through an existing Exasol Semantic Views model, including through the official Exasol MCP Server. Covers MCP preprocessor activation, metric and dimension discovery, compatibility checking, structured request compilation, semantic SQL, result execution, plan explanation, and feedback capture. Assumes the semantic model is already built and published.
+description: Use when an autonomous agent needs to answer business questions through an existing Exasol Semantic Views model, including through the official Exasol MCP Server. Covers comment-aware semantic discovery, metric and dimension descriptions, compatibility checking, structured request compilation, semantic SQL, result execution, plan explanation, and feedback capture. Assumes the model is published.
 ---
 
 # Exasol Semantic Analyst
@@ -82,7 +82,7 @@ ORDER BY MODEL_NAME;
 **Available objects in a model:**
 
 ```sql
-SELECT OBJECT_NAME, ROOT_ENTITY_NAME, QUERY_MODES
+SELECT OBJECT_NAME, ROOT_ENTITY_NAME, DESCRIPTION, QUERY_MODES
 FROM SEMANTIC_AGENT.OBJECTS_FOR_AGENT
 WHERE MODEL_NAME = '<model>'
 ORDER BY OBJECT_NAME;
@@ -92,12 +92,17 @@ ORDER BY OBJECT_NAME;
 
 ```sql
 SELECT FIELD_KIND, FIELD_NAME, DISPLAY_NAME, DATA_TYPE,
-       FILTER_EXPRESSION, FORMAT_HINT, IS_CERTIFIED
+       DESCRIPTION, FILTER_EXPRESSION, FORMAT_HINT, IS_CERTIFIED
 FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
 WHERE MODEL_NAME = '<model>'
   AND OBJECT_NAME = '<object>'
 ORDER BY FIELD_KIND, FIELD_NAME;
 ```
+
+Use descriptions before guessing from names. If `SEMANTIC_AGENT` discovery is
+unavailable, read `SCHEMA_COMMENT` and `VIEW_COMMENT` from `EXA_ALL_SCHEMAS`
+and `EXA_ALL_VIEWS` as a coarse fallback. Do not treat published view comments
+as a replacement for field-level descriptions or governance instructions.
 
 **Compiler contract (accepted keys, operators, handle types):**
 

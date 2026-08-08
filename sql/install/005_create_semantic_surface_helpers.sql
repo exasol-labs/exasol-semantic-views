@@ -60,6 +60,41 @@ local function sql_string(value)
     return "'" .. text .. "'"
 end
 
+local function utf8_prefix(value, max_bytes)
+    local text = tostring(value or "")
+    if #text <= max_bytes then
+        return text
+    end
+    local content_limit = max_bytes - 3
+    local index = 1
+    local last = 0
+    while index <= #text do
+        local byte = string.byte(text, index)
+        local width = 1
+        if byte >= 240 then
+            width = 4
+        elseif byte >= 224 then
+            width = 3
+        elseif byte >= 192 then
+            width = 2
+        end
+        if index + width - 1 > content_limit then
+            break
+        end
+        last = index + width - 1
+        index = index + width
+    end
+    return string.sub(text, 1, last) .. "..."
+end
+
+local function semantic_comment(summary, guidance)
+    local text = trim(summary)
+    if not missing(guidance) then
+        text = text .. " " .. trim(guidance)
+    end
+    return utf8_prefix(text, 2000)
+end
+
 local function safe_data_type(data_type)
     local text = trim(data_type)
     if text == "" then
@@ -81,7 +116,7 @@ end
 
 local requested_model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local model_rows = query([[
-    SELECT MODEL_ID, MODEL_NAME, ACTIVE_VERSION_ID AS VERSION_ID, PUBLISHED_SCHEMA
+    SELECT MODEL_ID, MODEL_NAME, ACTIVE_VERSION_ID AS VERSION_ID, PUBLISHED_SCHEMA, DESCRIPTION
     FROM SYS_SEMANTIC.MODELS
     WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
 ]], {model_name = requested_model_name})
@@ -94,6 +129,7 @@ local model = {
     name = row_value(model_rows[1], "MODEL_NAME", 2),
     version_id = row_value(model_rows[1], "VERSION_ID", 3),
     published_schema = row_value(model_rows[1], "PUBLISHED_SCHEMA", 4),
+    description = row_value(model_rows[1], "DESCRIPTION", 5),
 }
 if missing(model.version_id) then
     error("SEMANTIC_SURFACE_011: model has no active version: " .. tostring(model.name))
@@ -123,7 +159,10 @@ query([[
 
 query("CREATE SCHEMA IF NOT EXISTS " .. quote_ident(model.published_schema))
 query("COMMENT ON SCHEMA " .. quote_ident(model.published_schema) .. " IS "
-    .. sql_string("Published semantic model schema for " .. tostring(model.name) .. ". Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON."))
+    .. sql_string(semantic_comment(
+        "Published semantic model " .. tostring(model.name)
+            .. (missing(model.description) and "." or ": " .. tostring(model.description) .. "."),
+        "Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON.")))
 query("CREATE TABLE IF NOT EXISTS " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY") .. " (ENTRY_NAME VARCHAR(256), ENTRY_VALUE VARCHAR(2000000))")
 query("COMMENT ON TABLE " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY") .. " IS "
     .. sql_string("MCP-visible discovery table for semantic model " .. tostring(model.name)
@@ -131,6 +170,8 @@ query("COMMENT ON TABLE " .. quote_qualified(model.published_schema, "SEMANTIC_D
 query("DELETE FROM " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY"))
 query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
     .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('MODEL_NAME', " .. sql_string(model.name) .. ")")
+query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
+    .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('MODEL_DESCRIPTION', " .. sql_string(model.description) .. ")")
 query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
     .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('QUERY_ENTRYPOINT', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()')")
 query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
@@ -144,7 +185,7 @@ query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOV
     .. sql_string("SELECT METRIC_NAME, DIMENSION_NAME, IS_VALID, REASON_CODE FROM SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT WHERE MODEL_NAME = '" .. tostring(model.name) .. "' ORDER BY OBJECT_NAME, METRIC_NAME, DIMENSION_NAME") .. ")")
 
 local object_rows = query([[
-    SELECT OBJECT_ID, OBJECT_NAME
+    SELECT OBJECT_ID, OBJECT_NAME, DESCRIPTION
     FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
     WHERE MODEL_ID = :model_id
       AND VERSION_ID = :version_id
@@ -156,9 +197,14 @@ local output_rows = {}
 for _, object_row in ipairs(object_rows or {}) do
     local object_id = row_value(object_row, "OBJECT_ID", 1)
     local object_name = row_value(object_row, "OBJECT_NAME", 2)
+    local object_description = row_value(object_row, "DESCRIPTION", 3)
     query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
         .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('SEMANTIC_OBJECT', "
         .. sql_string(model.published_schema .. "." .. tostring(object_name)) .. ")")
+    query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
+        .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('SEMANTIC_OBJECT_DESCRIPTION', "
+        .. sql_string(model.published_schema .. "." .. tostring(object_name) .. ": "
+            .. tostring(object_description or "")) .. ")")
     query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
         .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('SEMANTIC_SELECT_EXAMPLE', "
         .. sql_string("SELECT * FROM " .. model.published_schema .. "." .. tostring(object_name) .. " LIMIT 10") .. ")")
@@ -197,9 +243,10 @@ for _, object_row in ipairs(object_rows or {}) do
 
     query("CREATE OR REPLACE VIEW " .. quote_qualified(model.published_schema, object_name)
         .. " AS\nSELECT\n  " .. table.concat(select_parts, ",\n  ") .. "\nFROM DUAL\nCOMMENT IS "
-        .. sql_string("Published semantic view for model " .. tostring(model.name)
-            .. "." .. tostring(object_name)
-            .. ". Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON."))
+        .. sql_string(semantic_comment(
+            "Semantic object " .. tostring(model.name) .. "." .. tostring(object_name)
+                .. (missing(object_description) and "." or ": " .. tostring(object_description) .. "."),
+            "Field descriptions are in SEMANTIC_AGENT.FIELDS_FOR_AGENT. Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON.")))
 
     output_rows[#output_rows + 1] = {
         model.name,

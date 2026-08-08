@@ -1,6 +1,6 @@
 interface:
   display_name: "Exasol Semantic Analyst"
   short_description: "Run governed analytics through SQL or Exasol MCP"
-  default_prompt: "Use $exasol-semantic-analyst to discover governed metrics and answer a business question through structured compilation or the official Exasol MCP Server."
+  default_prompt: "Use $exasol-semantic-analyst to discover governed descriptions and metrics, then answer a business question through structured compilation or the official Exasol MCP Server."
 policy:
   allow_implicit_invocation: true

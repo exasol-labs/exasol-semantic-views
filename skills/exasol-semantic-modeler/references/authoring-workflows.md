@@ -13,11 +13,25 @@ ORDER BY TABLE_NAME;
 ```
 
 ```sql
+SELECT VIEW_NAME, VIEW_COMMENT
+FROM EXA_ALL_VIEWS
+WHERE VIEW_SCHEMA = 'MART'
+ORDER BY VIEW_NAME;
+```
+
+```sql
 SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, NULLABLE, COLUMN_COMMENT
 FROM EXA_ALL_COLUMNS
 WHERE COLUMN_SCHEMA = 'MART'
 ORDER BY TABLE_NAME, ORDINAL_POSITION;
 ```
+
+Read non-null comments before sampling. Carry verified table/view meaning into
+model, entity, grain, and semantic-object descriptions; carry verified column
+meaning into fact and dimension descriptions. Enrich rather than merely copy:
+record units, aggregation behavior, filters, exclusions, and sensitivity when
+the source comment omits them. If comments conflict with data or constraints,
+flag the conflict for review.
 
 To find likely foreign key columns (columns whose names end in `_ID` or `_KEY`
 and appear in more than one table):
@@ -360,6 +374,23 @@ Publish when clean:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales');
+```
+
+Verify that semantic context is visible after publication:
+
+```sql
+SELECT SCHEMA_NAME, SCHEMA_COMMENT
+FROM EXA_ALL_SCHEMAS
+WHERE SCHEMA_NAME = 'SEMANTIC_SALES';
+
+SELECT VIEW_NAME, VIEW_COMMENT
+FROM EXA_ALL_VIEWS
+WHERE VIEW_SCHEMA = 'SEMANTIC_SALES';
+
+SELECT FIELD_KIND, FIELD_NAME, DESCRIPTION
+FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
+WHERE MODEL_NAME = 'sales' AND OBJECT_NAME = 'SALES'
+ORDER BY FIELD_KIND, FIELD_NAME;
 ```
 
 ## Add Agent Instructions

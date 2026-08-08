@@ -53,7 +53,7 @@ WHERE MODEL_NAME = 'sales';
 
 ```sql
 SELECT FIELD_KIND, FIELD_NAME, DISPLAY_NAME, DATA_TYPE,
-       FILTER_EXPRESSION, FORMAT_HINT, IS_CERTIFIED
+       DESCRIPTION, FILTER_EXPRESSION, FORMAT_HINT, IS_CERTIFIED
 FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
 WHERE MODEL_NAME = 'sales'
   AND OBJECT_NAME = 'SALES'
@@ -62,6 +62,18 @@ ORDER BY FIELD_KIND, FIELD_NAME;
 
 `FILTER_EXPRESSION` is non-null for filtered metrics — it shows the semantic
 filter that is always applied (e.g. `order_status = 'COMPLETE'`).
+Use `DESCRIPTION` to resolve business meaning before relying on field names.
+
+When agent views are unavailable, use published comments for coarse discovery:
+
+```sql
+SELECT VIEW_NAME, VIEW_COMMENT
+FROM EXA_ALL_VIEWS
+WHERE VIEW_SCHEMA = 'SEMANTIC_SALES';
+```
+
+Return to `FIELDS_FOR_AGENT` when possible; view comments describe objects, not
+individual field semantics.
 
 ## Get Business Context
 
