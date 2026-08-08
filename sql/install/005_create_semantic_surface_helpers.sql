@@ -213,7 +213,8 @@ for _, object_row in ipairs(object_rows or {}) do
           oc.COLUMN_NAME,
           oc.COLUMN_KIND,
           COALESCE(d.DATA_TYPE, f.DATA_TYPE, mt.DATA_TYPE) AS DATA_TYPE,
-          oc.ORDINAL_POSITION
+          oc.ORDINAL_POSITION,
+          COALESCE(d.DESCRIPTION, f.DESCRIPTION, mt.DESCRIPTION) AS DESCRIPTION
         FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
         LEFT JOIN SYS_SEMANTIC.DIMENSIONS d
           ON oc.COLUMN_KIND = 'DIMENSION'
@@ -233,20 +234,28 @@ for _, object_row in ipairs(object_rows or {}) do
         error("SEMANTIC_SURFACE_014: semantic object has no visible columns: " .. tostring(object_name))
     end
 
+    local column_declarations = {}
     local select_parts = {}
     for _, column_row in ipairs(column_rows) do
         local column_name = row_value(column_row, "COLUMN_NAME", 1)
         local data_type = safe_data_type(row_value(column_row, "DATA_TYPE", 3))
+        local description = row_value(column_row, "DESCRIPTION", 5)
+        local declaration = quote_ident(upper(column_name))
+        if not missing(description) then
+            declaration = declaration .. " COMMENT IS " .. sql_string(utf8_prefix(description, 2000))
+        end
+        column_declarations[#column_declarations + 1] = declaration
         select_parts[#select_parts + 1] = "CAST(SEMANTIC_ADMIN.SEMANTIC_GUARD() AS "
             .. data_type .. ") AS " .. quote_ident(upper(column_name))
     end
 
     query("CREATE OR REPLACE VIEW " .. quote_qualified(model.published_schema, object_name)
-        .. " AS\nSELECT\n  " .. table.concat(select_parts, ",\n  ") .. "\nFROM DUAL\nCOMMENT IS "
+        .. " (\n  " .. table.concat(column_declarations, ",\n  ") .. "\n) AS\nSELECT\n  "
+        .. table.concat(select_parts, ",\n  ") .. "\nFROM DUAL\nCOMMENT IS "
         .. sql_string(semantic_comment(
             "Semantic object " .. tostring(model.name) .. "." .. tostring(object_name)
                 .. (missing(object_description) and "." or ": " .. tostring(object_description) .. "."),
-            "Field descriptions are in SEMANTIC_AGENT.FIELDS_FOR_AGENT. Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON.")))
+            "Field descriptions are published as column comments and in SEMANTIC_AGENT.FIELDS_FOR_AGENT. Official Exasol MCP clients can set SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR; SQL sessions can call SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL; structured adapters can use COMPILE_REQUEST_JSON.")))
 
     output_rows[#output_rows + 1] = {
         model.name,

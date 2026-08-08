@@ -204,6 +204,21 @@ def main() -> int:
             ),
             2,
         )
+        assert_equal(
+            "published view column comments",
+            fetchall(
+                con,
+                "SELECT COLUMN_NAME, COLUMN_COMMENT FROM SYS.EXA_ALL_COLUMNS "
+                "WHERE COLUMN_SCHEMA = 'SEMANTIC_SALES' "
+                "AND COLUMN_TABLE = 'SALES' "
+                "AND COLUMN_NAME IN ('CUSTOMER_REGION', 'TOTAL_REVENUE') "
+                "ORDER BY COLUMN_NAME",
+            ),
+            [
+                ("CUSTOMER_REGION", "Commercial region assigned to the customer"),
+                ("TOTAL_REVENUE", "Net recognized revenue excluding tax"),
+            ],
+        )
 
         assert_fails_with(
             con,

@@ -365,14 +365,20 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('<model>');
 `PUBLISH_MODEL` validates internally and aborts if any errors remain.
 Publishing creates the guarded views in `SEMANTIC_<MODEL>` schema.
 It also publishes model and semantic-object descriptions as schema/view
-comments. Field descriptions remain available through
-`SEMANTIC_AGENT.FIELDS_FOR_AGENT`, because Exasol does not support assigning
-independent comments to view columns. After publishing, verify both surfaces:
+comments and field descriptions as inline view-column comments. Exasol does
+not support assigning view-column comments independently after creation, so
+update semantic descriptions and republish instead. Keep using
+`SEMANTIC_AGENT.FIELDS_FOR_AGENT` as the richer field discovery surface. After
+publishing, verify both catalog comments and agent metadata:
 
 ```sql
 SELECT VIEW_NAME, VIEW_COMMENT
 FROM EXA_ALL_VIEWS
 WHERE VIEW_SCHEMA = 'SEMANTIC_<MODEL>';
+
+SELECT COLUMN_TABLE, COLUMN_NAME, COLUMN_COMMENT
+FROM EXA_ALL_COLUMNS
+WHERE COLUMN_SCHEMA = 'SEMANTIC_<MODEL>';
 
 SELECT FIELD_KIND, FIELD_NAME, DESCRIPTION
 FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
