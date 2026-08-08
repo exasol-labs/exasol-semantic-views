@@ -149,6 +149,25 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
 );
 ```
 
+## Rebuild an Existing Model
+
+Bootstrap scripts are not idempotent. Prefer incremental add/replace operations
+for maintenance. For an intentional full rebuild, inspect and export anything
+that must survive, then remove only the target model:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL();
+EXPORT SEMANTIC MODEL sales;
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('sales');
+```
+
+The drop removes model-owned metadata and its exclusively referenced published
+schema, but leaves physical source schemas such as `MART` intact. Re-run
+`CREATE_MODEL` and the remaining bootstrap steps only after `DROP_MODEL`
+succeeds. Do not use installer `--reset` for a single-model rebuild; reset is a
+database-wide extension reinstall that removes unrelated semantic models too.
+
 ## Declare Grain Proofs
 
 Declare each unique key before its columns. Composite key columns must use

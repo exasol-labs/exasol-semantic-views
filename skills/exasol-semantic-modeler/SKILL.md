@@ -367,6 +367,31 @@ previous to succeed.
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
 script syntax.
 
+## Iterating on an Existing Model
+
+Do not rerun the bootstrap sequence against an existing model: `CREATE_MODEL`
+and structural `ADD_*` calls reject duplicate names. Inspect the current model
+first and choose one path:
+
+- For incremental maintenance, export or inspect the model, apply supported
+  add/replace operations, validate, and republish.
+- For a full rebuild, export any definition or history that must be retained,
+  obtain explicit confirmation, then drop only that model:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('<model>');
+```
+
+`DROP_MODEL` deletes the model's catalog, validation, cache, query-log,
+governance, feedback, and materialization metadata. It also drops the published
+schema when no other model references it and it is not a protected managed
+schema. It does not drop physical source schemas or tables. After it succeeds,
+run the bootstrap sequence from step 1.
+
+Use `tools/install.py --reset` only to reinstall the entire extension. It drops
+all catalogued published-model schemas and all fixed managed schemas, affecting
+unrelated models as well.
+
 ## Databricks UCMV Import
 
 When migrating a Databricks Unity Catalog Metric View, use

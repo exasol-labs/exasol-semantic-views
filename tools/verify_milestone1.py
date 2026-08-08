@@ -45,6 +45,7 @@ EXPECTED_TABLES = {
 
 EXPECTED_SCRIPTS = {
     "CREATE_MODEL",
+    "DROP_MODEL",
     "ADD_ENTITY",
     "ADD_SEMANTIC_OBJECT",
     "CREATE_SEMANTIC_OBJECT",
@@ -313,6 +314,54 @@ def main() -> int:
             "'order_id', NULL, 1)"
         )
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
+
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL("
+            "'drop_model_probe', 'SEMANTIC_DROP_MODEL_PROBE', "
+            "'DROP_MODEL verification fixture', NULL)"
+        )
+        con.execute("CREATE SCHEMA SEMANTIC_DROP_MODEL_PROBE")
+        probe_model_id = scalar(
+            con,
+            "SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS "
+            "WHERE MODEL_NAME = 'drop_model_probe'",
+        )
+        con.execute(
+            "INSERT INTO SYS_SEMANTIC.QUERY_LOG (MODEL_ID, STATUS) "
+            f"VALUES ({probe_model_id}, 'OK')"
+        )
+        drop_rows = con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('drop_model_probe')"
+        ).fetchall()
+        if not drop_rows or drop_rows[0][2] is not True:
+            raise AssertionError(f"DROP_MODEL did not report schema removal: {drop_rows!r}")
+        assert_equal(
+            "DROP_MODEL catalog cleanup",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.MODELS "
+                "WHERE MODEL_NAME = 'drop_model_probe'",
+            ),
+            0,
+        )
+        assert_equal(
+            "DROP_MODEL log cleanup",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.QUERY_LOG "
+                f"WHERE MODEL_ID = {probe_model_id}",
+            ),
+            0,
+        )
+        assert_equal(
+            "DROP_MODEL schema cleanup",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS.EXA_ALL_SCHEMAS "
+                "WHERE SCHEMA_NAME = 'SEMANTIC_DROP_MODEL_PROBE'",
+            ),
+            0,
+        )
     finally:
         con.close()
     return 0

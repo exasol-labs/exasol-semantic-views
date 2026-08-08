@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Regression tests for installer reset schema discovery."""
+
+from __future__ import annotations
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("semantic_install", ROOT / "tools/install.py")
+INSTALL = importlib.util.module_from_spec(SPEC)  # type: ignore[arg-type]
+SPEC.loader.exec_module(INSTALL)  # type: ignore[union-attr]
+
+
+class Result:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchall(self):
+        return self.rows
+
+
+class Connection:
+    def __init__(self, catalog_exists=True, catalog_broken=False):
+        self.catalog_exists = catalog_exists
+        self.catalog_broken = catalog_broken
+        self.sql = []
+
+    def execute(self, sql):
+        self.sql.append(sql)
+        if "EXA_ALL_VIEWS" in sql:
+            return Result([(1 if self.catalog_exists else 0,)])
+        if "SEMANTIC_CATALOG.MODELS" in sql:
+            if self.catalog_broken:
+                raise RuntimeError("catalog unavailable")
+            return Result([
+                ("SEMANTIC_ECOMMERCE",),
+                ("semantic_sales",),
+                (None,),
+            ])
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class InstallerResetTest(unittest.TestCase):
+    def test_reset_discovers_non_example_published_schemas(self):
+        statements = INSTALL.reset_statements(Connection())
+        self.assertEqual(
+            'DROP SCHEMA IF EXISTS "SEMANTIC_ECOMMERCE" CASCADE',
+            statements[0],
+        )
+        self.assertEqual(1, sum("SEMANTIC_SALES" in sql for sql in statements))
+
+    def test_reset_without_catalog_uses_fixed_managed_schemas(self):
+        statements = INSTALL.reset_statements(Connection(catalog_exists=False))
+        self.assertEqual(INSTALL.RESET_STATEMENTS, statements)
+
+    def test_reset_recovers_from_broken_catalog(self):
+        statements = INSTALL.reset_statements(Connection(catalog_broken=True))
+        self.assertEqual(INSTALL.RESET_STATEMENTS, statements)
+
+    def test_identifier_quoting(self):
+        self.assertEqual('"A""B"', INSTALL.quote_ident('A"B'))
+
+
+if __name__ == "__main__":
+    unittest.main()

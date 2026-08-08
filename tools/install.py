@@ -53,6 +53,15 @@ RESET_STATEMENTS = [
     "DROP SCHEMA IF EXISTS MART CASCADE",
 ]
 
+RESET_SCHEMA_NAMES = {
+    "SEMANTIC_SALES",
+    "SEMANTIC_AGENT",
+    "SEMANTIC_CATALOG",
+    "SEMANTIC_ADMIN",
+    "SYS_SEMANTIC",
+    "MART",
+}
+
 
 # ── output helpers ────────────────────────────────────────────────────────────
 
@@ -132,6 +141,39 @@ def split_exasol_sql(text: str) -> list[str]:
     if statement:
         statements.append(statement)
     return statements
+
+
+def quote_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def discover_published_schemas(con: object) -> list[str]:
+    try:
+        rows = con.execute(  # type: ignore[union-attr]
+            "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS "
+            "WHERE VIEW_SCHEMA = 'SEMANTIC_CATALOG' AND VIEW_NAME = 'MODELS'"
+        ).fetchall()
+        if not rows or int(rows[0][0]) == 0:
+            return []
+        rows = con.execute(  # type: ignore[union-attr]
+            "SELECT DISTINCT PUBLISHED_SCHEMA FROM SEMANTIC_CATALOG.MODELS "
+            "WHERE PUBLISHED_SCHEMA IS NOT NULL ORDER BY PUBLISHED_SCHEMA"
+        ).fetchall()
+    except Exception:
+        # A reset must still recover a partially installed or damaged catalog.
+        return []
+    return [str(row[0]) for row in rows if row and row[0]]
+
+
+def reset_statements(con: object) -> list[str]:
+    dynamic = []
+    seen = set(RESET_SCHEMA_NAMES)
+    for schema_name in discover_published_schemas(con):
+        normalized = schema_name.upper()
+        if normalized not in seen:
+            dynamic.append(f"DROP SCHEMA IF EXISTS {quote_ident(schema_name)} CASCADE")
+            seen.add(normalized)
+    return dynamic + RESET_STATEMENTS
 
 
 # ── core steps ────────────────────────────────────────────────────────────────
@@ -281,7 +323,7 @@ def main() -> int:
     if args.reset:
         step += 1
         print(f"\n[{step}/{total_steps}] Resetting all managed schemas", end="  ", flush=True)
-        for stmt in RESET_STATEMENTS:
+        for stmt in reset_statements(con):
             con.execute(stmt)
         print(green("done"))
 
