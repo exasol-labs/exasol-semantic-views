@@ -191,7 +191,7 @@ local function discovery_query(sql)
     elseif contains(sql, "FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT") then
         return {{"DEFINITION", "Use recognized revenue"}}
     elseif contains(sql, "FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT") then
-        return {{"top_regions", "Top regions by revenue"}}
+        return {{"top_regions", "Top regions by revenue", '{"metrics":["total_revenue"]}'}}
     end
     error("unexpected discovery SQL: " .. tostring(sql))
 end
@@ -214,6 +214,8 @@ test("agent glossary supports structured and semantic SQL modes", function()
         assert_contains(structured[1][4], "Use COMPILE_REQUEST_JSON")
         assert_contains(structured[1][4], "Instructions:")
         assert_contains(structured[1][4], "Verified examples:")
+        assert_contains(structured[1][4], 'Request JSON: {"metrics":["total_revenue"]}')
+        assert_contains(structured[1][5], '"request_json":"{\\"metrics\\":[\\"total_revenue\\"]}"')
         assert_branch("agent.glossary.semantic_sql", structured[1][3] == "SEMANTIC_SQL", false)
 
         local semantic = get_business_glossary("sales", "SALES", "semantic_sql")

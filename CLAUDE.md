@@ -105,9 +105,12 @@ Key functions to know when modifying the compiler:
 
 **Critical invariant:** `validator.lua:find_path` and `compiler:find_path` must use identical join-path logic. If they diverge, `VALID_COMBINATIONS_FOR_AGENT` will report IS_VALID=True for combinations that the compiler rejects at runtime (BUG-003 in `docs/known-issues.md`).
 
-### All SEMANTIC_ADMIN Scripts Are TABLE Scripts
+### Call SEMANTIC_ADMIN Scripts with EXECUTE SCRIPT
 
-Every `SEMANTIC_ADMIN` script returns a result set. Always call with `EXECUTE SCRIPT`, never `SELECT`:
+Always call `SEMANTIC_ADMIN` scripts with `EXECUTE SCRIPT`, never `SELECT`.
+Many scripts return a result set, but some mutation scripts, including
+`ADD_ENTITY`, `ADD_SEMANTIC_OBJECT`, and `ADD_RELATIONSHIP`, complete without
+returning rows:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON('<json>');

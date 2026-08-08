@@ -112,6 +112,13 @@ HAVING COUNT(DISTINCT COLUMN_TABLE) > 1
 ORDER BY TABLE_COUNT DESC, COLUMN_NAME;
 ```
 
+This query produces candidates, not a relationship list. Prefer one canonical
+path between two entities. Do not add a direct edge for a denormalized foreign
+key when an existing path already expresses the same business relationship;
+parallel paths can make metric-to-dimension compilation ambiguous. Keep a
+shortcut only when it has distinct role semantics and path selection remains
+unambiguous.
+
 ## Register Entities
 
 ```sql
@@ -486,6 +493,10 @@ ADD OR REPLACE METRIC gross_margin_pct
 Use this path when the source model is a Databricks Unity Catalog Metric View
 YAML. Dry-run first to inspect `GENERATED_DDL` and `DIAGNOSTICS_JSON`:
 
+Do not transfer Boolean conventions between APIs:
+`APPLY_SEMANTIC_DEFINITION(..., TRUE)` is a dry-run (`DRY_RUN`), whereas
+`IMPORT_DATABRICKS_METRIC_VIEW(..., FALSE)` is a dry-run (`APPLY_IMPORT`).
+
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW(
   '<metric view YAML>',
@@ -622,7 +633,15 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
   'sales', 'METRIC', 'gross_margin_pct', 'margin rate', 'MANUAL'
 );
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
+  'sales', 'DIMENSION', 'customer_region', 'region', 'MANUAL'
+);
 ```
+
+The object type must match the named object's catalog type. Valid values are
+`SEMANTIC_OBJECT`, `ENTITY`, `DIMENSION`, `FACT`, and `METRIC`; passing
+`METRIC` for `customer_region`, for example, searches only metrics and fails.
 
 ## Introspect the Model
 

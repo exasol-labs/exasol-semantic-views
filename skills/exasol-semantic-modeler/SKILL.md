@@ -209,6 +209,14 @@ types. These are join columns. Common patterns:
 - A column named `CUSTOMER_ID` in `ORDERS` matching `CUSTOMER_ID` in
   `CUSTOMERS` → many-to-one from order to customer.
 
+Do not register every matching column as a relationship. Choose one canonical
+path between entities and treat denormalized foreign-key copies as evidence,
+not extra joins. For example, if `order_line -> order -> customer` is the
+canonical path, do not also add `order_line -> customer` merely because the
+line table repeats `CUSTOMER_ID`; multiple paths make metric-to-dimension joins
+ambiguous. Add a shortcut only when it represents distinct business semantics,
+name that role explicitly, and verify the compiler selects an unambiguous path.
+
 Determine cardinality:
 - Fact-to-dimension join: almost always `MANY_TO_ONE` (many transactions per
   customer, many lines per order).
@@ -416,6 +424,11 @@ Unsupported or partial constructs return `DBX_IMPORT_*` diagnostics. Databricks
 SQL query compatibility (`MEASURE(metric)`, `agg(metric)`, `GROUP BY ALL`) is
 handled by the semantic SQL compiler/preprocessor after publication.
 
+**Boolean safety warning:** these APIs have opposite final-argument semantics.
+`APPLY_SEMANTIC_DEFINITION(..., TRUE)` is a dry-run because the parameter is
+`DRY_RUN`; `IMPORT_DATABRICKS_METRIC_VIEW(..., FALSE)` is a dry-run because the
+parameter is `APPLY_IMPORT`. Never reuse one API's safe value for the other.
+
 ## Entity and Relationship Management
 
 Register entities with `ADD_ENTITY`:
@@ -603,6 +616,10 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
   '<model>', '<object_type>', '<canonical_name>', '<synonym>', '<source>'
 );
 ```
+
+`<object_type>` must match the canonical object's catalog type exactly:
+`SEMANTIC_OBJECT`, `ENTITY`, `DIMENSION`, `FACT`, or `METRIC`. For example,
+use `DIMENSION` rather than `METRIC` when adding a synonym for a dimension.
 
 ## Introspection
 

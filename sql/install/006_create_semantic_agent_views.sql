@@ -440,7 +440,8 @@ SELECT
     WHEN FILTER_EXPRESSION IS NOT NULL THEN COALESCE(DESCRIPTION, '') || ' Filter: ' || FILTER_EXPRESSION
     ELSE DESCRIPTION
   END AS ENTRY_TEXT,
-  QUERY_MODES
+  QUERY_MODES,
+  CAST(NULL AS VARCHAR(2000000)) AS REQUEST_JSON
 FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT
 UNION ALL
 SELECT
@@ -454,7 +455,8 @@ SELECT
   QUERY_NAME AS ENTRY_NAME,
   QUERY_NAME AS DISPLAY_NAME,
   NATURAL_LANGUAGE_TEXT AS ENTRY_TEXT,
-  'STRUCTURED_REQUEST,SEMANTIC_SQL' AS QUERY_MODES
+  'STRUCTURED_REQUEST,SEMANTIC_SQL' AS QUERY_MODES,
+  REQUEST_JSON
 FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT
 UNION ALL
 SELECT
@@ -468,7 +470,8 @@ SELECT
   SCOPE_NAME AS ENTRY_NAME,
   SCOPE_NAME AS DISPLAY_NAME,
   INSTRUCTION_TEXT AS ENTRY_TEXT,
-  'STRUCTURED_REQUEST,SEMANTIC_SQL' AS QUERY_MODES
+  'STRUCTURED_REQUEST,SEMANTIC_SQL' AS QUERY_MODES,
+  CAST(NULL AS VARCHAR(2000000)) AS REQUEST_JSON
 FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT;
 
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT AS
@@ -1173,7 +1176,7 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
         LIMIT 10
     ]], {model_name = model_name}) or {}
     local verified = query([[
-        SELECT QUERY_NAME, NATURAL_LANGUAGE_TEXT
+        SELECT QUERY_NAME, NATURAL_LANGUAGE_TEXT, REQUEST_JSON
         FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT
         WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
           AND UPPER(OBJECT_NAME) = UPPER(:object_name)
@@ -1204,7 +1207,9 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
     if #verified > 0 then
         lines[#lines + 1] = "Verified examples:"
         for _, example in ipairs(verified) do
-            lines[#lines + 1] = "- " .. row_value(example, "QUERY_NAME", 1) .. ": " .. row_value(example, "NATURAL_LANGUAGE_TEXT", 2)
+            lines[#lines + 1] = "- " .. row_value(example, "QUERY_NAME", 1) .. ": "
+                .. row_value(example, "NATURAL_LANGUAGE_TEXT", 2) .. " Request JSON: "
+                .. row_value(example, "REQUEST_JSON", 3)
         end
     end
 
@@ -1216,7 +1221,7 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
         json_encode({
             fields = rows_to_objects(fields, {"FIELD_KIND", "FIELD_NAME", "DISPLAY_NAME", "DESCRIPTION", "DATA_TYPE", "FILTER_EXPRESSION"}),
             instructions = rows_to_objects(instructions, {"INSTRUCTION_KIND", "INSTRUCTION_TEXT"}),
-            verified_queries = rows_to_objects(verified, {"QUERY_NAME", "NATURAL_LANGUAGE_TEXT"}),
+            verified_queries = rows_to_objects(verified, {"QUERY_NAME", "NATURAL_LANGUAGE_TEXT", "REQUEST_JSON"}),
         }),
     }}
 end
