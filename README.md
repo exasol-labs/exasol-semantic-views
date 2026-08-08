@@ -300,7 +300,7 @@ requests, plans, durable handles, explanations, or feedback. See the
 [MCP integration guide](docs/mcp-server-integration.md) for the exact workflow
 and reconnect and result-limit caveats.
 
-The repository includes two agent skills:
+The repository includes three agent skills:
 
 - [**exasol-semantic-analyst**](skills/exasol-semantic-analyst/SKILL.md) — for
   agents answering business questions against an existing model. Covers
@@ -310,6 +310,10 @@ The repository includes two agent skills:
   agents creating or maintaining a model. Covers schema inspection, entity and
   relationship modelling, fact and dimension authoring, SQL-native metric DDL,
   validation, publication, and governance configuration.
+- [**exasol-semantic-reviewer**](skills/exasol-semantic-reviewer/SKILL.md) — for
+  agents coordinating human review of proposed or published models. Covers
+  evidence, technical and semantic approval gates, acceptance tests, semantic
+  diffs, release handoffs, and post-publication feedback triage.
 
 ## Quickstart With Exasol Personal
 
@@ -423,6 +427,7 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
   - [Agent contract](docs/agent-contract.md)
   - [Analyst skill](skills/exasol-semantic-analyst/SKILL.md) — answering business questions
   - [Modeler skill](skills/exasol-semantic-modeler/SKILL.md) — creating and maintaining models
+  - [Reviewer skill](skills/exasol-semantic-reviewer/SKILL.md) — coordinating review and release approval
 
 ## License
 

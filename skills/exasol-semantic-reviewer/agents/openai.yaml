@@ -1,0 +1,4 @@
+interface:
+  display_name: "Exasol Semantic Reviewer"
+  short_description: "Review semantic models and prepare engineer handoffs"
+  default_prompt: "Use $exasol-semantic-reviewer to review an Exasol semantic model, identify unresolved semantic and technical risks, and produce an approval-ready handoff for the data engineer."
