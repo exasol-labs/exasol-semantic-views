@@ -1245,8 +1245,9 @@ local function validate_relationship_key_mappings(ctx)
             add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
                 "SEMANTIC_MODEL_031",
                 "Relationship has no structured endpoint key mappings; legacy "
-                    .. "single-branch compilation remains available, but grain "
-                    .. "proofs require ordered mappings.")
+                    .. "single-branch compilation remains available. For grain "
+                    .. "proofs, declare a unique key and its ordered columns first, "
+                    .. "then add ordered relationship key mappings.")
         else
             local from_entity = ctx.entity_by_id[key(relationship.from_entity_id)]
             local to_entity = ctx.entity_by_id[key(relationship.to_entity_id)]

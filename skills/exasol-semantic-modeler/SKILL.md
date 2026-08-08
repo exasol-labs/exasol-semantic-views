@@ -82,10 +82,10 @@ FROM EXA_ALL_TABLES
 WHERE TABLE_SCHEMA = 'MART'
 ORDER BY TABLE_NAME;
 
-SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_COMMENT
+SELECT COLUMN_TABLE, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT
 FROM EXA_ALL_COLUMNS
 WHERE COLUMN_SCHEMA = 'MART'
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
+ORDER BY COLUMN_TABLE, COLUMN_ORDINAL_POSITION;
 ```
 
 Also inventory commented source views when they are in scope:
@@ -217,6 +217,23 @@ Determine cardinality:
 - `MANY_TO_MANY` requires an explicit fanout policy and should be used only
   when unavoidable.
 
+Declare proof metadata in this order:
+
+1. Call `ADD_UNIQUE_KEY` for each proven unique endpoint.
+2. Call `ADD_UNIQUE_KEY_COLUMN` for every key component in contiguous order.
+3. Call `ADD_RELATIONSHIP`.
+4. Call `ADD_RELATIONSHIP_KEY_MAPPING` for every endpoint pair in the same
+   order as the matching unique key.
+
+`MANY_TO_ONE` requires the mapped `to` endpoint to match a declared unique
+key; `ONE_TO_MANY` requires this on `from`; `ONE_TO_ONE` requires both. Never
+add mappings before the required key is complete: partial mappings trigger
+`SEMANTIC_MODEL_033` and block validation-gated metric edits. Repair proof
+metadata with the direct admin scripts, then run `VALIDATE_MODEL` before
+continuing. If uniqueness cannot be proven, do not invent a key or mapping;
+retain `SEMANTIC_MODEL_031` for legacy single-branch compilation and surface it
+for review.
+
 ### Step 4 — Derive facts from numeric columns
 
 A fact is a row-level expression that can be meaningfully aggregated. For each
@@ -240,17 +257,21 @@ be **RATIO metrics** referencing two additive metrics, not facts.
 | Column type | Pattern | Dimension |
 |-------------|---------|-----------|
 | `VARCHAR`/`CHAR` low-cardinality | `status`, `type`, `category`, `region`, `country` | Categorical dimension |
-| `DATE`/`TIMESTAMP` | `*_date`, `*_at`, `*_time` | Time dimension — create one per grain: year, quarter, month, week, day using `DATE_TRUNC` or `EXTRACT` |
+| `DATE`/`TIMESTAMP` | `*_date`, `*_at`, `*_time` | Time dimension — create one per grain: year, quarter, month, week, day using documented Exasol date functions |
 | `VARCHAR` high-cardinality ID | `customer_id`, `product_id` | Generally **not** a dimension — too many values; use the human-readable name column instead |
 
 For time columns, derive multiple dimensions from a single date column:
 
 ```
-order_year   → EXTRACT('YEAR', o.order_date)
-order_quarter → 'Q' || EXTRACT('QUARTER', o.order_date)
-order_month  → DATE_TRUNC('MONTH', o.order_date)
-order_week   → DATE_TRUNC('WEEK', o.order_date)
+order_year    → YEAR(o.order_date)
+order_quarter → CAST(YEAR(o.order_date) AS VARCHAR(4)) || '-Q' || TO_CHAR(o.order_date, 'Q')
+order_month   → DATE_TRUNC('MONTH', o.order_date)
+order_week    → DATE_TRUNC('WEEK', o.order_date)
 ```
+
+Exasol accepts `EXTRACT(YEAR FROM value)`, with an unquoted field, but does not
+support `QUARTER` as an `EXTRACT` field. Prefer the forms above. Include the year
+in quarter labels so quarters from different years do not collapse together.
 
 ### Step 6 — Propose metrics in dependency order
 
@@ -289,6 +310,20 @@ Use historical SQL and profiling evidence to derive candidate objects:
 
 ### Step 7 — Validate and iterate
 
+Before every `ADD_FACT` or `ADD_DIMENSION`, execute the expression against its
+owning source entity with the same alias:
+
+```sql
+SELECT <expression>
+FROM <source_schema>.<source_object> <entity_alias>
+LIMIT 1;
+```
+
+Do not register or certify the expression unless this query succeeds and its
+result type matches the declared semantic type. This execution check is
+mandatory: model validation checks known function names and structural rules,
+but does not parse or compile every expression as Exasol SQL.
+
 After each structural change:
 
 ```sql
@@ -318,13 +353,15 @@ previous to succeed.
 ```
 1. CREATE MODEL (name, description)
 2. ADD_ENTITY (per entity — one per physical table)
-3. ADD_RELATIONSHIP (per join — entities must exist)
-4. ADD_FACT (per row-level expression — entities must exist)
-5. ADD_DIMENSION (per dimension — entities must exist)
-6. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
+3. ADD_UNIQUE_KEY, then ADD_UNIQUE_KEY_COLUMN (per proven entity key)
+4. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
+5. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
+6. ADD_FACT (per row-level expression — entities must exist)
+7. ADD_DIMENSION (per dimension — entity and semantic object must exist)
+8. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED)
-7. VALIDATE_MODEL
-8. PUBLISH_MODEL
+9. VALIDATE_MODEL
+10. PUBLISH_MODEL
 ```
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full

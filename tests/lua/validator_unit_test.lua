@@ -87,6 +87,13 @@ local function has_rule(ctx, rule_code)
     return false
 end
 
+local function issue_for_rule(ctx, rule_code)
+    for _, issue in ipairs(ctx.issues) do
+        if issue.rule_code == rule_code then return issue end
+    end
+    return nil
+end
+
 test("validator rejects malformed and dangling custom extensions", function()
     local ctx = validation_context({
         metric_by_id = {['7'] = {id = 7, name = "revenue"}},
@@ -238,7 +245,9 @@ test("validator distinguishes legacy and invalid relationship mappings", functio
         }},
     })
     api.validate_relationship_key_mappings(legacy)
-    assert_true(has_rule(legacy, "SEMANTIC_MODEL_031"))
+    local missing_mapping = issue_for_rule(legacy, "SEMANTIC_MODEL_031")
+    assert_true(missing_mapping ~= nil)
+    assert_contains(missing_mapping.message, "declare a unique key")
     assert_equal(legacy.error_count, 0)
 
     local invalid = validation_context({

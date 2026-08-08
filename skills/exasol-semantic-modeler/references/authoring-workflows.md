@@ -20,10 +20,10 @@ ORDER BY VIEW_NAME;
 ```
 
 ```sql
-SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, NULLABLE, COLUMN_COMMENT
+SELECT COLUMN_TABLE, COLUMN_NAME, COLUMN_TYPE, COLUMN_IS_NULLABLE, COLUMN_COMMENT
 FROM EXA_ALL_COLUMNS
 WHERE COLUMN_SCHEMA = 'MART'
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
+ORDER BY COLUMN_TABLE, COLUMN_ORDINAL_POSITION;
 ```
 
 Read non-null comments before sampling. Carry verified table/view meaning into
@@ -103,12 +103,12 @@ To find likely foreign key columns (columns whose names end in `_ID` or `_KEY`
 and appear in more than one table):
 
 ```sql
-SELECT COLUMN_NAME, COUNT(DISTINCT TABLE_NAME) AS TABLE_COUNT
+SELECT COLUMN_NAME, COUNT(DISTINCT COLUMN_TABLE) AS TABLE_COUNT
 FROM EXA_ALL_COLUMNS
 WHERE COLUMN_SCHEMA = 'MART'
   AND (COLUMN_NAME LIKE '%_ID' OR COLUMN_NAME LIKE '%_KEY')
 GROUP BY COLUMN_NAME
-HAVING COUNT(DISTINCT TABLE_NAME) > 1
+HAVING COUNT(DISTINCT COLUMN_TABLE) > 1
 ORDER BY TABLE_COUNT DESC, COLUMN_NAME;
 ```
 
@@ -147,6 +147,51 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
   'One row per customer',
   'One row per customer account'
 );
+```
+
+## Declare Grain Proofs
+
+Declare each unique key before its columns. Composite key columns must use
+contiguous ordinals starting at 1. Use either `COLUMN_NAME` or `EXPRESSION` for
+each component, never both.
+
+```sql
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'order_line', 'order_line_pk', 'PRIMARY',
+  'Order-line row grain', 'NATIVE'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'order_line', 'order_line_pk', 'order_id', NULL, 1
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'order_line', 'order_line_pk', 'line_id', NULL, 2
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'order', 'order_pk', 'PRIMARY',
+  'Order row grain', 'NATIVE'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'order', 'order_pk', 'order_id', NULL, 1
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY(
+  'sales', 'customer', 'customer_pk', 'PRIMARY',
+  'Customer row grain', 'NATIVE'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
+  'sales', 'customer', 'customer_pk', 'customer_id', NULL, 1
+);
+```
+
+## Register Semantic Object
+
+```sql
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(
   'sales',
@@ -170,6 +215,13 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   NULL
 );
 
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
+  'sales', 'order_line_to_order',
+  'order_id', NULL,
+  'order_id', NULL,
+  1
+);
+
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'sales',
   'order_to_customer',
@@ -180,9 +232,32 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'LEFT',
   NULL
 );
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
+  'sales', 'order_to_customer',
+  'customer_id', NULL,
+  'customer_id', NULL,
+  1
+);
 ```
 
+For `MANY_TO_ONE`, the ordered `to` mappings must exactly match a declared
+unique key; reverse this requirement for `ONE_TO_MANY`, and satisfy it on both
+ends for `ONE_TO_ONE`. Add all required unique keys and key columns before any
+mapping. If `SEMANTIC_MODEL_033` occurs, use these direct admin scripts to
+repair the metadata and rerun `VALIDATE_MODEL`; `APPLY_SEMANTIC_DEFINITION`
+cannot apply metric edits while the model has a blocking validation error.
+
 ## Add Facts
+
+Smoke-test each row-level expression against its owning source entity before
+calling `ADD_FACT`:
+
+```sql
+SELECT ol.quantity * ol.net_unit_price
+FROM MART.ORDER_LINES ol
+LIMIT 1;
+```
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
@@ -269,10 +344,21 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
 Time dimensions from a single date column (one per grain):
 
 ```sql
+SELECT YEAR(o.order_date),
+       CAST(YEAR(o.order_date) AS VARCHAR(4)) || '-Q' || TO_CHAR(o.order_date, 'Q'),
+       DATE_TRUNC('MONTH', o.order_date)
+FROM MART.ORDERS o
+LIMIT 1;
+```
+
+Run this smoke test before `ADD_DIMENSION`. It verifies executable Exasol SQL
+and the returned types; `VALIDATE_MODEL` does not compile every expression.
+
+```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
   'sales', 'SALES', 'order',
   'order_year',
-  'EXTRACT(''YEAR'' FROM o.order_date)',
+  'YEAR(o.order_date)',
   'DECIMAL(4,0)',
   'Order Year',
   'Calendar year of the order',
@@ -283,8 +369,8 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
   'sales', 'SALES', 'order',
   'order_quarter',
-  '''Q'' || CAST(EXTRACT(''QUARTER'' FROM o.order_date) AS VARCHAR(1))',
-  'VARCHAR(2)',
+  'CAST(YEAR(o.order_date) AS VARCHAR(4)) || ''-Q'' || TO_CHAR(o.order_date, ''Q'')',
+  'VARCHAR(7)',
   'Order Quarter',
   'Calendar quarter of the order',
   'quarter',

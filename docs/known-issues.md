@@ -41,8 +41,9 @@ Exasol 2026.1.0:
   `sql/examples/sales_model_fixup.sql`, where the expression is already corrected to
   `CEIL(MONTH(o.order_date) / 3.0)`. A clean `--reset` install seeds only `customer_region`,
   `order_month`, `order_status`, `product_category`.
-- **Guidance:** expression validation is a blocklist, not an allowlist (see CLAUDE.md) — use only
-  documented Exasol SQL functions when adding dimension/fact expressions.
+- **Guidance:** expression validation uses a static function allowlist but does
+  not compile SQL (see CLAUDE.md). Use documented Exasol functions and execute
+  each dimension/fact expression against its source entity before registration.
 
 ### BUG-003 — `VALID_COMBINATIONS_FOR_AGENT` over-reports validity
 

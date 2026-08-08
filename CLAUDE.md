@@ -135,9 +135,9 @@ result = {"status": row[0], "error_code": row[1], "error_message": row[2],
 ```
 `EXECUTE SCRIPT` does not support pyexasol bind parameters (`?` or `{name}`) — escape manually with `sql_string()`.
 
-### SQL Expression Validation: Blocklist, Not Allowlist
+### SQL Expression Validation: Static Allowlist, Not SQL Compilation
 
-Dimension and fact expressions are validated against an explicit **blocklist** of unsupported functions in `validator.lua:unsupported_functions`. Functions not on the blocklist are allowed. This means invalid Exasol functions (e.g. `QUARTER()`, which doesn't exist) pass validation and only fail at SQL execution time. When adding expressions to the model, use only documented Exasol SQL functions.
+Dimension and fact expressions are checked against an explicit function allowlist in `validator.lua:unsupported_functions`. This rejects unknown functions such as `QUARTER()`, but it does not parse or compile complete Exasol expressions. Invalid syntax involving an allowed function can therefore pass validation and fail at execution time. Use documented Exasol SQL and smoke-test each expression against its owning source entity before registering or certifying it.
 
 ### The Sales Demo Model
 
