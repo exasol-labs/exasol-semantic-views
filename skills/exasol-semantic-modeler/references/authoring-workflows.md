@@ -33,6 +33,72 @@ record units, aggregation behavior, filters, exclusions, and sensitivity when
 the source comment omits them. If comments conflict with data or constraints,
 flag the conflict for review.
 
+If the source schema already has reporting traffic, mine historical workload
+queries before finalizing the semantic shape. Once a semantic layer is
+published, `SYS_SEMANTIC.QUERY_LOG` can refine naming and coverage.
+
+The most useful Exasol history sources are:
+
+1. `EXA_DBA_AUDIT_SQL` for executed SQL, statement class, duration, and
+   resource usage.
+2. `EXA_DBA_AUDIT_SESSIONS` and `EXA_DBA_SESSIONS_LAST_DAY` for user, client,
+   driver, host, login/logout, and success/failure context.
+3. `EXA_DBA_PROFILE_LAST_DAY` and `EXA_USER_PROFILE_LAST_DAY` for operator-
+   level evidence, touched objects, row counts, and `REMARKS` that often name
+   join and filter columns.
+4. `EXA_USAGE_LAST_DAY`, `EXA_USAGE_HOURLY`, `EXA_USAGE_DAILY`, and
+   `EXA_USAGE_MONTHLY` for aggregate load trends when fine-grained history is
+   not available.
+
+Most DBA-prefixed history tables require `SELECT ANY DICTIONARY`. Use the
+richest source available for the workload you are studying.
+
+Useful usage-shape queries:
+
+```sql
+SELECT HANDLE_TYPE, MODEL_NAME, USER_NAME, CLIENT_NAME, STATUS, REQUEST_TIME
+FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT
+WHERE MODEL_NAME = 'sales'
+ORDER BY REQUEST_TIME DESC;
+```
+
+```sql
+SELECT REQUESTED_METRICS, REQUESTED_DIMENSIONS, COUNT(*) AS QUERY_COUNT
+FROM SYS_SEMANTIC.QUERY_LOG
+WHERE MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales')
+  AND STATUS = 'OK'
+GROUP BY REQUESTED_METRICS, REQUESTED_DIMENSIONS
+ORDER BY QUERY_COUNT DESC;
+```
+
+```sql
+SELECT ERROR_CODE, COUNT(*) AS ERROR_COUNT
+FROM SYS_SEMANTIC.QUERY_LOG
+WHERE MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales')
+  AND STATUS <> 'OK'
+GROUP BY ERROR_CODE
+ORDER BY ERROR_COUNT DESC;
+```
+
+Treat historical query shape as evidence for prioritization, not as a source of
+truth for grain or relationships. The schema, comments, and constraints still
+win when they disagree with usage patterns.
+
+When translating history into semantic candidates:
+
+- Repeated `GROUP BY` columns become candidate dimensions.
+- Repeated `WHERE` predicates become candidate filter dimensions or filtered
+  metrics.
+- Repeated `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`, and `COUNT DISTINCT` patterns
+  become candidate metrics.
+- Repeated arithmetic over aggregates becomes a derived or ratio metric.
+- Columns repeatedly seen in joins or in profiling `REMARKS` become relationship
+  or fact candidates.
+- Repeated labels, aliases, and business phrases become synonym candidates.
+
+Use these rules as a ranking mechanism, not as an automatic generator. The
+physical schema still decides grain and relationship truth.
+
 To find likely foreign key columns (columns whose names end in `_ID` or `_KEY`
 and appear in more than one table):
 

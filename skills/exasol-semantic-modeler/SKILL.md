@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-modeler
-description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema and catalog-comment inspection, autonomous metric derivation from physical tables, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration.
+description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema and catalog-comment inspection, historical query-log analysis, autonomous metric derivation from physical tables, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration.
 ---
 
 # Exasol Semantic Modeler
@@ -9,9 +9,10 @@ description: Use when an autonomous agent needs to create, bootstrap, import, or
 
 The semantic layer encodes what the physical schema means. Before writing any
 metric definition, understand the physical data — its grain, its relationships,
-and the columns that carry business meaning. A well-derived model makes every
-downstream agent query deterministic and governed. A poorly derived model
-propagates ambiguity into every answer.
+and the columns that carry business meaning. If workload history exists, use it
+to reflect how people already ask for the data.
+A well-derived model makes every downstream agent query deterministic and
+governed. A poorly derived model propagates ambiguity into every answer.
 
 Prefer this order:
 
@@ -44,6 +45,26 @@ for all authoring, validation, and publication operations.
 Discovery views in `SEMANTIC_AGENT` and `SEMANTIC_CATALOG` can be read with a
 SELECT-only tool, but schema inspection (`EXA_ALL_COLUMNS`, `EXA_ALL_TABLES`)
 also requires only SELECT.
+
+## Historical Evidence Sources
+
+Exasol keeps several kinds of historical information in system tables. Use the
+most detailed source available:
+
+1. `EXA_DBA_AUDIT_SQL` records executed SQL, statement class, duration,
+   timing, CPU, and memory/I/O peaks.
+2. `EXA_DBA_AUDIT_SESSIONS` and `EXA_DBA_SESSIONS_LAST_DAY` show who connected,
+   from where, with what client/driver, and whether the session succeeded.
+3. `EXA_DBA_PROFILE_LAST_DAY` and `EXA_USER_PROFILE_LAST_DAY` show operators,
+   touched objects, row counts, and `REMARKS` for join/filter clues.
+4. `EXA_USAGE_LAST_DAY`, `EXA_USAGE_HOURLY`, `EXA_USAGE_DAILY`, and
+   `EXA_USAGE_MONTHLY` provide aggregate load trends.
+5. `EXA_DBA_IMPERSONATION_LAST_DAY` and `EXA_DBA_AUDIT_IMPERSONATION` show
+   effective-user access patterns.
+
+Most DBA-prefixed history tables require `SELECT ANY DICTIONARY`. Audit and
+profiling data are periodic, so use the richest source you have for the
+workload.
 
 ## Autonomous Model Derivation
 
@@ -91,6 +112,74 @@ Sample a few rows from each candidate table to understand actual values:
 SELECT * FROM MART.ORDERS LIMIT 5;
 ```
 
+### Step 1b — Mine historical usage
+
+When you are bootstrapping a model, review historical workload queries against
+the source schema before you lock in dimensions, metric names, synonyms, and
+default shapes. If the semantic layer already exists, `SYS_SEMANTIC.QUERY_LOG`
+can refine naming and coverage.
+
+Prefer the richest available source of historical evidence:
+
+```sql
+SELECT SESSION_ID, STMT_ID, COMMAND_NAME, COMMAND_CLASS, START_TIME, STOP_TIME, DURATION, SQL_TEXT
+FROM EXA_DBA_AUDIT_SQL
+ORDER BY START_TIME DESC;
+```
+
+```sql
+SELECT SESSION_ID, USER_NAME, CLIENT, DRIVER, HOST, LOGIN_TIME, LOGOUT_TIME, SUCCESS
+FROM EXA_DBA_AUDIT_SESSIONS
+ORDER BY LOGIN_TIME DESC;
+```
+
+```sql
+SELECT SESSION_ID, STMT_ID, PART_ID, PART_NAME, OBJECT_SCHEMA, OBJECT_NAME,
+       OUT_ROWS, DURATION, CPU, TEMP_DB_RAM_PEAK, HDD_READ, REMARKS, SQL_TEXT
+FROM EXA_DBA_PROFILE_LAST_DAY
+ORDER BY DURATION DESC;
+```
+
+Use `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT` for the curated agent view, and
+`SYS_SEMANTIC.QUERY_LOG` only after publication:
+
+```sql
+SELECT HANDLE_TYPE, MODEL_NAME, USER_NAME, CLIENT_NAME, STATUS, REQUEST_TIME, REQUEST_TEXT
+FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT
+WHERE MODEL_NAME = 'sales'
+ORDER BY REQUEST_TIME DESC;
+```
+
+For post-publish refinement, read `SYS_SEMANTIC.QUERY_LOG` directly:
+
+```sql
+SELECT REQUESTED_METRICS, REQUESTED_DIMENSIONS, COUNT(*) AS QUERY_COUNT
+FROM SYS_SEMANTIC.QUERY_LOG
+WHERE MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales')
+  AND STATUS = 'OK'
+GROUP BY REQUESTED_METRICS, REQUESTED_DIMENSIONS
+ORDER BY QUERY_COUNT DESC;
+```
+
+The strongest query-log signals are:
+
+- `REQUESTED_METRICS` and `REQUESTED_DIMENSIONS` show the governed shape people
+  ask for most often.
+- `ORIGINAL_SQL` shows ad hoc SQL field names, filters, sort orders, and join
+  paths that users reach for when they are not using the semantic contract.
+- `MATERIALIZATION_USED` and `RUNTIME_MS` expose hot paths worth optimizing or
+  surfacing more directly.
+- `STATUS`, `ERROR_CODE`, and `ERROR_MESSAGE` show where users hit ambiguity,
+  missing fields, or unsupported shapes.
+
+Use that evidence to prioritize metrics and dimensions, add synonyms, promote
+repeated group-by or filter columns, create filtered metrics, and register
+verified queries from real usage.
+
+Treat query history as prioritization and naming evidence, not as a substitute
+for physical grain, key, or relationship proof. If it conflicts with the
+schema or validated comments, the physical schema wins.
+
 ### Step 2 — Identify entities and their grain
 
 An entity is a physical table with a clear, unique business grain. Signals:
@@ -103,6 +192,9 @@ An entity is a physical table with a clear, unique business grain. Signals:
   (grain: one row = one transaction or event).
 - Smaller tables with mostly categorical attributes are **dimension entities**
   (grain: one row = one entity instance such as a customer or product).
+
+Historical query patterns can refine the order in which you expose entities,
+but they should not change the entity grain itself.
 
 Choose a short, lowercase alias for each entity that matches the table's
 business role: `ol` for order_line, `o` for order, `c` for customer.
@@ -174,6 +266,26 @@ Build metrics in this order to satisfy dependency resolution:
 Propose names in `snake_case`. Write a business `COMMENT` for every metric.
 Reuse verified source-comment terminology and add aggregation, filter, unit,
 and exclusion semantics that are not explicit upstream.
+If query history shows a heavily repeated business subset or roll-up pattern,
+author the relevant filtered or derived metric early so agents do not have to
+reconstruct it in every query.
+
+### Step 6b — Convert history into semantic candidates
+
+Use historical SQL and profiling evidence to derive candidate objects:
+
+- Repeated `GROUP BY` columns become candidate dimensions.
+- Repeated `WHERE` predicates become candidate filter dimensions or filtered
+  metrics.
+- Repeated `SUM`, `COUNT`, `MIN`, `MAX`, `AVG`, and `COUNT DISTINCT` patterns
+  become candidate metrics.
+- Repeated arithmetic expressions over aggregated values become derived or
+  ratio metrics.
+- Columns that appear in join predicates, or are named in profiling `REMARKS`
+  as join/filter columns, become relationship or fact candidates.
+- Repeated aliases, output labels, and business terms in SQL comments or query
+  text become synonym candidates.
+
 
 ### Step 7 — Validate and iterate
 
@@ -194,6 +306,9 @@ ORDER BY SEVERITY, OBJECT_TYPE, OBJECT_NAME;
 
 Fix errors before adding further definitions. Warnings can be deferred but
 should be resolved before publication.
+Use query history again after validation to confirm the final model covers the
+dominant request shapes and that the semantic naming matches the terms users
+already rely on.
 
 ## Bootstrap Sequence
 
@@ -451,4 +566,6 @@ EXPORT SEMANTIC MODEL <model>;
   listed. Use `ADD OR REPLACE METRIC` for incremental changes.
 - Do not hardcode physical table column references in metric expressions when
   a fact exists — reuse the fact layer.
+- Do not let historical SQL override physical grain, relationship, or comment
+  evidence; use it to prioritize and name the model, not to invent semantics.
 - Dry-run every `APPLY_SEMANTIC_DEFINITION` call before the live apply.
