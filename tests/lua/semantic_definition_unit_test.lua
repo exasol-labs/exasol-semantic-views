@@ -248,6 +248,50 @@ test("validation failure message identifies rule and object", function()
     assert_contains(message, "Certified synonym is ambiguous")
 end)
 
+test("metric dry-run binds a null definition source", function()
+    local metric_update = nil
+    with_query(function(sql, params)
+        local text = tostring(sql)
+        if text:find("SELECT ENTITY_ID", 1, true) then
+            return {{20}}
+        elseif text:find("SELECT METRIC_ID", 1, true)
+                and text:find("UPPER(METRIC_NAME)", 1, true) then
+            return {{30}}
+        elseif text:find("UPDATE SYS_SEMANTIC.METRICS", 1, true) then
+            metric_update = params
+            return {}
+        elseif text:find("SELECT COUNT(*)", 1, true)
+                and text:find("SYS_SEMANTIC.OBJECT_COLUMNS", 1, true) then
+            return {{1}}
+        elseif text:find("SELECT FACT_ID", 1, true) then
+            return {{40}}
+        elseif text:find("SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS", 1, true) then
+            return {}
+        end
+        return {}
+    end, function()
+        api.upsert_metric(
+            {model_id = 1, version_id = 2},
+            10,
+            {
+                name = "total_revenue",
+                expression = "SUM(net_revenue)",
+                metric_type = "SIMPLE",
+                metric_kind = "SIMPLE",
+                aggregation_function = "SUM",
+                measure_expr = "net_revenue",
+                base_entity = "order_line",
+                data_type = "DECIMAL(18,2)",
+                is_private = false,
+                is_certified = true,
+                synonyms = {},
+            },
+            nil)
+    end)
+    assert_true(metric_update ~= nil)
+    assert_equal(metric_update.definition_source_id, null)
+end)
+
 test("semantic definition rejects incomplete authoring statements", function()
     local cases = {
         {"", "SEMANTIC_DDL_001"},

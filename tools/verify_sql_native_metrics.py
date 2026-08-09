@@ -270,6 +270,7 @@ def main() -> int:
         assert_contains("dry run normalized semantic filter", dry_run["normalized_json"], '"semantic_filter_expr":"order_status =')
 
         compound_dry_run = apply_definition(con, COMPOUND_AGGREGATE_METRIC, True)
+        assert_equal("single metric dry run status", compound_dry_run["status"], "DRY_RUN")
         compound_json = json.loads(compound_dry_run["normalized_json"])
         assert_equal("compound aggregate function", compound_json["metrics"][0]["aggregation_function"], "SUM")
         assert_equal("compound aggregate measure expr", compound_json["metrics"][0]["measure_expr"], "net_revenue")

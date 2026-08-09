@@ -13035,7 +13035,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             non_additive_dimension_id = null_if_missing(non_additive_dimension_id),
             window_spec_json = null_if_missing(metric.window_spec_json),
             type_params_json = json_encode({metric_type = metric.metric_type}),
-            definition_source_id = definition_source_id,
+            definition_source_id = null_if_missing(definition_source_id),
         })
     else
         query([[
@@ -13077,7 +13077,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             non_additive_dimension_id = null_if_missing(non_additive_dimension_id),
             window_spec_json = null_if_missing(metric.window_spec_json),
             type_params_json = json_encode({metric_type = metric.metric_type}),
-            definition_source_id = definition_source_id,
+            definition_source_id = null_if_missing(definition_source_id),
         })
         existing_id = scalar([[
             SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
@@ -15745,6 +15745,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validation_error_message = validation_error_message,
         apply_definition_changes = apply_definition_changes,
         validate_definition_model = validate_definition_model,
+        upsert_metric = upsert_metric,
         drop_metric = drop_metric,
         rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,
