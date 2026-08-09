@@ -1616,6 +1616,46 @@ local function validate_agent_metadata(ctx)
         end
     end
 
+    local metric_synonyms = {}
+    local dimension_synonyms = {}
+    local synonym_rows = query([[
+        SELECT OBJECT_TYPE, OBJECT_ID, SYNONYM
+        FROM SYS_SEMANTIC.SYNONYMS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND OBJECT_TYPE IN ('DIMENSION', 'METRIC')
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(synonym_rows or {}) do
+        local object_type = upper(row_value(row, "OBJECT_TYPE", 1))
+        local object_id = row_value(row, "OBJECT_ID", 2)
+        local synonym = upper(row_value(row, "SYNONYM", 3))
+        local index = object_type == "METRIC" and metric_synonyms or dimension_synonyms
+        local active = object_type == "METRIC"
+            and ctx.metric_by_id[key(object_id)] ~= nil
+            or object_type == "DIMENSION" and ctx.dimension_by_id[key(object_id)] ~= nil
+        if active then
+            index[synonym] = index[synonym] or {}
+            index[synonym][key(object_id)] = true
+        end
+    end
+
+    local function reference_status(canonical, synonyms, name)
+        local normalized = upper(name)
+        if canonical[normalized] ~= nil then
+            return "FOUND"
+        end
+        local count = 0
+        for _ in pairs(synonyms[normalized] or {}) do
+            count = count + 1
+        end
+        if count == 1 then
+            return "FOUND"
+        elseif count > 1 then
+            return "AMBIGUOUS"
+        end
+        return "UNKNOWN"
+    end
+
     local request_rows = query([[
         SELECT QUERY_NAME, REQUEST_JSON
         FROM SYS_SEMANTIC.VERIFIED_QUERIES
@@ -1627,15 +1667,23 @@ local function validate_agent_metadata(ctx)
         local query_name = row_value(row, "QUERY_NAME", 1)
         local request_json = row_value(row, "REQUEST_JSON", 2)
         for _, metric_name in ipairs(extract_json_array_values(request_json, "metrics")) do
-            if ctx.metric_by_name[upper(metric_name)] == nil then
+            local status = reference_status(ctx.metric_by_name, metric_synonyms, metric_name)
+            if status == "UNKNOWN" then
                 add_issue(ctx, "ERROR", "VERIFIED_QUERY", query_name, "SEMANTIC_MODEL_023",
                     "Verified query references unknown metric: " .. metric_name .. ".")
+            elseif status == "AMBIGUOUS" then
+                add_issue(ctx, "ERROR", "VERIFIED_QUERY", query_name, "SEMANTIC_MODEL_023",
+                    "Verified query references ambiguous metric synonym: " .. metric_name .. ".")
             end
         end
         for _, dimension_name in ipairs(extract_json_array_values(request_json, "dimensions")) do
-            if ctx.dimension_by_name[upper(dimension_name)] == nil then
+            local status = reference_status(ctx.dimension_by_name, dimension_synonyms, dimension_name)
+            if status == "UNKNOWN" then
                 add_issue(ctx, "ERROR", "VERIFIED_QUERY", query_name, "SEMANTIC_MODEL_023",
                     "Verified query references unknown dimension: " .. dimension_name .. ".")
+            elseif status == "AMBIGUOUS" then
+                add_issue(ctx, "ERROR", "VERIFIED_QUERY", query_name, "SEMANTIC_MODEL_023",
+                    "Verified query references ambiguous dimension synonym: " .. dimension_name .. ".")
             end
         end
     end

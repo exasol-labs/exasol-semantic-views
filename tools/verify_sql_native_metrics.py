@@ -637,12 +637,24 @@ REPLACE METRICS (
             "SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS "
             "WHERE METRIC_NAME = 'total_revenue' AND STATUS = 'ACTIVE'",
         )
+        fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_VERIFIED_QUERY("
+            "'sales', 'SALES', 'rename_compatibility', 'Revenue before rename', "
+            "'{\"model\":\"sales\",\"object\":\"SALES\",\"metrics\":[\"total_revenue\"]}', "
+            "NULL, FALSE)",
+        )
         rename_ddl = (
             "ALTER SEMANTIC VIEW sales.SALES "
             "RENAME METRIC total_revenue TO gross_merchandise_value"
         )
         assert_equal("rename metric dry run", apply_definition(con, rename_ddl, True)["status"], "DRY_RUN")
         assert_equal("rename metric apply", apply_definition(con, rename_ddl, False)["status"], "OK")
+        assert_equal(
+            "renamed metric validates with verified query using old synonym",
+            len(fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")),
+            0,
+        )
         assert_equal(
             "rename preserves metric id",
             scalar(

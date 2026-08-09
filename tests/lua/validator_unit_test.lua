@@ -398,6 +398,8 @@ test("validator checks agent metadata quality and referential integrity", functi
             return {{SYNONYM_TEXT = "sales"}}
         elseif contains(sql, "LEFT JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so") and contains(sql, "VERIFIED_QUERY_ID") then
             return {{VERIFIED_QUERY_ID = 4, QUERY_NAME = "dangling", OBJECT_ID = 99}}
+        elseif contains(sql, "SELECT OBJECT_TYPE, OBJECT_ID, SYNONYM") then
+            return {}
         elseif contains(sql, "SELECT QUERY_NAME, REQUEST_JSON") then
             return {{QUERY_NAME = "bad_request", REQUEST_JSON =
                 '{"metrics":["revenue","missing_metric"],"dimensions":["region","missing_dimension"]}'}}
@@ -411,6 +413,32 @@ test("validator checks agent metadata quality and referential integrity", functi
         assert_true(has_rule(ctx, rule), "missing rule " .. rule)
     end
     assert_equal(ctx.warning_count, 2)
+end)
+
+test("verified queries accept a renamed metric through its retained synonym", function()
+    local renamed_metric = {id = 1, name = "gross_merchandise_value"}
+    local ctx = validation_context({
+        version_id = 2,
+        metrics = {},
+        metric_by_id = {['1'] = renamed_metric},
+        metric_by_name = {GROSS_MERCHANDISE_VALUE = renamed_metric},
+        dimension_by_id = {},
+        dimension_by_name = {},
+    })
+    with_query(function(sql)
+        if contains(sql, "GROUP BY UPPER(s.SYNONYM)")
+            or contains(sql, "LEFT JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so")
+            or contains(sql, "FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS") then
+            return {}
+        elseif contains(sql, "SELECT OBJECT_TYPE, OBJECT_ID, SYNONYM") then
+            return {{OBJECT_TYPE = "METRIC", OBJECT_ID = 1, SYNONYM = "total_revenue"}}
+        elseif contains(sql, "SELECT QUERY_NAME, REQUEST_JSON") then
+            return {{QUERY_NAME = "GMV by category", REQUEST_JSON =
+                '{"metrics":["total_revenue"],"dimensions":[]}'}}
+        end
+        error("unexpected verified query synonym SQL: " .. tostring(sql))
+    end, function() api.validate_agent_metadata(ctx) end)
+    assert_true(not has_rule(ctx, "SEMANTIC_MODEL_023"))
 end)
 
 test("validator computes safe fanout and missing-entity matrix outcomes", function()
@@ -517,6 +545,8 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return {{1}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
+            return {}
+        elseif contains(sql, "SELECT OBJECT_TYPE, OBJECT_ID, SYNONYM") then
             return {}
         elseif contains(sql, "AND e.ENTITY_ID IS NULL") then
             return {}
