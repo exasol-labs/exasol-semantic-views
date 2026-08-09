@@ -379,9 +379,7 @@ def main() -> int:
             0,
         )
 
-        invalid_validation = apply_definition(
-            con,
-            """ALTER SEMANTIC VIEW sales.SALES
+        invalid_definition = """ALTER SEMANTIC VIEW sales.SALES
 REPLACE METRICS (
   METRIC bad_replaced_metric
     AS SUM(missing_fact)
@@ -391,9 +389,26 @@ REPLACE METRICS (
     DISPLAY 'Bad Replaced Metric'
     COMMENT 'Should be rejected atomically'
     ADDITIVE PUBLIC CERTIFIED
-)""",
-            False,
+)"""
+        metric_count_before_dry_run = scalar(
+            con,
+            "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS WHERE MODEL_NAME = 'sales'",
         )
+        invalid_dry_run = apply_definition(con, invalid_definition, True)
+        assert_equal("invalid dry run status", invalid_dry_run["status"], "ERROR")
+        assert_equal("invalid dry run error", invalid_dry_run["error_code"], "SEMANTIC_DDL_090")
+        assert_contains(
+            "invalid dry run identifies rule and field",
+            invalid_dry_run["message"],
+            "SEMANTIC_MODEL_011 [METRIC bad_replaced_metric]",
+        )
+        assert_equal(
+            "invalid dry run restored catalog",
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS WHERE MODEL_NAME = 'sales'"),
+            metric_count_before_dry_run,
+        )
+
+        invalid_validation = apply_definition(con, invalid_definition, False)
         assert_equal("invalid validation apply status", invalid_validation["status"], "ERROR")
         assert_equal("invalid validation apply error", invalid_validation["error_code"], "SEMANTIC_DDL_090")
         assert_contains(

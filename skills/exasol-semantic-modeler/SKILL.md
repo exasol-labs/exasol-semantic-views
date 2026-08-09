@@ -535,6 +535,12 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION('<semantic-sql>', TRUE);
 EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION('<semantic-sql>', FALSE);
 ```
 
+Dry-run simulates the same catalog changes, runs `VALIDATE_MODEL`, and restores
+the original model before returning. Proceed only when status is `DRY_RUN`;
+`ERROR` includes the blocking validation rule and object. Validation history is
+recorded, but no proposed fact, metric, membership, synonym, drop, or rename is
+committed.
+
 `REPLACE METRICS (...)` replaces the semantic object's visible metric
 membership; it does not delete omitted metric definitions from the model
 catalog. It may atomically move a synonym by assigning it to its new metric;

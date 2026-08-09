@@ -453,6 +453,10 @@ ADD OR REPLACE METRIC total_revenue
 );
 ```
 
+The `TRUE` call simulates the mutation and validates the resulting model before
+restoring the original catalog state. Continue to the `FALSE` call only when it
+returns `DRY_RUN`; an `ERROR` result contains the blocking rule and object.
+
 Filtered metric:
 
 ```sql
@@ -697,7 +701,7 @@ EXPORT SEMANTIC MODEL sales;
 ## Review Validation Run History
 
 ```sql
-SELECT RUN_ID, MODEL_NAME, RUN_STATUS, STARTED_AT, ISSUE_COUNT
+SELECT VALIDATION_RUN_ID, MODEL_NAME, STATUS, STARTED_AT, ISSUE_COUNT
 FROM SEMANTIC_CATALOG.VALIDATION_RUNS
 WHERE MODEL_NAME = 'sales'
 ORDER BY STARTED_AT DESC

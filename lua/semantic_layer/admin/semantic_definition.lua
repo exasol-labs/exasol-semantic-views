@@ -1637,6 +1637,51 @@ local function validation_error_message(validation_rows)
     return table.concat(details, "; ")
 end
 
+local function apply_definition_changes(definition, model, object_id_value, definition_source_id)
+    if definition.operation == "DROP_METRIC" then
+        drop_metric(model, object_id_value, definition.metric_name)
+    elseif definition.operation == "RENAME_METRIC" then
+        rename_metric(model, object_id_value, definition.metric_name, definition.new_metric_name)
+    else
+        if definition.replace_facts then
+            replace_object_columns(object_id_value, "FACT")
+        end
+        if definition.replace_metrics then
+            replace_object_columns(object_id_value, "METRIC")
+            prepare_replacement_synonyms(model, definition.metrics)
+        end
+        for _, fact in ipairs(definition.facts) do
+            upsert_fact(model, object_id_value, fact)
+        end
+        for _, metric in ipairs(definition.metrics) do
+            upsert_metric(model, object_id_value, metric, definition_source_id)
+        end
+    end
+end
+
+local function validate_definition_model(model, model_name)
+    local validation_rows = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name}) or {}
+    local error_count = 0
+    local warning_count = 0
+    for _, row in ipairs(validation_rows) do
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" then
+            error_count = error_count + 1
+        elseif severity == "WARNING" then
+            warning_count = warning_count + 1
+        end
+    end
+    local validation_run_id = scalar([[
+        SELECT MAX(VALIDATION_RUN_ID)
+        FROM SYS_SEMANTIC.VALIDATION_RUNS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    return validation_rows, error_count, warning_count, validation_run_id
+end
+
 local function snapshot_model_state(model)
     return {
         facts = query([[
@@ -2428,46 +2473,34 @@ function M.apply_semantic_definition(definition_sql, dry_run)
         local definition = parse_definition(definition_sql)
         local normalized_json = json_encode(definition)
         local operation_count = definition_operation_count(definition)
-        if sql_bool(dry_run) then
-            return {{"DRY_RUN", nil, "Parsed Semantic SQL definition.", normalized_json, operation_count, nil}}
-        end
+        local is_dry_run = sql_bool(dry_run)
         local model = load_model(definition.model_name)
         restore_model = model
         local object_id_value = object_id(model, definition.object_name)
         snapshot = snapshot_model_state(model)
-        source_id = insert_source(model, definition, definition_sql, normalized_json, "APPLYING")
-        if definition.operation == "DROP_METRIC" then
-            drop_metric(model, object_id_value, definition.metric_name)
-        elseif definition.operation == "RENAME_METRIC" then
-            rename_metric(model, object_id_value, definition.metric_name, definition.new_metric_name)
-        else
-            if definition.replace_facts then
-                replace_object_columns(object_id_value, "FACT")
-            end
-            if definition.replace_metrics then
-                replace_object_columns(object_id_value, "METRIC")
-                prepare_replacement_synonyms(model, definition.metrics)
-            end
-            for _, fact in ipairs(definition.facts) do
-                upsert_fact(model, object_id_value, fact)
-            end
-            for _, metric in ipairs(definition.metrics) do
-                upsert_metric(model, object_id_value, metric, source_id)
-            end
+        if not is_dry_run then
+            source_id = insert_source(model, definition, definition_sql, normalized_json, "APPLYING")
         end
-        local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = definition.model_name})
-        local error_count = 0
-        for _, row in ipairs(validation_rows or {}) do
-            if row_value(row, "SEVERITY", 1) == "ERROR" then
-                error_count = error_count + 1
+        apply_definition_changes(definition, model, object_id_value, source_id)
+        local validation_rows, error_count, warning_count, validation_run_id =
+            validate_definition_model(model, definition.model_name)
+        if is_dry_run then
+            local validation_details = error_count > 0 and validation_error_message(validation_rows) or nil
+            restore_model_state(model, snapshot)
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = definition.model_name})
+            restore_model = nil
+            snapshot = nil
+            if error_count > 0 then
+                return {{"ERROR", "SEMANTIC_DDL_090", "Dry-run rejected; validation failed: "
+                    .. validation_details .. ". No catalog changes were committed.",
+                    normalized_json, operation_count, validation_run_id}}
             end
+            local message = "Dry-run parsed and validated the Semantic SQL definition; no catalog changes were committed."
+            if warning_count > 0 then
+                message = message .. " Validation returned " .. tostring(warning_count) .. " warning(s)."
+            end
+            return {{"DRY_RUN", nil, message, normalized_json, operation_count, validation_run_id}}
         end
-        local validation_run_id = scalar([[
-            SELECT MAX(VALIDATION_RUN_ID)
-            FROM SYS_SEMANTIC.VALIDATION_RUNS
-            WHERE MODEL_ID = :model_id
-              AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id})
         query([[
             UPDATE SYS_SEMANTIC.SEMANTIC_DEFINITION_SOURCES
             SET APPLY_STATUS = :status,
@@ -4043,6 +4076,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         definition_operation_count = definition_operation_count,
         prepare_replacement_synonyms = prepare_replacement_synonyms,
         validation_error_message = validation_error_message,
+        apply_definition_changes = apply_definition_changes,
+        validate_definition_model = validate_definition_model,
         drop_metric = drop_metric,
         rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,

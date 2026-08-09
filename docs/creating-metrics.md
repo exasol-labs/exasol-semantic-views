@@ -174,8 +174,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
 );
 ```
 
-Pass `TRUE` as the dry-run flag during review to inspect the normalized
-definition before mutating the catalog.
+Pass `TRUE` as the dry-run flag during review. It snapshots the model, simulates
+the definition, runs `VALIDATE_MODEL`, and restores the snapshot. A valid
+proposal returns `DRY_RUN`; an invalid proposal returns `ERROR` with the
+blocking rule and object. The validation run remains in history, but proposed
+semantic definitions are not committed.
 
 Because this fallback passes Semantic SQL as a SQL string literal, any single
 quotes inside the definition must be doubled. Enabling Semantic SQL and running

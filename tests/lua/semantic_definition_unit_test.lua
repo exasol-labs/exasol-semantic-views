@@ -389,24 +389,55 @@ local metric_row = {
 }
 
 test("semantic definition public dry-run and error results preserve catalog", function()
-    local ddl = [[
-        ALTER SEMANTIC VIEW sales.SALES
-        ADD OR REPLACE METRIC total_revenue AS SUM(net_revenue)
-          ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC
-    ]]
-    local dry = apply_semantic_definition(ddl, true)
+    local function dry_run_with(validation_issues)
+        local validation_calls = 0
+        return with_query(function(sql)
+            local text = tostring(sql)
+            if text:find("SELECT MODEL_ID, ACTIVE_VERSION_ID", 1, true) then
+                return {{1, 2}}
+            elseif text:find("SELECT OBJECT_ID", 1, true)
+                    and text:find("SEMANTIC_OBJECTS", 1, true) then
+                return {{10}}
+            elseif text:find("SELECT mt.METRIC_ID", 1, true) then
+                return {{30}}
+            elseif text:find("SELECT COUNT(*)", 1, true) then
+                return {{0}}
+            elseif text:find("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", 1, true) then
+                validation_calls = validation_calls + 1
+                if validation_calls == 1 then return validation_issues end
+                return {}
+            elseif text:find("SELECT MAX(VALIDATION_RUN_ID)", 1, true) then
+                return {{77}}
+            elseif text:find("INSERT INTO SYS_SEMANTIC.SEMANTIC_DEFINITION_SOURCES", 1, true) then
+                error("dry-run must not insert a definition source")
+            elseif text:find("SELECT ", 1, true) then
+                return {}
+            end
+            return {}
+        end, function()
+            return apply_semantic_definition(
+                "ALTER SEMANTIC VIEW sales.SALES DROP METRIC total_revenue", true)
+        end)
+    end
+
+    local dry = dry_run_with({})
     assert_equal(dry[1][1], "DRY_RUN")
     assert_equal(dry[1][5], 1)
-    assert_contains(dry[1][4], '"total_revenue"')
+    assert_equal(dry[1][6], 77)
+    assert_contains(dry[1][3], "parsed and validated")
+    assert_contains(dry[1][3], "no catalog changes")
 
-    local drop_dry = apply_semantic_definition(
-        "ALTER SEMANTIC VIEW sales.SALES DROP METRIC total_revenue", true)
-    assert_equal(drop_dry[1][1], "DRY_RUN")
-    assert_equal(drop_dry[1][5], 1)
-    local rename_dry = apply_semantic_definition(
-        "ALTER SEMANTIC VIEW sales.SALES RENAME METRIC total_revenue TO revenue", true)
-    assert_equal(rename_dry[1][1], "DRY_RUN")
-    assert_equal(rename_dry[1][5], 1)
+    local invalid = dry_run_with({{
+        SEVERITY = "ERROR",
+        OBJECT_TYPE = "METRIC",
+        OBJECT_NAME = "gross_margin",
+        RULE_CODE = "SEMANTIC_MODEL_011",
+        MESSAGE = "Metric expression references unknown fact or metric: total_revenue.",
+    }})
+    assert_equal(invalid[1][1], "ERROR")
+    assert_equal(invalid[1][2], "SEMANTIC_DDL_090")
+    assert_contains(invalid[1][3], "SEMANTIC_MODEL_011 [METRIC gross_margin]")
+    assert_contains(invalid[1][3], "No catalog changes were committed")
 
     local malformed = apply_semantic_definition("ALTER SEMANTIC VIEW sales", false)
     assert_equal(malformed[1][1], "ERROR")
