@@ -488,6 +488,37 @@ ADD OR REPLACE METRIC gross_margin_pct
 );
 ```
 
+Rename a metric while preserving its identity and old name as a compatibility
+synonym:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
+  'ALTER SEMANTIC VIEW sales.SALES
+RENAME METRIC total_revenue TO gross_merchandise_value',
+  TRUE
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
+  'ALTER SEMANTIC VIEW sales.SALES
+RENAME METRIC total_revenue TO gross_merchandise_value',
+  FALSE
+);
+```
+
+Remove a metric from an object:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
+  'ALTER SEMANTIC VIEW sales.SALES DROP METRIC obsolete_metric',
+  TRUE
+);
+```
+
+Apply with `FALSE` after reviewing the dry-run. The drop deactivates a metric
+only after its last object membership is removed, and validation rejects the
+change while another active metric depends on it. `REPLACE METRICS (...)`
+changes visible object membership but does not delete omitted catalog metrics.
+
 ## Import a Databricks UCMV
 
 Use this path when the source model is a Databricks Unity Catalog Metric View

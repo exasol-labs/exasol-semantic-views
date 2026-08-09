@@ -1,5 +1,14 @@
 local api = ESV_SEMANTIC_DEFINITION_TEST_API
 
+local function with_query(mock, fn)
+    local original_query = query
+    query = mock
+    local ok, result = xpcall(fn, debug.traceback)
+    query = original_query
+    if not ok then error(result, 0) end
+    return result
+end
+
 test("semantic definition splits top-level members without splitting expressions", function()
     local parts = api.split_top_level_text("SUM(a, b), RATIO(x, NULLIF(y, 0)), z")
     assert_equal(#parts, 3)
@@ -112,6 +121,133 @@ test("semantic definition parses single metric replacement", function()
     assert_branch("definition.replace.metrics", definition.replace_metrics, false)
 end)
 
+test("semantic definition parses metric drop and rename", function()
+    local dropped = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES DROP METRIC obsolete_revenue
+    ]])
+    assert_equal(dropped.operation, "DROP_METRIC")
+    assert_equal(dropped.metric_name, "obsolete_revenue")
+    assert_equal(api.definition_operation_count(dropped), 1)
+
+    local renamed = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        RENAME METRIC total_revenue TO gross_merchandise_value
+    ]])
+    assert_equal(renamed.operation, "RENAME_METRIC")
+    assert_equal(renamed.metric_name, "total_revenue")
+    assert_equal(renamed.new_metric_name, "gross_merchandise_value")
+    assert_equal(api.definition_operation_count(renamed), 1)
+end)
+
+test("metric rename rewrites identifiers without touching literals or partial names", function()
+    local rewritten = api.rewrite_identifier(
+        [[total_revenue / NULLIF(total_revenue_tax, 0) + "total_revenue" /* total_revenue */]],
+        "total_revenue",
+        "gross_merchandise_value")
+    assert_contains(rewritten, "gross_merchandise_value / NULLIF(total_revenue_tax, 0)")
+    assert_contains(rewritten, '"gross_merchandise_value"')
+    assert_contains(rewritten, "/* total_revenue */")
+end)
+
+test("metric drop removes membership and deactivates the final membership", function()
+    local deleted = false
+    local deactivated = false
+    with_query(function(sql)
+        if tostring(sql):find("SELECT mt.METRIC_ID", 1, true) then
+            return {{30}}
+        elseif tostring(sql):find("DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS", 1, true) then
+            deleted = true
+            return {}
+        elseif tostring(sql):find("SELECT COUNT(*)", 1, true) then
+            return {{0}}
+        elseif tostring(sql):find("SET STATUS = 'INACTIVE'", 1, true) then
+            deactivated = true
+            return {}
+        end
+        error("unexpected drop query: " .. tostring(sql))
+    end, function()
+        api.drop_metric({model_id = 1, version_id = 2}, 10, "obsolete_metric")
+    end)
+    assert_true(deleted)
+    assert_true(deactivated)
+end)
+
+test("metric rename preserves identity metadata and rewrites dependents", function()
+    local updates = {}
+    local synonym_inserted = false
+    with_query(function(sql, params)
+        local text = tostring(sql)
+        if text:find("SELECT mt.METRIC_ID", 1, true) then
+            return {{30}}
+        elseif text:find("FROM SYS_SEMANTIC.METRICS", 1, true)
+                and text:find("METRIC_ID <>", 1, true) then
+            return {{0}}
+        elseif text:find("FROM SYS_SEMANTIC.OBJECT_COLUMNS candidate", 1, true) then
+            return {{0}}
+        elseif text:find("SELECT METRIC_ID, EXPRESSION, MEASURE_EXPR", 1, true) then
+            return {
+                {30, "SUM(net_revenue)", "net_revenue"},
+                {31, "total_revenue / NULLIF(order_count, 0)", "total_revenue"},
+            }
+        elseif text:find("UPDATE SYS_SEMANTIC.METRICS", 1, true)
+                or text:find("UPDATE SYS_SEMANTIC.OBJECT_COLUMNS", 1, true)
+                or text:find("UPDATE SYS_SEMANTIC.METRIC_INPUTS", 1, true) then
+            updates[#updates + 1] = params
+            return {}
+        elseif text:find("DELETE FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
+            return {}
+        elseif text:find("SELECT COUNT(*)", 1, true)
+                and text:find("FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
+            return {{0}}
+        elseif text:find("INSERT INTO SYS_SEMANTIC.SYNONYMS", 1, true) then
+            synonym_inserted = params.old_name == "total_revenue"
+            return {}
+        end
+        error("unexpected rename query: " .. text)
+    end, function()
+        api.rename_metric(
+            {model_id = 1, version_id = 2}, 10,
+            "total_revenue", "gross_merchandise_value")
+    end)
+    assert_equal(updates[1].metric_id, 31)
+    assert_contains(updates[1].expression, "gross_merchandise_value")
+    assert_contains(updates[1].measure_expr, "gross_merchandise_value")
+    assert_true(synonym_inserted)
+end)
+
+test("replacement synonyms are claimed before metric upserts", function()
+    local deleted = {}
+    with_query(function(sql, params)
+        assert_contains(sql, "DELETE FROM SYS_SEMANTIC.SYNONYMS")
+        deleted[#deleted + 1] = params.synonym
+        return {}
+    end, function()
+        api.prepare_replacement_synonyms(
+            {model_id = 1, version_id = 2},
+            {
+                {synonyms = {"revenue", "sales"}},
+                {synonyms = {"Revenue", "turnover"}},
+            })
+    end)
+    assert_equal(#deleted, 3)
+    assert_equal(deleted[1], "REVENUE")
+    assert_equal(deleted[2], "SALES")
+    assert_equal(deleted[3], "TURNOVER")
+end)
+
+test("validation failure message identifies rule and object", function()
+    local message = api.validation_error_message({{
+        SEVERITY = "ERROR",
+        OBJECT_TYPE = "SYNONYM",
+        OBJECT_NAME = "REVENUE",
+        RULE_CODE = "SEMANTIC_MODEL_021",
+        MESSAGE = "Certified synonym is ambiguous across multiple semantic objects.",
+    }})
+    assert_contains(message, "SEMANTIC_MODEL_021")
+    assert_contains(message, "[SYNONYM REVENUE]")
+    assert_contains(message, "Certified synonym is ambiguous")
+end)
+
 test("semantic definition rejects incomplete authoring statements", function()
     local cases = {
         {"", "SEMANTIC_DDL_001"},
@@ -122,6 +258,10 @@ test("semantic definition rejects incomplete authoring statements", function()
         {"ALTER SEMANTIC VIEW sales.SALES REPLACE FACTS (FACT x", "SEMANTIC_DDL_024"},
         {"ALTER SEMANTIC VIEW sales.SALES REPLACE METRICS METRIC x", "SEMANTIC_DDL_033"},
         {"ALTER SEMANTIC VIEW sales.SALES REPLACE METRICS (METRIC x", "SEMANTIC_DDL_034"},
+        {"ALTER SEMANTIC VIEW sales.SALES DROP METRIC", "SEMANTIC_DDL_035"},
+        {"ALTER SEMANTIC VIEW sales.SALES DROP METRIC x y", "SEMANTIC_DDL_035"},
+        {"ALTER SEMANTIC VIEW sales.SALES RENAME METRIC x y", "SEMANTIC_DDL_036"},
+        {"ALTER SEMANTIC VIEW sales.SALES RENAME METRIC x TO X", "SEMANTIC_DDL_083"},
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC x ON ENTITY e RETURNS INT", "SEMANTIC_DDL_031"},
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC x AS SUM(f) ON ENTITY e", "SEMANTIC_DDL_032"},
     }
@@ -237,15 +377,6 @@ test("normalized import model discovery deduplicates explicit operations", funct
     assert_equal(names[3], "marketing")
 end)
 
-local function with_query(mock, fn)
-    local original_query = query
-    query = mock
-    local ok, result = xpcall(fn, debug.traceback)
-    query = original_query
-    if not ok then error(result, 0) end
-    return result
-end
-
 local metric_row = {
     MODEL_NAME = "sales", OBJECT_NAME = "SALES", METRIC_ID = 30,
     METRIC_NAME = "total_revenue", DISPLAY_NAME = "Total Revenue",
@@ -267,6 +398,15 @@ test("semantic definition public dry-run and error results preserve catalog", fu
     assert_equal(dry[1][1], "DRY_RUN")
     assert_equal(dry[1][5], 1)
     assert_contains(dry[1][4], '"total_revenue"')
+
+    local drop_dry = apply_semantic_definition(
+        "ALTER SEMANTIC VIEW sales.SALES DROP METRIC total_revenue", true)
+    assert_equal(drop_dry[1][1], "DRY_RUN")
+    assert_equal(drop_dry[1][5], 1)
+    local rename_dry = apply_semantic_definition(
+        "ALTER SEMANTIC VIEW sales.SALES RENAME METRIC total_revenue TO revenue", true)
+    assert_equal(rename_dry[1][1], "DRY_RUN")
+    assert_equal(rename_dry[1][5], 1)
 
     local malformed = apply_semantic_definition("ALTER SEMANTIC VIEW sales", false)
     assert_equal(malformed[1][1], "ERROR")
@@ -448,6 +588,12 @@ test("semantic preprocessor covers authoring discovery and explain commands", fu
         ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC]])
     assert_equal(definition.status, "OK")
     assert_contains(definition.generated_sql, "APPLY_SEMANTIC_DEFINITION_OR_FAIL")
+    local dropped = preprocess_sql("ALTER SEMANTIC VIEW sales.SALES DROP METRIC old_revenue")
+    assert_equal(dropped.status, "OK")
+    assert_contains(dropped.generated_sql, "APPLY_SEMANTIC_DEFINITION_OR_FAIL")
+    local renamed = preprocess_sql(
+        "ALTER SEMANTIC VIEW sales.SALES RENAME METRIC revenue TO net_revenue")
+    assert_equal(renamed.status, "OK")
     local invalid = preprocess_sql("ALTER SEMANTIC VIEW sales")
     assert_equal(invalid.status, "ERROR")
     local unchanged = preprocess_sql("SELECT 1")

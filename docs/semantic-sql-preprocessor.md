@@ -116,7 +116,8 @@ Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.
 
 `ALTER SEMANTIC VIEW` currently supports `REPLACE FACTS`, `REPLACE METRICS`,
-and single `ADD OR REPLACE METRIC`. Unsupported authoring forms, such as
+single `ADD OR REPLACE METRIC`, `DROP METRIC`, and `RENAME METRIC ... TO ...`.
+Unsupported authoring forms, such as
 `ADD OR REPLACE DIMENSION`, fail during preprocessing instead of returning a
 result row that callers might ignore. Use `SEMANTIC_ADMIN.ADD_DIMENSION` for
 dimension maintenance.

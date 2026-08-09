@@ -396,6 +396,11 @@ REPLACE METRICS (
         )
         assert_equal("invalid validation apply status", invalid_validation["status"], "ERROR")
         assert_equal("invalid validation apply error", invalid_validation["error_code"], "SEMANTIC_DDL_090")
+        assert_contains(
+            "invalid validation identifies rule and field",
+            invalid_validation["message"],
+            "SEMANTIC_MODEL_011 [METRIC bad_replaced_metric]",
+        )
         assert_equal(
             "invalid validation restored metrics",
             scalar(
@@ -410,6 +415,52 @@ REPLACE METRICS (
             "invalid validation no bad metric",
             scalar(con, "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales' AND METRIC_NAME = 'bad_replaced_metric'"),
             0,
+        )
+
+        synonym_handoff = SEMANTIC_DEFINITION.replace(
+            "    SYNONYMS ('revenue', 'sales')\n", "", 1
+        ).replace(
+            "    COMMENT 'Net revenue for completed orders only'\n",
+            "    COMMENT 'Net revenue for completed orders only'\n"
+            "    SYNONYMS ('revenue', 'sales')\n",
+            1,
+        )
+        assert_equal(
+            "replace metrics synonym handoff",
+            apply_definition(con, synonym_handoff, False)["status"],
+            "OK",
+        )
+        assert_equal(
+            "synonym moved to target metric",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.SYNONYMS s "
+                "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = s.OBJECT_ID "
+                "WHERE s.OBJECT_TYPE = 'METRIC' "
+                "AND mt.METRIC_NAME = 'completed_revenue' "
+                "AND UPPER(s.SYNONYM) = 'REVENUE'",
+            ),
+            1,
+        )
+        assert_equal(
+            "restore original synonym owner",
+            apply_definition(con, SEMANTIC_DEFINITION, False)["status"],
+            "OK",
+        )
+
+        duplicate_synonym = SEMANTIC_DEFINITION.replace(
+            "    COMMENT 'Net revenue for completed orders only'\n",
+            "    COMMENT 'Net revenue for completed orders only'\n"
+            "    SYNONYMS ('revenue')\n",
+            1,
+        )
+        duplicate_result = apply_definition(con, duplicate_synonym, False)
+        assert_equal("duplicate synonym rejected", duplicate_result["status"], "ERROR")
+        assert_equal("duplicate synonym error", duplicate_result["error_code"], "SEMANTIC_DDL_090")
+        assert_contains(
+            "duplicate synonym identifies rule and field",
+            duplicate_result["message"],
+            "SEMANTIC_MODEL_021 [SYNONYM REVENUE]",
         )
 
         assert_fails_with(
@@ -564,6 +615,101 @@ REPLACE METRICS (
             assert_equal("export semantic dimensions kind", {row[0] for row in dimension_filter}, {"DIMENSION"})
         finally:
             con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()")
+
+        original_metric_id = scalar(
+            con,
+            "SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS "
+            "WHERE METRIC_NAME = 'total_revenue' AND STATUS = 'ACTIVE'",
+        )
+        rename_ddl = (
+            "ALTER SEMANTIC VIEW sales.SALES "
+            "RENAME METRIC total_revenue TO gross_merchandise_value"
+        )
+        assert_equal("rename metric dry run", apply_definition(con, rename_ddl, True)["status"], "DRY_RUN")
+        assert_equal("rename metric apply", apply_definition(con, rename_ddl, False)["status"], "OK")
+        assert_equal(
+            "rename preserves metric id",
+            scalar(
+                con,
+                "SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS "
+                "WHERE METRIC_NAME = 'gross_merchandise_value' AND STATUS = 'ACTIVE'",
+            ),
+            original_metric_id,
+        )
+        assert_equal(
+            "rename keeps old name synonym",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.SYNONYMS "
+                "WHERE OBJECT_TYPE = 'METRIC' AND OBJECT_ID = " + str(original_metric_id)
+                + " AND UPPER(SYNONYM) = 'TOTAL_REVENUE'",
+            ),
+            1,
+        )
+        assert_contains(
+            "rename rewrites dependent expression",
+            scalar(
+                con,
+                "SELECT EXPRESSION FROM SYS_SEMANTIC.METRICS "
+                "WHERE METRIC_NAME = 'gross_margin_pct'",
+            ),
+            "gross_merchandise_value",
+        )
+        assert_status_ok(
+            "old metric synonym remains compilable",
+            compile_request(
+                con,
+                {"model": "sales", "object": "SALES", "metrics": ["total_revenue"]},
+            ),
+        )
+        rename_back = (
+            "ALTER SEMANTIC VIEW sales.SALES "
+            "RENAME METRIC gross_merchandise_value TO total_revenue"
+        )
+        assert_equal("rename metric back", apply_definition(con, rename_back, False)["status"], "OK")
+
+        drop_dependency = apply_definition(
+            con,
+            "ALTER SEMANTIC VIEW sales.SALES DROP METRIC total_revenue",
+            False,
+        )
+        assert_equal("drop depended-on metric rejected", drop_dependency["status"], "ERROR")
+        assert_equal("drop depended-on metric rollback", drop_dependency["error_code"], "SEMANTIC_DDL_090")
+        assert_equal(
+            "drop rollback keeps metric active",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS "
+                "WHERE METRIC_NAME = 'total_revenue' AND STATUS = 'ACTIVE'",
+            ),
+            1,
+        )
+
+        obsolete_ddl = """ALTER SEMANTIC VIEW sales.SALES
+ADD OR REPLACE METRIC obsolete_metric
+  AS SUM(net_revenue)
+  ON ENTITY order_line
+  RETURNS DECIMAL(18,2)
+  ADDITIVE PUBLIC"""
+        assert_equal("add obsolete metric", apply_definition(con, obsolete_ddl, False)["status"], "OK")
+        assert_equal(
+            "drop obsolete metric",
+            apply_definition(
+                con,
+                "ALTER SEMANTIC VIEW sales.SALES DROP METRIC obsolete_metric",
+                False,
+            )["status"],
+            "OK",
+        )
+        assert_equal(
+            "dropped metric inactive",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS "
+                "WHERE METRIC_NAME = 'obsolete_metric' AND STATUS = 'INACTIVE'",
+            ),
+            1,
+        )
 
         add_replace_rows = fetchall(
             con,

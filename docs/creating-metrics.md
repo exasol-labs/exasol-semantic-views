@@ -139,7 +139,24 @@ REPLACE METRICS (
 `REPLACE FACTS` and `REPLACE METRICS` replace the visible fact or metric
 membership for the semantic object. They are appropriate for bootstrap,
 complete model regeneration, and deliberate resets. For one metric, use
-`ADD OR REPLACE METRIC` instead.
+`ADD OR REPLACE METRIC` instead. Omitted definitions remain in the model
+catalog; use `DROP METRIC` for removal.
+Within one replacement block, a requested synonym is released from its prior
+metric owner before assignment. Repeating that synonym on multiple metrics in
+the block remains an ambiguity and fails with `SEMANTIC_MODEL_021`.
+
+```sql
+ALTER SEMANTIC VIEW sales.SALES
+RENAME METRIC total_revenue TO gross_merchandise_value;
+
+ALTER SEMANTIC VIEW sales.SALES
+DROP METRIC obsolete_revenue;
+```
+
+Rename preserves the metric ID, updates dependent metric expressions, and
+keeps the old name as a synonym. Drop removes the named object's membership and
+deactivates the metric after its final membership is removed. Both operations
+validate atomically and roll back when they would leave an invalid model.
 
 When Semantic SQL is enabled, Exasol routes that statement through the
 preprocessor:

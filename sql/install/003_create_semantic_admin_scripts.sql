@@ -12451,6 +12451,7 @@ local function parse_definition(definition_sql)
     end
     local definition = {
         statement_kind = "ALTER_SEMANTIC_VIEW",
+        operation = "UPSERT",
         model_name = model_name,
         object_name = object_name,
         facts = {},
@@ -12462,6 +12463,34 @@ local function parse_definition(definition_sql)
     local replace_facts = find_sequence(tokens, {"REPLACE", "FACTS"}, next_index, 0)
     local replace_metrics = find_sequence(tokens, {"REPLACE", "METRICS"}, next_index, 0)
     local add_metric = find_sequence(tokens, {"ADD", "OR", "REPLACE", "METRIC"}, next_index, 0)
+    local drop_metric = find_sequence(tokens, {"DROP", "METRIC"}, next_index, 0)
+    local rename_metric = find_sequence(tokens, {"RENAME", "METRIC"}, next_index, 0)
+
+    if drop_metric ~= nil then
+        local metric_name = token_identifier(tokens[drop_metric + 2])
+        if metric_name == nil or tokens[drop_metric + 3] ~= nil then
+            error("SEMANTIC_DDL_035: DROP METRIC requires exactly one metric name")
+        end
+        definition.operation = "DROP_METRIC"
+        definition.metric_name = normalize_name(metric_name, "METRIC_NAME")
+        return definition
+    end
+
+    if rename_metric ~= nil then
+        local old_name = token_identifier(tokens[rename_metric + 2])
+        local to_keyword = token_upper(tokens[rename_metric + 3])
+        local new_name = token_identifier(tokens[rename_metric + 4])
+        if old_name == nil or to_keyword ~= "TO" or new_name == nil or tokens[rename_metric + 5] ~= nil then
+            error("SEMANTIC_DDL_036: RENAME METRIC requires <old_name> TO <new_name>")
+        end
+        definition.operation = "RENAME_METRIC"
+        definition.metric_name = normalize_name(old_name, "METRIC_NAME")
+        definition.new_metric_name = normalize_name(new_name, "NEW_METRIC_NAME")
+        if upper(definition.metric_name) == upper(definition.new_metric_name) then
+            error("SEMANTIC_DDL_083: old and new metric names must differ")
+        end
+        return definition
+    end
 
     if replace_facts ~= nil then
         definition.replace_facts = true
@@ -12497,7 +12526,7 @@ local function parse_definition(definition_sql)
         local metric_text = string.sub(source, tokens[add_metric + 3].start_pos)
         definition.metrics[#definition.metrics + 1] = parse_metric(metric_text, false)
     else
-        error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE METRICS, or ADD OR REPLACE METRIC")
+        error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE METRICS, ADD OR REPLACE METRIC, DROP METRIC, or RENAME METRIC")
     end
 
     return definition
@@ -12918,6 +12947,29 @@ local function upsert_synonyms(model, metric_id, synonyms)
     end
 end
 
+local function prepare_replacement_synonyms(model, metrics)
+    local requested = {}
+    for _, metric in ipairs(metrics or {}) do
+        for _, synonym in ipairs(metric.synonyms or {}) do
+            local normalized = upper(trim(synonym))
+            if normalized ~= "" and not requested[normalized] then
+                requested[normalized] = true
+                query([[
+                    DELETE FROM SYS_SEMANTIC.SYNONYMS
+                    WHERE MODEL_ID = :model_id
+                      AND VERSION_ID = :version_id
+                      AND OBJECT_TYPE = 'METRIC'
+                      AND UPPER(SYNONYM) = :synonym
+                ]], {
+                    model_id = model.model_id,
+                    version_id = model.version_id,
+                    synonym = normalized,
+                })
+            end
+        end
+    end
+end
+
 local function upsert_metric(model, object_id_value, metric, definition_source_id)
     local base_entity = entity_id(model, metric.base_entity)
     validate_metric_shape(model, metric)
@@ -13045,6 +13097,211 @@ local function replace_object_columns(object_id_value, column_kind)
         WHERE OBJECT_ID = :object_id
           AND COLUMN_KIND = :column_kind
     ]], {object_id = object_id_value, column_kind = column_kind})
+end
+
+local function rewrite_identifier(expression, old_name, new_name)
+    if missing(expression) then
+        return expression
+    end
+    local source = tostring(expression)
+    local replacements = {}
+    for _, token in ipairs(tokenize(source)) do
+        if (token.kind == "word" or token.kind == "identifier")
+                and upper(token.value or token.text) == upper(old_name) then
+            local replacement = new_name
+            if token.kind == "identifier" then
+                replacement = '"' .. string.gsub(new_name, '"', '""') .. '"'
+            end
+            replacements[#replacements + 1] = {
+                start_pos = token.start_pos,
+                end_pos = token.end_pos,
+                text = replacement,
+            }
+        end
+    end
+    for index = #replacements, 1, -1 do
+        local replacement = replacements[index]
+        source = string.sub(source, 1, replacement.start_pos - 1)
+            .. replacement.text
+            .. string.sub(source, replacement.end_pos + 1)
+    end
+    return source
+end
+
+local function metric_id_for_object(model, object_id_value, metric_name)
+    local metric_id = scalar([[
+        SELECT mt.METRIC_ID
+        FROM SYS_SEMANTIC.METRICS mt
+        JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+          ON oc.OBJECT_REF_ID = mt.METRIC_ID
+         AND oc.COLUMN_KIND = 'METRIC'
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+          AND oc.OBJECT_ID = :object_id
+          AND UPPER(mt.METRIC_NAME) = UPPER(:metric_name)
+    ]], {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        object_id = object_id_value,
+        metric_name = metric_name,
+    })
+    if metric_id == nil then
+        error("SEMANTIC_DDL_080: metric not found in semantic view: " .. metric_name)
+    end
+    return metric_id
+end
+
+local function drop_metric(model, object_id_value, metric_name)
+    local metric_id = metric_id_for_object(model, object_id_value, metric_name)
+    query([[
+        DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
+        WHERE OBJECT_ID = :object_id
+          AND COLUMN_KIND = 'METRIC'
+          AND OBJECT_REF_ID = :metric_id
+    ]], {object_id = object_id_value, metric_id = metric_id})
+    local remaining_memberships = scalar([[
+        SELECT COUNT(*)
+        FROM SYS_SEMANTIC.OBJECT_COLUMNS
+        WHERE COLUMN_KIND = 'METRIC'
+          AND OBJECT_REF_ID = :metric_id
+    ]], {metric_id = metric_id})
+    if tonumber(remaining_memberships or 0) == 0 then
+        query("UPDATE SYS_SEMANTIC.METRICS SET STATUS = 'INACTIVE' WHERE METRIC_ID = :metric_id",
+            {metric_id = metric_id})
+    end
+end
+
+local function rename_metric(model, object_id_value, old_name, new_name)
+    local metric_id = metric_id_for_object(model, object_id_value, old_name)
+    local duplicate = scalar([[
+        SELECT COUNT(*)
+        FROM SYS_SEMANTIC.METRICS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(METRIC_NAME) = UPPER(:new_name)
+          AND METRIC_ID <> :metric_id
+    ]], {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        new_name = new_name,
+        metric_id = metric_id,
+    })
+    if tonumber(duplicate or 0) > 0 then
+        error("SEMANTIC_DDL_081: metric already exists: " .. new_name)
+    end
+    local column_collision = scalar([[
+        SELECT COUNT(*)
+        FROM SYS_SEMANTIC.OBJECT_COLUMNS candidate
+        WHERE UPPER(candidate.COLUMN_NAME) = UPPER(:new_name)
+          AND candidate.OBJECT_REF_ID <> :metric_id
+          AND candidate.OBJECT_ID IN (
+            SELECT OBJECT_ID
+            FROM SYS_SEMANTIC.OBJECT_COLUMNS
+            WHERE COLUMN_KIND = 'METRIC'
+              AND OBJECT_REF_ID = :metric_id
+          )
+    ]], {new_name = new_name, metric_id = metric_id})
+    if tonumber(column_collision or 0) > 0 then
+        error("SEMANTIC_DDL_082: semantic object column already exists: " .. new_name)
+    end
+
+    local dependent_rows = query([[
+        SELECT METRIC_ID, EXPRESSION, MEASURE_EXPR
+        FROM SYS_SEMANTIC.METRICS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+    ]], {model_id = model.model_id, version_id = model.version_id}) or {}
+    for _, row in ipairs(dependent_rows) do
+        local dependent_id = row_value(row, "METRIC_ID", 1)
+        local expression = row_value(row, "EXPRESSION", 2)
+        local measure_expr = row_value(row, "MEASURE_EXPR", 3)
+        local rewritten_expression = rewrite_identifier(expression, old_name, new_name)
+        local rewritten_measure = rewrite_identifier(measure_expr, old_name, new_name)
+        if rewritten_expression ~= expression or rewritten_measure ~= measure_expr then
+            query([[
+                UPDATE SYS_SEMANTIC.METRICS
+                SET EXPRESSION = :expression,
+                    MEASURE_EXPR = :measure_expr
+                WHERE METRIC_ID = :metric_id
+            ]], {
+                metric_id = dependent_id,
+                expression = rewritten_expression,
+                measure_expr = null_if_missing(rewritten_measure),
+            })
+        end
+    end
+
+    query("UPDATE SYS_SEMANTIC.METRICS SET METRIC_NAME = :new_name WHERE METRIC_ID = :metric_id",
+        {new_name = new_name, metric_id = metric_id})
+    query([[
+        UPDATE SYS_SEMANTIC.OBJECT_COLUMNS
+        SET COLUMN_NAME = :new_name
+        WHERE COLUMN_KIND = 'METRIC'
+          AND OBJECT_REF_ID = :metric_id
+    ]], {new_name = new_name, metric_id = metric_id})
+    query([[
+        UPDATE SYS_SEMANTIC.METRIC_INPUTS
+        SET EXPRESSION_ALIAS = :new_name
+        WHERE INPUT_OBJECT_TYPE = 'METRIC'
+          AND INPUT_OBJECT_ID = :metric_id
+          AND UPPER(EXPRESSION_ALIAS) = UPPER(:old_name)
+    ]], {new_name = new_name, old_name = old_name, metric_id = metric_id})
+    query([[
+        DELETE FROM SYS_SEMANTIC.SYNONYMS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND OBJECT_TYPE = 'METRIC'
+          AND OBJECT_ID = :metric_id
+          AND UPPER(SYNONYM) = UPPER(:new_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, metric_id = metric_id, new_name = new_name})
+    local old_synonym = scalar([[
+        SELECT COUNT(*)
+        FROM SYS_SEMANTIC.SYNONYMS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND OBJECT_TYPE = 'METRIC'
+          AND OBJECT_ID = :metric_id
+          AND UPPER(SYNONYM) = UPPER(:old_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, metric_id = metric_id, old_name = old_name})
+    if tonumber(old_synonym or 0) == 0 then
+        query([[
+            INSERT INTO SYS_SEMANTIC.SYNONYMS (
+              MODEL_ID, VERSION_ID, OBJECT_TYPE, OBJECT_ID, SYNONYM, SYNONYM_SOURCE
+            ) VALUES (
+              :model_id, :version_id, 'METRIC', :metric_id, :old_name, 'RENAME'
+            )
+        ]], {model_id = model.model_id, version_id = model.version_id, metric_id = metric_id, old_name = old_name})
+    end
+end
+
+local function definition_operation_count(definition)
+    if definition.operation == "DROP_METRIC" or definition.operation == "RENAME_METRIC" then
+        return 1
+    end
+    return #definition.facts + #definition.metrics
+end
+
+local function validation_error_message(validation_rows)
+    local details = {}
+    for _, row in ipairs(validation_rows or {}) do
+        if row_value(row, "SEVERITY", 1) == "ERROR" then
+            local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
+            local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
+            local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
+            local message = row_value(row, "MESSAGE", 5) or "model validation failed"
+            details[#details + 1] = tostring(rule_code) .. " [" .. tostring(object_type)
+                .. " " .. tostring(object_name) .. "]: " .. tostring(message)
+            if #details == 5 then
+                break
+            end
+        end
+    end
+    if #details == 0 then
+        return "model validation failed"
+    end
+    return table.concat(details, "; ")
 end
 
 local function snapshot_model_state(model)
@@ -13837,25 +14094,33 @@ function M.apply_semantic_definition(definition_sql, dry_run)
     local ok, result = pcall(function()
         local definition = parse_definition(definition_sql)
         local normalized_json = json_encode(definition)
+        local operation_count = definition_operation_count(definition)
         if sql_bool(dry_run) then
-            return {{"DRY_RUN", nil, "Parsed Semantic SQL definition.", normalized_json, #definition.facts + #definition.metrics, nil}}
+            return {{"DRY_RUN", nil, "Parsed Semantic SQL definition.", normalized_json, operation_count, nil}}
         end
         local model = load_model(definition.model_name)
         restore_model = model
         local object_id_value = object_id(model, definition.object_name)
         snapshot = snapshot_model_state(model)
         source_id = insert_source(model, definition, definition_sql, normalized_json, "APPLYING")
-        if definition.replace_facts then
-            replace_object_columns(object_id_value, "FACT")
-        end
-        if definition.replace_metrics then
-            replace_object_columns(object_id_value, "METRIC")
-        end
-        for _, fact in ipairs(definition.facts) do
-            upsert_fact(model, object_id_value, fact)
-        end
-        for _, metric in ipairs(definition.metrics) do
-            upsert_metric(model, object_id_value, metric, source_id)
+        if definition.operation == "DROP_METRIC" then
+            drop_metric(model, object_id_value, definition.metric_name)
+        elseif definition.operation == "RENAME_METRIC" then
+            rename_metric(model, object_id_value, definition.metric_name, definition.new_metric_name)
+        else
+            if definition.replace_facts then
+                replace_object_columns(object_id_value, "FACT")
+            end
+            if definition.replace_metrics then
+                replace_object_columns(object_id_value, "METRIC")
+                prepare_replacement_synonyms(model, definition.metrics)
+            end
+            for _, fact in ipairs(definition.facts) do
+                upsert_fact(model, object_id_value, fact)
+            end
+            for _, metric in ipairs(definition.metrics) do
+                upsert_metric(model, object_id_value, metric, source_id)
+            end
         end
         local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = definition.model_name})
         local error_count = 0
@@ -13877,11 +14142,13 @@ function M.apply_semantic_definition(definition_sql, dry_run)
             WHERE DEFINITION_SOURCE_ID = :source_id
         ]], {status = error_count > 0 and "VALIDATION_FAILED" or "APPLIED", validation_run_id = validation_run_id, source_id = source_id})
         if error_count > 0 then
+            local validation_details = validation_error_message(validation_rows)
             restore_model_state(model, snapshot)
             query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = definition.model_name})
-            return {{"ERROR", "SEMANTIC_DDL_090", "Definition rejected; validation failed and catalog state was restored.", normalized_json, #definition.facts + #definition.metrics, validation_run_id}}
+            return {{"ERROR", "SEMANTIC_DDL_090", "Definition rejected; validation failed: "
+                .. validation_details .. ". Catalog state was restored.", normalized_json, operation_count, validation_run_id}}
         end
-        return {{"OK", nil, "Semantic definition applied.", normalized_json, #definition.facts + #definition.metrics, validation_run_id}}
+        return {{"OK", nil, "Semantic definition applied.", normalized_json, operation_count, validation_run_id}}
     end)
     if ok then
         return result
@@ -15439,6 +15706,12 @@ if rawget(_G, "ESV_TEST_MODE") then
         aggregate_parts = aggregate_parts,
         inline_ratio_parts = inline_ratio_parts,
         parse_definition = parse_definition,
+        rewrite_identifier = rewrite_identifier,
+        definition_operation_count = definition_operation_count,
+        prepare_replacement_synonyms = prepare_replacement_synonyms,
+        validation_error_message = validation_error_message,
+        drop_metric = drop_metric,
+        rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,
         parse_databricks_yaml = parse_databricks_yaml,
         dbx_table_ref = dbx_table_ref,

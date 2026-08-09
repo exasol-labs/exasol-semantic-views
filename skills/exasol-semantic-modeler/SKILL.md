@@ -535,8 +535,29 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION('<semantic-sql>', TRUE);
 EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION('<semantic-sql>', FALSE);
 ```
 
-Do not use `REPLACE METRICS (...)` unless deliberately replacing the entire
-metric membership of an object (bootstrap or full reset only).
+`REPLACE METRICS (...)` replaces the semantic object's visible metric
+membership; it does not delete omitted metric definitions from the model
+catalog. It may atomically move a synonym by assigning it to its new metric;
+requested synonyms are released from prior metric owners before the block is
+applied. Assigning one synonym to multiple metrics in the same block fails
+validation. Use replacement for bootstrap or deliberate surface resets, not
+metric removal.
+
+Remove or rename one metric through Semantic DDL. Dry-run each statement before
+applying it:
+
+```sql
+ALTER SEMANTIC VIEW <model>.<object> DROP METRIC <metric_name>;
+
+ALTER SEMANTIC VIEW <model>.<object>
+RENAME METRIC <old_name> TO <new_name>;
+```
+
+`DROP METRIC` removes membership from the named object and deactivates the
+metric when no other object uses it. It is rejected and rolled back when active
+metrics still depend on it. `RENAME METRIC` preserves the metric ID, rewrites
+dependent metric expressions, and retains the old name as a synonym so verified
+requests and existing clients can migrate without an immediate break.
 
 ## Validation and Publication
 
@@ -641,8 +662,9 @@ EXPORT SEMANTIC MODEL <model>;
 - Do not expose private metrics or hidden fields outside role-scoped views.
 - Validate before publishing. Never call `PUBLISH_MODEL` without a clean
   `VALIDATE_MODEL` pass.
-- Treat `REPLACE METRICS (...)` as destructive — it removes all metrics not
-  listed. Use `ADD OR REPLACE METRIC` for incremental changes.
+- `REPLACE METRICS (...)` replaces visible membership only; omitted catalog
+  definitions remain. Use `DROP METRIC` for intentional removal and
+  `ADD OR REPLACE METRIC` for incremental changes.
 - Do not hardcode physical table column references in metric expressions when
   a fact exists — reuse the fact layer.
 - Do not let historical SQL override physical grain, relationship, or comment
