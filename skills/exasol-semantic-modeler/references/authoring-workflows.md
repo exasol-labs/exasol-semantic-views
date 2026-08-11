@@ -272,7 +272,10 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
 For `MANY_TO_ONE`, the ordered `to` mappings must exactly match a declared
 unique key; reverse this requirement for `ONE_TO_MANY`, and satisfy it on both
 ends for `ONE_TO_ONE`. Add all required unique keys and key columns before any
-mapping. If `SEMANTIC_MODEL_033` occurs, use these direct admin scripts to
+mapping. Relationship key mappings must use columns: typed grain proofs do not
+support `FROM_EXPRESSION` or `TO_EXPRESSION`. Normalize casts and other key
+expressions into a source view, then map the projected column. If
+`SEMANTIC_MODEL_033` occurs, use these direct admin scripts to
 repair the metadata and rerun `VALIDATE_MODEL`; `APPLY_SEMANTIC_DEFINITION`
 cannot apply metric edits while the model has a blocking validation error.
 

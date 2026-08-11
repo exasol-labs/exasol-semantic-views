@@ -262,6 +262,23 @@ def main() -> int:
             1,
         )
 
+        try:
+            assert_script_fails(
+                con,
+                "expression relationship key mapping",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING("
+                "'sales', 'order_line_to_order', NULL, "
+                "'CAST(ol.order_id AS DECIMAL(18,0))', 'order_id', NULL, 99)",
+                "SEMANTIC_ADMIN_043",
+            )
+        finally:
+            con.execute(
+                "DELETE FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS "
+                "WHERE ORDINAL_POSITION = 99 AND RELATIONSHIP_ID = ("
+                "SELECT RELATIONSHIP_ID FROM SYS_SEMANTIC.RELATIONSHIPS "
+                "WHERE RELATIONSHIP_NAME = 'order_line_to_order')"
+            )
+
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
         assert_equal(
             "OSI metadata validation errors",

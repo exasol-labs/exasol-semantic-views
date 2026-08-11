@@ -226,13 +226,12 @@ test("validator accepts composite relationship mappings backed by a unique key",
         name = "customer_tenant",
         kind = "PRIMARY",
         columns = {
-            {ordinal_position = 1, expression = "c.tenant_id"},
-            {ordinal_position = 2, expression = "c.customer_id"},
+            {ordinal_position = 1, column_name = "tenant_id"},
+            {ordinal_position = 2, column_name = "customer_id"},
         },
     }
     local ctx = validation_context({
         entities = {from_entity, to_entity},
-        entity_by_id = {['1'] = from_entity, ['2'] = to_entity},
         unique_keys_by_entity = {['2'] = {customer_key}},
         relationships = {{
             name = "orders_customer",
@@ -240,16 +239,40 @@ test("validator accepts composite relationship mappings backed by a unique key",
             to_entity_id = 2,
             cardinality = "MANY_TO_ONE",
             key_mappings = {
-                {ordinal_position = 1, from_expression = "o.tenant_id",
-                    to_expression = "c.tenant_id"},
-                {ordinal_position = 2, from_expression = "o.customer_id",
-                    to_expression = "c.customer_id"},
+                {ordinal_position = 1, from_column_name = "tenant_id",
+                    to_column_name = "tenant_id"},
+                {ordinal_position = 2, from_column_name = "customer_id",
+                    to_column_name = "customer_id"},
             },
         }},
     })
     api.validate_relationship_key_mappings(ctx)
     assert_equal(ctx.error_count, 0)
     assert_equal(ctx.warning_count, 0)
+end)
+
+test("validator rejects expression relationship key mappings before publication", function()
+    local ctx = validation_context({
+        unique_keys_by_entity = {['2'] = {{
+            entity_id = 2,
+            columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}},
+        }}},
+        relationships = {{
+            name = "session_to_customer",
+            from_entity_id = 1,
+            to_entity_id = 2,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {{
+                ordinal_position = 1,
+                from_expression = "CAST(w.CUSTOMER_ID AS DECIMAL(18,0))",
+                to_column_name = "CUSTOMER_ID",
+            }},
+        }},
+    })
+    api.validate_relationship_key_mappings(ctx)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_032")
+    assert_true(issue ~= nil)
+    assert_contains(issue.message, "normalize the expression into a source view")
 end)
 
 test("validator distinguishes legacy and invalid relationship mappings", function()

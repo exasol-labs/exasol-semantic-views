@@ -1254,24 +1254,19 @@ local function validate_relationship_key_mappings(ctx)
                     .. " must define exactly one " .. side .. " column or expression.")
             return
         end
+        if has_expression then
+            add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                "SEMANTIC_MODEL_032",
+                "Expression relationship key mappings are not supported by typed grain proofs; "
+                    .. "normalize the expression into a source view and map a column.")
+            return
+        end
         if has_column and entity ~= nil
             and not source_column_exists(entity.source_schema, entity.source_object, column_name) then
             add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
                 "SEMANTIC_MODEL_032",
                 "Relationship key mapping references unknown " .. side
                     .. " source column: " .. tostring(column_name) .. ".")
-        end
-        if has_expression and entity ~= nil then
-            local expected_alias = upper(entity.alias)
-            for alias, _ in pairs(aliases_in_expression(expression)) do
-                if alias ~= expected_alias then
-                    add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
-                        "SEMANTIC_MODEL_032",
-                        "Relationship key mapping " .. side
-                            .. " expression references out-of-scope alias: "
-                            .. tostring(alias) .. ".")
-                end
-            end
         end
     end
 
