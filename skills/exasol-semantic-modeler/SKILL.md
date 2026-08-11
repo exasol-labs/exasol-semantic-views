@@ -359,7 +359,7 @@ When starting from zero, create objects in this order. Each step requires the
 previous to succeed.
 
 ```
-1. CREATE MODEL (name, description)
+1. CREATE_MODEL (name, published schema, description, owner role)
 2. ADD_ENTITY (per entity — one per physical table)
 3. ADD_UNIQUE_KEY, then ADD_UNIQUE_KEY_COLUMN (per proven entity key)
 4. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)

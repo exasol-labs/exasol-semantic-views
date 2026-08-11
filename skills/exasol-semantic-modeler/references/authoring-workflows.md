@@ -119,6 +119,21 @@ parallel paths can make metric-to-dimension compilation ambiguous. Keep a
 shortcut only when it has distinct role semantics and path selection remains
 unambiguous.
 
+## Create the Model
+
+Create the model before registering any entities. `PUBLISHED_SCHEMA` is the
+schema where published semantic views will be created; use `NULL` when no
+owner role is required.
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL(
+  'sales',
+  'SEMANTIC_SALES',
+  'Sales domain semantic model',
+  NULL
+);
+```
+
 ## Register Entities
 
 ```sql
