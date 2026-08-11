@@ -1914,12 +1914,24 @@ local function validate_visible_metric_dimension_pairs(ctx)
         local dimension_id = row_value(row, "DIMENSION_ID", 4)
         local matrix_row = ctx.matrix[key(metric_id)] and ctx.matrix[key(metric_id)][key(dimension_id)]
         if matrix_row ~= nil and not matrix_row.is_valid then
+            local object_name = row_value(row, "OBJECT_NAME", 1)
             local path_detail = missing(matrix_row.path)
                 and "" or " via " .. tostring(matrix_row.path)
-            add_issue(ctx, "ERROR", "SEMANTIC_OBJECT", row_value(row, "OBJECT_NAME", 1), "SEMANTIC_MODEL_030",
-                "Visible metric " .. tostring(row_value(row, "METRIC_NAME", 3))
+            local message = "Visible metric " .. tostring(row_value(row, "METRIC_NAME", 3))
                 .. " cannot be grouped or filtered by dimension " .. tostring(row_value(row, "DIMENSION_NAME", 5))
-                .. ": " .. tostring(matrix_row.reason_code) .. path_detail .. ".")
+                .. ": " .. tostring(matrix_row.reason_code) .. path_detail .. "."
+            if matrix_row.reason_code == "NO_SAFE_JOIN_PATH" then
+                local metric = ctx.metric_by_id[key(metric_id)]
+                if metric ~= nil then
+                    local base_name = ctx.entity_name_by_id[key(metric.base_entity_id)]
+                        or tostring(metric.base_entity_id)
+                    message = message .. " Declare a semantic object rooted at '"
+                        .. base_name .. "', or remove this metric from object '"
+                        .. tostring(object_name) .. "'."
+                end
+            end
+            add_issue(ctx, "ERROR", "SEMANTIC_OBJECT", object_name,
+                "SEMANTIC_MODEL_030", message)
         end
     end
 end

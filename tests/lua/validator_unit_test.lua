@@ -571,6 +571,7 @@ test("validator matrix rejects metrics unreachable from published roots", functi
         semantic_objects = {{root_entity_id = 1}},
         entity_name_by_id = {['1'] = "order_line", ['2'] = "order", ['3'] = "shipment"},
         metrics = {{id = 10, name = "shipping_cost", base_entity_id = 3}},
+        metric_by_id = {['10'] = {id = 10, name = "shipping_cost", base_entity_id = 3}},
         dimensions = {{id = 20, name = "order_id", entity_id = 2}},
     })
     local safe = {
@@ -595,6 +596,16 @@ test("validator matrix rejects metrics unreachable from published roots", functi
     assert_equal(ctx.matrix['10']['20'].path,
         "line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)")
     assert_equal(inserted.relationship_path, ctx.matrix['10']['20'].path)
+
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+            return {{"COMMERCE", 10, "shipping_cost", 20, "order_id"}}
+        end
+        return {}
+    end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_030")
+    assert_contains(issue.message,
+        "Declare a semantic object rooted at 'shipment', or remove this metric from object 'COMMERCE'.")
 end)
 
 test("validator public entry point loads and validates a coherent catalog", function()

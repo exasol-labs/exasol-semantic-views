@@ -199,6 +199,11 @@ but they should not change the entity grain itself.
 Choose a short, lowercase alias for each entity that matches the table's
 business role: `ol` for order_line, `o` for order, `c` for customer.
 
+When metrics originate on fact branches at different grains, generally add a
+semantic object rooted at each metric base entity, even if consumers only query
+the cross-source object. Without that root, validation can reject the branch
+with `NO_SAFE_JOIN_PATH`; otherwise remove the metric from that object.
+
 ### Step 3 — Identify relationships
 
 Scan for columns that appear in more than one table with matching names and

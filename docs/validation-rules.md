@@ -97,6 +97,8 @@ and annotates unsafe edges with their reason, for example
 without traversing from the one-side to the many-side of a relationship. This
 prevents attributing one fact row to multiple dimension rows; see
 [Grain-Aware Result Semantics](architecture-decisions/001-grain-aware-result-semantics.md).
+Declare a semantic object rooted at the metric's base entity to establish that
+branch grain, or remove the metric from the incompatible object.
 
 ## Test Coverage
 
