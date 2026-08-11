@@ -179,7 +179,9 @@ database-wide extension reinstall that removes unrelated semantic models too.
 
 Declare each unique key before its columns. Composite key columns must use
 contiguous ordinals starting at 1. Use either `COLUMN_NAME` or `EXPRESSION` for
-each component, never both.
+each component, never both. `COLUMN_NAME` preserves supplied source casing and
+falls back to uppercase for ordinary unquoted identifiers. Use `EXPRESSION`
+for computed keys or explicitly quoted references such as `li."order_id"`.
 
 ```sql
 

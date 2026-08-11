@@ -284,6 +284,28 @@ local function contains(text, fragment)
     return tostring(text):find(fragment, 1, true) ~= nil
 end
 
+test("source catalog probes preserve non-uppercase identifiers", function()
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then
+            assert_true(contains(sql, "TABLE_SCHEMA = :schema_name"))
+            assert_true(contains(sql, "TABLE_NAME = :object_name"))
+            assert_equal(params.schema_name, "SRC_MONGO_ORDERS")
+            assert_equal(params.object_name, "ORDERS_line_items_arr")
+            return {{1}}
+        elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            assert_true(contains(sql, "COLUMN_TABLE = :object_name"))
+            assert_true(contains(sql, "COLUMN_NAME = :column_name"))
+            assert_equal(params.object_name, "campaigns")
+            assert_equal(params.column_name, "order_id")
+            return {{1}}
+        end
+        error("unexpected source catalog SQL: " .. tostring(sql))
+    end, function()
+        assert_true(api.source_object_exists("SRC_MONGO_ORDERS", "ORDERS_line_items_arr"))
+        assert_true(api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "order_id"))
+    end)
+end)
+
 test("validator structural rules reject invisible and dangling catalog objects", function()
     local ctx = validation_context({
         version_id = 2,

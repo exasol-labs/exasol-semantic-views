@@ -507,13 +507,13 @@ local function source_object_exists(schema_name, object_name)
         FROM (
           SELECT TABLE_NAME AS OBJECT_NAME
           FROM SYS.EXA_ALL_TABLES
-          WHERE TABLE_SCHEMA = UPPER(:schema_name)
-            AND TABLE_NAME = UPPER(:object_name)
+          WHERE (TABLE_SCHEMA = :schema_name OR TABLE_SCHEMA = UPPER(:schema_name))
+            AND (TABLE_NAME = :object_name OR TABLE_NAME = UPPER(:object_name))
           UNION ALL
           SELECT VIEW_NAME AS OBJECT_NAME
           FROM SYS.EXA_ALL_VIEWS
-          WHERE VIEW_SCHEMA = UPPER(:schema_name)
-            AND VIEW_NAME = UPPER(:object_name)
+          WHERE (VIEW_SCHEMA = :schema_name OR VIEW_SCHEMA = UPPER(:schema_name))
+            AND (VIEW_NAME = :object_name OR VIEW_NAME = UPPER(:object_name))
         ) visible_objects
     ]], {schema_name = schema_name, object_name = object_name}) > 0
 end
@@ -522,9 +522,9 @@ local function source_column_exists(schema_name, object_name, column_name)
     return count_query([[
         SELECT COUNT(*)
         FROM SYS.EXA_ALL_COLUMNS
-        WHERE COLUMN_SCHEMA = UPPER(:schema_name)
-          AND COLUMN_TABLE = UPPER(:object_name)
-          AND COLUMN_NAME = UPPER(:column_name)
+        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
+          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
+          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
     ]], {schema_name = schema_name, object_name = object_name, column_name = column_name}) > 0
 end
 
@@ -1876,6 +1876,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         unsupported_functions = unsupported_functions,
         dependency_tokens = dependency_tokens,
         extract_json_array_values = extract_json_array_values,
+        source_object_exists = source_object_exists,
+        source_column_exists = source_column_exists,
         validate_structural_rules = validate_structural_rules,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
