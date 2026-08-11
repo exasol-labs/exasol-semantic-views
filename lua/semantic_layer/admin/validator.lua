@@ -1050,6 +1050,22 @@ local function validate_structural_rules(ctx)
             "Entity alias is not unique within the model version.")
     end
 
+    local reserved_alias_rows = query([[
+        SELECT e.ENTITY_NAME, e.SOURCE_ALIAS
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS.EXA_SQL_KEYWORDS k
+          ON UPPER(k.KEYWORD) = UPPER(e.SOURCE_ALIAS)
+         AND k.RESERVED = TRUE
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(reserved_alias_rows or {}) do
+        local alias = row_value(row, "SOURCE_ALIAS", 2)
+        add_issue(ctx, "ERROR", "ENTITY", row_value(row, "ENTITY_NAME", 1), "SEMANTIC_MODEL_034",
+            "Entity alias '" .. tostring(alias) .. "' is an Exasol reserved word; choose another alias.")
+    end
+
     local missing_roots = query([[
         SELECT so.OBJECT_NAME
         FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so

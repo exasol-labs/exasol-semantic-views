@@ -156,6 +156,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
 );
 ```
 
+Entity aliases are emitted as regular SQL identifiers. Keep them short and
+unique, and do not use words marked `RESERVED` in `SYS.EXA_SQL_KEYWORDS`.
+
 ## Rebuild an Existing Model
 
 Bootstrap scripts are not idempotent. Prefer incremental add/replace operations

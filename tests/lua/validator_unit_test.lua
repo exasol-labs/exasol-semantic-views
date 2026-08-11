@@ -364,6 +364,8 @@ test("validator structural rules reject invisible and dangling catalog objects",
             return {{params.object_name == "ORDERS" and 1 or 0}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
             return {{SOURCE_ALIAS = "O"}}
+        elseif contains(sql, "JOIN SYS.EXA_SQL_KEYWORDS") then
+            return {{ENTITY_NAME = "attribution", SOURCE_ALIAS = "at"}}
         elseif contains(sql, "AND e.ENTITY_ID IS NULL") then
             return {{OBJECT_NAME = "BROKEN_OBJECT"}}
         elseif contains(sql, "oc.COLUMN_KIND NOT IN") then
@@ -375,6 +377,7 @@ test("validator structural rules reject invisible and dangling catalog objects",
     end)
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_001"))
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_003"))
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_034"))
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_004"))
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_005"))
     assert_branch("validator.structure.valid", ctx.error_count == 0, false)
@@ -612,6 +615,8 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return {{1}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
+            return {}
+        elseif contains(sql, "JOIN SYS.EXA_SQL_KEYWORDS") then
             return {}
         elseif contains(sql, "SELECT OBJECT_TYPE, OBJECT_ID, SYNONYM") then
             return {}

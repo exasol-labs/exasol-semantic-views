@@ -17,6 +17,7 @@ return {
         invalid_metric_dependency = "SEMANTIC_MODEL_011",
         cyclic_metric_dependency = "SEMANTIC_MODEL_012",
         many_to_many_without_fanout = "SEMANTIC_MODEL_010",
+        reserved_entity_alias = "SEMANTIC_MODEL_034",
         ambiguous_certified_synonym = "SEMANTIC_MODEL_021",
         verified_query_missing_metric = "SEMANTIC_MODEL_023",
     },

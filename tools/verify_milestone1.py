@@ -241,6 +241,22 @@ def main() -> int:
             7,
         )
 
+        try:
+            assert_script_fails(
+                con,
+                "reserved entity alias",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY("
+                "'sales', 'reserved_alias_probe', 'MART', 'ORDERS', 'at', "
+                "'at.order_id', 'Probe grain', 'Reserved alias probe')",
+                "SEMANTIC_ADMIN_044",
+            )
+        finally:
+            con.execute(
+                "DELETE FROM SYS_SEMANTIC.ENTITIES WHERE ENTITY_NAME = 'reserved_alias_probe' "
+                "AND MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS "
+                "WHERE MODEL_NAME = 'sales')"
+            )
+
         con.execute(
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY("
             "'sales', 'order', 'order_order_id_key', 'PRIMARY', 'Order primary key', 'OSI')"

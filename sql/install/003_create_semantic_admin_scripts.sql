@@ -387,6 +387,16 @@ local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
 local source_schema = normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA")
 local source_object = normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT")
 local source_alias = normalize_name(SOURCE_ALIAS, "SOURCE_ALIAS")
+local reserved_alias = scalar([[
+    SELECT COUNT(*)
+    FROM SYS.EXA_SQL_KEYWORDS
+    WHERE UPPER(KEYWORD) = UPPER(:source_alias)
+      AND RESERVED = TRUE
+]], {source_alias = source_alias})
+if tonumber(reserved_alias or 0) > 0 then
+    error("SEMANTIC_ADMIN_044: entity alias '" .. source_alias
+        .. "' is an Exasol reserved word; choose another alias")
+end
 local model = model_row(model_name)
 
 local duplicate_name = scalar([[
@@ -4789,6 +4799,22 @@ local function validate_structural_rules(ctx)
     for _, row in ipairs(duplicate_alias_rows or {}) do
         add_issue(ctx, "ERROR", "ENTITY", row_value(row, "SOURCE_ALIAS", 1), "SEMANTIC_MODEL_003",
             "Entity alias is not unique within the model version.")
+    end
+
+    local reserved_alias_rows = query([[
+        SELECT e.ENTITY_NAME, e.SOURCE_ALIAS
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS.EXA_SQL_KEYWORDS k
+          ON UPPER(k.KEYWORD) = UPPER(e.SOURCE_ALIAS)
+         AND k.RESERVED = TRUE
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(reserved_alias_rows or {}) do
+        local alias = row_value(row, "SOURCE_ALIAS", 2)
+        add_issue(ctx, "ERROR", "ENTITY", row_value(row, "ENTITY_NAME", 1), "SEMANTIC_MODEL_034",
+            "Entity alias '" .. tostring(alias) .. "' is an Exasol reserved word; choose another alias.")
     end
 
     local missing_roots = query([[
