@@ -9,6 +9,11 @@ test("validator expression inspection ignores strings and permits qualified UDFs
     local aliases = api.aliases_in_expression("f.amount + d.rate + 'x.fake'")
     assert_true(aliases.F and aliases.D)
     assert_true(not aliases.X)
+    local quoted_aliases = api.aliases_in_expression('li."_parent" = o."_id"')
+    assert_true(quoted_aliases.LI and quoted_aliases.O)
+    local quoted_refs = api.column_refs_in_expression('li."_parent" = o."a""b"')
+    assert_equal(quoted_refs[1].column_name, "_parent")
+    assert_equal(quoted_refs[2].column_name, 'a"b')
     local unsupported = api.unsupported_functions("SUM(f.amount) + QUARTER(d.day) + ML.PREDICT(f.x)")
     assert_branch("validator.unsupported_function", unsupported.QUARTER, true)
     assert_branch("validator.unsupported_function", unsupported.SUM, false)
@@ -93,6 +98,23 @@ local function issue_for_rule(ctx, rule_code)
     end
     return nil
 end
+
+test("validator accepts relationship joins with quoted columns on both endpoints", function()
+    local ctx = validation_context({
+        entity_name_by_id = {['1'] = "order_line", ['2'] = "order"},
+        entity_alias_by_id = {['1'] = "LI", ['2'] = "O"},
+        relationships = {{
+            name = "line_to_order",
+            from_entity_id = 1,
+            to_entity_id = 2,
+            cardinality = "MANY_TO_ONE",
+            join_type = "INNER",
+            join_condition = 'li."_parent" = o."_id"',
+        }},
+    })
+    api.relationship_edges(ctx)
+    assert_true(not has_rule(ctx, "SEMANTIC_MODEL_007"))
+end)
 
 test("validator rejects malformed and dangling custom extensions", function()
     local ctx = validation_context({

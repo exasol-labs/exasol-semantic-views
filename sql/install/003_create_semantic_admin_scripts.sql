@@ -4294,38 +4294,85 @@ local function strip_string_literals(text)
     return table.concat(out)
 end
 
-local function aliases_in_expression(expression)
-    local aliases = {}
-    if missing(expression) then
-        return aliases
-    end
-    local text = strip_string_literals(tostring(expression))
-    local pos = 1
-    while true do
-        local start_pos, end_pos, alias = string.find(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%.[%s]*[A-Za-z_][A-Za-z0-9_]*", pos)
-        if start_pos == nil then
-            break
-        end
-        local next_char = string.sub(text, end_pos + 1, end_pos + 1)
-        if next_char ~= "(" then
-            aliases[upper(alias)] = true
-        end
-        pos = end_pos + 1
-    end
-    return aliases
-end
-
-local function column_refs_in_expression(expression)
+local function qualified_column_refs(expression)
     local refs = {}
     if missing(expression) then
         return refs
     end
     local text = strip_string_literals(tostring(expression))
-    for alias, column_name in string.gmatch(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)") do
-        local after = string.sub(text, string.find(text, alias .. "%s*%.%s*" .. column_name, 1) or 1)
-        refs[#refs + 1] = {alias = upper(alias), column_name = upper(column_name)}
+    local pos = 1
+    while pos <= #text do
+        local start_pos, alias_end, alias = string.find(
+            text, "([A-Za-z_][A-Za-z0-9_]*)", pos)
+        if start_pos == nil then break end
+        local cursor = alias_end + 1
+        while string.match(string.sub(text, cursor, cursor), "%s") do
+            cursor = cursor + 1
+        end
+        if string.sub(text, cursor, cursor) ~= "." then
+            pos = alias_end + 1
+        else
+            cursor = cursor + 1
+            while string.match(string.sub(text, cursor, cursor), "%s") do
+                cursor = cursor + 1
+            end
+            local column_name = nil
+            local quoted = false
+            if string.sub(text, cursor, cursor) == '"' then
+                quoted = true
+                cursor = cursor + 1
+                local parts = {}
+                while cursor <= #text do
+                    local char = string.sub(text, cursor, cursor)
+                    local next_char = string.sub(text, cursor + 1, cursor + 1)
+                    if char == '"' and next_char == '"' then
+                        parts[#parts + 1] = '"'
+                        cursor = cursor + 2
+                    elseif char == '"' then
+                        cursor = cursor + 1
+                        column_name = table.concat(parts)
+                        break
+                    else
+                        parts[#parts + 1] = char
+                        cursor = cursor + 1
+                    end
+                end
+            else
+                local column_start, column_end
+                column_start, column_end, column_name = string.find(
+                    text, "([A-Za-z_][A-Za-z0-9_]*)", cursor)
+                if column_start ~= cursor then
+                    column_name = nil
+                elseif column_end ~= nil then
+                    cursor = column_end + 1
+                end
+            end
+            local after = cursor
+            while string.match(string.sub(text, after, after), "%s") do
+                after = after + 1
+            end
+            if column_name ~= nil and string.sub(text, after, after) ~= "(" then
+                refs[#refs + 1] = {
+                    alias = upper(alias),
+                    column_name = quoted and column_name or upper(column_name),
+                }
+            end
+            pos = math.max(cursor, alias_end + 1)
+        end
     end
     return refs
+end
+
+local function aliases_in_expression(expression)
+    local aliases = {}
+    for _, ref in ipairs(qualified_column_refs(expression)) do
+        aliases[ref.alias] = true
+    end
+    return aliases
+end
+
+local function column_refs_in_expression(expression)
+    return qualified_column_refs(expression)
 end
 
 local function schema_qualified_functions(expression)
