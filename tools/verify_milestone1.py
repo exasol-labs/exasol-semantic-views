@@ -279,6 +279,29 @@ def main() -> int:
         )
 
         try:
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN("
+                "'sales', 'order', 'order_order_id_key', '_id', NULL, 99)"
+            ).fetchall()
+            assert_equal(
+                "leading-underscore unique key column",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SEMANTIC_CATALOG.UNIQUE_KEY_COLUMNS "
+                    "WHERE MODEL_NAME = 'sales' AND ENTITY_NAME = 'order' "
+                    "AND KEY_NAME = 'order_order_id_key' AND COLUMN_NAME = '_id'",
+                ),
+                1,
+            )
+        finally:
+            con.execute(
+                "DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS WHERE ORDINAL_POSITION = 99 "
+                "AND UNIQUE_KEY_ID = (SELECT UNIQUE_KEY_ID FROM SYS_SEMANTIC.UNIQUE_KEYS "
+                "WHERE KEY_NAME = 'order_order_id_key' AND MODEL_ID = ("
+                "SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales'))"
+            )
+
+        try:
             assert_script_fails(
                 con,
                 "expression relationship key mapping",

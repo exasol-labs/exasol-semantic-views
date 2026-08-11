@@ -2667,7 +2667,10 @@ end
 if not missing(COLUMN_NAME) and not missing(EXPRESSION) then
     error("SEMANTIC_ADMIN_041: specify either COLUMN_NAME or EXPRESSION, not both")
 end
-local column_name = missing(COLUMN_NAME) and null or normalize_name(COLUMN_NAME, "COLUMN_NAME")
+local column_name = missing(COLUMN_NAME) and null or trim(COLUMN_NAME)
+if column_name ~= null and not string.match(column_name, "^[A-Za-z_][A-Za-z0-9_]*$") then
+    error("SEMANTIC_ADMIN_002: invalid COLUMN_NAME: " .. column_name)
+end
 local expression = optional_text(EXPRESSION)
 local model = model_row(model_name)
 local unique_key_id = scalar([[

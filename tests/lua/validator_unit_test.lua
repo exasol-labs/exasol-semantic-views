@@ -341,13 +341,13 @@ test("source catalog probes preserve non-uppercase identifiers", function()
             assert_true(contains(sql, "COLUMN_TABLE = :object_name"))
             assert_true(contains(sql, "COLUMN_NAME = :column_name"))
             assert_equal(params.object_name, "campaigns")
-            assert_equal(params.column_name, "order_id")
+            assert_equal(params.column_name, "_id")
             return {{1}}
         end
         error("unexpected source catalog SQL: " .. tostring(sql))
     end, function()
         assert_true(api.source_object_exists("SRC_MONGO_ORDERS", "ORDERS_line_items_arr"))
-        assert_true(api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "order_id"))
+        assert_true(api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "_id"))
     end)
 end)
 
