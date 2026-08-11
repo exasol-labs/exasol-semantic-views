@@ -1767,19 +1767,54 @@ local function validate_agent_metadata(ctx)
     end
 end
 
--- Returns true if metric.base_entity_id is reachable via safe_edges from at least one
--- semantic object root entity. Mirrors the compiler join-resolution starting point.
-local function metric_reachable_from_any_root(ctx, metric, safe_edges)
-    if #ctx.semantic_objects == 0 then
-        return true  -- no objects loaded, skip the check
+local function rejected_path(edges)
+    local parts = {}
+    local first_reason = nil
+    for _, edge in ipairs(edges or {}) do
+        local name = tostring(edge.name)
+        if edge.safe == false then
+            local reason = tostring(edge.reason or "UNSAFE_RELATIONSHIP_EDGE")
+            first_reason = first_reason or reason
+            name = name .. " (rejected: " .. reason .. ")"
+        end
+        parts[#parts + 1] = name
     end
+    return #parts == 0 and nil or table.concat(parts, " > "), first_reason
+end
+
+local function attempted_path(all_edges, from_id, to_id)
+    local ok, reason, _, proof = find_path(all_edges, from_id, to_id, false)
+    if ok then
+        local path, blocked_reason = rejected_path(proof.edges)
+        return path, blocked_reason
+    end
+    if proof ~= nil and proof.ambiguous then
+        local paths = {}
+        for _, candidate in ipairs(proof.candidates or {}) do
+            paths[#paths + 1] = rejected_path(candidate)
+        end
+        return table.concat(paths, " | "), reason
+    end
+    return nil, reason
+end
+
+-- Mirrors the compiler's requirement that an object root can reach a metric
+-- base without traversing from one-side to many-side.
+local function metric_reachable_from_any_root(ctx, metric, safe_edges, all_edges)
+    if #ctx.semantic_objects == 0 then
+        return true, nil
+    end
+    local diagnostic_path = nil
     for _, obj in ipairs(ctx.semantic_objects) do
         local ok, _, _ = find_path(safe_edges, obj.root_entity_id, metric.base_entity_id, true)
         if ok then
-            return true
+            return true, nil
+        end
+        if diagnostic_path == nil then
+            diagnostic_path = attempted_path(all_edges, obj.root_entity_id, metric.base_entity_id)
         end
     end
-    return false
+    return false, diagnostic_path
 end
 
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
@@ -1795,13 +1830,15 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         -- Pre-check: the compiler starts joins from the semantic object root. If the
         -- metric base entity is unreachable from any root via safe edges, every
         -- metric/dimension combination is invalid (compiler will return SEMANTIC_REQUEST_042).
-        local root_can_reach_metric = metric_reachable_from_any_root(ctx, metric, safe_edges)
+        local root_can_reach_metric, root_path = metric_reachable_from_any_root(
+            ctx, metric, safe_edges, all_edges)
         for _, dimension in ipairs(ctx.dimensions) do
             local is_valid = false
             local reason_code = "OK"
             local path = nil
             if not root_can_reach_metric then
                 reason_code = "NO_SAFE_JOIN_PATH"
+                path = root_path
             elseif ctx.entity_name_by_id[key(metric.base_entity_id)] == nil then
                 reason_code = "MISSING_BASE_ENTITY"
             elseif ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
@@ -1813,8 +1850,10 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                     reason_code = "OK"
                     path = relationship_path
                 else
-                    local connected = find_path(all_edges, metric.base_entity_id, dimension.entity_id, false)
-                    reason_code = connected and "FANOUT_REQUIRES_POLICY" or reason
+                    local blocked_path, blocked_reason = attempted_path(
+                        all_edges, metric.base_entity_id, dimension.entity_id)
+                    path = blocked_path
+                    reason_code = blocked_path ~= nil and blocked_reason or reason
                 end
             end
             matrix[key(metric.id)][key(dimension.id)] = {
@@ -1875,10 +1914,12 @@ local function validate_visible_metric_dimension_pairs(ctx)
         local dimension_id = row_value(row, "DIMENSION_ID", 4)
         local matrix_row = ctx.matrix[key(metric_id)] and ctx.matrix[key(metric_id)][key(dimension_id)]
         if matrix_row ~= nil and not matrix_row.is_valid then
+            local path_detail = missing(matrix_row.path)
+                and "" or " via " .. tostring(matrix_row.path)
             add_issue(ctx, "ERROR", "SEMANTIC_OBJECT", row_value(row, "OBJECT_NAME", 1), "SEMANTIC_MODEL_030",
                 "Visible metric " .. tostring(row_value(row, "METRIC_NAME", 3))
                 .. " cannot be grouped or filtered by dimension " .. tostring(row_value(row, "DIMENSION_NAME", 5))
-                .. ": " .. tostring(matrix_row.reason_code) .. ".")
+                .. ": " .. tostring(matrix_row.reason_code) .. path_detail .. ".")
         end
     end
 end

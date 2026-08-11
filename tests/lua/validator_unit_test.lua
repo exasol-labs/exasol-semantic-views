@@ -546,6 +546,8 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
     assert_true(ctx.matrix['10']['20'].is_valid)
     assert_equal(ctx.matrix['10']['21'].reason_code, "OK")
     assert_equal(ctx.matrix['10']['22'].reason_code, "FANOUT_REQUIRES_POLICY")
+    assert_equal(ctx.matrix['10']['22'].path,
+        "orders_items (rejected: FANOUT_REQUIRES_POLICY)")
     assert_equal(ctx.matrix['10']['23'].reason_code, "MISSING_DIMENSION_ENTITY")
     assert_equal(ctx.matrix['11']['20'].reason_code, "MISSING_BASE_ENTITY")
     assert_branch("validator.matrix.safe", ctx.matrix['10']['21'].is_valid, true)
@@ -558,21 +560,41 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
         return {}
     end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_030"))
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_030").message,
+        "orders_items (rejected: FANOUT_REQUIRES_POLICY)")
 end)
 
 test("validator matrix rejects metrics unreachable from published roots", function()
+    local inserted = nil
     local ctx = validation_context({
         version_id = 2,
-        semantic_objects = {{root_entity_id = 3}},
-        entity_name_by_id = {['1'] = "orders", ['2'] = "customers", ['3'] = "isolated"},
-        metrics = {{id = 10, name = "revenue", base_entity_id = 1}},
-        dimensions = {{id = 20, name = "region", entity_id = 2}},
+        semantic_objects = {{root_entity_id = 1}},
+        entity_name_by_id = {['1'] = "order_line", ['2'] = "order", ['3'] = "shipment"},
+        metrics = {{id = 10, name = "shipping_cost", base_entity_id = 3}},
+        dimensions = {{id = 20, name = "order_id", entity_id = 2}},
     })
-    local safe = {['1'] = {{to_id = 2, name = "orders_customer", safe = true, reason = "OK"}}}
-    with_query(function() return {} end, function()
-        api.compute_metric_dimension_matrix(ctx, safe, safe)
+    local safe = {
+        ['1'] = {{from_id = 1, to_id = 2, name = "line_to_order", safe = true, reason = "OK"}},
+        ['3'] = {{from_id = 3, to_id = 2, name = "shipment_to_order", safe = true, reason = "OK"}},
+    }
+    local all = {
+        ['1'] = safe['1'],
+        ['2'] = {{from_id = 2, to_id = 3, name = "shipment_to_order", safe = false,
+            reason = "FANOUT_REQUIRES_POLICY"}},
+        ['3'] = safe['3'],
+    }
+    with_query(function(sql, params)
+        if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX") then
+            inserted = params
+        end
+        return {}
+    end, function()
+        api.compute_metric_dimension_matrix(ctx, safe, all)
     end)
     assert_equal(ctx.matrix['10']['20'].reason_code, "NO_SAFE_JOIN_PATH")
+    assert_equal(ctx.matrix['10']['20'].path,
+        "line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)")
+    assert_equal(inserted.relationship_path, ctx.matrix['10']['20'].path)
 end)
 
 test("validator public entry point loads and validates a coherent catalog", function()

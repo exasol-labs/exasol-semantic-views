@@ -90,6 +90,14 @@ The matrix records:
 The MVP accepts same-entity pairs and non-fanout relationship paths. It rejects
 paths that require many-to-many traversal without fanout policy.
 
+For rejected connected pairs, `RELATIONSHIP_PATH` contains the attempted path
+and annotates unsafe edges with their reason, for example
+`line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)`.
+`NO_SAFE_JOIN_PATH` means no semantic-object root can reach the metric base
+without traversing from the one-side to the many-side of a relationship. This
+prevents attributing one fact row to multiple dimension rows; see
+[Grain-Aware Result Semantics](architecture-decisions/001-grain-aware-result-semantics.md).
+
 ## Test Coverage
 
 Run the Nano smoke:
