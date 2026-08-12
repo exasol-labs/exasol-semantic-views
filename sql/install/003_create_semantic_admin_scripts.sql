@@ -6126,6 +6126,7 @@ local function probe_count(sql_text)
 end
 
 local function validate_representation_data_equivalence(ctx)
+    if (ctx.error_count or 0) > 0 then return end
     for _, entity in ipairs(ctx.entities or {}) do
         local representations = representations_for_entity(ctx, entity)
         if #representations > 1 then
@@ -6138,17 +6139,21 @@ local function validate_representation_data_equivalence(ctx)
             local primary = entity.primary_representation
             for _, unique_key in ipairs(unique_keys) do
                 local object_name = unique_key_object_name(ctx, unique_key)
-                local primary_keys, primary_build_error = nil, nil
-                if primary ~= nil then
-                    primary_keys, primary_build_error =
-                        representation_key_query(primary, unique_key)
-                end
+                local probes = {}
                 for _, representation in ipairs(representations) do
                     local grouped_keys, build_error =
                         representation_key_query(representation, unique_key)
+                    local representation_name = tostring(entity.name) .. "."
+                        .. tostring(representation.name)
+                    local probe = {
+                        grouped_keys = grouped_keys,
+                        build_error = build_error,
+                        representation_name = representation_name,
+                    }
+                    probes[key(representation.id)] = probe
                     if build_error ~= nil then
                         add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
-                            tostring(entity.name) .. "." .. tostring(representation.name),
+                            representation_name,
                             "SEMANTIC_MODEL_037", "Could not construct declared key probe "
                                 .. object_name .. ": " .. tostring(build_error) .. ".")
                     end
@@ -6159,10 +6164,12 @@ local function validate_representation_data_equivalence(ctx)
                             .. " " .. tostring(representation.alias)
                         local distinct_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM ("
                             .. grouped_keys .. ") representation_keys"
-                        local total_count, total_error = probe_count(total_sql)
-                        local distinct_count, distinct_error = probe_count(distinct_sql)
-                        local representation_name = tostring(entity.name) .. "."
-                            .. tostring(representation.name)
+                        probe.total_count, probe.total_error = probe_count(total_sql)
+                        probe.distinct_count, probe.distinct_error = probe_count(distinct_sql)
+                        local total_count = probe.total_count
+                        local total_error = probe.total_error
+                        local distinct_count = probe.distinct_count
+                        local distinct_error = probe.distinct_error
                         if total_error ~= nil or distinct_error ~= nil then
                             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
                                 representation_name, "SEMANTIC_MODEL_037",
@@ -6177,54 +6184,63 @@ local function validate_representation_data_equivalence(ctx)
                                     .. tostring(distinct_count) .. ".")
                         end
 
-                        if primary_build_error ~= nil then
+                    end
+                end
+
+                local primary_probe = primary ~= nil and probes[key(primary.id)] or nil
+                for _, representation in ipairs(representations) do
+                    if primary ~= nil and key(representation.id) ~= key(primary.id) then
+                        local probe = probes[key(representation.id)] or {}
+                        local representation_name = probe.representation_name
+                            or tostring(entity.name) .. "." .. tostring(representation.name)
+                        if primary_probe == nil or primary_probe.build_error ~= nil then
                             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
                                 representation_name, "SEMANTIC_MODEL_038",
                                 "Could not construct PRIMARY key probe " .. object_name
-                                    .. ": " .. tostring(primary_build_error) .. ".")
-                        elseif primary_keys ~= nil and primary ~= nil
-                            and key(representation.id) ~= key(primary.id) then
-                            local primary_count, primary_error = probe_count(
-                                "SELECT COUNT(*) AS PROBE_COUNT FROM ("
-                                    .. primary_keys .. ") representation_keys")
-                            if primary_error ~= nil or distinct_error ~= nil then
+                                    .. ": " .. tostring(primary_probe and primary_probe.build_error
+                                        or "primary representation is unavailable") .. ".")
+                        elseif primary_probe.distinct_error ~= nil
+                            or probe.distinct_error ~= nil then
                                 add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
                                     representation_name, "SEMANTIC_MODEL_038",
                                     "Could not compare declared key " .. object_name
                                         .. " with PRIMARY representation: "
-                                        .. tostring(primary_error or distinct_error) .. ".")
-                            elseif primary_count ~= distinct_count then
+                                        .. tostring(primary_probe.distinct_error
+                                            or probe.distinct_error) .. ".")
+                        elseif primary_probe.distinct_count ~= probe.distinct_count then
+                            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                representation_name, "SEMANTIC_MODEL_038",
+                                "Declared key cardinality differs from PRIMARY for "
+                                    .. object_name .. ": primary="
+                                    .. tostring(primary_probe.distinct_count)
+                                    .. ", alternate=" .. tostring(probe.distinct_count) .. ".")
+                        elseif primary_probe.grouped_keys ~= nil
+                            and probe.grouped_keys ~= nil then
+                            local missing_from_alternate, forward_error = probe_count(
+                                "SELECT COUNT(*) AS PROBE_COUNT FROM ("
+                                    .. primary_probe.grouped_keys .. " MINUS "
+                                    .. probe.grouped_keys
+                                    .. ") representation_key_difference")
+                            local missing_from_primary, reverse_error = probe_count(
+                                "SELECT COUNT(*) AS PROBE_COUNT FROM ("
+                                    .. probe.grouped_keys .. " MINUS "
+                                    .. primary_probe.grouped_keys
+                                    .. ") representation_key_difference")
+                            if forward_error ~= nil or reverse_error ~= nil then
                                 add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
                                     representation_name, "SEMANTIC_MODEL_038",
-                                    "Declared key cardinality differs from PRIMARY for "
-                                        .. object_name .. ": primary="
-                                        .. tostring(primary_count) .. ", alternate="
-                                        .. tostring(distinct_count) .. ".")
-                            else
-                                local missing_from_alternate, forward_error = probe_count(
-                                    "SELECT COUNT(*) AS PROBE_COUNT FROM ("
-                                        .. primary_keys .. " MINUS " .. grouped_keys
-                                        .. ") representation_key_difference")
-                                local missing_from_primary, reverse_error = probe_count(
-                                    "SELECT COUNT(*) AS PROBE_COUNT FROM ("
-                                        .. grouped_keys .. " MINUS " .. primary_keys
-                                        .. ") representation_key_difference")
-                                if forward_error ~= nil or reverse_error ~= nil then
-                                    add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
-                                        representation_name, "SEMANTIC_MODEL_038",
-                                        "Could not compare declared key set " .. object_name
-                                            .. " with PRIMARY representation: "
-                                            .. tostring(forward_error or reverse_error) .. ".")
-                                elseif missing_from_alternate ~= 0
-                                    or missing_from_primary ~= 0 then
-                                    add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
-                                        representation_name, "SEMANTIC_MODEL_038",
-                                        "Declared key set differs from PRIMARY for "
-                                            .. object_name .. ": missing_in_alternate="
-                                            .. tostring(missing_from_alternate)
-                                            .. ", missing_in_primary="
-                                            .. tostring(missing_from_primary) .. ".")
-                                end
+                                    "Could not compare declared key set " .. object_name
+                                        .. " with PRIMARY representation: "
+                                        .. tostring(forward_error or reverse_error) .. ".")
+                            elseif missing_from_alternate ~= 0
+                                or missing_from_primary ~= 0 then
+                                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                    representation_name, "SEMANTIC_MODEL_038",
+                                    "Declared key set differs from PRIMARY for "
+                                        .. object_name .. ": missing_in_alternate="
+                                        .. tostring(missing_from_alternate)
+                                        .. ", missing_in_primary="
+                                        .. tostring(missing_from_primary) .. ".")
                             end
                         end
                     end
@@ -7037,7 +7053,6 @@ function M.validate_model(model_name_arg)
         validate_structural_rules(ctx)
         validate_custom_extensions(ctx)
         validate_unique_keys(ctx)
-        validate_representation_data_equivalence(ctx)
         validate_relationship_key_mappings(ctx)
         local safe_edges, all_edges = relationship_edges(ctx)
         validate_expressions(ctx, safe_edges)
@@ -7046,6 +7061,11 @@ function M.validate_model(model_name_arg)
         validate_agent_metadata(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
+        -- Remote equivalence proofs are full data scans. Do not launch them
+        -- for a model that is already invalid on local catalog metadata.
+        if ctx.error_count == 0 then
+            validate_representation_data_equivalence(ctx)
+        end
         -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
         -- VALIDATE_MODEL after mutating the catalog. Invalidating compile-cache
         -- entries here gives all those callers cache-coherent compile results

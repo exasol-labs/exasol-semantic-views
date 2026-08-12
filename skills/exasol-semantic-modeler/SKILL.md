@@ -457,6 +457,8 @@ When several relations are equivalent at the same grain and identity, register
 alternates with `ADD_ENTITY_REPRESENTATION`. Declare the entity key first:
 validation proves key uniqueness on every representation and exact key-set
 equality with the primary. Probe failures and duplicate grain are blocking.
+Fix local validation errors before rerunning validation: remote key scans are
+deferred until catalog metadata is clean but remain mandatory before publish.
 
 F2 does not bind identity or relationship SQL. Before registration, require the
 alternate to expose the same case-sensitive physical names used by the entity

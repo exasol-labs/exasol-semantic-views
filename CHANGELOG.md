@@ -8,6 +8,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Remote representation validation cost
+
+- `VALIDATE_MODEL` now defers F1 source probes until local catalog validation is
+  clean, so invalid authoring states do not scan federated representations.
+- Each representation's distinct-key cardinality is probed once per declared
+  key instead of rescanning the primary for every alternate; exact
+  bidirectional key-set proofs remain unchanged.
+
 #### Attribute-binding repair ordering
 
 - `ADD_ATTRIBUTE_BINDING` now compares validation before and after the

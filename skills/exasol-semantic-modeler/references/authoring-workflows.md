@@ -221,6 +221,9 @@ a representation, first remove its attribute bindings and promote another one
 if it is primary. Validation probe failures are blocking, so run it as a user
 that can query every source. Do not use equivalent representations for temporal
 partitions, union, reconciliation, or non-equivalent entity identity.
+Resolve local catalog errors before retrying validation. Remote equivalence
+probes are deferred while those errors exist, then run in full once metadata is
+clean; every representation's key cardinality is scanned once per declared key.
 
 Promotion gives explicit target bindings precedence. Compatibility defaults
 move only for attributes without an explicit target binding; otherwise they

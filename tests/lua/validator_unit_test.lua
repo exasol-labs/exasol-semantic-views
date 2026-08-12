@@ -658,6 +658,7 @@ test("validator proves F1 representation grain and key-set equivalence", functio
         unique_keys_by_entity = {["1"] = {unique_key}},
         entity_name_by_id = {["1"] = "customers"},
     })
+    local primary_distinct_probes = 0
     with_query(function(sql)
         local normalized = tostring(sql):gsub("%s+", " ")
         if contains(normalized, "FROM SYS.EXA_ALL_COLUMNS") then
@@ -668,7 +669,10 @@ test("validator proves F1 representation grain and key-set equivalence", functio
         if contains(normalized, '"CUSTOMERS_DUP"') then return {{grouped and 2 or 4}} end
         if contains(normalized, '"CUSTOMERS_HALF"') then return {{1}} end
         if contains(normalized, '"CUSTOMERS_SWAPPED"') then return {{2}} end
-        if contains(normalized, '"CUSTOMERS"') then return {{2}} end
+        if contains(normalized, '"CUSTOMERS"') then
+            if grouped then primary_distinct_probes = primary_distinct_probes + 1 end
+            return {{2}}
+        end
         error("unexpected equivalence probe: " .. normalized)
     end, function()
         api.validate_representation_data_equivalence(ctx)
@@ -677,6 +681,32 @@ test("validator proves F1 representation grain and key-set equivalence", functio
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_038"))
     assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_037").message,
         "does not preserve grain")
+    assert_equal(primary_distinct_probes, 1)
+end)
+
+test("validator skips F1 source probes after a local validation error", function()
+    local entity = {id = 1, name = "customers", alias = "c"}
+    local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS"}
+    local alternate = {id = 2, entity_id = 1, name = "remote", alias = "c",
+        source_schema = "REMOTE", source_object = "CUSTOMERS"}
+    entity.primary_representation = primary
+    local unique_key = {id = 10, entity_id = 1, name = "customer_pk",
+        columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}}
+    local ctx = validation_context({
+        error_count = 1,
+        entities = {entity},
+        representations_by_entity = {["1"] = {primary, alternate}},
+        unique_keys_by_entity = {["1"] = {unique_key}},
+    })
+    local query_count = 0
+    with_query(function()
+        query_count = query_count + 1
+        return {}
+    end, function()
+        api.validate_representation_data_equivalence(ctx)
+    end)
+    assert_equal(query_count, 0)
 end)
 
 test("validator requires a key before claiming F1 equivalence", function()

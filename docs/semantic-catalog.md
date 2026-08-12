@@ -77,7 +77,10 @@ same key cardinality and bidirectional key set as the primary. Multiple
 representations without a declared key fail validation. Probe errors also fail
 closed, so the validating user must be able to query every representation.
 These full key scans and set comparisons can be expensive for large or remote
-sources; they run during model validation, never during compiled business queries.
+sources. Validation runs them only after local catalog validation is clean and
+caches each representation's key cardinality once per key; exact bidirectional
+set comparisons still run for every alternate. They never run during compiled
+business queries.
 
 Identity and relationship metadata remains representation-invariant through
 F2. Primary-key expressions, unique-key columns, relationship key mappings,
