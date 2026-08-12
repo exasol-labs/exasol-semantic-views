@@ -78,6 +78,15 @@ representations without a declared key fail validation. Probe errors also fail
 closed, so the validating user must be able to query every representation.
 These full key scans and set comparisons can be expensive for large or remote
 sources; they run during model validation, never during compiled business queries.
+
+Identity and relationship metadata remains representation-invariant through
+F2. Primary-key expressions, unique-key columns, relationship key mappings,
+join conditions, and representation-blind metric filters must resolve against
+the same case-sensitive physical column names in every representation. F2
+attribute bindings cannot repair those differences. Normalize incompatible
+sources behind a view with canonical aliases before registration; native
+representation-specific identity mappings are reserved for Fusion Phase F5.
+
 Phase F2 separates semantic dimensions and facts from their source expressions
 through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`
 automatically create a `PREFER` binding on the current primary representation;

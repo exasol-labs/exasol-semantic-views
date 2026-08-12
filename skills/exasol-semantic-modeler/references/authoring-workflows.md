@@ -182,6 +182,25 @@ stable alias, and semantic/key columns. `ADD_ENTITY` already created the
 alternate; validation queries every source to prove key uniqueness and exact
 key-set equality, then promotion can proceed:
 
+Before `ADD_ENTITY_REPRESENTATION`, compare exact `EXA_ALL_COLUMNS.COLUMN_NAME`
+values for the primary-key expression, unique-key columns, relationship key
+mappings, join-condition columns, and representation-blind metric filters.
+F2 binds only dimensions and facts; it cannot remap identity or join SQL. Case
+differences in quoted identifiers are physical differences. If a source uses
+`"customer_id"` where the model requires `CUSTOMER_ID`, normalize it first:
+
+```sql
+CREATE VIEW MART.CUSTOMERS_CANONICAL AS
+SELECT
+  "customer_id" AS CUSTOMER_ID,
+  "loyalty_tier" AS LOYALTY_TIER
+FROM SRC_MONGO_CUSTOMERS."CUSTOMERS";
+```
+
+Register the canonicalizing view, not the raw source. If creating such a view
+is not acceptable, stop and report that representation-specific identity
+bindings require Fusion Phase F5.
+
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
   'sales', 'order', 'lakehouse', 'VIRTUAL_SCHEMA',

@@ -458,6 +458,15 @@ alternates with `ADD_ENTITY_REPRESENTATION`. Declare the entity key first:
 validation proves key uniqueness on every representation and exact key-set
 equality with the primary. Probe failures and duplicate grain are blocking.
 
+F2 does not bind identity or relationship SQL. Before registration, require the
+alternate to expose the same case-sensitive physical names used by the entity
+primary-key expression, every `UNIQUE_KEY_COLUMN`, relationship key mapping,
+relationship join condition, and representation-blind metric filter. A quoted
+lowercase `"customer_id"` is not the same physical column as `CUSTOMER_ID`. If
+any differ, do not register the raw source: create a relation or Virtual Schema
+view that aliases them to the canonical names, smoke-test it, and register that
+view. Representation-specific identity mapping is Phase F5, not F2.
+
 For different physical dimension or fact expressions, add
 `ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark
 the authoritative expression `PREFER` and ordered substitutes `FALLBACK`.

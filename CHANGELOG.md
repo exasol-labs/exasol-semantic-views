@@ -16,6 +16,14 @@ All notable changes to Exasol Semantic Views are documented here.
 - Intermediate representation errors continue to block publication until all
   required bindings are present and validation succeeds.
 
+#### Representation identity scope diagnostics
+
+- The modeler workflow now requires exact preflight checks for physical key and
+  join-column names before registering an alternate representation.
+- Identity-related validation errors now explain that F2 binds dimensions and
+  facts only, recommend a canonicalizing source view, and identify native
+  representation identity binding as a Phase F5 capability.
+
 #### Unary null predicates
 
 - Structured filters and `having`, plus Semantic SQL `WHERE` and `HAVING`, now

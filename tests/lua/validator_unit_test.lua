@@ -587,6 +587,57 @@ test("F2 bindings monotonically repair renamed representation columns", function
     assert_true(not has_rule(complete, "SEMANTIC_MODEL_040"))
 end)
 
+test("F2 identity mismatches prescribe canonical views and Phase F5", function()
+    local customer = {id = 1, name = "customer", alias = "c"}
+    local order = {id = 2, name = "order", alias = "o"}
+    local primary = {id = 10, entity_id = 1, name = "primary", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS"}
+    local lowercase = {id = 11, entity_id = 1, name = "mongo", alias = "c",
+        source_schema = "SRC_MONGO", source_object = "CUSTOMERS"}
+    local order_primary = {id = 12, entity_id = 2, name = "primary", alias = "o",
+        source_schema = "HUB", source_object = "ORDERS"}
+    local unique_key = {id = 20, entity_id = 1, name = "customer_pk",
+        kind = "PRIMARY", columns = {
+            {ordinal_position = 1, column_name = "CUSTOMER_ID"},
+        }}
+    local relationship = {name = "order_customer", from_entity_id = 2,
+        to_entity_id = 1, cardinality = "MANY_TO_ONE", key_mappings = {
+            {ordinal_position = 1, from_column_name = "CUSTOMER_ID",
+                to_column_name = "CUSTOMER_ID"},
+        }}
+    local ctx = validation_context({
+        entities = {customer, order},
+        entity_by_id = {["1"] = customer, ["2"] = order},
+        entity_name_by_id = {["1"] = "customer", ["2"] = "order"},
+        representations = {primary, lowercase, order_primary},
+        representations_by_entity = {
+            ["1"] = {primary, lowercase}, ["2"] = {order_primary},
+        },
+        unique_keys = {unique_key},
+        unique_keys_by_entity = {["1"] = {unique_key}},
+        relationships = {relationship},
+    })
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            -- The quoted MongoDB key is physically lowercase and therefore
+            -- does not satisfy the model's canonical CUSTOMER_ID contract.
+            return {{params.schema_name == "SRC_MONGO" and 0 or 1}}
+        end
+        return {}
+    end, function()
+        api.validate_unique_keys(ctx)
+        api.validate_relationship_key_mappings(ctx)
+    end)
+    local key_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_029")
+    local mapping_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_032")
+    assert_true(key_issue ~= nil)
+    assert_true(mapping_issue ~= nil)
+    assert_contains(key_issue.message, "canonical key and join column names")
+    assert_contains(key_issue.message, "Phase F5")
+    assert_contains(mapping_issue.message, "source view")
+    assert_contains(mapping_issue.message, "Phase F5")
+end)
+
 test("validator proves F1 representation grain and key-set equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

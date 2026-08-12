@@ -1166,6 +1166,10 @@ local function representation_suffix(names)
     return " in representation(s): " .. table.concat(names, ", ")
 end
 
+local function identity_binding_remedy()
+    return " F2 attribute bindings do not remap identity or joins; expose the canonical key and join column names in a source view before registering this representation. Representation-specific identity bindings require Fusion Phase F5."
+end
+
 local function validate_structural_rules(ctx)
     local invalid_representation_rows = query([[
         SELECT e.ENTITY_NAME, COUNT(er.REPRESENTATION_ID) AS PRIMARY_COUNT
@@ -1257,7 +1261,8 @@ local function validate_structural_rules(ctx)
                     add_issue(ctx, "ERROR", "ENTITY", entity.name,
                         "SEMANTIC_MODEL_036", "Legacy primary-key expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. identity_binding_remedy())
                 end
             end
         end
@@ -1439,8 +1444,9 @@ local function validate_unique_key_expression(ctx, unique_key, column, entity, o
         local missing_representations = missing_representation_columns(ctx, entity, ref.column_name)
         if ref.alias == owning_alias and #missing_representations > 0 then
             add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
-                "Unique key expression references unknown source column: " .. ref.alias .. "."
-                    .. ref.column_name .. representation_suffix(missing_representations) .. ".")
+            "Unique key expression references unknown source column: " .. ref.alias .. "."
+                    .. ref.column_name .. representation_suffix(missing_representations) .. "."
+                    .. identity_binding_remedy())
         end
     end
 end
@@ -1492,7 +1498,8 @@ local function validate_unique_keys(ctx)
                         add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
                             "Unique key column references unknown source column: "
                                 .. tostring(column_name)
-                                .. representation_suffix(missing_representations) .. ".")
+                                .. representation_suffix(missing_representations) .. "."
+                                .. identity_binding_remedy())
                     end
                 else
                     validate_unique_key_expression(ctx, unique_key, column, entity, owning_alias, column_object_name)
@@ -1687,7 +1694,8 @@ local function validate_relationship_key_mappings(ctx)
                 "SEMANTIC_MODEL_032",
                 "Relationship key mapping references unknown " .. side
                     .. " source column: " .. tostring(column_name)
-                    .. representation_suffix(missing_representations) .. ".")
+                    .. representation_suffix(missing_representations) .. "."
+                    .. identity_binding_remedy())
         end
     end
 
@@ -1811,7 +1819,8 @@ local function relationship_edges(ctx)
                 add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
                     "SEMANTIC_MODEL_017", "Relationship join condition references unknown source column: "
                         .. ref.alias .. "." .. ref.column_name
-                        .. representation_suffix(missing_representations) .. ".")
+                        .. representation_suffix(missing_representations) .. "."
+                        .. identity_binding_remedy())
             end
         end
 
