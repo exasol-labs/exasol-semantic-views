@@ -6,6 +6,21 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Added
+
+#### Fusion Phase F3: temporal partition unions
+
+- Representations can declare certified coverage predicates and half-open
+  validity intervals through `SET_REPRESENTATION_COVERAGE`.
+- The compiler expands partitioned metric leaves into representation-specific
+  aggregate-state branches, combines them with `UNION ALL`, and records source,
+  coverage, validity, and binding provenance in `PLAN_JSON`.
+- Validation requires complete, contiguous, non-overlapping, open-ended
+  coverage and proves key uniqueness per partition without requiring disjoint
+  partitions to contain identical key sets.
+- F3 supports mergeable `SUM` and `COUNT` states. Partitioned joined dimensions
+  and materialization substitution remain fail-closed for later phases.
+
 ### Fixed
 
 #### Federated representation probe timeout

@@ -1149,6 +1149,98 @@ local function representations_for_entity(ctx, entity)
     return representations
 end
 
+local function entity_uses_partition_fusion(ctx, entity)
+    local representations = representations_for_entity(ctx, entity)
+    if #representations < 2 then return false end
+    for _, representation in ipairs(representations) do
+        if missing(representation.coverage_predicate) then return false end
+    end
+    return true
+end
+
+local function validate_partition_coverage(ctx, entity)
+    local representations = representations_for_entity(ctx, entity)
+    local metadata_count = 0
+    for _, representation in ipairs(representations) do
+        if not missing(representation.coverage_predicate)
+            or not missing(representation.valid_from)
+            or not missing(representation.valid_to) then
+            metadata_count = metadata_count + 1
+        end
+    end
+    if metadata_count == 0 then return end
+
+    local entity_name = tostring(entity.name)
+    if #representations < 2 or metadata_count ~= #representations then
+        add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
+            "UNION fusion requires coverage metadata on every active representation.")
+        return
+    end
+
+    local ordered = {}
+    for _, representation in ipairs(representations) do
+        local object_name = entity_name .. "." .. tostring(representation.name)
+        if missing(representation.coverage_predicate) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "UNION partition requires a coverage predicate.")
+        end
+        if missing(representation.valid_from) and missing(representation.valid_to) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "UNION partition requires VALID_FROM or VALID_TO.")
+        end
+        if not missing(representation.valid_from)
+            and not missing(representation.valid_to)
+            and tostring(representation.valid_from) >= tostring(representation.valid_to) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "VALID_FROM must be earlier than VALID_TO.")
+        end
+        local predicate = tostring(representation.coverage_predicate or "")
+        for alias, _ in pairs(aliases_in_expression(predicate)) do
+            if alias ~= upper(representation.alias) then
+                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                    "SEMANTIC_MODEL_042", "Coverage predicate references alias outside its representation: "
+                        .. tostring(alias) .. ".")
+            end
+        end
+        for function_name, _ in pairs(unsupported_functions(predicate)) do
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "Coverage predicate uses unsupported function: "
+                    .. tostring(function_name) .. ".")
+        end
+        for _, ref in ipairs(column_refs_in_expression(predicate)) do
+            if ref.alias == upper(representation.alias)
+                and not source_column_exists(representation.source_schema,
+                    representation.source_object, ref.column_name) then
+                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                    "SEMANTIC_MODEL_042", "Coverage predicate references unknown source column: "
+                        .. tostring(ref.column_name) .. ".")
+            end
+        end
+        ordered[#ordered + 1] = representation
+    end
+    table.sort(ordered, function(left, right)
+        if missing(left.valid_from) ~= missing(right.valid_from) then
+            return missing(left.valid_from)
+        end
+        return tostring(left.valid_from or "") < tostring(right.valid_from or "")
+    end)
+    if not missing(ordered[1].valid_from)
+        or not missing(ordered[#ordered].valid_to) then
+        add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
+            "UNION coverage must be open-ended before the first and after the last partition.")
+    end
+    for index = 2, #ordered do
+        local previous = ordered[index - 1]
+        local current = ordered[index]
+        if missing(previous.valid_to) or missing(current.valid_from)
+            or tostring(previous.valid_to) ~= tostring(current.valid_from) then
+            add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
+                "UNION partition intervals must be contiguous and non-overlapping; boundary mismatch between "
+                    .. tostring(previous.name) .. " and " .. tostring(current.name) .. ".")
+        end
+    end
+end
+
 local function missing_representation_columns(ctx, entity, column_name)
     local names = {}
     for _, representation in ipairs(representations_for_entity(ctx, entity)) do
@@ -1230,12 +1322,6 @@ local function validate_structural_rules(ctx)
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_036", "Representation priority must be a positive integer.")
         end
-        if not missing(representation.coverage_predicate)
-            or not missing(representation.valid_from)
-            or not missing(representation.valid_to) then
-            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "Coverage predicates and validity windows require Fusion Phase F3.")
-        end
         if not source_object_exists(representation.source_schema,
             representation.source_object) then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
@@ -1244,6 +1330,7 @@ local function validate_structural_rules(ctx)
                     .. tostring(representation.source_object) .. ".")
         end
     end
+    for _, entity in ipairs(ctx.entities) do validate_partition_coverage(ctx, entity) end
     for _, entity in ipairs(ctx.entities) do
         if not missing(entity.primary_key_expr) then
             local owning_alias = upper(entity.alias)
@@ -1611,6 +1698,7 @@ local function validate_representation_data_equivalence(ctx)
                     "Multiple F1 representations require at least one declared unique key to prove grain and identity equivalence.")
             end
             local primary = entity.primary_representation
+            local partitioned = entity_uses_partition_fusion(ctx, entity)
             for _, unique_key in ipairs(unique_keys) do
                 local object_name = unique_key_object_name(ctx, unique_key)
                 local probes = {}
@@ -1662,7 +1750,7 @@ local function validate_representation_data_equivalence(ctx)
                 end
 
                 local primary_probe = primary ~= nil and probes[key(primary.id)] or nil
-                for _, representation in ipairs(representations) do
+                for _, representation in ipairs(partitioned and {} or representations) do
                     if primary ~= nil and key(representation.id) ~= key(primary.id) then
                         local probe = probes[key(representation.id)] or {}
                         local representation_name = probe.representation_name
@@ -2572,6 +2660,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         source_object_exists = source_object_exists,
         source_column_exists = source_column_exists,
         validate_structural_rules = validate_structural_rules,
+        validate_partition_coverage = validate_partition_coverage,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
         validate_representation_probe_timeout = validate_representation_probe_timeout,

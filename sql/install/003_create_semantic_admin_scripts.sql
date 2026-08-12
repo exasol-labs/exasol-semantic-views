@@ -612,6 +612,111 @@ exit({{representation_id, model_name, entity_name, representation_name,
 ]])
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME,
+  COVERAGE_PREDICATE,
+  VALID_FROM,
+  VALID_TO
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function normalize_name(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
+local predicate = missing(COVERAGE_PREDICATE) and null or trim(COVERAGE_PREDICATE)
+local valid_from = missing(VALID_FROM) and null or VALID_FROM
+local valid_to = missing(VALID_TO) and null or VALID_TO
+if predicate == null and (valid_from ~= null or valid_to ~= null) then
+    error("SEMANTIC_ADMIN_003: coverage bounds require COVERAGE_PREDICATE")
+end
+if predicate ~= null and valid_from == null and valid_to == null then
+    error("SEMANTIC_ADMIN_003: UNION partition requires VALID_FROM or VALID_TO")
+end
+
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, er.REPRESENTATION_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID
+     AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name)
+     AND e.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = e.ENTITY_ID
+     AND er.MODEL_ID = e.MODEL_ID
+     AND er.VERSION_ID = e.VERSION_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {
+    model_name = model_name,
+    entity_name = entity_name,
+    representation_name = representation_name,
+})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_047: active representation not found: " .. representation_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local representation_id = row_value(rows[1], "REPRESENTATION_ID", 3)
+
+query([[
+    UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    SET COVERAGE_PREDICATE = :coverage_predicate,
+        VALID_FROM = :valid_from,
+        VALID_TO = :valid_to,
+        UPDATED_AT = CURRENT_TIMESTAMP,
+        UPDATED_BY = CURRENT_USER
+    WHERE REPRESENTATION_ID = :representation_id
+]], {
+    representation_id = representation_id,
+    coverage_predicate = predicate,
+    valid_from = valid_from,
+    valid_to = valid_to,
+})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query([[
+    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND STATUS IN ('OK', 'WARNING')
+]], {model_id = model_id, version_id = version_id})
+
+exit({{representation_id, model_name, entity_name, representation_name,
+    predicate == null and "NONE" or "UNION", predicate, valid_from, valid_to}}, [[
+  REPRESENTATION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256),
+  FUSION_STRATEGY VARCHAR(32),
+  COVERAGE_PREDICATE VARCHAR(2000000),
+  VALID_FROM TIMESTAMP,
+  VALID_TO TIMESTAMP
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
   MODEL_NAME,
   ENTITY_NAME,
@@ -5716,6 +5821,98 @@ local function representations_for_entity(ctx, entity)
     return representations
 end
 
+local function entity_uses_partition_fusion(ctx, entity)
+    local representations = representations_for_entity(ctx, entity)
+    if #representations < 2 then return false end
+    for _, representation in ipairs(representations) do
+        if missing(representation.coverage_predicate) then return false end
+    end
+    return true
+end
+
+local function validate_partition_coverage(ctx, entity)
+    local representations = representations_for_entity(ctx, entity)
+    local metadata_count = 0
+    for _, representation in ipairs(representations) do
+        if not missing(representation.coverage_predicate)
+            or not missing(representation.valid_from)
+            or not missing(representation.valid_to) then
+            metadata_count = metadata_count + 1
+        end
+    end
+    if metadata_count == 0 then return end
+
+    local entity_name = tostring(entity.name)
+    if #representations < 2 or metadata_count ~= #representations then
+        add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
+            "UNION fusion requires coverage metadata on every active representation.")
+        return
+    end
+
+    local ordered = {}
+    for _, representation in ipairs(representations) do
+        local object_name = entity_name .. "." .. tostring(representation.name)
+        if missing(representation.coverage_predicate) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "UNION partition requires a coverage predicate.")
+        end
+        if missing(representation.valid_from) and missing(representation.valid_to) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "UNION partition requires VALID_FROM or VALID_TO.")
+        end
+        if not missing(representation.valid_from)
+            and not missing(representation.valid_to)
+            and tostring(representation.valid_from) >= tostring(representation.valid_to) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "VALID_FROM must be earlier than VALID_TO.")
+        end
+        local predicate = tostring(representation.coverage_predicate or "")
+        for alias, _ in pairs(aliases_in_expression(predicate)) do
+            if alias ~= upper(representation.alias) then
+                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                    "SEMANTIC_MODEL_042", "Coverage predicate references alias outside its representation: "
+                        .. tostring(alias) .. ".")
+            end
+        end
+        for function_name, _ in pairs(unsupported_functions(predicate)) do
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "Coverage predicate uses unsupported function: "
+                    .. tostring(function_name) .. ".")
+        end
+        for _, ref in ipairs(column_refs_in_expression(predicate)) do
+            if ref.alias == upper(representation.alias)
+                and not source_column_exists(representation.source_schema,
+                    representation.source_object, ref.column_name) then
+                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                    "SEMANTIC_MODEL_042", "Coverage predicate references unknown source column: "
+                        .. tostring(ref.column_name) .. ".")
+            end
+        end
+        ordered[#ordered + 1] = representation
+    end
+    table.sort(ordered, function(left, right)
+        if missing(left.valid_from) ~= missing(right.valid_from) then
+            return missing(left.valid_from)
+        end
+        return tostring(left.valid_from or "") < tostring(right.valid_from or "")
+    end)
+    if not missing(ordered[1].valid_from)
+        or not missing(ordered[#ordered].valid_to) then
+        add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
+            "UNION coverage must be open-ended before the first and after the last partition.")
+    end
+    for index = 2, #ordered do
+        local previous = ordered[index - 1]
+        local current = ordered[index]
+        if missing(previous.valid_to) or missing(current.valid_from)
+            or tostring(previous.valid_to) ~= tostring(current.valid_from) then
+            add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
+                "UNION partition intervals must be contiguous and non-overlapping; boundary mismatch between "
+                    .. tostring(previous.name) .. " and " .. tostring(current.name) .. ".")
+        end
+    end
+end
+
 local function missing_representation_columns(ctx, entity, column_name)
     local names = {}
     for _, representation in ipairs(representations_for_entity(ctx, entity)) do
@@ -5797,12 +5994,6 @@ local function validate_structural_rules(ctx)
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_036", "Representation priority must be a positive integer.")
         end
-        if not missing(representation.coverage_predicate)
-            or not missing(representation.valid_from)
-            or not missing(representation.valid_to) then
-            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "Coverage predicates and validity windows require Fusion Phase F3.")
-        end
         if not source_object_exists(representation.source_schema,
             representation.source_object) then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
@@ -5811,6 +6002,7 @@ local function validate_structural_rules(ctx)
                     .. tostring(representation.source_object) .. ".")
         end
     end
+    for _, entity in ipairs(ctx.entities) do validate_partition_coverage(ctx, entity) end
     for _, entity in ipairs(ctx.entities) do
         if not missing(entity.primary_key_expr) then
             local owning_alias = upper(entity.alias)
@@ -6178,6 +6370,7 @@ local function validate_representation_data_equivalence(ctx)
                     "Multiple F1 representations require at least one declared unique key to prove grain and identity equivalence.")
             end
             local primary = entity.primary_representation
+            local partitioned = entity_uses_partition_fusion(ctx, entity)
             for _, unique_key in ipairs(unique_keys) do
                 local object_name = unique_key_object_name(ctx, unique_key)
                 local probes = {}
@@ -6229,7 +6422,7 @@ local function validate_representation_data_equivalence(ctx)
                 end
 
                 local primary_probe = primary ~= nil and probes[key(primary.id)] or nil
-                for _, representation in ipairs(representations) do
+                for _, representation in ipairs(partitioned and {} or representations) do
                     if primary ~= nil and key(representation.id) ~= key(primary.id) then
                         local probe = probes[key(representation.id)] or {}
                         local representation_name = probe.representation_name
@@ -7139,6 +7332,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         source_object_exists = source_object_exists,
         source_column_exists = source_column_exists,
         validate_structural_rules = validate_structural_rules,
+        validate_partition_coverage = validate_partition_coverage,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
         validate_representation_probe_timeout = validate_representation_probe_timeout,
@@ -7546,7 +7740,9 @@ function M.select_branch_sources(ctx, physical_plan)
         }
         local eligible = {}
         local states = sorted_states_for_branch(physical_plan, branch)
-        for _, candidate in ipairs(candidates) do
+        local partition_branch = upper(branch.source and branch.source.source_kind)
+            == "REPRESENTATION_PARTITION"
+        for _, candidate in ipairs(partition_branch and {} or candidates) do
             local selection, reason_code, reason_message = branch_candidate(
                 candidate, physical_plan, branch, required_dimensions, states)
             if selection == nil then
@@ -7564,6 +7760,10 @@ function M.select_branch_sources(ctx, physical_plan)
             else
                 eligible[#eligible + 1] = selection
             end
+        end
+        if partition_branch then
+            branch_diagnostic.candidate_count = 0
+            branch_diagnostic.fallback_reason = "FUSION_PARTITION_MATERIALIZATION_UNSUPPORTED"
         end
         table.sort(eligible, function(left, right)
             if left.extra_dimension_count ~= right.extra_dimension_count then
@@ -7999,7 +8199,7 @@ ESV_QUERY_SPEC = M
 
 -- Detached model-versioned catalog input for the typed planner.
 
-local M = {VERSION = 3}
+local M = {VERSION = 4}
 
 local function key(value) return tostring(value) end
 
@@ -8104,7 +8304,7 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 9}
+local M = {PLAN_VERSION = 10}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -8712,7 +8912,15 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
     for _, entity_key in ipairs(sorted_keys(leaf_set)) do
         leaf_entities[#leaf_entities + 1] = leaf_set[entity_key]
     end
-    local plan_kind = #leaf_entities > 1 and "MULTI_BRANCH" or "SINGLE_BRANCH"
+    local has_partitioned_leaf = false
+    for _, entity_id in ipairs(leaf_entities) do
+        local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION" then
+            has_partitioned_leaf = true
+        end
+    end
+    local plan_kind = (#leaf_entities > 1 or has_partitioned_leaf)
+        and "MULTI_BRANCH" or "SINGLE_BRANCH"
     -- Non-mergeable legacy aggregates remain valid on the unchanged
     -- single-branch compatibility renderer. They are rejected when a caller
     -- explicitly requests the strict typed boundary or when multiple leaves
@@ -8736,7 +8944,33 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
         requested_dimensions = bound_query.selected_dimensions,
         requested_metrics = bound_query.selected_metrics,
         failure = failure,
+        fusion_strategy = has_partitioned_leaf and "UNION" or nil,
     }
+
+    local leaf_lookup = {}
+    for _, entity_id in ipairs(leaf_entities) do leaf_lookup[key(entity_id)] = true end
+    for _, dimension in ipairs(bound_query.selected_dimensions or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(dimension.entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+            and not leaf_lookup[key(entity.id)] and plan.failure == nil then
+            plan.failure = {
+                reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+                entity_id = entity.id,
+                dimension_id = dimension.id,
+            }
+        end
+    end
+    for _, filter in ipairs(bound_query.global_filters or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(filter.entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+            and not leaf_lookup[key(entity.id)] and plan.failure == nil then
+            plan.failure = {
+                reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+                entity_id = entity.id,
+                dimension_id = filter.field_id,
+            }
+        end
+    end
 
     if plan_kind == "MULTI_BRANCH" then
         for _, leaf_entity_id in ipairs(leaf_entities) do
@@ -8848,7 +9082,7 @@ ESV_METRIC_PLAN = M
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 5,
+    VERSION = 6,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -9502,6 +9736,9 @@ function M.build(logical_plan, snapshot, options)
                 column_alias = state.column_alias,
                 data_type = state.data_type,
                 owner = key(state.leaf_entity_id) == key(branch.leaf_entity_id),
+                source_fact_id = state.source_fact_id,
+                state_kind = state.state_kind,
+                filter_expression = state.filter_expression,
             }
             if column.owner then
                 state_owner_counts[state.state_id] =
@@ -9531,6 +9768,148 @@ function M.build(logical_plan, snapshot, options)
         end
     end
     return physical, nil
+end
+
+local function clone(value, seen)
+    if type(value) ~= "table" or value == null then return value end
+    seen = seen or {}
+    if seen[value] ~= nil then return seen[value] end
+    local out = {}
+    seen[value] = out
+    for child_key, child in pairs(value) do out[child_key] = clone(child, seen) end
+    return out
+end
+
+local function candidate_binding(candidate, attribute_type, attribute_id)
+    return (candidate.bindings or {})[attribute_type .. ":" .. key(attribute_id)]
+end
+
+local function rebind_partition_predicate(predicate, candidate)
+    local binding = candidate_binding(candidate, "DIMENSION", predicate.dimension_id)
+    if binding == nil then return predicate, nil end
+    local expression, reason = predicate_sql(predicate, {expression = binding.expression})
+    if expression == nil then return nil, reason end
+    local rebound = clone(predicate)
+    rebound.expression = expression
+    return rebound, nil
+end
+
+-- Expand a grain-proven leaf into disjoint representation partitions. Each
+-- partition computes mergeable aggregate state independently; the existing
+-- UNION/merge pipeline combines those states without joining partition rows.
+function M.apply_partitioned_sources(physical_plan, snapshot)
+    local expanded = {}
+    local fusion_partitions = {}
+    local max_branches = physical_plan.safeguards.branch_limit
+    for _, branch in ipairs(physical_plan.branches or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(branch.leaf_entity_id)]
+        local candidates = entity and entity.fusion_candidates or nil
+        if upper(entity and entity.fusion_strategy) ~= "UNION" then
+            expanded[#expanded + 1] = branch
+        else
+            if candidates == nil or #candidates < 2 then
+                return fail("FUSION_PARTITION_BINDING_INCOMPLETE", {
+                    entity_id = branch.leaf_entity_id,
+                })
+            end
+            for _, candidate in ipairs(candidates) do
+                local representation = candidate.representation
+                local partition = clone(branch)
+                partition.branch_id = branch.branch_id .. ":representation:"
+                    .. key(representation.id)
+                partition.cte_id = "cte:" .. partition.branch_id
+                partition.cte_alias = "__esv_b_" .. stable_token(branch.leaf_entity_id)
+                    .. "_r_" .. stable_token(representation.id)
+                partition.source = {
+                    source_kind = "REPRESENTATION_PARTITION",
+                    entity_id = entity.id,
+                    entity_name = entity.name,
+                    representation_id = representation.id,
+                    representation_name = representation.name,
+                    physical_schema = representation.source_schema,
+                    physical_object = representation.source_object,
+                    coverage_predicate = representation.coverage_predicate,
+                    valid_from = representation.valid_from,
+                    valid_to = representation.valid_to,
+                }
+                partition.from_sql = quote_qualified(representation.source_schema,
+                    representation.source_object) .. " " .. tostring(representation.alias)
+                for _, dimension in ipairs(partition.dimensions or {}) do
+                    if key(dimension.entity_id) == key(entity.id) then
+                        local binding = candidate_binding(candidate, "DIMENSION",
+                            dimension.dimension_id)
+                        if binding == nil then
+                            return fail("FUSION_PARTITION_BINDING_INCOMPLETE", {
+                                entity_id = entity.id,
+                                representation_id = representation.id,
+                                dimension_id = dimension.dimension_id,
+                            })
+                        end
+                        dimension.expression = binding.expression
+                    end
+                end
+                local predicates = {}
+                for _, predicate in ipairs(partition.where_predicates or {}) do
+                    local rebound, reason = rebind_partition_predicate(predicate, candidate)
+                    if rebound == nil then
+                        return fail("PHYSICAL_FILTER_INVALID", {
+                            branch_id = partition.branch_id,
+                            dimension_id = predicate.dimension_id,
+                            issue = reason,
+                        })
+                    end
+                    predicates[#predicates + 1] = rebound
+                end
+                predicates[#predicates + 1] = {
+                    filter_id = "coverage:representation:" .. key(representation.id),
+                    expression = representation.coverage_predicate,
+                    predicate_kind = "COVERAGE",
+                }
+                partition.where_predicates = predicates
+                for _, state_column in ipairs(partition.state_columns or {}) do
+                    if state_column.owner then
+                        local binding = candidate_binding(candidate, "FACT",
+                            state_column.source_fact_id)
+                        if binding == nil then
+                            return fail("FUSION_PARTITION_BINDING_INCOMPLETE", {
+                                entity_id = entity.id,
+                                representation_id = representation.id,
+                                fact_id = state_column.source_fact_id,
+                            })
+                        end
+                        state_column.expression = state_expression(state_column,
+                            binding.expression, state_column.filter_expression)
+                    end
+                end
+                expanded[#expanded + 1] = partition
+                fusion_partitions[#fusion_partitions + 1] = {
+                    branch_id = partition.branch_id,
+                    entity_id = entity.id,
+                    representation_id = representation.id,
+                    representation_name = representation.name,
+                    coverage_predicate = representation.coverage_predicate,
+                    valid_from = representation.valid_from,
+                    valid_to = representation.valid_to,
+                }
+            end
+        end
+    end
+    if #expanded > max_branches then
+        return fail("PLANNER_BRANCH_LIMIT_EXCEEDED", {
+            branch_count = #expanded,
+            branch_limit = max_branches,
+        })
+    end
+    physical_plan.branches = expanded
+    physical_plan.safeguards.branch_count = #expanded
+    if #fusion_partitions > 0 then
+        physical_plan.fusion_plan = {
+            fusion_plan_version = 1,
+            strategy = "UNION",
+            partitions = fusion_partitions,
+        }
+    end
+    return physical_plan, nil
 end
 
 local function materialized_column_expression(source_alias, column)
@@ -11377,6 +11756,21 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 if left_priority ~= right_priority then return left_priority < right_priority end
                 return tonumber(left.representation.id) < tonumber(right.representation.id)
             end)
+            local covered_count = 0
+            for _, representation in ipairs(representations) do
+                if not missing(representation.coverage_predicate) then
+                    covered_count = covered_count + 1
+                end
+            end
+            local partitioned = covered_count > 0
+            if partitioned and covered_count ~= #representations then
+                return nil, "Partitioned entity '" .. tostring(entity.name)
+                    .. "' has incomplete coverage metadata."
+            end
+            if partitioned and #candidates ~= #representations then
+                return nil, "No complete UNION binding set exists for every partition of entity '"
+                    .. tostring(entity.name) .. "'."
+            end
             local selected = candidates[1]
             if selected == nil then
                 return nil, "No active representation provides every required attribute for entity '"
@@ -11387,6 +11781,10 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
             entity.source_object = representation.source_object
             entity.alias = representation.alias
             entity.selected_representation = representation
+            if partitioned then
+                entity.fusion_strategy = "UNION"
+                entity.fusion_candidates = candidates
+            end
             for attribute_key, binding in pairs(selected.bindings) do
                 local attribute_type, attribute_id = string.match(attribute_key, "^([^:]+):(.+)$")
                 local attribute = attribute_type == "DIMENSION"
@@ -11402,6 +11800,8 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 binding_priority = selected.binding_priority,
                 bindings = selected.bindings,
                 legacy_only = selected.legacy_only,
+                fusion_strategy = partitioned and "UNION" or nil,
+                candidates = partitioned and candidates or nil,
             }
         end
     end
@@ -12238,7 +12638,24 @@ local function compile_request_table(request, options)
                     fallback_binding_count = selection and selection.fallback_count or 0,
                     binding_priority = selection and selection.binding_priority or 0,
                     selected_bindings = selected_bindings,
+                    fusion_strategy = selection and selection.fusion_strategy or JSON_NULL,
+                    partitions = {},
                 }
+                local selected_entry = plan.selected_representations[
+                    #plan.selected_representations]
+                for _, candidate in ipairs(selection and selection.candidates or {}) do
+                    local candidate_representation = candidate.representation
+                    selected_entry.partitions[#selected_entry.partitions + 1] = {
+                        representation_id = candidate_representation.id,
+                        representation_name = candidate_representation.name,
+                        source_kind = candidate_representation.source_kind,
+                        source_schema = candidate_representation.source_schema,
+                        source_object = candidate_representation.source_object,
+                        coverage_predicate = candidate_representation.coverage_predicate,
+                        valid_from = candidate_representation.valid_from or JSON_NULL,
+                        valid_to = candidate_representation.valid_to or JSON_NULL,
+                    }
+                end
             end
         end
         return plan
@@ -12267,6 +12684,14 @@ local function compile_request_table(request, options)
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(physical_error.reason_code) .. ".")
         end
+        local fused_plan, fusion_error = physical_plan_runtime.apply_partitioned_sources(
+            physical_plan, snapshot)
+        if fused_plan == nil then
+            typed_plan.failure = fusion_error
+            return plan_error("_075", "Fusion planning failed: "
+                .. tostring(fusion_error.reason_code) .. ".")
+        end
+        physical_plan = fused_plan
         local branch_decision = nil
         if materialization_runtime ~= nil
             and type(materialization_runtime.select_branch_sources) == "function" then

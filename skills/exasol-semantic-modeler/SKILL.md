@@ -367,16 +367,17 @@ previous to succeed.
 1. CREATE_MODEL (name, published schema, description, owner role)
 2. ADD_ENTITY (per semantic entity; creates its primary physical representation)
 3. ADD_UNIQUE_KEY, then ADD_UNIQUE_KEY_COLUMN (per proven entity key)
-4. Optional ADD_ENTITY_REPRESENTATION (equivalent physical sources only)
+4. Optional ADD_ENTITY_REPRESENTATION (equivalent or F3 temporal partitions)
 5. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
 6. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
 7. ADD_FACT (per row-level expression — entities must exist)
 8. ADD_DIMENSION (per dimension — entity and semantic object must exist)
 9. Optional ADD_ATTRIBUTE_BINDING (per representation-specific dimension/fact expression)
-10. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
+10. Optional SET_REPRESENTATION_COVERAGE (every active hot/cold partition)
+11. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED)
-11. VALIDATE_MODEL
-12. PUBLISH_MODEL
+12. VALIDATE_MODEL
+13. PUBLISH_MODEL
 ```
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
@@ -457,6 +458,8 @@ When several relations are equivalent at the same grain and identity, register
 alternates with `ADD_ENTITY_REPRESENTATION`. Declare the entity key first:
 validation proves key uniqueness on every representation and exact key-set
 equality with the primary. Probe failures and duplicate grain are blocking.
+This F1 equality rule does not apply after every active representation has a
+valid F3 temporal coverage contract; F3 proves grain within each partition.
 Fix local validation errors before rerunning validation: remote key scans are
 deferred until catalog metadata is clean but remain mandatory before publish.
 Before adding or validating a `VIRTUAL_SCHEMA` alternate, run `ALTER SESSION SET
@@ -496,6 +499,21 @@ must not create two bindings for the same attribute and target representation.
 If upgrading a model trapped by the older behavior, call
 `SET_PRIMARY_REPRESENTATION` for the desired recovery target: the script repairs
 stale default/explicit collisions before enforcing its clean-validation gate.
+
+For hot/cold data, use F3 `UNION` fusion only on a metric-leaf entity with
+mergeable `SUM` or `COUNT` metrics. Add all representations and attribute
+bindings first, then call `SET_REPRESENTATION_COVERAGE` for every active
+representation. Declare contiguous half-open `[VALID_FROM, VALID_TO)` intervals:
+the cold edge is open at the start, the hot edge is open at the end, and their
+boundary timestamps are identical. The SQL predicate must enforce the same
+declared interval using the stable entity alias. Validate under
+`QUERY_TIMEOUT=60` when any partition is a `VIRTUAL_SCHEMA`.
+
+Do not use F3 for a partitioned entity that is only joined to supply dimensions,
+for overlapping snapshots, or for non-additive/distinct/window metrics. Inspect
+`plan_json.selected_representations[].partitions` and
+`logical_plan.physical_plan.fusion_plan` to verify every physical source and
+coverage predicate before publication.
 
 Register relationships with `ADD_RELATIONSHIP`:
 

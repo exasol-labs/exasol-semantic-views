@@ -61,6 +61,7 @@ Manage the F1 lifecycle through:
 
 ```text
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
+SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
 SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
 SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 ```
@@ -76,6 +77,8 @@ representation must preserve key uniqueness, and every alternate must have the
 same key cardinality and bidirectional key set as the primary. Multiple
 representations without a declared key fail validation. Probe errors also fail
 closed, so the validating user must be able to query every representation.
+F3 partitioned entities are the exception to key-set equality: validation
+proves uniqueness within each certified non-overlapping partition instead.
 These full key scans and set comparisons can be expensive for large or remote
 sources. Validation runs them only after local catalog validation is clean and
 caches each representation's key cardinality once per key; exact bidirectional
@@ -141,8 +144,44 @@ signature; malformed candidates are rolled back. Existing errors continue to
 block publication until subsequent bindings resolve them.
 
 The selected representation, reason, expressions, roles, and priorities are
-recorded in `plan_json.selected_representations[].selected_bindings`. Temporal
-coverage, unions, reconciliation, and row-level coalescing remain later phases.
+recorded in `plan_json.selected_representations[].selected_bindings`.
+
+### F3 Temporal Partition Fusion
+
+F3 combines hot/cold representations of a metric-leaf entity. Configure each
+active representation with `SET_REPRESENTATION_COVERAGE`. The predicate is SQL
+executed against that representation and must use its stable entity alias. The
+validity metadata declares a half-open interval `[VALID_FROM, VALID_TO)` used
+for deterministic overlap and gap validation.
+
+Every active representation of the entity must participate. The first interval
+must have `VALID_FROM = NULL`, the last must have `VALID_TO = NULL`, and every
+adjacent `VALID_TO`/`VALID_FROM` boundary must be equal. This proves complete,
+contiguous, non-overlapping temporal coverage. Passing `NULL` for predicate and
+both bounds clears a declaration.
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
+  'sales', 'order', 'lakehouse',
+  'o.order_ts < TIMESTAMP ''2026-01-01 00:00:00''',
+  NULL, TIMESTAMP '2026-01-01 00:00:00'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
+  'sales', 'order', 'primary',
+  'o.order_ts >= TIMESTAMP ''2026-01-01 00:00:00''',
+  TIMESTAMP '2026-01-01 00:00:00', NULL
+);
+```
+
+Validation still proves unique-key grain independently on every partition, but
+does not require key-set equality because temporal partitions are expected to
+contain different identities. Compilation requires every requested dimension
+and transitive metric fact to have a binding on every partition. It supports
+mergeable `SUM` and `COUNT` aggregate states and records all partitions under
+`selected_representations[].partitions` and `physical_plan.fusion_plan`.
+Partitioned joined dimensions and materialization substitution are not supported
+in F3; both remain explicit, fail-closed boundaries.
 
 The read-only representation view is available as:
 

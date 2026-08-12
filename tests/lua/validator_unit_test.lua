@@ -684,6 +684,96 @@ test("validator proves F1 representation grain and key-set equivalence", functio
     assert_equal(primary_distinct_probes, 1)
 end)
 
+test("validator accepts contiguous F3 coverage and rejects boundary gaps", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local cold = {id = 1, entity_id = 1, name = "cold", alias = "o",
+        source_schema = "LAKE", source_object = "ORDERS", source_kind = "VIRTUAL_SCHEMA",
+        coverage_predicate = "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'",
+        valid_to = "2026-01-01 00:00:00"}
+    local hot = {id = 2, entity_id = 1, name = "hot", alias = "o",
+        source_schema = "MART", source_object = "ORDERS", source_kind = "RELATION",
+        coverage_predicate = "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00'",
+        valid_from = "2026-01-01 00:00:00"}
+    local function context()
+        return validation_context({
+            entities = {entity},
+            representations_by_entity = {["1"] = {cold, hot}},
+        })
+    end
+    local valid = context()
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        error("unexpected coverage SQL: " .. tostring(sql))
+    end, function() api.validate_partition_coverage(valid, entity) end)
+    assert_equal(valid.error_count, 0)
+
+    local invalid = context()
+    cold.valid_to = "2025-12-31 00:00:00"
+    with_query(function() return {{1}} end, function()
+        api.validate_partition_coverage(invalid, entity)
+    end)
+    assert_true(has_rule(invalid, "SEMANTIC_MODEL_042"))
+    cold.valid_to = "2026-01-01 00:00:00"
+end)
+
+test("validator rejects partial and malformed F3 coverage contracts", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local primary = {id = 1, entity_id = 1, name = "primary", alias = "o",
+        source_schema = "MART", source_object = "ORDERS",
+        coverage_predicate = "x.other_day < MAGIC(o.missing_day)"}
+    local alternate = {id = 2, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "LAKE", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts >= TIMESTAMP '2026-02-01 00:00:00'",
+        valid_from = "2026-02-01 00:00:00", valid_to = "2026-01-01 00:00:00"}
+    local malformed = validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {primary, alternate}},
+    })
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {} end
+        error("unexpected malformed coverage SQL: " .. tostring(sql))
+    end, function() api.validate_partition_coverage(malformed, entity) end)
+    assert_true(has_rule(malformed, "SEMANTIC_MODEL_042"))
+    assert_true(malformed.error_count >= 5)
+
+    alternate.coverage_predicate = nil
+    alternate.valid_from = nil
+    alternate.valid_to = nil
+    local partial = validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {primary, alternate}},
+    })
+    api.validate_partition_coverage(partial, entity)
+    assert_true(has_rule(partial, "SEMANTIC_MODEL_042"))
+end)
+
+test("validator proves partition grain without requiring equal key sets", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local cold = {id = 1, entity_id = 1, name = "cold", alias = "o",
+        source_schema = "LAKE", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'"}
+    local hot = {id = 2, entity_id = 1, name = "hot", alias = "o",
+        source_schema = "MART", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00'"}
+    entity.primary_representation = hot
+    local unique_key = {id = 10, entity_id = 1, name = "order_pk",
+        columns = {{ordinal_position = 1, column_name = "ORDER_ID"}}}
+    local ctx = validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {cold, hot}},
+        unique_keys_by_entity = {["1"] = {unique_key}},
+        entity_name_by_id = {["1"] = "orders"},
+    })
+    local minus_count = 0
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{"ORDER_ID"}} end
+        if contains(sql, " MINUS ") then minus_count = minus_count + 1 end
+        return {{4}}
+    end, function() api.validate_representation_data_equivalence(ctx) end)
+    assert_equal(ctx.error_count, 0)
+    assert_equal(minus_count, 0)
+end)
+
 test("validator skips F1 source probes after a local validation error", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

@@ -221,8 +221,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 Promotion is manual/static unless F2 attribute bindings are present. To remove
 a representation, first remove its attribute bindings and promote another one
 if it is primary. Validation probe failures are blocking, so run it as a user
-that can query every source. Do not use equivalent representations for temporal
-partitions, union, reconciliation, or non-equivalent entity identity.
+that can query every source. Do not leave temporal partitions modeled as F1
+equivalents; configure every active representation through the F3 coverage
+workflow below. Reconciliation and non-equivalent identity remain unsupported.
 Resolve local catalog errors before retrying validation. Remote equivalence
 probes are deferred while those errors exist, then run in full once metadata is
 clean; every representation's key cardinality is scanned once per declared key.
@@ -268,6 +269,46 @@ remaining unbound attributes are expected. `ADD_ATTRIBUTE_BINDING` treats each
 call as a repair: it accepts a binding that removes errors without introducing
 new ones, but rolls back malformed bindings. Publication remains blocked until
 the complete representation validates cleanly.
+
+### Fuse Hot and Cold Partitions
+
+F3 `UNION` fusion applies only to metric-leaf entities and mergeable `SUM` or
+`COUNT` states. First add every representation and every required dimension/fact
+binding. Do not validate the sources as F1 equivalents before coverage is
+complete: temporal partitions intentionally have different key sets.
+
+Declare a certified SQL predicate and half-open interval for every active
+representation:
+
+```sql
+ALTER SESSION SET QUERY_TIMEOUT=60;
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
+  'sales', 'order', 'lakehouse',
+  'o.order_ts < TIMESTAMP ''2026-01-01 00:00:00''',
+  NULL, TIMESTAMP '2026-01-01 00:00:00'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
+  'sales', 'order', 'primary',
+  'o.order_ts >= TIMESTAMP ''2026-01-01 00:00:00''',
+  TIMESTAMP '2026-01-01 00:00:00', NULL
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
+```
+
+The first partition must have no `VALID_FROM`, the last no `VALID_TO`, and each
+adjacent boundary must match exactly. Validation rejects partial, overlapping,
+gapped, or expression-invalid coverage. Clear coverage by passing `NULL` for
+the predicate and both bounds on every representation.
+
+Compile representative requests and inspect
+`selected_representations[].partitions` plus
+`logical_plan.physical_plan.fusion_plan.partitions`. Confirm that each source,
+binding, predicate, and boundary is present and that generated SQL aggregates
+each partition before `UNION ALL`. Stop if the entity is only a joined dimension
+or the metric uses distinct, window, or another non-mergeable aggregate.
 
 ## Rebuild an Existing Model
 

@@ -431,6 +431,10 @@ local function compiler_query_fixture(options)
                 return {{1, "orders", "VS_ARCHIVE", "ORDERS", "o", "o.order_id",
                     "One row per order", 104, "archive", "VIRTUAL_SCHEMA", "PRIMARY", 40}}
             end
+            if options.f3_union then
+                return {{1, "orders", "MART", "ORDERS_HOT", "o", "o.order_id",
+                    "One row per order", 104, "hot", "RELATION", "PRIMARY", 1}}
+            end
             return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
                 "One row per order", 101, "primary", "RELATION", "PRIMARY", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
@@ -445,6 +449,16 @@ local function compiler_query_fixture(options)
                 return {
                     {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "PRIMARY", 40},
                     {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "ALTERNATE", 1},
+                }
+            end
+            if options.f3_union then
+                return {
+                    {104, 1, "hot", "RELATION", "MART", "ORDERS_HOT", "o", "PRIMARY", 1,
+                        nil, "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00'",
+                        "2026-01-01 00:00:00", nil},
+                    {105, 1, "cold", "VIRTUAL_SCHEMA", "VS_LAKE", "ORDERS", "o", "ALTERNATE", 20,
+                        nil, "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'",
+                        nil, "2026-01-01 00:00:00"},
                 }
             end
             return {
@@ -533,6 +547,14 @@ local function compiler_query_fixture(options)
             end
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            if options.f3_union then
+                return {
+                    {301, 1, "DIMENSION", 10, 104, "o.status", "PREFER", 1, true},
+                    {302, 1, "FACT", 20, 104, "o.amount", "PREFER", 1, true},
+                    {303, 1, "DIMENSION", 10, 105, "o.order_status", "PREFER", 1, false},
+                    {304, 1, "FACT", 20, 105, "o.net_amount", "PREFER", 1, false},
+                }
+            end
             if options.promoted_primary then
                 return {
                     {301, 1, "DIMENSION", 10, 101, "o.status", "PREFER", 1, true},
@@ -703,6 +725,27 @@ test("F2 compiler prefers the promoted primary when bindings are equivalent", fu
     assert_contains(result.plan_json, '"representation_name":"archive"')
 end)
 
+test("F3 compiler unions hot and cold aggregate-state partitions", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+        dimensions = {"status"},
+        proof_mode = "STRICT_GRAIN",
+    }, {f3_union = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, 'FROM "MART"."ORDERS_HOT" o')
+    assert_contains(result.generated_sql, 'FROM "VS_LAKE"."ORDERS" o')
+    assert_contains(result.generated_sql, "o.net_amount")
+    assert_contains(result.generated_sql, "o.order_status")
+    assert_contains(result.generated_sql,
+        "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'")
+    assert_contains(result.generated_sql, "UNION ALL")
+    assert_contains(result.plan_json, '"fusion_strategy":"UNION"')
+    assert_contains(result.plan_json, '"fusion_plan_version":1')
+    assert_contains(result.plan_json, '"representation_name":"cold"')
+end)
+
 test("structured compiler renders unary null filters and having", function()
     local result = compile_with_fixture({
         model = "sales",
@@ -738,10 +781,10 @@ test("C3 compiler activates a versioned multi branch query", function()
     assert_contains(result.generated_sql, 'ORDER BY "activity_ratio" DESC')
     assert_contains(result.generated_sql, "LIMIT 10")
     local envelope = api.json_decode(result.plan_json)
-    assert_equal(envelope.plan_version, 9)
+    assert_equal(envelope.plan_version, 10)
     assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
     assert_equal(envelope.logical_plan.execution.status, "EXECUTABLE")
-    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 5)
+    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 6)
     assert_equal(envelope.logical_plan.physical_plan.plan_kind,
         "MULTI_BRANCH_QUERY")
     assert_true(envelope.logical_plan.physical_plan.safeguards.sql_size_bytes > 0)

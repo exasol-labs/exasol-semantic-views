@@ -49,9 +49,10 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
 - finalizes state metrics and dependency-ordered scalar metrics after merging
 - applies final `HAVING`, ordering, and limit against finalized metric columns
 - returns executable multi-branch SQL and participates in the compile cache
-- records a deterministic `source` contract with `source_kind = BASE` or
-  `MATERIALIZATION` for each physical branch under physical-plan version 5;
-  base sources include the selected representation id and name
+- records a deterministic `source` contract with `source_kind = BASE`,
+  `MATERIALIZATION`, or `REPRESENTATION_PARTITION` for each physical branch
+  under physical-plan version 6; partition sources include representation,
+  coverage, and validity provenance
 
 `PLAN_JSON.selected_representations` lists the active representation selected
 for every entity used by the request. Without F2 attribute bindings, F1 selects
@@ -59,6 +60,17 @@ the representation marked `PRIMARY` and records
 `selection_reason = STATIC_PRIMARY`. With F2 bindings, binding role and priority
 rank candidates first, then `PRIMARY` breaks otherwise-equal candidates before
 representation priority and ID. Selection does not inspect freshness or cost.
+
+F3 treats an entity as partitioned when every active representation has a
+coverage predicate and a certified half-open validity interval. A partitioned
+metric leaf enters the typed aggregate-state path even when it is the request's
+only fact entity. The physical planner creates one branch per complete
+representation binding, adds that representation's coverage predicate, and
+merges `SUM`/`COUNT` states after `UNION ALL`.
+`PLAN_JSON.logical_plan.physical_plan.fusion_plan` records every partition.
+Non-mergeable metrics fail with `METRIC_STATE_UNSUPPORTED`. Partitioned entities
+used only as joined dimensions fail with
+`FUSION_PARTITION_DIMENSION_UNSUPPORTED`.
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the

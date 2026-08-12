@@ -1,6 +1,6 @@
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 9}
+local M = {PLAN_VERSION = 10}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -608,7 +608,15 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
     for _, entity_key in ipairs(sorted_keys(leaf_set)) do
         leaf_entities[#leaf_entities + 1] = leaf_set[entity_key]
     end
-    local plan_kind = #leaf_entities > 1 and "MULTI_BRANCH" or "SINGLE_BRANCH"
+    local has_partitioned_leaf = false
+    for _, entity_id in ipairs(leaf_entities) do
+        local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION" then
+            has_partitioned_leaf = true
+        end
+    end
+    local plan_kind = (#leaf_entities > 1 or has_partitioned_leaf)
+        and "MULTI_BRANCH" or "SINGLE_BRANCH"
     -- Non-mergeable legacy aggregates remain valid on the unchanged
     -- single-branch compatibility renderer. They are rejected when a caller
     -- explicitly requests the strict typed boundary or when multiple leaves
@@ -632,7 +640,33 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
         requested_dimensions = bound_query.selected_dimensions,
         requested_metrics = bound_query.selected_metrics,
         failure = failure,
+        fusion_strategy = has_partitioned_leaf and "UNION" or nil,
     }
+
+    local leaf_lookup = {}
+    for _, entity_id in ipairs(leaf_entities) do leaf_lookup[key(entity_id)] = true end
+    for _, dimension in ipairs(bound_query.selected_dimensions or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(dimension.entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+            and not leaf_lookup[key(entity.id)] and plan.failure == nil then
+            plan.failure = {
+                reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+                entity_id = entity.id,
+                dimension_id = dimension.id,
+            }
+        end
+    end
+    for _, filter in ipairs(bound_query.global_filters or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(filter.entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+            and not leaf_lookup[key(entity.id)] and plan.failure == nil then
+            plan.failure = {
+                reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+                entity_id = entity.id,
+                dimension_id = filter.field_id,
+            }
+        end
+    end
 
     if plan_kind == "MULTI_BRANCH" then
         for _, leaf_entity_id in ipairs(leaf_entities) do

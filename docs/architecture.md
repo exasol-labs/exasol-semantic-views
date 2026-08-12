@@ -69,7 +69,10 @@ base source explicitly and records planner runtime without making cached plans
 nondeterministic. Phase D2 uses plan version 7 / physical-plan version 4 to
 substitute at most one complete aggregate materialization per leaf without
 changing the proven merge and finalization pipeline. Fusion F1 uses plan version
-8 / physical-plan version 5.
+8, F2 uses plan version 9 / physical-plan version 5, and F3 uses plan version
+10 / catalog-snapshot version 4 / physical-plan version 6. F3 expands a proven
+metric-leaf branch into disjoint representation partitions before rendering,
+then reuses the existing aggregate-state union and finalization pipeline.
 
 ## Primary Flows
 

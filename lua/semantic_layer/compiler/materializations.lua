@@ -358,7 +358,9 @@ function M.select_branch_sources(ctx, physical_plan)
         }
         local eligible = {}
         local states = sorted_states_for_branch(physical_plan, branch)
-        for _, candidate in ipairs(candidates) do
+        local partition_branch = upper(branch.source and branch.source.source_kind)
+            == "REPRESENTATION_PARTITION"
+        for _, candidate in ipairs(partition_branch and {} or candidates) do
             local selection, reason_code, reason_message = branch_candidate(
                 candidate, physical_plan, branch, required_dimensions, states)
             if selection == nil then
@@ -376,6 +378,10 @@ function M.select_branch_sources(ctx, physical_plan)
             else
                 eligible[#eligible + 1] = selection
             end
+        end
+        if partition_branch then
+            branch_diagnostic.candidate_count = 0
+            branch_diagnostic.fallback_reason = "FUSION_PARTITION_MATERIALIZATION_UNSUPPORTED"
         end
         table.sort(eligible, function(left, right)
             if left.extra_dimension_count ~= right.extra_dimension_count then

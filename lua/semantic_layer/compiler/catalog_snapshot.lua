@@ -1,6 +1,6 @@
 -- Detached model-versioned catalog input for the typed planner.
 
-local M = {VERSION = 3}
+local M = {VERSION = 4}
 
 local function key(value) return tostring(value) end
 

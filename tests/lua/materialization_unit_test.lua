@@ -136,3 +136,19 @@ test("D2 selector rejects filtered and unsafe state columns atomically", functio
     assert_equal(diagnostics.branches[1].rejected_materializations[1].reason_code,
         "ROLLUP_POLICY_UNSAFE")
 end)
+
+test("F3 partition branches bypass materialization substitution", function()
+    install_catalog({
+        {1, "orders", "MART", "ORDERS", "AGGREGATE", "ALWAYS", "ACTIVE"},
+    }, {
+        {1, "DIMENSION", 10, "REGION", "DIRECT"},
+        {1, "METRIC", 20, "REVENUE_STATE", "SUM"},
+    })
+    local plan = branch_plan(false)
+    plan.branches[1].source = {source_kind = "REPRESENTATION_PARTITION"}
+    local selected, diagnostics = api.select_branch_sources(ctx, plan)
+    assert_true(selected["branch:1"] == nil)
+    assert_equal(diagnostics.branches[1].candidate_count, 0)
+    assert_equal(diagnostics.branches[1].fallback_reason,
+        "FUSION_PARTITION_MATERIALIZATION_UNSUPPORTED")
+end)

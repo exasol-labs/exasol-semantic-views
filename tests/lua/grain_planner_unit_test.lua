@@ -154,7 +154,7 @@ end)
 test("CatalogSnapshot includes transitive private metrics and is detached", function()
     local ctx, public = base_context()
     local snapshot = snapshots.from_context(ctx, {public})
-    assert_equal(snapshot.catalog_snapshot_version, 3)
+    assert_equal(snapshot.catalog_snapshot_version, 4)
     assert_equal(snapshot.version_id, 6)
     assert_equal(#snapshot.visible_metrics, 1)
     assert_equal(#snapshot.metrics, 3)
@@ -286,7 +286,7 @@ test("C1 logical planner emits a planning-only multi branch plan", function()
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
     assert_equal(reason, nil)
-    assert_equal(plan.plan_version, 9)
+    assert_equal(plan.plan_version, 10)
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(plan.proof_mode, "STRICT_GRAIN")
     assert_equal(plan.execution.status, "PLANNING_ONLY")
@@ -421,7 +421,7 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local snapshot, logical = multi_physical_fixture()
     local physical, physical_error = physical_planner.build(logical, snapshot)
     assert_true(physical ~= nil, physical_error and physical_error.reason_code)
-    assert_equal(physical.physical_plan_version, 5)
+    assert_equal(physical.physical_plan_version, 6)
     assert_equal(physical.branches[1].source.representation_name, "primary")
     assert_equal(physical.plan_kind, "MULTI_BRANCH_QUERY")
     assert_equal(#physical.branches, 2)
@@ -468,6 +468,90 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local too_large, size_error = physical_planner.check_sql_size(physical, sql)
     assert_equal(too_large, false)
     assert_equal(size_error.reason_code, "PLANNER_SQL_SIZE_LIMIT_EXCEEDED")
+end)
+
+test("F3 logical planner routes one partitioned leaf through aggregate states", function()
+    local ctx, public = base_context()
+    ctx.entities[1].fusion_strategy = "UNION"
+    local snapshot = snapshots.from_context(ctx, {public})
+    local spec = assert(query_spec.new({
+        model = "sales", object = "sales", metrics = {"margin"},
+        proof_mode = "STRICT_GRAIN",
+    }))
+    local bound = planner.bind_query(spec, {}, {public}, {}, {}, {})
+    local logical = assert(planner.logical_plan(spec, snapshot, bound, {public}))
+    assert_equal(logical.plan_kind, "MULTI_BRANCH")
+    assert_equal(logical.fusion_strategy, "UNION")
+    assert_equal(#logical.branches, 1)
+end)
+
+test("F3 rejects partition fusion on a joined dimension entity", function()
+    local ctx, public = base_context()
+    ctx.entities[3].fusion_strategy = "UNION"
+    local snapshot = snapshots.from_context(ctx, {public})
+    local spec = assert(query_spec.new({
+        model = "sales", object = "sales", metrics = {"margin"},
+        dimensions = {"region"}, proof_mode = "STRICT_GRAIN",
+    }))
+    local bound = planner.bind_query(spec, {ctx.dimensions[1]}, {public}, {}, {}, {})
+    local logical = assert(planner.logical_plan(spec, snapshot, bound, {public}))
+    assert_equal(logical.failure.reason_code,
+        "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
+end)
+
+test("F3 physical planner expands disjoint representation partitions", function()
+    local snapshot, logical = multi_physical_fixture()
+    local orders = snapshot.entity_by_id["1"]
+    orders.fusion_strategy = "UNION"
+    orders.fusion_candidates = {
+        {
+            representation = {id = 201, name = "cold", source_kind = "VIRTUAL_SCHEMA",
+                source_schema = "LAKE", source_object = "ORDERS", alias = "o",
+                coverage_predicate = "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'",
+                valid_to = "2026-01-01 00:00:00"},
+            bindings = {["FACT:21"] = {expression = "o.profit_amount"}},
+        },
+        {
+            representation = {id = 202, name = "hot", source_kind = "RELATION",
+                source_schema = "MART", source_object = "ORDERS_HOT", alias = "o",
+                coverage_predicate = "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00'",
+                valid_from = "2026-01-01 00:00:00"},
+            bindings = {["FACT:21"] = {expression = "o.profit"}},
+        },
+    }
+    local physical = assert(physical_planner.build(logical, snapshot))
+    local fused, fusion_error = physical_planner.apply_partitioned_sources(
+        physical, snapshot)
+    assert_true(fused ~= nil, fusion_error and fusion_error.reason_code)
+    assert_equal(#fused.branches, 3)
+    assert_equal(fused.safeguards.branch_count, 3)
+    assert_equal(fused.fusion_plan.strategy, "UNION")
+    assert_equal(#fused.fusion_plan.partitions, 2)
+    assert_equal(fused.branches[1].source.source_kind, "REPRESENTATION_PARTITION")
+    assert_equal(fused.branches[1].source.representation_name, "cold")
+    assert_contains(fused.branches[1].from_sql, '"LAKE"."ORDERS" o')
+    assert_contains(fused.branches[1].state_columns[1].expression, "o.profit_amount")
+    assert_equal(fused.branches[1].where_predicates[2].predicate_kind, "COVERAGE")
+    assert_contains(fused.branches[2].from_sql, '"MART"."ORDERS_HOT" o')
+
+    local sql = renderer.render_multi_branch(fused)
+    assert_contains(sql, '"__esv_b_1_r_201" AS (')
+    assert_contains(sql, "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'")
+    assert_contains(sql, '"__esv_b_1_r_202" AS (')
+    assert_contains(sql, "UNION ALL")
+
+    local missing = snapshots.copy(snapshot)
+    missing.entity_by_id["1"].fusion_candidates[1].bindings = {}
+    local rejected, reason = physical_planner.apply_partitioned_sources(
+        assert(physical_planner.build(logical, missing)), missing)
+    assert_equal(rejected, nil)
+    assert_equal(reason.reason_code, "FUSION_PARTITION_BINDING_INCOMPLETE")
+
+    local limited = assert(physical_planner.build(logical, snapshot,
+        {max_branches = 2}))
+    rejected, reason = physical_planner.apply_partitioned_sources(limited, snapshot)
+    assert_equal(rejected, nil)
+    assert_equal(reason.reason_code, "PLANNER_BRANCH_LIMIT_EXCEEDED")
 end)
 
 test("D2 physical rebinding replaces one complete branch source", function()

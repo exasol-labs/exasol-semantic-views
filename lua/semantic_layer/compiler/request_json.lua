@@ -1554,6 +1554,21 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 if left_priority ~= right_priority then return left_priority < right_priority end
                 return tonumber(left.representation.id) < tonumber(right.representation.id)
             end)
+            local covered_count = 0
+            for _, representation in ipairs(representations) do
+                if not missing(representation.coverage_predicate) then
+                    covered_count = covered_count + 1
+                end
+            end
+            local partitioned = covered_count > 0
+            if partitioned and covered_count ~= #representations then
+                return nil, "Partitioned entity '" .. tostring(entity.name)
+                    .. "' has incomplete coverage metadata."
+            end
+            if partitioned and #candidates ~= #representations then
+                return nil, "No complete UNION binding set exists for every partition of entity '"
+                    .. tostring(entity.name) .. "'."
+            end
             local selected = candidates[1]
             if selected == nil then
                 return nil, "No active representation provides every required attribute for entity '"
@@ -1564,6 +1579,10 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
             entity.source_object = representation.source_object
             entity.alias = representation.alias
             entity.selected_representation = representation
+            if partitioned then
+                entity.fusion_strategy = "UNION"
+                entity.fusion_candidates = candidates
+            end
             for attribute_key, binding in pairs(selected.bindings) do
                 local attribute_type, attribute_id = string.match(attribute_key, "^([^:]+):(.+)$")
                 local attribute = attribute_type == "DIMENSION"
@@ -1579,6 +1598,8 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 binding_priority = selected.binding_priority,
                 bindings = selected.bindings,
                 legacy_only = selected.legacy_only,
+                fusion_strategy = partitioned and "UNION" or nil,
+                candidates = partitioned and candidates or nil,
             }
         end
     end
@@ -2415,7 +2436,24 @@ local function compile_request_table(request, options)
                     fallback_binding_count = selection and selection.fallback_count or 0,
                     binding_priority = selection and selection.binding_priority or 0,
                     selected_bindings = selected_bindings,
+                    fusion_strategy = selection and selection.fusion_strategy or JSON_NULL,
+                    partitions = {},
                 }
+                local selected_entry = plan.selected_representations[
+                    #plan.selected_representations]
+                for _, candidate in ipairs(selection and selection.candidates or {}) do
+                    local candidate_representation = candidate.representation
+                    selected_entry.partitions[#selected_entry.partitions + 1] = {
+                        representation_id = candidate_representation.id,
+                        representation_name = candidate_representation.name,
+                        source_kind = candidate_representation.source_kind,
+                        source_schema = candidate_representation.source_schema,
+                        source_object = candidate_representation.source_object,
+                        coverage_predicate = candidate_representation.coverage_predicate,
+                        valid_from = candidate_representation.valid_from or JSON_NULL,
+                        valid_to = candidate_representation.valid_to or JSON_NULL,
+                    }
+                end
             end
         end
         return plan
@@ -2444,6 +2482,14 @@ local function compile_request_table(request, options)
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(physical_error.reason_code) .. ".")
         end
+        local fused_plan, fusion_error = physical_plan_runtime.apply_partitioned_sources(
+            physical_plan, snapshot)
+        if fused_plan == nil then
+            typed_plan.failure = fusion_error
+            return plan_error("_075", "Fusion planning failed: "
+                .. tostring(fusion_error.reason_code) .. ".")
+        end
+        physical_plan = fused_plan
         local branch_decision = nil
         if materialization_runtime ~= nil
             and type(materialization_runtime.select_branch_sources) == "function" then

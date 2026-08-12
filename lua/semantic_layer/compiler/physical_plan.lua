@@ -1,7 +1,7 @@
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 5,
+    VERSION = 6,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -655,6 +655,9 @@ function M.build(logical_plan, snapshot, options)
                 column_alias = state.column_alias,
                 data_type = state.data_type,
                 owner = key(state.leaf_entity_id) == key(branch.leaf_entity_id),
+                source_fact_id = state.source_fact_id,
+                state_kind = state.state_kind,
+                filter_expression = state.filter_expression,
             }
             if column.owner then
                 state_owner_counts[state.state_id] =
@@ -684,6 +687,148 @@ function M.build(logical_plan, snapshot, options)
         end
     end
     return physical, nil
+end
+
+local function clone(value, seen)
+    if type(value) ~= "table" or value == null then return value end
+    seen = seen or {}
+    if seen[value] ~= nil then return seen[value] end
+    local out = {}
+    seen[value] = out
+    for child_key, child in pairs(value) do out[child_key] = clone(child, seen) end
+    return out
+end
+
+local function candidate_binding(candidate, attribute_type, attribute_id)
+    return (candidate.bindings or {})[attribute_type .. ":" .. key(attribute_id)]
+end
+
+local function rebind_partition_predicate(predicate, candidate)
+    local binding = candidate_binding(candidate, "DIMENSION", predicate.dimension_id)
+    if binding == nil then return predicate, nil end
+    local expression, reason = predicate_sql(predicate, {expression = binding.expression})
+    if expression == nil then return nil, reason end
+    local rebound = clone(predicate)
+    rebound.expression = expression
+    return rebound, nil
+end
+
+-- Expand a grain-proven leaf into disjoint representation partitions. Each
+-- partition computes mergeable aggregate state independently; the existing
+-- UNION/merge pipeline combines those states without joining partition rows.
+function M.apply_partitioned_sources(physical_plan, snapshot)
+    local expanded = {}
+    local fusion_partitions = {}
+    local max_branches = physical_plan.safeguards.branch_limit
+    for _, branch in ipairs(physical_plan.branches or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(branch.leaf_entity_id)]
+        local candidates = entity and entity.fusion_candidates or nil
+        if upper(entity and entity.fusion_strategy) ~= "UNION" then
+            expanded[#expanded + 1] = branch
+        else
+            if candidates == nil or #candidates < 2 then
+                return fail("FUSION_PARTITION_BINDING_INCOMPLETE", {
+                    entity_id = branch.leaf_entity_id,
+                })
+            end
+            for _, candidate in ipairs(candidates) do
+                local representation = candidate.representation
+                local partition = clone(branch)
+                partition.branch_id = branch.branch_id .. ":representation:"
+                    .. key(representation.id)
+                partition.cte_id = "cte:" .. partition.branch_id
+                partition.cte_alias = "__esv_b_" .. stable_token(branch.leaf_entity_id)
+                    .. "_r_" .. stable_token(representation.id)
+                partition.source = {
+                    source_kind = "REPRESENTATION_PARTITION",
+                    entity_id = entity.id,
+                    entity_name = entity.name,
+                    representation_id = representation.id,
+                    representation_name = representation.name,
+                    physical_schema = representation.source_schema,
+                    physical_object = representation.source_object,
+                    coverage_predicate = representation.coverage_predicate,
+                    valid_from = representation.valid_from,
+                    valid_to = representation.valid_to,
+                }
+                partition.from_sql = quote_qualified(representation.source_schema,
+                    representation.source_object) .. " " .. tostring(representation.alias)
+                for _, dimension in ipairs(partition.dimensions or {}) do
+                    if key(dimension.entity_id) == key(entity.id) then
+                        local binding = candidate_binding(candidate, "DIMENSION",
+                            dimension.dimension_id)
+                        if binding == nil then
+                            return fail("FUSION_PARTITION_BINDING_INCOMPLETE", {
+                                entity_id = entity.id,
+                                representation_id = representation.id,
+                                dimension_id = dimension.dimension_id,
+                            })
+                        end
+                        dimension.expression = binding.expression
+                    end
+                end
+                local predicates = {}
+                for _, predicate in ipairs(partition.where_predicates or {}) do
+                    local rebound, reason = rebind_partition_predicate(predicate, candidate)
+                    if rebound == nil then
+                        return fail("PHYSICAL_FILTER_INVALID", {
+                            branch_id = partition.branch_id,
+                            dimension_id = predicate.dimension_id,
+                            issue = reason,
+                        })
+                    end
+                    predicates[#predicates + 1] = rebound
+                end
+                predicates[#predicates + 1] = {
+                    filter_id = "coverage:representation:" .. key(representation.id),
+                    expression = representation.coverage_predicate,
+                    predicate_kind = "COVERAGE",
+                }
+                partition.where_predicates = predicates
+                for _, state_column in ipairs(partition.state_columns or {}) do
+                    if state_column.owner then
+                        local binding = candidate_binding(candidate, "FACT",
+                            state_column.source_fact_id)
+                        if binding == nil then
+                            return fail("FUSION_PARTITION_BINDING_INCOMPLETE", {
+                                entity_id = entity.id,
+                                representation_id = representation.id,
+                                fact_id = state_column.source_fact_id,
+                            })
+                        end
+                        state_column.expression = state_expression(state_column,
+                            binding.expression, state_column.filter_expression)
+                    end
+                end
+                expanded[#expanded + 1] = partition
+                fusion_partitions[#fusion_partitions + 1] = {
+                    branch_id = partition.branch_id,
+                    entity_id = entity.id,
+                    representation_id = representation.id,
+                    representation_name = representation.name,
+                    coverage_predicate = representation.coverage_predicate,
+                    valid_from = representation.valid_from,
+                    valid_to = representation.valid_to,
+                }
+            end
+        end
+    end
+    if #expanded > max_branches then
+        return fail("PLANNER_BRANCH_LIMIT_EXCEEDED", {
+            branch_count = #expanded,
+            branch_limit = max_branches,
+        })
+    end
+    physical_plan.branches = expanded
+    physical_plan.safeguards.branch_count = #expanded
+    if #fusion_partitions > 0 then
+        physical_plan.fusion_plan = {
+            fusion_plan_version = 1,
+            strategy = "UNION",
+            partitions = fusion_partitions,
+        }
+    end
+    return physical_plan, nil
 end
 
 local function materialized_column_expression(source_alias, column)

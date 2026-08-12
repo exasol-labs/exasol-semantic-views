@@ -89,6 +89,22 @@ class InstallerResetTest(unittest.TestCase):
             promotion.index("SET REPRESENTATION_ROLE = 'ALTERNATE'"),
         )
 
+    def test_f3_coverage_admin_surface_is_installable(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        coverage = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE" in sql
+        )
+        self.assertIn("COVERAGE_PREDICATE = :coverage_predicate", coverage)
+        self.assertIn("VALID_FROM = :valid_from", coverage)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", coverage)
+        self.assertIn("STATUS = 'STALE'", coverage)
+
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())
         self.assertEqual(
