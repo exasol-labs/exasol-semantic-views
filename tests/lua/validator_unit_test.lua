@@ -837,6 +837,57 @@ test("validator requires a bounded session timeout for federated F1 probes", fun
     assert_true(has_rule(excessive, "SEMANTIC_MODEL_041"))
 end)
 
+test("validator derives federated probes from the virtual schema catalog", function()
+    local entity = {id = 1, name = "customers"}
+    local primary = {id = 1, entity_id = 1, name = "primary",
+        source_kind = "RELATION", source_schema = "HUB"}
+    local remote = {id = 2, entity_id = 1, name = "remote",
+        source_kind = "RELATION", source_schema = "SRC_PROD_LUA"}
+    local function context()
+        return validation_context({
+            model_name = "hub",
+            entities = {entity},
+            representations_by_entity = {["1"] = {primary, remote}},
+        })
+    end
+
+    local unlimited = context()
+    with_query(function(sql)
+        if string.find(sql, "EXA_ALL_VIRTUAL_SCHEMAS", 1, true) then
+            return {{"SRC_PROD_LUA"}}
+        end
+        assert_contains(sql, "FROM EXA_PARAMETERS")
+        return {{0}}
+    end, function()
+        assert_true(not api.validate_representation_probe_timeout(unlimited))
+    end)
+    assert_true(has_rule(unlimited, "SEMANTIC_MODEL_041"))
+
+    local bounded = context()
+    with_query(function(sql)
+        if string.find(sql, "EXA_ALL_VIRTUAL_SCHEMAS", 1, true) then
+            return {{SCHEMA_NAME = "src_prod_lua"}}
+        end
+        return {{30}}
+    end, function()
+        assert_true(api.validate_representation_probe_timeout(bounded))
+    end)
+    assert_equal(bounded.error_count, 0)
+
+    local unavailable = context()
+    with_query(function(sql)
+        if string.find(sql, "EXA_ALL_VIRTUAL_SCHEMAS", 1, true) then
+            error("catalog denied")
+        end
+        return {}
+    end, function()
+        assert_true(not api.validate_representation_probe_timeout(unavailable))
+    end)
+    assert_true(has_rule(unavailable, "SEMANTIC_MODEL_041"))
+    assert_contains(issue_for_rule(unavailable, "SEMANTIC_MODEL_041").message,
+        "EXA_ALL_VIRTUAL_SCHEMAS is unavailable")
+end)
+
 test("validator requires a key before claiming F1 equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary"}

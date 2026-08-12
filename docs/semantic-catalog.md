@@ -93,10 +93,13 @@ ALTER SESSION SET QUERY_TIMEOUT=60;
 EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 ```
 
-Validation rejects federated F1 probes when the session timeout is unlimited or
-greater than 60 seconds. Exasol applies `QUERY_TIMEOUT` to the complete
-`EXECUTE SCRIPT`, including nested federated statements; a script cannot lower
-its own active timeout.
+Validation identifies federation conservatively from either the declared
+`SOURCE_KIND` or the source schema's presence in
+`SYS.EXA_ALL_VIRTUAL_SCHEMAS`; a mistaken `RELATION` declaration therefore
+cannot bypass the guard. It rejects federated F1 probes when the session timeout
+is unlimited or greater than 60 seconds. Exasol applies `QUERY_TIMEOUT` to the
+complete `EXECUTE SCRIPT`, including nested federated statements; a script
+cannot lower its own active timeout.
 
 Identity and relationship metadata remains representation-invariant through
 F2. Primary-key expressions, unique-key columns, relationship key mappings,

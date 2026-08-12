@@ -462,8 +462,10 @@ This F1 equality rule does not apply after every active representation has a
 valid F3 temporal coverage contract; F3 proves grain within each partition.
 Fix local validation errors before rerunning validation: remote key scans are
 deferred until catalog metadata is clean but remain mandatory before publish.
-Before adding or validating a `VIRTUAL_SCHEMA` alternate, run `ALTER SESSION SET
-QUERY_TIMEOUT=60`; validation refuses federated F1 probes under an unlimited or
+Before adding or validating an alternate whose source schema is physically a
+Virtual Schema, run `ALTER SESSION SET QUERY_TIMEOUT=60`; validation derives
+this from `SYS.EXA_ALL_VIRTUAL_SCHEMAS`, even if `SOURCE_KIND` was mistakenly
+declared as `RELATION`, and refuses federated probes under an unlimited or
 longer timeout. The setting must precede `EXECUTE SCRIPT` because an Exasol
 script cannot change its own active timeout.
 
@@ -507,7 +509,8 @@ representation. Declare contiguous half-open `[VALID_FROM, VALID_TO)` intervals:
 the cold edge is open at the start, the hot edge is open at the end, and their
 boundary timestamps are identical. The SQL predicate must enforce the same
 declared interval using the stable entity alias. Validate under
-`QUERY_TIMEOUT=60` when any partition is a `VIRTUAL_SCHEMA`.
+`QUERY_TIMEOUT=60` when any partition's source is physically a Virtual Schema;
+the catalog-derived guard does not trust `SOURCE_KIND` alone.
 
 Do not use F3 for a partitioned entity that is only joined to supply dimensions,
 for overlapping snapshots, or for non-additive/distinct/window metrics. Inspect

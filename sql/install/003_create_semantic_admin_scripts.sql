@@ -6321,6 +6321,7 @@ local MAX_FEDERATED_PROBE_TIMEOUT_SECONDS = 60
 
 local function validate_representation_probe_timeout(ctx)
     local has_federated_probe = false
+    local probe_source_schemas = {}
     for _, entity in ipairs(ctx.entities or {}) do
         local representations = representations_for_entity(ctx, entity)
         if #representations > 1 then
@@ -6329,9 +6330,34 @@ local function validate_representation_probe_timeout(ctx)
                     has_federated_probe = true
                     break
                 end
+                if not missing(representation.source_schema) then
+                    probe_source_schemas[upper(representation.source_schema)] = true
+                end
             end
         end
         if has_federated_probe then break end
+    end
+    if not has_federated_probe and next(probe_source_schemas) ~= nil then
+        local catalog_ok, catalog_rows = pcall(query, [[
+            SELECT SCHEMA_NAME
+            FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS
+        ]])
+        if not catalog_ok then
+            add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
+                "SEMANTIC_MODEL_041",
+                "Cannot determine whether representation probes are federated because "
+                    .. "SYS.EXA_ALL_VIRTUAL_SCHEMAS is unavailable; probes were refused: "
+                    .. tostring(catalog_rows) .. ".")
+            return false
+        end
+        for _, row in ipairs(catalog_rows or {}) do
+            local schema_name = row_value(row, "SCHEMA_NAME", 1)
+            if not missing(schema_name)
+                and probe_source_schemas[upper(schema_name)] then
+                has_federated_probe = true
+                break
+            end
+        end
     end
     if not has_federated_probe then return true end
 
@@ -6346,7 +6372,7 @@ local function validate_representation_probe_timeout(ctx)
         or timeout > MAX_FEDERATED_PROBE_TIMEOUT_SECONDS then
         add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
             "SEMANTIC_MODEL_041",
-            "Federated F1 equivalence probes require session QUERY_TIMEOUT between 1 and "
+            "Federated representation key probes require session QUERY_TIMEOUT between 1 and "
                 .. tostring(MAX_FEDERATED_PROBE_TIMEOUT_SECONDS)
                 .. " seconds; current value is " .. tostring(timeout or "unavailable")
                 .. ". Run ALTER SESSION SET QUERY_TIMEOUT="
