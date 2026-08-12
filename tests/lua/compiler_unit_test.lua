@@ -548,12 +548,14 @@ local function compiler_query_fixture(options)
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
             if options.f3_union then
-                return {
+                local bindings = {
                     {301, 1, "DIMENSION", 10, 104, "o.status", "PREFER", 1, true},
                     {302, 1, "FACT", 20, 104, "o.amount", "PREFER", 1, true},
                     {303, 1, "DIMENSION", 10, 105, "o.order_status", "PREFER", 1, false},
                     {304, 1, "FACT", 20, 105, "o.net_amount", "PREFER", 1, false},
                 }
+                if options.f3_missing_fact_binding then table.remove(bindings, 4) end
+                return bindings
             end
             if options.promoted_primary then
                 return {
@@ -744,6 +746,39 @@ test("F3 compiler unions hot and cold aggregate-state partitions", function()
     assert_contains(result.plan_json, '"fusion_strategy":"UNION"')
     assert_contains(result.plan_json, '"fusion_plan_version":1')
     assert_contains(result.plan_json, '"representation_name":"cold"')
+end)
+
+test("F3 compiler diagnostics name failing model objects", function()
+    local metric_failure = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+    }, {f3_union = true, unsupported_metric = true})
+    assert_equal(metric_failure.error_code, "SEMANTIC_REQUEST_070")
+    assert_contains(metric_failure.error_message, "Metric 'total_revenue'")
+    assert_contains(metric_failure.error_message, "COUNT_DISTINCT")
+    assert_contains(metric_failure.error_message, "entity 'orders' is partitioned")
+
+    local binding_failure = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+        dimensions = {"status"},
+    }, {f3_union = true, f3_missing_fact_binding = true})
+    assert_equal(binding_failure.error_code, "SEMANTIC_REQUEST_080")
+    assert_contains(binding_failure.error_message, "Attribute 'net_revenue'")
+    assert_contains(binding_failure.error_message, "partition 'cold'")
+    assert_contains(binding_failure.error_message, "ADD_ATTRIBUTE_BINDING")
+
+    local dimension_message = api.typed_failure_message({
+        reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+        dimension = "web_campaign_channel",
+        entity_name = "campaign",
+        usage = "SELECTED_DIMENSION",
+    })
+    assert_contains(dimension_message, "Dimension 'web_campaign_channel'")
+    assert_contains(dimension_message, "partitioned entity 'campaign'")
+    assert_contains(dimension_message, "joined dimensions are not supported")
 end)
 
 test("structured compiler renders unary null filters and having", function()

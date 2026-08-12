@@ -520,6 +520,11 @@ for overlapping snapshots, or for non-additive/distinct/window metrics. Inspect
 `logical_plan.physical_plan.fusion_plan` to verify every physical source and
 coverage predicate before publication.
 
+Act on F3 compiler diagnostics directly: `_070` names the non-mergeable metric
+and aggregate, `_074` names the unsupported partitioned joined dimension or
+filter, and `_080` names the attribute and partition requiring
+`ADD_ATTRIBUTE_BINDING`. Do not work around these refusals by removing coverage.
+
 Register relationships with `ADD_RELATIONSHIP`:
 
 ```sql

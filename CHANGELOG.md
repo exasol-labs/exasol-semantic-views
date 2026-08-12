@@ -23,6 +23,13 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### F3 fail-closed diagnostics
+
+- F3 typed-planning errors now name the unsupported metric and aggregate, the
+  partitioned entity, or the joined dimension/filter that caused refusal.
+- Incomplete partition bindings now name the missing attribute and partition
+  and prescribe `ADD_ATTRIBUTE_BINDING` instead of reporting only the entity.
+
 #### F3 coverage predicate certification
 
 - `VALIDATE_MODEL` now requires every F3 runtime predicate to exactly encode

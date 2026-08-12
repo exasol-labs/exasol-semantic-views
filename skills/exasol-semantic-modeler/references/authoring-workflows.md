@@ -315,6 +315,10 @@ Compile representative requests and inspect
 binding, predicate, and boundary is present and that generated SQL aggregates
 each partition before `UNION ALL`. Stop if the entity is only a joined dimension
 or the metric uses distinct, window, or another non-mergeable aggregate.
+Compiler refusals identify the affected metric/aggregate (`_070`), joined
+dimension or filter and entity (`_074`), or missing attribute and partition
+(`_080`). For `_080`, add the named binding with `ADD_ATTRIBUTE_BINDING`; do not
+remove temporal coverage to force single-source compilation.
 
 ## Rebuild an Existing Model
 

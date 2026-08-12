@@ -440,6 +440,36 @@ local function plan_materialization_name(plan)
     return tostring(plan.selected_materialization)
 end
 
+local function typed_failure_message(failure)
+    local reason = failure.reason_code or "TYPED_PLANNING_FAILED"
+    if reason == "METRIC_STATE_UNSUPPORTED" then
+        local metric_name = tostring(failure.metric or failure.metric_id or "unknown")
+        local aggregate = tostring(failure.aggregation_function
+            or failure.state_class or "unknown aggregate")
+        if failure.entity_name ~= nil then
+            return "Metric '" .. metric_name .. "' uses " .. aggregate
+                .. ", which has no mergeable aggregate state; entity '"
+                .. tostring(failure.entity_name)
+                .. "' is partitioned (F3 supports SUM and COUNT). Remove the metric "
+                .. "from this request or express it using mergeable SUM/COUNT states."
+        end
+        return "Metric '" .. metric_name .. "' uses " .. aggregate
+            .. ", which has no mergeable aggregate state for strict typed planning."
+    end
+    if reason == "FUSION_PARTITION_DIMENSION_UNSUPPORTED" then
+        local dimension_name = tostring(failure.dimension
+            or failure.dimension_id or "unknown")
+        local usage = failure.usage == "GLOBAL_FILTER"
+            and "Filter dimension" or "Dimension"
+        return usage .. " '" .. dimension_name
+            .. "' resolves to partitioned entity '"
+            .. tostring(failure.entity_name or failure.entity_id or "unknown")
+            .. "', which is used here only as a joined dimension. Partitioned joined "
+            .. "dimensions are not supported in F3."
+    end
+    return "Typed planning failed: " .. tostring(reason) .. "."
+end
+
 local function ok_result(sql_text, plan, validation_run_id)
     return {
         status = "OK",
@@ -1492,6 +1522,7 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
         if entity ~= nil then
             local attributes = required_by_entity[key(entity.id)] or {}
             local candidates = {}
+            local incomplete_candidates = {}
             local representations = ctx.representations_by_entity[key(entity.id)] or {}
             if #representations == 0 and entity.primary_representation ~= nil then
                 representations = {entity.primary_representation}
@@ -1505,7 +1536,13 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                     complete = true,
                     legacy_only = true,
                 }
-                for attribute_key, attribute in pairs(attributes) do
+                local attribute_keys = {}
+                for attribute_key, _ in pairs(attributes) do
+                    attribute_keys[#attribute_keys + 1] = attribute_key
+                end
+                table.sort(attribute_keys)
+                for _, attribute_key in ipairs(attribute_keys) do
+                    local attribute = attributes[attribute_key]
                     local bindings = ctx.bindings_by_attribute[attribute_key] or {}
                     local selected = nil
                     for _, binding in ipairs(bindings) do
@@ -1527,6 +1564,8 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                     end
                     if selected == nil then
                         candidate.complete = false
+                        candidate.missing_attribute_key = attribute_key
+                        candidate.missing_attribute_name = attribute.name
                         break
                     end
                     candidate.bindings[attribute_key] = selected
@@ -1537,7 +1576,11 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                     candidate.binding_priority = candidate.binding_priority
                         + tonumber(selected.priority or 1)
                 end
-                if candidate.complete then candidates[#candidates + 1] = candidate end
+                if candidate.complete then
+                    candidates[#candidates + 1] = candidate
+                else
+                    incomplete_candidates[#incomplete_candidates + 1] = candidate
+                end
             end
             table.sort(candidates, function(left, right)
                 if left.fallback_count ~= right.fallback_count then
@@ -1566,6 +1609,14 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                     .. "' has incomplete coverage metadata."
             end
             if partitioned and #candidates ~= #representations then
+                local incomplete = incomplete_candidates[1]
+                if incomplete ~= nil then
+                    return nil, "Attribute '" .. tostring(incomplete.missing_attribute_name
+                        or incomplete.missing_attribute_key) .. "' has no binding on partition '"
+                        .. tostring(incomplete.representation.name) .. "' of entity '"
+                        .. tostring(entity.name)
+                        .. "'. Add it with ADD_ATTRIBUTE_BINDING."
+                end
                 return nil, "No complete UNION binding set exists for every partition of entity '"
                     .. tostring(entity.name) .. "'."
             end
@@ -2469,7 +2520,7 @@ local function compile_request_table(request, options)
         local reason = typed_plan.failure.reason_code or "TYPED_PLANNING_FAILED"
         local code = string.find(reason, "METRIC_", 1, true) == 1
             and "_070" or "_074"
-        return plan_error(code, "Typed planning failed: " .. tostring(reason) .. ".")
+        return plan_error(code, typed_failure_message(typed_plan.failure))
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
         local physical_plan, physical_error = physical_plan_runtime.build(
@@ -3659,5 +3710,6 @@ if rawget(_G, "ESV_TEST_MODE") then
         parse_having_filters = parse_having_filters,
         parse_order_by = parse_order_by,
         collision_error = collision_error,
+        typed_failure_message = typed_failure_message,
     }
 end

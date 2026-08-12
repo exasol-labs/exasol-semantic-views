@@ -497,6 +497,9 @@ test("F3 rejects partition fusion on a joined dimension entity", function()
     local logical = assert(planner.logical_plan(spec, snapshot, bound, {public}))
     assert_equal(logical.failure.reason_code,
         "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
+    assert_equal(logical.failure.dimension, "region")
+    assert_equal(logical.failure.entity_name, "regions")
+    assert_equal(logical.failure.usage, "SELECTED_DIMENSION")
 end)
 
 test("F3 physical planner expands disjoint representation partitions", function()

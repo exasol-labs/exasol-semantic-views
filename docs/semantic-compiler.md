@@ -71,6 +71,10 @@ merges `SUM`/`COUNT` states after `UNION ALL`.
 Non-mergeable metrics fail with `METRIC_STATE_UNSUPPORTED`. Partitioned entities
 used only as joined dimensions fail with
 `FUSION_PARTITION_DIMENSION_UNSUPPORTED`.
+The public `_070`/`_074` diagnostics retain the metric, aggregate, entity,
+dimension or filter usage from the typed failure and state the supported F3
+remedy. `_080` names the first missing attribute and partition and points to
+`ADD_ATTRIBUTE_BINDING`.
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the

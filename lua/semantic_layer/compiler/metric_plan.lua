@@ -197,6 +197,7 @@ function M.build_dag(snapshot, selected_metrics)
             expression = metric.expression,
             data_type = metric.data_type,
             state_class = state_class,
+            aggregation_function = metric.aggregation_function,
             state_spec = state,
             base_entity_id = metric.base_entity_id,
             leaf_entity_ids = leaf_entities,
@@ -584,6 +585,8 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
                     metric_id = node.metric_id,
                     metric = node.name,
                     state_class = node.state_class,
+                    aggregation_function = node.aggregation_function,
+                    leaf_entity_ids = node.leaf_entity_ids,
                 }
             end
             for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
@@ -613,6 +616,17 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
         local entity = (snapshot.entity_by_id or {})[key(entity_id)]
         if entity ~= nil and upper(entity.fusion_strategy) == "UNION" then
             has_partitioned_leaf = true
+            if legacy_state_failure ~= nil then
+                for _, failure_entity_id in ipairs(
+                    legacy_state_failure.leaf_entity_ids or {}) do
+                    if key(failure_entity_id) == key(entity.id) then
+                        legacy_state_failure.entity_id = entity.id
+                        legacy_state_failure.entity_name = entity.name
+                        legacy_state_failure.fusion_strategy = "UNION"
+                        break
+                    end
+                end
+            end
         end
     end
     local plan_kind = (#leaf_entities > 1 or has_partitioned_leaf)
@@ -652,7 +666,10 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
             plan.failure = {
                 reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
                 entity_id = entity.id,
+                entity_name = entity.name,
                 dimension_id = dimension.id,
+                dimension = dimension.name,
+                usage = "SELECTED_DIMENSION",
             }
         end
     end
@@ -663,7 +680,10 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
             plan.failure = {
                 reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
                 entity_id = entity.id,
+                entity_name = entity.name,
                 dimension_id = filter.field_id,
+                dimension = filter.field,
+                usage = "GLOBAL_FILTER",
             }
         end
     end
