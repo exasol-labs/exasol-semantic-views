@@ -507,8 +507,10 @@ mergeable `SUM` or `COUNT` metrics. Add all representations and attribute
 bindings first, then call `SET_REPRESENTATION_COVERAGE` for every active
 representation. Declare contiguous half-open `[VALID_FROM, VALID_TO)` intervals:
 the cold edge is open at the start, the hot edge is open at the end, and their
-boundary timestamps are identical. The SQL predicate must enforce the same
-declared interval using the stable entity alias. Validate under
+boundary timestamps are identical. Use exactly one qualified temporal column
+and canonical predicates: `column >= VALID_FROM` and `column < VALID_TO`,
+omitting the comparison for each `NULL` bound. Predicate timestamp literals
+must exactly match the metadata; free-form coverage SQL is rejected. Validate under
 `QUERY_TIMEOUT=60` when any partition's source is physically a Virtual Schema;
 the catalog-derived guard does not trust `SOURCE_KIND` alone.
 

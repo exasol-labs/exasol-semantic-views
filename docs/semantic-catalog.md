@@ -153,15 +153,19 @@ recorded in `plan_json.selected_representations[].selected_bindings`.
 
 F3 combines hot/cold representations of a metric-leaf entity. Configure each
 active representation with `SET_REPRESENTATION_COVERAGE`. The predicate is SQL
-executed against that representation and must use its stable entity alias. The
-validity metadata declares a half-open interval `[VALID_FROM, VALID_TO)` used
-for deterministic overlap and gap validation.
+executed against that representation and must use one qualified temporal column
+under its stable entity alias. It is certifiable only in canonical half-open
+form: `column >= VALID_FROM` and `column < VALID_TO`, omitting the comparison
+whose bound is `NULL`. Timestamp literals must exactly match the corresponding
+validity metadata. Free-form predicates are rejected because independent SQL
+and interval declarations cannot prove the rows are disjoint and complete.
 
 Every active representation of the entity must participate. The first interval
 must have `VALID_FROM = NULL`, the last must have `VALID_TO = NULL`, and every
-adjacent `VALID_TO`/`VALID_FROM` boundary must be equal. This proves complete,
-contiguous, non-overlapping temporal coverage. Passing `NULL` for predicate and
-both bounds clears a declaration.
+adjacent `VALID_TO`/`VALID_FROM` boundary must be equal. Together with canonical
+predicate validation, this proves the predicates executed by `UNION ALL` are
+complete, contiguous, and non-overlapping. Passing `NULL` for predicate and both
+bounds clears a declaration.
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(

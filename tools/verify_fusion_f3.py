@@ -81,6 +81,18 @@ def main() -> int:
         for statement in statements:
             execute(con, statement)
 
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE("
+            "'f3_verify', 'orders', 'cold', "
+            "'o.order_ts < TIMESTAMP ''2026-02-01 00:00:00''', NULL, "
+            "TIMESTAMP '2026-01-01 00:00:00')")
+        mismatched = execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f3_verify')")
+        if not any(str(row[3]) == "SEMANTIC_MODEL_042" for row in mismatched):
+            raise AssertionError(f"mismatched F3 predicate was not rejected: {mismatched}")
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE("
+            "'f3_verify', 'orders', 'cold', "
+            "'o.order_ts < TIMESTAMP ''2026-01-01 00:00:00''', NULL, "
+            "TIMESTAMP '2026-01-01 00:00:00')")
+
         issues = execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f3_verify')")
         errors = [row for row in issues if str(row[0]).upper() == "ERROR"]
         if errors:
@@ -116,6 +128,7 @@ def main() -> int:
         expected = {"CLOSED": 40.0, "OPEN": 60.0}
         if actual != expected:
             raise AssertionError(f"F3 result mismatch: expected {expected}, got {actual}")
+        print("ok F3 mismatch: SEMANTIC_MODEL_042")
         print("ok F3 validation: 0 errors")
         print("ok F3 plan: 2 covered representation partitions")
         print(f"ok F3 rows: {actual}")

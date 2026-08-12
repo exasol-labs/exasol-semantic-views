@@ -716,6 +716,57 @@ test("validator accepts contiguous F3 coverage and rejects boundary gaps", funct
     cold.valid_to = "2026-01-01 00:00:00"
 end)
 
+test("validator rejects F3 predicates that disagree with declared intervals", function()
+    local entity = {id = 1, name = "web_session", alias = "w"}
+    local cold = {id = 1, entity_id = 1, name = "cold", alias = "w",
+        source_schema = "LAKE", source_object = "WEB_SESSION",
+        coverage_predicate = "w.ts < TIMESTAMP '2026-06-01 00:00:00'",
+        valid_to = "2026-05-01 00:00:00.000000"}
+    local hot = {id = 2, entity_id = 1, name = "hot", alias = "w",
+        source_schema = "MART", source_object = "WEB_SESSION",
+        coverage_predicate = "w.ts >= TIMESTAMP '2026-05-01 00:00:00'",
+        valid_from = "2026-05-01 00:00:00"}
+    local function validate()
+        local ctx = validation_context({
+            entities = {entity},
+            representations_by_entity = {["1"] = {cold, hot}},
+        })
+        with_query(function(sql)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+            error("unexpected coverage SQL: " .. tostring(sql))
+        end, function() api.validate_partition_coverage(ctx, entity) end)
+        return ctx
+    end
+
+    local overlap = validate()
+    assert_true(has_rule(overlap, "SEMANTIC_MODEL_042"))
+    assert_contains(issue_for_rule(overlap, "SEMANTIC_MODEL_042").message,
+        "timestamp literals must exactly match")
+
+    cold.coverage_predicate = "w.ts < TIMESTAMP '2026-04-01 00:00:00'"
+    local gap = validate()
+    assert_true(has_rule(gap, "SEMANTIC_MODEL_042"))
+
+    cold.coverage_predicate = "w.ts < TIMESTAMP '2026-05-01 00:00:00'"
+    local valid = validate()
+    assert_equal(valid.error_count, 0,
+        valid.issues[1] and valid.issues[1].message or "valid coverage rejected")
+end)
+
+test("validator certifies bounded F3 predicates only in canonical form", function()
+    local parsed = api.parse_partition_predicate(
+        "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00' "
+            .. "AND o.order_ts < TIMESTAMP '2026-02-01 00:00:00'")
+    assert_equal(#parsed, 2)
+    assert_equal(parsed[1].key_expression, "O.order_ts")
+    assert_equal(parsed[1].operator, ">=")
+    assert_equal(parsed[2].operator, "<")
+    assert_equal(api.parse_partition_predicate(
+        "YEAR(o.order_ts) >= TIMESTAMP '2026-01-01 00:00:00'"), nil)
+    assert_equal(api.parse_partition_predicate(
+        "o.order_ts < TIMESTAMP '2026-01-01 00:00:00' OR 1 = 1"), nil)
+end)
+
 test("validator rejects partial and malformed F3 coverage contracts", function()
     local entity = {id = 1, name = "orders", alias = "o"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "o",

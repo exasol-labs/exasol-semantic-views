@@ -5830,6 +5830,90 @@ local function entity_uses_partition_fusion(ctx, entity)
     return true
 end
 
+local function trim_text(value)
+    return tostring(value or ""):match("^%s*(.-)%s*$")
+end
+
+local function normalized_timestamp(value)
+    if missing(value) then return nil end
+    local text = trim_text(value):gsub("T", " ")
+    local date, time, fraction = text:match(
+        "^(%d%d%d%d%-%d%d%-%d%d) (%d%d:%d%d:%d%d)(%.%d+)$")
+    if date == nil then
+        date, time = text:match("^(%d%d%d%d%-%d%d%-%d%d) (%d%d:%d%d:%d%d)$")
+    end
+    if date == nil then return nil end
+    fraction = (fraction or ""):gsub("0+$", ""):gsub("%.$", "")
+    return date .. " " .. time .. fraction
+end
+
+local function comparable_timestamp(value)
+    return normalized_timestamp(value) or tostring(value or "")
+end
+
+local function partition_key_expression(value)
+    local compact = trim_text(value):gsub("%s+", "")
+    while compact:match("^%b()$") do compact = compact:sub(2, -2) end
+    local alias, column = compact:match("^([%a_][%w_]*)%.([%a_][%w_]*)$")
+    if alias == nil then
+        alias, column = compact:match('^([%a_][%w_]*)%."([^"]+)"$')
+    end
+    if alias == nil then return nil end
+    return upper(alias) .. "." .. tostring(column)
+end
+
+local function parse_partition_bound(clause)
+    local expression, literal = trim_text(clause):match(
+        "^(.-)%s*>=%s*[Tt][Ii][Mm][Ee][Ss][Tt][Aa][Mm][Pp]%s*'([^']+)'%s*$")
+    local operator = ">="
+    if expression == nil then
+        expression, literal = trim_text(clause):match(
+            "^(.-)%s*<%s*[Tt][Ii][Mm][Ee][Ss][Tt][Aa][Mm][Pp]%s*'([^']+)'%s*$")
+        operator = "<"
+    end
+    local key_expression = partition_key_expression(expression)
+    local timestamp = normalized_timestamp(literal)
+    if key_expression == nil or timestamp == nil then return nil end
+    return {key_expression = key_expression, operator = operator, timestamp = timestamp}
+end
+
+local function parse_partition_predicate(predicate)
+    local text = trim_text(predicate)
+    while text:match("^%b()$") do text = trim_text(text:sub(2, -2)) end
+    local upper_text = upper(text)
+    local and_start, and_end = upper_text:find("%s+AND%s+")
+    if and_start == nil then
+        local bound = parse_partition_bound(text)
+        return bound and {bound} or nil
+    end
+    if upper_text:find("%s+AND%s+", and_end + 1) ~= nil then return nil end
+    local first = parse_partition_bound(text:sub(1, and_start - 1))
+    local second = parse_partition_bound(text:sub(and_end + 1))
+    if first == nil or second == nil
+        or first.key_expression ~= second.key_expression then return nil end
+    return {first, second}
+end
+
+local function predicate_matches_partition_interval(representation)
+    local bounds = parse_partition_predicate(representation.coverage_predicate)
+    if bounds == nil then return false, nil end
+    local expected_from = normalized_timestamp(representation.valid_from)
+    local expected_to = normalized_timestamp(representation.valid_to)
+    local actual_from, actual_to, key_expression
+    for _, bound in ipairs(bounds) do
+        key_expression = key_expression or bound.key_expression
+        if bound.key_expression ~= key_expression then return false, nil end
+        if bound.operator == ">=" then
+            if actual_from ~= nil then return false, nil end
+            actual_from = bound.timestamp
+        elseif bound.operator == "<" then
+            if actual_to ~= nil then return false, nil end
+            actual_to = bound.timestamp
+        end
+    end
+    return actual_from == expected_from and actual_to == expected_to, key_expression
+end
+
 local function validate_partition_coverage(ctx, entity)
     local representations = representations_for_entity(ctx, entity)
     local metadata_count = 0
@@ -5862,11 +5946,24 @@ local function validate_partition_coverage(ctx, entity)
         end
         if not missing(representation.valid_from)
             and not missing(representation.valid_to)
-            and tostring(representation.valid_from) >= tostring(representation.valid_to) then
+            and comparable_timestamp(representation.valid_from)
+                >= comparable_timestamp(representation.valid_to) then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_042", "VALID_FROM must be earlier than VALID_TO.")
         end
         local predicate = tostring(representation.coverage_predicate or "")
+        local predicate_matches, partition_key =
+            predicate_matches_partition_interval(representation)
+        if not predicate_matches then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042",
+                "Coverage predicate must be canonical half-open SQL over one qualified column: "
+                    .. ">= VALID_FROM and < VALID_TO, omitting comparisons for NULL bounds. "
+                    .. "Predicate timestamp literals must exactly match the declared interval.")
+        elseif partition_key == nil then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_042", "Coverage predicate has no certifiable partition key.")
+        end
         for alias, _ in pairs(aliases_in_expression(predicate)) do
             if alias ~= upper(representation.alias) then
                 add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
@@ -5894,7 +5991,8 @@ local function validate_partition_coverage(ctx, entity)
         if missing(left.valid_from) ~= missing(right.valid_from) then
             return missing(left.valid_from)
         end
-        return tostring(left.valid_from or "") < tostring(right.valid_from or "")
+        return comparable_timestamp(left.valid_from)
+            < comparable_timestamp(right.valid_from)
     end)
     if not missing(ordered[1].valid_from)
         or not missing(ordered[#ordered].valid_to) then
@@ -5905,7 +6003,8 @@ local function validate_partition_coverage(ctx, entity)
         local previous = ordered[index - 1]
         local current = ordered[index]
         if missing(previous.valid_to) or missing(current.valid_from)
-            or tostring(previous.valid_to) ~= tostring(current.valid_from) then
+            or comparable_timestamp(previous.valid_to)
+                ~= comparable_timestamp(current.valid_from) then
             add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
                 "UNION partition intervals must be contiguous and non-overlapping; boundary mismatch between "
                     .. tostring(previous.name) .. " and " .. tostring(current.name) .. ".")
@@ -7359,6 +7458,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         source_column_exists = source_column_exists,
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
+        parse_partition_predicate = parse_partition_predicate,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
         validate_representation_probe_timeout = validate_representation_probe_timeout,

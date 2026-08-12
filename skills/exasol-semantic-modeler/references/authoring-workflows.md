@@ -302,9 +302,12 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 ```
 
 The first partition must have no `VALID_FROM`, the last no `VALID_TO`, and each
-adjacent boundary must match exactly. Validation rejects partial, overlapping,
-gapped, or expression-invalid coverage. Clear coverage by passing `NULL` for
-the predicate and both bounds on every representation.
+adjacent boundary must match exactly. Each predicate must be canonical half-open
+SQL over one qualified temporal column: `column >= VALID_FROM` and
+`column < VALID_TO`, omitting comparisons for `NULL` bounds. Its timestamp
+literals must exactly match the metadata. Validation rejects partial,
+overlapping, gapped, free-form, or mismatched coverage. Clear coverage by
+passing `NULL` for the predicate and both bounds on every representation.
 
 Compile representative requests and inspect
 `selected_representations[].partitions` plus

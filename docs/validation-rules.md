@@ -77,7 +77,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_039` | error | An attribute binding has invalid ownership, role, priority, representation, or duplicate active membership. |
 | `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses an unsupported function, or references a column absent from its target representation. |
 | `SEMANTIC_MODEL_041` | error | A declared or catalog-derived federated F1/F3 probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds, or federation could not be determined safely. |
-| `SEMANTIC_MODEL_042` | error | F3 `UNION` coverage is partial, gapped, overlapping, not open-ended, or uses an invalid representation predicate. |
+| `SEMANTIC_MODEL_042` | error | F3 `UNION` coverage is partial, gapped, overlapping, not open-ended, or its canonical predicate does not exactly encode the declared half-open interval. |
 
 ## Metric/Dimension Matrix
 

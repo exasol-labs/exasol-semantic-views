@@ -23,6 +23,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### F3 coverage predicate certification
+
+- `VALIDATE_MODEL` now requires every F3 runtime predicate to exactly encode
+  its declared half-open validity interval over one qualified temporal column.
+- Mismatched, overlapping, gapped, or free-form predicates fail
+  `SEMANTIC_MODEL_042` before publication instead of invalidating the interval
+  proof and silently changing `UNION ALL` results.
+
 #### Federated representation probe timeout
 
 - `VALIDATE_MODEL` now refuses F1/F3 key probes involving a physical Virtual
