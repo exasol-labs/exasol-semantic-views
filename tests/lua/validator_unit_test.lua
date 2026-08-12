@@ -461,6 +461,89 @@ test("validator rejects malformed and column-incompatible F1 representations", f
     assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_017").message, "archive")
 end)
 
+test("validator proves F1 representation grain and key-set equivalence", function()
+    local entity = {id = 1, name = "customers", alias = "c"}
+    local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS"}
+    local duplicate = {id = 2, entity_id = 1, name = "duplicate", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS_DUP"}
+    local half = {id = 3, entity_id = 1, name = "half", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS_HALF"}
+    local swapped = {id = 4, entity_id = 1, name = "swapped", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS_SWAPPED"}
+    entity.primary_representation = primary
+    local unique_key = {id = 10, entity_id = 1, name = "customer_pk",
+        columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}}
+    local ctx = validation_context({
+        entities = {entity},
+        representations = {primary, duplicate, half, swapped},
+        representations_by_entity = {["1"] = {primary, duplicate, half, swapped}},
+        unique_keys_by_entity = {["1"] = {unique_key}},
+        entity_name_by_id = {["1"] = "customers"},
+    })
+    with_query(function(sql)
+        local normalized = tostring(sql):gsub("%s+", " ")
+        if contains(normalized, "FROM SYS.EXA_ALL_COLUMNS") then
+            return {{"CUSTOMER_ID"}}
+        end
+        if contains(normalized, " MINUS ") then return {{1}} end
+        local grouped = contains(normalized, "FROM (SELECT")
+        if contains(normalized, '"CUSTOMERS_DUP"') then return {{grouped and 2 or 4}} end
+        if contains(normalized, '"CUSTOMERS_HALF"') then return {{1}} end
+        if contains(normalized, '"CUSTOMERS_SWAPPED"') then return {{2}} end
+        if contains(normalized, '"CUSTOMERS"') then return {{2}} end
+        error("unexpected equivalence probe: " .. normalized)
+    end, function()
+        api.validate_representation_data_equivalence(ctx)
+    end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_037"))
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_038"))
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_037").message,
+        "does not preserve grain")
+end)
+
+test("validator requires a key before claiming F1 equivalence", function()
+    local entity = {id = 1, name = "customers", alias = "c"}
+    local primary = {id = 1, entity_id = 1, name = "primary"}
+    local alternate = {id = 2, entity_id = 1, name = "alternate"}
+    entity.primary_representation = primary
+    local ctx = validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {primary, alternate}},
+        unique_keys_by_entity = {},
+    })
+    api.validate_representation_data_equivalence(ctx)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_037"))
+end)
+
+test("validator fails closed when an F1 data probe cannot execute", function()
+    local entity = {id = 1, name = "customers", alias = "c"}
+    local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS"}
+    local alternate = {id = 2, entity_id = 1, name = "remote", alias = "c",
+        source_schema = "REMOTE", source_object = "CUSTOMERS"}
+    entity.primary_representation = primary
+    local unique_key = {id = 10, entity_id = 1, name = "customer_pk",
+        columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}}
+    local ctx = validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {primary, alternate}},
+        unique_keys_by_entity = {["1"] = {unique_key}},
+        entity_name_by_id = {["1"] = "customers"},
+    })
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            return {{"CUSTOMER_ID"}}
+        end
+        error("remote source unavailable")
+    end, function()
+        api.validate_representation_data_equivalence(ctx)
+    end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_037"))
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_037").message,
+        "Could not prove")
+end)
+
 test("validator expressions enforce ownership reachability functions and columns", function()
     local orders = {id = 1, name = "orders", alias = "o", source_schema = "MART", source_object = "ORDERS"}
     local customers = {id = 2, name = "customers", alias = "c", source_schema = "MART", source_object = "CUSTOMERS"}
@@ -724,6 +807,8 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {{1}}
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return {{1}}
+        elseif contains(sql, "AS PROBE_COUNT") then
+            return {{contains(sql, " MINUS ") and 0 or 4}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
             return {}
         elseif contains(sql, "COUNT(er.REPRESENTATION_ID)") then

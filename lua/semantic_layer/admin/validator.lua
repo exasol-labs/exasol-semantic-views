@@ -528,6 +528,14 @@ local function source_column_exists(schema_name, object_name, column_name)
     ]], {schema_name = schema_name, object_name = object_name, column_name = column_name}) > 0
 end
 
+local function quote_ident(value)
+    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
+end
+
+local function quote_qualified(schema_name, object_name)
+    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
+end
+
 local function strip_string_literals(text)
     local out = {}
     local in_quote = false
@@ -1461,6 +1469,164 @@ local function validate_unique_keys(ctx)
     end
 end
 
+local function resolved_source_column_name(representation, column_name)
+    local ok, rows = pcall(query, [[
+        SELECT COLUMN_NAME
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
+          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
+          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
+        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
+        LIMIT 1
+    ]], {
+        schema_name = representation.source_schema,
+        object_name = representation.source_object,
+        column_name = column_name,
+    })
+    if not ok then return nil, tostring(rows) end
+    if rows == nil or #rows == 0 then
+        return nil, "source column is not visible: " .. tostring(column_name)
+    end
+    return row_value(rows[1], "COLUMN_NAME", 1), nil
+end
+
+local function representation_key_query(representation, unique_key)
+    local expressions = {}
+    for _, column in ipairs(unique_key.columns or {}) do
+        if not missing(column.column_name) then
+            local physical_name, resolution_error = resolved_source_column_name(
+                representation, column.column_name)
+            if physical_name == nil then return nil, resolution_error end
+            expressions[#expressions + 1] = tostring(representation.alias)
+                .. "." .. quote_ident(physical_name)
+        elseif not missing(column.expression) then
+            expressions[#expressions + 1] = tostring(column.expression)
+        end
+    end
+    if #expressions == 0 then return nil, "declared key has no executable columns" end
+    local source = quote_qualified(representation.source_schema,
+        representation.source_object) .. " " .. tostring(representation.alias)
+    return "SELECT " .. table.concat(expressions, ", ")
+        .. " FROM " .. source
+        .. " GROUP BY " .. table.concat(expressions, ", "), nil
+end
+
+local function probe_count(sql_text)
+    local ok, rows = pcall(query, sql_text)
+    if not ok then return nil, tostring(rows) end
+    if rows == nil or #rows == 0 then return nil, "probe returned no rows" end
+    return tonumber(row_value(rows[1], "PROBE_COUNT", 1) or 0), nil
+end
+
+local function validate_representation_data_equivalence(ctx)
+    for _, entity in ipairs(ctx.entities or {}) do
+        local representations = representations_for_entity(ctx, entity)
+        if #representations > 1 then
+            local unique_keys = ctx.unique_keys_by_entity[key(entity.id)] or {}
+            if #unique_keys == 0 then
+                add_issue(ctx, "ERROR", "ENTITY", entity.name,
+                    "SEMANTIC_MODEL_037",
+                    "Multiple F1 representations require at least one declared unique key to prove grain and identity equivalence.")
+            end
+            local primary = entity.primary_representation
+            for _, unique_key in ipairs(unique_keys) do
+                local object_name = unique_key_object_name(ctx, unique_key)
+                local primary_keys, primary_build_error = nil, nil
+                if primary ~= nil then
+                    primary_keys, primary_build_error =
+                        representation_key_query(primary, unique_key)
+                end
+                for _, representation in ipairs(representations) do
+                    local grouped_keys, build_error =
+                        representation_key_query(representation, unique_key)
+                    if build_error ~= nil then
+                        add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                            tostring(entity.name) .. "." .. tostring(representation.name),
+                            "SEMANTIC_MODEL_037", "Could not construct declared key probe "
+                                .. object_name .. ": " .. tostring(build_error) .. ".")
+                    end
+                    if grouped_keys ~= nil then
+                        local total_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM "
+                            .. quote_qualified(representation.source_schema,
+                                representation.source_object)
+                            .. " " .. tostring(representation.alias)
+                        local distinct_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM ("
+                            .. grouped_keys .. ") representation_keys"
+                        local total_count, total_error = probe_count(total_sql)
+                        local distinct_count, distinct_error = probe_count(distinct_sql)
+                        local representation_name = tostring(entity.name) .. "."
+                            .. tostring(representation.name)
+                        if total_error ~= nil or distinct_error ~= nil then
+                            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                representation_name, "SEMANTIC_MODEL_037",
+                                "Could not prove declared key " .. object_name .. ": "
+                                    .. tostring(total_error or distinct_error) .. ".")
+                        elseif total_count ~= distinct_count then
+                            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                representation_name, "SEMANTIC_MODEL_037",
+                                "Declared key " .. object_name
+                                    .. " does not preserve grain: row_count="
+                                    .. tostring(total_count) .. ", distinct_key_count="
+                                    .. tostring(distinct_count) .. ".")
+                        end
+
+                        if primary_build_error ~= nil then
+                            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                representation_name, "SEMANTIC_MODEL_038",
+                                "Could not construct PRIMARY key probe " .. object_name
+                                    .. ": " .. tostring(primary_build_error) .. ".")
+                        elseif primary_keys ~= nil and primary ~= nil
+                            and key(representation.id) ~= key(primary.id) then
+                            local primary_count, primary_error = probe_count(
+                                "SELECT COUNT(*) AS PROBE_COUNT FROM ("
+                                    .. primary_keys .. ") representation_keys")
+                            if primary_error ~= nil or distinct_error ~= nil then
+                                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                    representation_name, "SEMANTIC_MODEL_038",
+                                    "Could not compare declared key " .. object_name
+                                        .. " with PRIMARY representation: "
+                                        .. tostring(primary_error or distinct_error) .. ".")
+                            elseif primary_count ~= distinct_count then
+                                add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                    representation_name, "SEMANTIC_MODEL_038",
+                                    "Declared key cardinality differs from PRIMARY for "
+                                        .. object_name .. ": primary="
+                                        .. tostring(primary_count) .. ", alternate="
+                                        .. tostring(distinct_count) .. ".")
+                            else
+                                local missing_from_alternate, forward_error = probe_count(
+                                    "SELECT COUNT(*) AS PROBE_COUNT FROM ("
+                                        .. primary_keys .. " MINUS " .. grouped_keys
+                                        .. ") representation_key_difference")
+                                local missing_from_primary, reverse_error = probe_count(
+                                    "SELECT COUNT(*) AS PROBE_COUNT FROM ("
+                                        .. grouped_keys .. " MINUS " .. primary_keys
+                                        .. ") representation_key_difference")
+                                if forward_error ~= nil or reverse_error ~= nil then
+                                    add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                        representation_name, "SEMANTIC_MODEL_038",
+                                        "Could not compare declared key set " .. object_name
+                                            .. " with PRIMARY representation: "
+                                            .. tostring(forward_error or reverse_error) .. ".")
+                                elseif missing_from_alternate ~= 0
+                                    or missing_from_primary ~= 0 then
+                                    add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION",
+                                        representation_name, "SEMANTIC_MODEL_038",
+                                        "Declared key set differs from PRIMARY for "
+                                            .. object_name .. ": missing_in_alternate="
+                                            .. tostring(missing_from_alternate)
+                                            .. ", missing_in_primary="
+                                            .. tostring(missing_from_primary) .. ".")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 local function validate_relationship_key_mappings(ctx)
     local function validate_side(relationship, mapping, side, entity)
         local column_name = mapping[side .. "_column_name"]
@@ -2186,6 +2352,7 @@ function M.validate_model(model_name_arg)
         validate_structural_rules(ctx)
         validate_custom_extensions(ctx)
         validate_unique_keys(ctx)
+        validate_representation_data_equivalence(ctx)
         validate_relationship_key_mappings(ctx)
         local safe_edges, all_edges = relationship_edges(ctx)
         validate_expressions(ctx, safe_edges)
@@ -2228,6 +2395,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_structural_rules = validate_structural_rules,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
+        validate_representation_data_equivalence = validate_representation_data_equivalence,
         validate_relationship_key_mappings = validate_relationship_key_mappings,
         relationship_edges = relationship_edges,
         find_path = find_path,

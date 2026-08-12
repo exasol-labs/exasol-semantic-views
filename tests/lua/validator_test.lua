@@ -20,6 +20,8 @@ return {
         reserved_entity_alias = "SEMANTIC_MODEL_034",
         invalid_primary_representation = "SEMANTIC_MODEL_035",
         invalid_equivalent_representation = "SEMANTIC_MODEL_036",
+        invalid_representation_grain = "SEMANTIC_MODEL_037",
+        mismatched_representation_keys = "SEMANTIC_MODEL_038",
         ambiguous_certified_synonym = "SEMANTIC_MODEL_021",
         verified_query_missing_metric = "SEMANTIC_MODEL_023",
     },

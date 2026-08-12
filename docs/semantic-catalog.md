@@ -70,6 +70,13 @@ must expose the same semantic alias and every column used by dimensions, facts,
 filters, unique keys, and relationship mappings. Adding, promoting, or removing
 a representation clears compile cache entries and marks successful validation
 runs stale. Validate before promotion, then validate and publish after it.
+Validation executes data probes for every declared unique key: each
+representation must preserve key uniqueness, and every alternate must have the
+same key cardinality and bidirectional key set as the primary. Multiple
+representations without a declared key fail validation. Probe errors also fail
+closed, so the validating user must be able to query every representation.
+These full key scans and set comparisons can be expensive for large or remote
+sources; they run during model validation, never during compiled business queries.
 Per-representation field bindings, fallback, temporal coverage, unions,
 reconciliation, and dynamic source selection remain later fusion phases.
 

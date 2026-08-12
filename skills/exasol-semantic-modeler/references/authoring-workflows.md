@@ -178,7 +178,9 @@ unique, and do not use words marked `RESERVED` in `SYS.EXA_SQL_KEYWORDS`.
 
 Use F1 representations only when each source has the same grain, identity,
 stable alias, and semantic/key columns. `ADD_ENTITY` already created the
-`primary` representation; add an alternate, validate it, then promote it:
+`primary` representation. Declare its structured unique key before adding an
+alternate; validation queries every source to prove key uniqueness and exact
+key-set equality, then promotion can proceed:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
@@ -197,8 +199,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 
 Promotion is manual/static and invalidates cached plans. To remove a
 representation, first promote another one; removing the current primary is
-rejected. Do not use F1 for partial columns, temporal partitions, fallback,
-union, or reconciliation.
+rejected. Validation probe failures are blocking, so run it as a user that can
+query every source. Do not use F1 for partial columns, temporal partitions,
+fallback, union, or reconciliation.
 
 ## Rebuild an Existing Model
 

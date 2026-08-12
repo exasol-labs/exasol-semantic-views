@@ -142,6 +142,56 @@ def main() -> int:
             "SEMANTIC_MODEL_036",
         )
 
+        execute(con, "DROP TABLE IF EXISTS MART.ORDERS_F1_DUPLICATE")
+        execute(
+            con,
+            "CREATE TABLE MART.ORDERS_F1_DUPLICATE AS "
+            "SELECT * FROM MART.ORDERS UNION ALL SELECT * FROM MART.ORDERS",
+        )
+        try:
+            with_restore(
+                con,
+                "duplicate-grain alternate representation",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'duplicate_grain', 'RELATION', 'MART', "
+                "'ORDERS_F1_DUPLICATE', 50, NULL)",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'duplicate_grain')",
+                "SEMANTIC_MODEL_037",
+            )
+        finally:
+            execute(
+                con,
+                "DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS "
+                "WHERE REPRESENTATION_NAME = 'duplicate_grain'",
+            )
+            execute(con, "DROP TABLE IF EXISTS MART.ORDERS_F1_DUPLICATE")
+
+        execute(con, "DROP TABLE IF EXISTS MART.ORDERS_F1_HALF")
+        execute(
+            con,
+            "CREATE TABLE MART.ORDERS_F1_HALF AS "
+            "SELECT * FROM MART.ORDERS WHERE ORDER_ID <= 1001",
+        )
+        try:
+            with_restore(
+                con,
+                "partial-key alternate representation",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'partial_keys', 'RELATION', 'MART', "
+                "'ORDERS_F1_HALF', 50, NULL)",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'partial_keys')",
+                "SEMANTIC_MODEL_038",
+            )
+        finally:
+            execute(
+                con,
+                "DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS "
+                "WHERE REPRESENTATION_NAME = 'partial_keys'",
+            )
+            execute(con, "DROP TABLE IF EXISTS MART.ORDERS_F1_HALF")
+
         with_restore(
             con,
             "missing primary representation",

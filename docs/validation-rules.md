@@ -72,6 +72,8 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_033` | error | Relationship endpoint mappings do not match the unique key required by the declared cardinality. |
 | `SEMANTIC_MODEL_035` | error | An active entity does not have exactly one active `PRIMARY` representation. |
 | `SEMANTIC_MODEL_036` | error | An active representation has invalid F1 metadata, a duplicate name, a missing entity, an unstable alias, or unsupported temporal coverage. |
+| `SEMANTIC_MODEL_037` | error | F1 equivalence cannot be proven: no key is declared, a key probe failed, or a representation violates a declared key's grain. |
+| `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. |
 
 ## Metric/Dimension Matrix
 
