@@ -68,6 +68,27 @@ class InstallerResetTest(unittest.TestCase):
         )
         self.assertIn("if not baseline_errors[signature]", add_binding)
 
+    def test_representation_promotion_preserves_explicit_binding_precedence(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        promotion = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION" in sql
+        )
+        self.assertIn("stale_default_count", promotion)
+        self.assertIn("stale default bindings were repaired", promotion)
+        self.assertIn("explicit.IS_DEFAULT = FALSE", promotion)
+        self.assertIn("explicit.REPRESENTATION_ID = :representation_id", promotion)
+        self.assertIn("AND NOT EXISTS (", promotion)
+        self.assertLess(
+            promotion.index("stale_default_count"),
+            promotion.index("SET REPRESENTATION_ROLE = 'ALTERNATE'"),
+        )
+
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())
         self.assertEqual(

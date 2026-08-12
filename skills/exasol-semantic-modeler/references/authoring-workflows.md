@@ -222,6 +222,15 @@ if it is primary. Validation probe failures are blocking, so run it as a user
 that can query every source. Do not use equivalent representations for temporal
 partitions, union, reconciliation, or non-equivalent entity identity.
 
+Promotion gives explicit target bindings precedence. Compatibility defaults
+move only for attributes without an explicit target binding; otherwise they
+remain on the outgoing representation. After promotion, inspect
+`SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS` and verify there is at most one active
+binding per attribute and representation. Older F2 installs could create stale
+default/explicit collisions and block rollback. Re-running
+`SET_PRIMARY_REPRESENTATION` toward the intended recovery source now repairs
+those collisions before applying the validation gate.
+
 ### Bind Dimensions and Facts Per Representation
 
 `ADD_DIMENSION` and `ADD_FACT` create a preferred binding on `primary`

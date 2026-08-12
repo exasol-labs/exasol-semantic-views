@@ -99,8 +99,12 @@ SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING
 ```
 
 Compatibility defaults have `IS_DEFAULT = TRUE`. Promoting a representation
-moves those defaults so pre-F2 models retain static-primary behavior. Explicit
-bindings have `IS_DEFAULT = FALSE` and never move during promotion.
+moves a default only when the incoming representation has no explicit binding
+for that attribute, so pre-F2 models retain static-primary behavior without
+overriding representation-specific expressions. Explicit bindings have
+`IS_DEFAULT = FALSE` and never move during promotion. The promotion script
+also repairs stale default/explicit collisions produced by older F2 installs
+before checking the validation gate, allowing a trapped model to promote back.
 
 At compile time, F2 chooses one active representation per required entity. A
 candidate must bind every requested dimension and every fact used transitively

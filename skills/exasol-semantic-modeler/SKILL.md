@@ -482,6 +482,14 @@ sequentially. Intermediate errors for attributes not yet bound do not reject a
 repairing binding, but the model cannot be published until the final validation
 is clean. A candidate that introduces a new validation error is rolled back.
 
+Before `SET_PRIMARY_REPRESENTATION`, validate that every differing attribute
+has an explicit binding on the target. Promotion preserves those explicit
+bindings and leaves their compatibility defaults on the outgoing source; it
+must not create two bindings for the same attribute and target representation.
+If upgrading a model trapped by the older behavior, call
+`SET_PRIMARY_REPRESENTATION` for the desired recovery target: the script repairs
+stale default/explicit collisions before enforcing its clean-validation gate.
+
 Register relationships with `ADD_RELATIONSHIP`:
 
 ```sql

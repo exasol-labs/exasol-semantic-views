@@ -692,15 +692,100 @@ local previous_name = previous_rows and previous_rows[1]
 local changed = tostring(row_value(row, "REPRESENTATION_ROLE", 9)) ~= "PRIMARY"
 
 if changed then
-    local validation_rows = query([[
-        SELECT VALIDATION_RUN_ID
-        FROM SYS_SEMANTIC.VALIDATION_RUNS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-          AND STATUS IN ('OK', 'WARNING') AND ERROR_COUNT = 0
-        ORDER BY VALIDATION_RUN_ID DESC LIMIT 1
-    ]], {model_id = model_id, version_id = version_id})
-    if validation_rows == nil or #validation_rows == 0 then
-        error("SEMANTIC_ADMIN_048: representations must pass VALIDATE_MODEL before promotion")
+    local stale_default_count = scalar([[
+        SELECT COUNT(*)
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS defaults
+        WHERE defaults.ENTITY_ID = :entity_id
+          AND defaults.REPRESENTATION_ID = :previous_representation_id
+          AND defaults.IS_DEFAULT = TRUE
+          AND defaults.STATUS = 'ACTIVE'
+          AND EXISTS (
+            SELECT 1
+            FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS explicit
+            WHERE explicit.ATTRIBUTE_TYPE = defaults.ATTRIBUTE_TYPE
+              AND explicit.ATTRIBUTE_ID = defaults.ATTRIBUTE_ID
+              AND explicit.REPRESENTATION_ID = defaults.REPRESENTATION_ID
+              AND explicit.IS_DEFAULT = FALSE
+              AND explicit.STATUS = 'ACTIVE'
+          )
+    ]], {entity_id = entity_id,
+        previous_representation_id = previous_representation_id})
+
+    if tonumber(stale_default_count or 0) > 0 then
+        -- Repair catalog states produced by the pre-fix promotion path. Move a
+        -- collided compatibility default back to the requested representation
+        -- when that representation has no binding for the attribute. If it
+        -- already has an explicit binding, the stale default is redundant.
+        query([[
+            UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            SET REPRESENTATION_ID = :representation_id,
+                UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+            WHERE ATTRIBUTE_BINDING_ID IN (
+              SELECT defaults.ATTRIBUTE_BINDING_ID
+              FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS defaults
+              WHERE defaults.ENTITY_ID = :entity_id
+                AND defaults.REPRESENTATION_ID = :previous_representation_id
+                AND defaults.IS_DEFAULT = TRUE
+                AND defaults.STATUS = 'ACTIVE'
+                AND EXISTS (
+                  SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS explicit
+                  WHERE explicit.ATTRIBUTE_TYPE = defaults.ATTRIBUTE_TYPE
+                    AND explicit.ATTRIBUTE_ID = defaults.ATTRIBUTE_ID
+                    AND explicit.REPRESENTATION_ID = defaults.REPRESENTATION_ID
+                    AND explicit.IS_DEFAULT = FALSE
+                    AND explicit.STATUS = 'ACTIVE'
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS target
+                  WHERE target.ATTRIBUTE_TYPE = defaults.ATTRIBUTE_TYPE
+                    AND target.ATTRIBUTE_ID = defaults.ATTRIBUTE_ID
+                    AND target.REPRESENTATION_ID = :representation_id
+                    AND target.STATUS = 'ACTIVE'
+                )
+            )
+        ]], {entity_id = entity_id, representation_id = representation_id,
+            previous_representation_id = previous_representation_id})
+        query([[
+            DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            WHERE ATTRIBUTE_BINDING_ID IN (
+              SELECT defaults.ATTRIBUTE_BINDING_ID
+              FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS defaults
+              WHERE defaults.ENTITY_ID = :entity_id
+                AND defaults.REPRESENTATION_ID = :previous_representation_id
+                AND defaults.IS_DEFAULT = TRUE
+                AND defaults.STATUS = 'ACTIVE'
+                AND EXISTS (
+                  SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS explicit
+                  WHERE explicit.ATTRIBUTE_TYPE = defaults.ATTRIBUTE_TYPE
+                    AND explicit.ATTRIBUTE_ID = defaults.ATTRIBUTE_ID
+                    AND explicit.REPRESENTATION_ID = defaults.REPRESENTATION_ID
+                    AND explicit.IS_DEFAULT = FALSE
+                    AND explicit.STATUS = 'ACTIVE'
+                )
+            )
+        ]], {entity_id = entity_id,
+            previous_representation_id = previous_representation_id})
+        local repair_validation = query(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+            {model_name = model_name})
+        for _, validation_row in ipairs(repair_validation or {}) do
+            if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+                error("SEMANTIC_ADMIN_048: stale default bindings were repaired, but model validation still fails: "
+                    .. tostring(row_value(validation_row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR")
+                    .. " " .. tostring(row_value(validation_row, "MESSAGE", 5) or "validation failed"))
+            end
+        end
+    else
+        local validation_rows = query([[
+            SELECT VALIDATION_RUN_ID
+            FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+              AND STATUS IN ('OK', 'WARNING') AND ERROR_COUNT = 0
+            ORDER BY VALIDATION_RUN_ID DESC LIMIT 1
+        ]], {model_id = model_id, version_id = version_id})
+        if validation_rows == nil or #validation_rows == 0 then
+            error("SEMANTIC_ADMIN_048: representations must pass VALIDATE_MODEL before promotion")
+        end
     end
     query([[
         UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
@@ -727,10 +812,23 @@ if changed then
         UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
         SET REPRESENTATION_ID = :representation_id,
             UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
-        WHERE ENTITY_ID = :entity_id
-          AND REPRESENTATION_ID = :previous_representation_id
-          AND IS_DEFAULT = TRUE
-          AND STATUS = 'ACTIVE'
+        WHERE ATTRIBUTE_BINDING_ID IN (
+          SELECT defaults.ATTRIBUTE_BINDING_ID
+          FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS defaults
+          WHERE defaults.ENTITY_ID = :entity_id
+            AND defaults.REPRESENTATION_ID = :previous_representation_id
+            AND defaults.IS_DEFAULT = TRUE
+            AND defaults.STATUS = 'ACTIVE'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS explicit
+              WHERE explicit.ATTRIBUTE_TYPE = defaults.ATTRIBUTE_TYPE
+                AND explicit.ATTRIBUTE_ID = defaults.ATTRIBUTE_ID
+                AND explicit.REPRESENTATION_ID = :representation_id
+                AND explicit.IS_DEFAULT = FALSE
+                AND explicit.STATUS = 'ACTIVE'
+            )
+          )
     ]], {entity_id = entity_id, representation_id = representation_id,
         previous_representation_id = previous_representation_id})
     query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",

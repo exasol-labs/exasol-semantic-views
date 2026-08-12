@@ -24,6 +24,15 @@ All notable changes to Exasol Semantic Views are documented here.
   facts only, recommend a canonicalizing source view, and identify native
   representation identity binding as a Phase F5 capability.
 
+#### Representation promotion binding safety
+
+- `SET_PRIMARY_REPRESENTATION` no longer moves a compatibility default onto an
+  incoming representation that already has an explicit binding for the same
+  attribute.
+- Promotion detects and repairs stale default/explicit collisions created by
+  older F2 installs before enforcing the clean-validation gate, restoring a
+  supported rollback route for affected models.
+
 #### Unary null predicates
 
 - Structured filters and `having`, plus Semantic SQL `WHERE` and `HAVING`, now
