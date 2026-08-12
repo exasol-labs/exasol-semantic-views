@@ -1,6 +1,6 @@
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 7}
+local M = {PLAN_VERSION = 8}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end

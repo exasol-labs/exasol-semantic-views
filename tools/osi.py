@@ -2654,6 +2654,7 @@ def cleanup_imported_model(con: Any, model_name: str) -> None:
         f"DELETE FROM SYS_SEMANTIC.FACTS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.METRICS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.SEMANTIC_OBJECTS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.ENTITIES WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.MODEL_VERSIONS WHERE {model_filter}",
         f"UPDATE SYS_SEMANTIC.MODELS SET ACTIVE_VERSION_ID = NULL WHERE {model_filter}",

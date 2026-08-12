@@ -174,6 +174,32 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
 Entity aliases are emitted as regular SQL identifiers. Keep them short and
 unique, and do not use words marked `RESERVED` in `SYS.EXA_SQL_KEYWORDS`.
 
+## Register Equivalent Representations
+
+Use F1 representations only when each source has the same grain, identity,
+stable alias, and semantic/key columns. `ADD_ENTITY` already created the
+`primary` representation; add an alternate, validate it, then promote it:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
+  'sales', 'order', 'lakehouse', 'VIRTUAL_SCHEMA',
+  'VS_LAKEHOUSE', 'ORDERS', 20, 'MANUAL'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
+  'sales', 'order', 'lakehouse'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
+```
+
+Promotion is manual/static and invalidates cached plans. To remove a
+representation, first promote another one; removing the current primary is
+rejected. Do not use F1 for partial columns, temporal partitions, fallback,
+union, or reconciliation.
+
 ## Rebuild an Existing Model
 
 Bootstrap scripts are not idempotent. Prefer incremental add/replace operations

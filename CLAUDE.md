@@ -105,6 +105,10 @@ Key functions to know when modifying the compiler:
 
 **Critical invariant:** `validator.lua:find_path` and `compiler:find_path` must use identical join-path logic. If they diverge, `VALID_COMBINATIONS_FOR_AGENT` will report IS_VALID=True for combinations that the compiler rejects at runtime (BUG-003 in `docs/known-issues.md`).
 
+Every active entity has exactly one active `PRIMARY` representation. F1
+alternates must expose the same alias and semantic/key columns. Compilation
+always binds the static primary and records it in plan provenance.
+
 ### Call SEMANTIC_ADMIN Scripts with EXECUTE SCRIPT
 
 Always call `SEMANTIC_ADMIN` scripts with `EXECUTE SCRIPT`, never `SELECT`.
@@ -145,7 +149,7 @@ Dimension and fact expressions are checked against an explicit function allowlis
 ### The Sales Demo Model
 
 The reference model is in `sql/examples/`. Authoring order matters:
-1. `CREATE_MODEL` → `ADD_ENTITY` × N → `ADD_SEMANTIC_OBJECT`
+1. `CREATE_MODEL` → `ADD_ENTITY` × N → optional equivalent representations → `ADD_SEMANTIC_OBJECT`
 2. `ADD_RELATIONSHIP` × N
 3. `ADD_DIMENSION` × N
 4. `ADD_FACT` × N → `ADD_METRIC` × N

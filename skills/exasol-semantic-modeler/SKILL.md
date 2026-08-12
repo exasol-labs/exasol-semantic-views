@@ -365,16 +365,17 @@ previous to succeed.
 
 ```
 1. CREATE_MODEL (name, published schema, description, owner role)
-2. ADD_ENTITY (per entity — one per physical table)
-3. ADD_UNIQUE_KEY, then ADD_UNIQUE_KEY_COLUMN (per proven entity key)
-4. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
-5. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
-6. ADD_FACT (per row-level expression — entities must exist)
-7. ADD_DIMENSION (per dimension — entity and semantic object must exist)
-8. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
+2. ADD_ENTITY (per semantic entity; creates its primary physical representation)
+3. Optional ADD_ENTITY_REPRESENTATION (equivalent physical sources only)
+4. ADD_UNIQUE_KEY, then ADD_UNIQUE_KEY_COLUMN (per proven entity key)
+5. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
+6. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
+7. ADD_FACT (per row-level expression — entities must exist)
+8. ADD_DIMENSION (per dimension — entity and semantic object must exist)
+9. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED)
-9. VALIDATE_MODEL
-10. PUBLISH_MODEL
+10. VALIDATE_MODEL
+11. PUBLISH_MODEL
 ```
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
@@ -450,6 +451,13 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
   '<description>'
 );
 ```
+
+When several relations are equivalent at the same grain and expose the same
+alias and semantic/key columns, register alternates with
+`ADD_ENTITY_REPRESENTATION`. Validate before promoting one, then use
+`SET_PRIMARY_REPRESENTATION`; selection is static and all queries use that
+primary until explicitly changed. Never model partial coverage or field
+fallback this way.
 
 Register relationships with `ADD_RELATIONSHIP`:
 

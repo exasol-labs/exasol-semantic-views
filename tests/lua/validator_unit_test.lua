@@ -80,6 +80,8 @@ local function validation_context(overrides)
         dimension_by_id = {},
         fact_by_id = {},
         metric_by_id = {},
+        representations = {},
+        representations_by_entity = {},
     }
     for name, value in pairs(overrides or {}) do ctx[name] = value end
     return ctx
@@ -355,12 +357,28 @@ test("validator structural rules reject invisible and dangling catalog objects",
     local ctx = validation_context({
         version_id = 2,
         entities = {
-            {name = "orders", source_schema = "MART", source_object = "ORDERS"},
-            {name = "missing", source_schema = "MART", source_object = "MISSING"},
+            {id = 1, name = "orders", alias = "o", source_schema = "MART", source_object = "ORDERS",
+                primary_representation = {id = 1}},
+            {id = 2, name = "missing", alias = "m", source_schema = "MART", source_object = "MISSING",
+                primary_representation = {id = 2}},
+        },
+        entity_by_id = {
+            ["1"] = {id = 1, name = "orders", alias = "o"},
+            ["2"] = {id = 2, name = "missing", alias = "m"},
+        },
+        representations = {
+            {id = 1, entity_id = 1, name = "primary", source_kind = "RELATION",
+                source_schema = "MART", source_object = "ORDERS", alias = "o",
+                role = "PRIMARY", priority = 1},
+            {id = 2, entity_id = 2, name = "primary", source_kind = "RELATION",
+                source_schema = "MART", source_object = "MISSING", alias = "m",
+                role = "PRIMARY", priority = 1},
         },
     })
     with_query(function(sql, params)
-        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then
+        if contains(sql, "COUNT(er.REPRESENTATION_ID)") then
+            return {{ENTITY_NAME = "unbound", PRIMARY_COUNT = 0}}
+        elseif contains(sql, "FROM SYS.EXA_ALL_TABLES") then
             return {{params.object_name == "ORDERS" and 1 or 0}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
             return {{SOURCE_ALIAS = "O"}}
@@ -380,16 +398,67 @@ test("validator structural rules reject invisible and dangling catalog objects",
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_034"))
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_004"))
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_005"))
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_035"))
     assert_branch("validator.structure.valid", ctx.error_count == 0, false)
 
     local valid = validation_context({version_id = 2, entities = {
-        {name = "orders", source_schema = "MART", source_object = "ORDERS"},
-    }})
+        {id = 1, name = "orders", alias = "o", source_schema = "MART", source_object = "ORDERS",
+            primary_representation = {id = 1}},
+    }, entity_by_id = {['1'] = {id = 1, name = "orders", alias = "o"}},
+    representations = {{
+        id = 1, entity_id = 1, name = "primary", source_kind = "RELATION",
+        source_schema = "MART", source_object = "ORDERS", alias = "o",
+        role = "PRIMARY", priority = 1,
+    }}})
     with_query(function(sql)
+        if contains(sql, "COUNT(er.REPRESENTATION_ID)") then return {} end
         if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
         return {}
     end, function() api.validate_structural_rules(valid) end)
     assert_branch("validator.structure.valid", valid.error_count == 0, true)
+end)
+
+test("validator rejects malformed and column-incompatible F1 representations", function()
+    local entity = {
+        id = 1, name = "orders", alias = "o", source_schema = "MART",
+        source_object = "ORDERS", primary_representation = {id = 1},
+    }
+    local primary = {
+        id = 1, entity_id = 1, name = "primary", source_kind = "RELATION",
+        source_schema = "MART", source_object = "ORDERS", alias = "o",
+        role = "PRIMARY", priority = 1,
+    }
+    local archive = {
+        id = 2, entity_id = 1, name = "archive", source_kind = "UNION",
+        source_schema = "ARCHIVE", source_object = "ORDERS", alias = "old",
+        role = "HISTORICAL", priority = 0, coverage_predicate = "year < 2020",
+    }
+    local ctx = validation_context({
+        version_id = 2,
+        entities = {entity},
+        entity_by_id = {["1"] = entity},
+        entity_name_by_id = {["1"] = "orders"},
+        entity_alias_by_id = {["1"] = "O"},
+        representations = {primary, archive},
+        representations_by_entity = {["1"] = {primary, archive}},
+        dimensions = {{id = 10, name = "amount", entity_id = 1,
+            expression = "o.amount"}},
+        facts = {}, metrics = {},
+    })
+    with_query(function(sql, params)
+        if contains(sql, "COUNT(er.REPRESENTATION_ID)") then return {} end
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            return {{params.schema_name == "MART" and 1 or 0}}
+        end
+        return {}
+    end, function()
+        api.validate_structural_rules(ctx)
+        api.validate_expressions(ctx, {})
+    end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_036"))
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_017"))
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_017").message, "archive")
 end)
 
 test("validator expressions enforce ownership reachability functions and columns", function()
@@ -619,8 +688,16 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {}
         elseif contains(sql, "SELECT MAX(VALIDATION_RUN_ID)") then
             return {{77}}
-        elseif contains(sql, "SELECT ENTITY_ID, ENTITY_NAME") then
-            return {{1, "orders", "MART", "ORDERS", "o"}}
+        elseif contains(sql, "SELECT e.ENTITY_ID, e.ENTITY_NAME") then
+            return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
+                "One order", 100, "primary", "RELATION", "PRIMARY", 1}}
+        elseif contains(sql, "FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS") then
+            return {
+                {100, 1, "primary", "RELATION", "MART", "ORDERS", "o",
+                    "PRIMARY", 1},
+                {101, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o",
+                    "ALTERNATE", 20},
+            }
         elseif contains(sql, "SELECT DIMENSION_ID, DIMENSION_NAME") then
             return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
                 "Order status", nil, nil, false, true}}
@@ -648,6 +725,8 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return {{1}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
+            return {}
+        elseif contains(sql, "COUNT(er.REPRESENTATION_ID)") then
             return {}
         elseif contains(sql, "JOIN SYS.EXA_SQL_KEYWORDS") then
             return {}

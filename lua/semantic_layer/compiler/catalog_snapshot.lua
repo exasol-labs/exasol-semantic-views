@@ -1,6 +1,6 @@
 -- Detached model-versioned catalog input for the typed planner.
 
-local M = {VERSION = 1}
+local M = {VERSION = 3}
 
 local function key(value) return tostring(value) end
 
@@ -62,6 +62,7 @@ function M.from_context(ctx, selected_metrics)
         version_number = ctx.model and ctx.model.version_number,
         object = clone(ctx.object),
         entities = clone(ctx.entities or {}),
+        representations = clone(ctx.representations or {}),
         dimensions = clone(ctx.dimensions or {}),
         visible_metrics = clone(ctx.metrics or {}),
         metrics = clone(collect_transitive(all_metric_by_id, requested_ids)),
@@ -70,6 +71,15 @@ function M.from_context(ctx, selected_metrics)
         unique_keys = clone(ctx.unique_keys or {}),
     }
     snapshot.entity_by_id = index_by(snapshot.entities, "id")
+    snapshot.representation_by_id = index_by(snapshot.representations, "id")
+    snapshot.representations_by_entity = {}
+    for _, representation in ipairs(snapshot.representations) do
+        local entity_key = key(representation.entity_id)
+        snapshot.representations_by_entity[entity_key] =
+            snapshot.representations_by_entity[entity_key] or {}
+        snapshot.representations_by_entity[entity_key]
+            [#snapshot.representations_by_entity[entity_key] + 1] = representation
+    end
     snapshot.dimension_by_id = index_by(snapshot.dimensions, "id")
     snapshot.metric_by_id = index_by(snapshot.metrics, "id")
     snapshot.fact_by_id = index_by(snapshot.facts, "id")

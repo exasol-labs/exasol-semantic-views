@@ -41,6 +41,44 @@ sql/install/006_create_semantic_agent_views.sql
 The catalog avoids unsupported Exasol `CHECK` and generic `UNIQUE` constraints.
 Semantic uniqueness and allowed values are enforced by Lua admin scripts.
 
+## Entity Representations
+
+Phase F0 separated semantic entities from their physical source bindings through
+`SYS_SEMANTIC.ENTITY_REPRESENTATIONS`. `ADD_ENTITY` creates one active
+`PRIMARY` representation automatically, and installation backfills one for
+every existing entity. `VALIDATE_MODEL` rejects active entities that do not
+have exactly one active primary representation.
+
+Phase F1 allows additional active `ALTERNATE` representations for the same
+entity. Selection is manual and static: `SET_PRIMARY_REPRESENTATION` chooses
+the single source used by every compile until another representation is
+promoted. The validator, compiler, grain-metadata assistant, and semantic-definition
+export resolve source schema, object, and alias through the primary representation.
+The corresponding columns on `SYS_SEMANTIC.ENTITIES` remain mandatory and are
+kept as compatibility mirrors, including after promotion.
+
+Manage the F1 lifecycle through:
+
+```text
+SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
+SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
+SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
+```
+
+F1 supports `RELATION` and `VIRTUAL_SCHEMA` sources. All active representations
+must expose the same semantic alias and every column used by dimensions, facts,
+filters, unique keys, and relationship mappings. Adding, promoting, or removing
+a representation clears compile cache entries and marks successful validation
+runs stale. Validate before promotion, then validate and publish after it.
+Per-representation field bindings, fallback, temporal coverage, unions,
+reconciliation, and dynamic source selection remain later fusion phases.
+
+The read-only representation view is available as:
+
+```text
+SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS
+```
+
 ## Validation Tables
 
 - `VALIDATION_RUNS`: one row per `VALIDATE_MODEL` execution.

@@ -776,6 +776,8 @@ local function load_catalog(model, object_name)
             root_entity_id = row_value(object_rows[1], "ROOT_ENTITY_ID", 3),
         },
         entities = {},
+        representations = {},
+        representations_by_entity = {},
         entity_by_id = {},
         entity_by_alias = {},
         dimensions = {},
@@ -797,13 +799,22 @@ local function load_catalog(model, object_name)
     }
 
     local entity_rows = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS,
-               PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION
-        FROM SYS_SEMANTIC.ENTITIES
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        ORDER BY ENTITY_ID
+        SELECT e.ENTITY_ID, e.ENTITY_NAME,
+               er.SOURCE_SCHEMA, er.SOURCE_OBJECT, er.SOURCE_ALIAS,
+               e.PRIMARY_KEY_EXPR, e.GRAIN_DESCRIPTION,
+               er.REPRESENTATION_ID, er.REPRESENTATION_NAME,
+               er.SOURCE_KIND, er.REPRESENTATION_ROLE, er.PRIORITY
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        ORDER BY e.ENTITY_ID
     ]], {model_id = model.model_id, version_id = model.version_id})
     for _, row in ipairs(entity_rows or {}) do
         local entity = {
@@ -814,10 +825,60 @@ local function load_catalog(model, object_name)
             alias = row_value(row, "SOURCE_ALIAS", 5),
             primary_key_expr = row_value(row, "PRIMARY_KEY_EXPR", 6),
             grain_description = row_value(row, "GRAIN_DESCRIPTION", 7),
+            primary_representation = {
+                id = row_value(row, "REPRESENTATION_ID", 8),
+                entity_id = row_value(row, "ENTITY_ID", 1),
+                name = row_value(row, "REPRESENTATION_NAME", 9),
+                source_kind = row_value(row, "SOURCE_KIND", 10),
+                role = row_value(row, "REPRESENTATION_ROLE", 11),
+                priority = row_value(row, "PRIORITY", 12),
+                source_schema = row_value(row, "SOURCE_SCHEMA", 3),
+                source_object = row_value(row, "SOURCE_OBJECT", 4),
+                alias = row_value(row, "SOURCE_ALIAS", 5),
+            },
         }
         ctx.entities[#ctx.entities + 1] = entity
         ctx.entity_by_id[key(entity.id)] = entity
         ctx.entity_by_alias[upper(entity.alias)] = entity
+    end
+
+    local representation_rows = query([[
+        SELECT REPRESENTATION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
+               SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
+               PRIORITY, FRESHNESS_POLICY, COVERAGE_PREDICATE, VALID_FROM, VALID_TO
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID,
+          CASE WHEN REPRESENTATION_ROLE = 'PRIMARY' THEN 0 ELSE 1 END,
+          PRIORITY, REPRESENTATION_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(representation_rows or {}) do
+        local representation = {
+            id = row_value(row, "REPRESENTATION_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "REPRESENTATION_NAME", 3),
+            source_kind = row_value(row, "SOURCE_KIND", 4),
+            source_schema = row_value(row, "SOURCE_SCHEMA", 5),
+            source_object = row_value(row, "SOURCE_OBJECT", 6),
+            alias = row_value(row, "SOURCE_ALIAS", 7),
+            role = row_value(row, "REPRESENTATION_ROLE", 8),
+            priority = row_value(row, "PRIORITY", 9),
+            freshness_policy = row_value(row, "FRESHNESS_POLICY", 10),
+            coverage_predicate = row_value(row, "COVERAGE_PREDICATE", 11),
+            valid_from = row_value(row, "VALID_FROM", 12),
+            valid_to = row_value(row, "VALID_TO", 13),
+        }
+        ctx.representations[#ctx.representations + 1] = representation
+        local entity_key = key(representation.entity_id)
+        ctx.representations_by_entity[entity_key] =
+            ctx.representations_by_entity[entity_key] or {}
+        ctx.representations_by_entity[entity_key]
+            [#ctx.representations_by_entity[entity_key] + 1] = representation
+        if upper(representation.role) == "PRIMARY" and ctx.entity_by_id[entity_key] ~= nil then
+            ctx.entity_by_id[entity_key].primary_representation = representation
+        end
     end
 
     local dimension_rows = query([[
@@ -1570,6 +1631,7 @@ local function plan_joins(ctx, needed_entities)
             path_names[#path_names + 1] = relationship.name
             local join_key = key(relationship.id)
             local to_entity_key = key(edge.to_entity_id)
+            needed_entities[to_entity_key] = true
             if not joined_relationships[join_key] and not joined_entities[to_entity_key] then
                 joins[#joins + 1] = {
                     relationship = relationship,
@@ -2082,6 +2144,7 @@ local function compile_request_table(request, options)
             materialization_decision = materialization_decision,
             validation_run_id = validation_run_id,
             warnings = {},
+            selected_representations = {},
         }
         if selected_materialization ~= nil then
             plan.selected_materialization = {
@@ -2117,6 +2180,29 @@ local function compile_request_table(request, options)
         end
         for _, dimension in ipairs(selected_dimensions) do
             plan.dimensions[#plan.dimensions + 1] = dimension.name
+        end
+        local representation_entity_ids = {}
+        for entity_id, _ in pairs(needed_entities) do
+            representation_entity_ids[#representation_entity_ids + 1] = entity_id
+        end
+        table.sort(representation_entity_ids, function(left, right)
+            return key(left) < key(right)
+        end)
+        for _, entity_id in ipairs(representation_entity_ids) do
+            local entity = ctx.entity_by_id[key(entity_id)]
+            local representation = entity and entity.primary_representation or nil
+            if representation ~= nil then
+                plan.selected_representations[#plan.selected_representations + 1] = {
+                    entity_id = entity.id,
+                    entity_name = entity.name,
+                    representation_id = representation.id,
+                    representation_name = representation.name,
+                    source_kind = representation.source_kind,
+                    source_schema = representation.source_schema,
+                    source_object = representation.source_object,
+                    selection_reason = "STATIC_PRIMARY",
+                }
+            end
         end
         return plan
     end
@@ -3163,12 +3249,18 @@ function M.suggest_grain_metadata(model_name)
     end
     local suggestions = {}
     local entities = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_ALIAS, PRIMARY_KEY_EXPR
-        FROM SYS_SEMANTIC.ENTITIES
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        ORDER BY ENTITY_ID
+        SELECT e.ENTITY_ID, e.ENTITY_NAME, er.SOURCE_ALIAS, e.PRIMARY_KEY_EXPR
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        ORDER BY e.ENTITY_ID
     ]], {model_id = model.model_id, version_id = model.version_id})
     local alias_by_id = {}
     for _, row in ipairs(entities or {}) do

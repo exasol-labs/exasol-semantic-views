@@ -41,6 +41,22 @@ The legacy join proof remains the compatibility path. Strict grain proofs are
 separate values and are the only proof type the multi-fact branch planner may
 consume.
 
+Semantic Fusion Phase F0 introduced an explicit physical-binding seam:
+
+```text
+Entity -> PrimaryRepresentation -> Exasol relation
+```
+
+Every active entity has exactly one active `PRIMARY` representation. Runtime
+validation and compilation resolve physical source metadata through that
+representation while legacy entity source columns remain compatibility mirrors.
+This refactor intentionally does not change source selection or query semantics.
+Phase F1 permits multiple equivalent representations but keeps one explicit
+`PRIMARY`. Admin promotion is the only source-selection mechanism; compilation
+is deterministic and records `STATIC_PRIMARY` representation provenance.
+Validation requires every active alternate to preserve the entity alias and
+the complete semantic/key column interface before it can be certified.
+
 Phase C1 normalizes leaf fact inputs, binds filter scopes, and proves each leaf
 branch to each required dimension before the legacy matrix or root join planner
 runs. Phase C2 adds a separate typed physical planner and decision-free
@@ -50,7 +66,8 @@ caching through both compiler input lanes. Phase D1 identifies every branch's
 base source explicitly and records planner runtime without making cached plans
 nondeterministic. Phase D2 uses plan version 7 / physical-plan version 4 to
 substitute at most one complete aggregate materialization per leaf without
-changing the proven merge and finalization pipeline.
+changing the proven merge and finalization pipeline. Fusion F1 uses plan version
+8 / physical-plan version 5.
 
 ## Primary Flows
 

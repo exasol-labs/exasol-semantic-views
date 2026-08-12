@@ -351,6 +351,7 @@ local function compiler_query_fixture(options)
         request_log_attempts = 0,
         request_logs = {},
         query_logs = {},
+        representation_reads = 0,
     }
 
     local function mock(sql, params)
@@ -404,6 +405,9 @@ local function compiler_query_fixture(options)
             if options.object_missing then return {} end
             return {{40, "SALES", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            if normalized:find("JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
+                state.representation_reads = state.representation_reads + 1
+            end
             if options.multi_fact then
                 return {
                     {1, "orders", options.missing_multi_source and "" or "MART",
@@ -424,7 +428,19 @@ local function compiler_query_fixture(options)
                 }
             end
             return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
-                "One row per order"}}
+                "One row per order", 101, "primary", "RELATION", "PRIMARY", 1}}
+        elseif normalized:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
+            if options.multi_fact then
+                return {
+                    {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1},
+                    {102, 2, "primary", "RELATION", "MART", "TICKETS", "t", "PRIMARY", 1},
+                    {103, 3, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
+                }
+            end
+            return {
+                {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1},
+                {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "ALTERNATE", 20},
+            }
         elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
             if options.multi_fact then
                 return {{10, "customer_region", 3, "c.region", "VARCHAR(20)",
@@ -604,12 +620,16 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_equal(first.agent_request_id, 501)
     assert_branch("compiler.public.cache", first.cache_hit == true, false)
     assert_contains(first.generated_sql, 'FROM "MART"."ORDERS" o')
+    assert_equal(state.representation_reads, 1)
     assert_contains(first.generated_sql, "UPPER(o.status) = UPPER('COMPLETE')")
     assert_contains(first.generated_sql, "HAVING SUM((o.amount)) > 100")
     assert_contains(first.generated_sql, 'ORDER BY "total_revenue" DESC')
     assert_contains(first.generated_sql, "LIMIT 25")
     assert_contains(first.plan_json, '"validation_run_id":77')
     assert_contains(first.plan_json, '"input_roles"')
+    assert_contains(first.plan_json, '"selection_reason":"STATIC_PRIMARY"')
+    assert_contains(first.plan_json, '"representation_name":"primary"')
+    assert_true(not string.find(first.generated_sql, "VS_ARCHIVE", 1, true))
     assert_equal(state.cache_inserts, 1)
     assert_equal(#state.request_logs, 1)
     assert_equal(state.request_logs[1].client_name, "lua-tests")
@@ -662,10 +682,10 @@ test("C3 compiler activates a versioned multi branch query", function()
     assert_contains(result.generated_sql, 'ORDER BY "activity_ratio" DESC')
     assert_contains(result.generated_sql, "LIMIT 10")
     local envelope = api.json_decode(result.plan_json)
-    assert_equal(envelope.plan_version, 7)
+    assert_equal(envelope.plan_version, 8)
     assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
     assert_equal(envelope.logical_plan.execution.status, "EXECUTABLE")
-    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 4)
+    assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 5)
     assert_equal(envelope.logical_plan.physical_plan.plan_kind,
         "MULTI_BRANCH_QUERY")
     assert_true(envelope.logical_plan.physical_plan.safeguards.sql_size_bytes > 0)

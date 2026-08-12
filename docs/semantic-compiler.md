@@ -19,8 +19,9 @@ dependencies that are not exposed as query fields.
 
 Phase B introduced the typed single-branch boundary. Phase C1 added
 multi-branch validation, Phase C2 added the typed physical state pipeline, and
-Phase D2 adds complete leaf-source substitution. `PLAN_JSON.plan_version` is
-`7` and
+Phase D2 adds complete leaf-source substitution. Fusion Phase F1 adds static
+primary-representation binding and provenance. `PLAN_JSON.plan_version` is
+`8` and
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -49,7 +50,13 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
 - applies final `HAVING`, ordering, and limit against finalized metric columns
 - returns executable multi-branch SQL and participates in the compile cache
 - records a deterministic `source` contract with `source_kind = BASE` or
-  `MATERIALIZATION` for each physical branch under physical-plan version 4
+  `MATERIALIZATION` for each physical branch under physical-plan version 5;
+  base sources include the selected representation id and name
+
+`PLAN_JSON.selected_representations` lists the active representation selected
+for every entity used by the request. F1 always selects the representation
+marked `PRIMARY` and records `selection_reason = STATIC_PRIMARY`; it does not
+perform freshness-, cost-, or request-dependent selection.
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the

@@ -299,6 +299,7 @@ local model_tables = {
     "RELATIONSHIPS",
     "SEMANTIC_OBJECTS",
     "UNIQUE_KEYS",
+    "ENTITY_REPRESENTATIONS",
     "ENTITIES",
     "AGENT_REQUEST_LOG",
     "QUERY_LOG",
@@ -440,6 +441,368 @@ query([[
     grain_description = optional_text(GRAIN_DESCRIPTION),
     description = optional_text(DESCRIPTION)
 })
+
+local entity_id = scalar([[
+    SELECT ENTITY_ID
+    FROM SYS_SEMANTIC.ENTITIES
+    WHERE MODEL_ID = :model_id
+      AND VERSION_ID = :version_id
+      AND UPPER(ENTITY_NAME) = UPPER(:entity_name)
+]], {model_id = model.model_id, version_id = model.version_id, entity_name = entity_name})
+query([[
+    INSERT INTO SYS_SEMANTIC.ENTITY_REPRESENTATIONS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
+      SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
+      PRIORITY, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, 'primary', 'RELATION',
+      :source_schema, :source_object, :source_alias, 'PRIMARY', 1, 'ACTIVE'
+    )
+]], {
+    model_id = model.model_id,
+    version_id = model.version_id,
+    entity_id = entity_id,
+    source_schema = source_schema,
+    source_object = source_object,
+    source_alias = source_alias,
+})
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME,
+  SOURCE_KIND,
+  SOURCE_SCHEMA,
+  SOURCE_OBJECT,
+  PRIORITY,
+  FRESHNESS_POLICY
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function upper(value)
+    return string.upper(tostring(value))
+end
+
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return row_value(rows[1], "VALUE", 1) or rows[1][1]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
+local source_schema = normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA")
+local source_object = normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT")
+local source_kind = missing(SOURCE_KIND) and "RELATION" or upper(trim(SOURCE_KIND))
+if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
+    error("SEMANTIC_ADMIN_003: invalid SOURCE_KIND: " .. tostring(SOURCE_KIND))
+end
+local priority = missing(PRIORITY) and 100 or tonumber(PRIORITY)
+if priority == nil or priority < 1 or priority % 1 ~= 0 then
+    error("SEMANTIC_ADMIN_003: PRIORITY must be a positive integer")
+end
+
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, e.ENTITY_ID, p.SOURCE_ALIAS
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID
+     AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name)
+     AND e.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS p
+      ON p.ENTITY_ID = e.ENTITY_ID
+     AND p.MODEL_ID = e.MODEL_ID
+     AND p.VERSION_ID = e.VERSION_ID
+     AND p.REPRESENTATION_ROLE = 'PRIMARY'
+     AND p.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_014: entity or active primary representation not found: " .. entity_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local entity_id = row_value(rows[1], "ENTITY_ID", 3)
+local source_alias = row_value(rows[1], "SOURCE_ALIAS", 4)
+
+local duplicate = scalar([[
+    SELECT COUNT(*)
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND UPPER(REPRESENTATION_NAME) = UPPER(:representation_name)
+]], {entity_id = entity_id, representation_name = representation_name})
+if tonumber(duplicate or 0) > 0 then
+    error("SEMANTIC_ADMIN_046: duplicate representation name: " .. representation_name)
+end
+
+query([[
+    INSERT INTO SYS_SEMANTIC.ENTITY_REPRESENTATIONS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
+      SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
+      PRIORITY, FRESHNESS_POLICY, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, :representation_name, :source_kind,
+      :source_schema, :source_object, :source_alias, 'ALTERNATE',
+      :priority, :freshness_policy, 'ACTIVE'
+    )
+]], {
+    model_id = model_id,
+    version_id = version_id,
+    entity_id = entity_id,
+    representation_name = representation_name,
+    source_kind = source_kind,
+    source_schema = source_schema,
+    source_object = source_object,
+    source_alias = source_alias,
+    priority = priority,
+    freshness_policy = missing(FRESHNESS_POLICY) and null or tostring(FRESHNESS_POLICY),
+})
+local representation_id = scalar([[
+    SELECT REPRESENTATION_ID
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND UPPER(REPRESENTATION_NAME) = UPPER(:representation_name)
+]], {entity_id = entity_id, representation_name = representation_name})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query([[
+    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND STATUS IN ('OK', 'WARNING')
+]], {model_id = model_id, version_id = version_id})
+
+exit({{representation_id, model_name, entity_name, representation_name,
+    source_kind, source_schema, source_object, source_alias, "ALTERNATE", priority}}, [[
+  REPRESENTATION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256),
+  SOURCE_KIND VARCHAR(64),
+  SOURCE_SCHEMA VARCHAR(256),
+  SOURCE_OBJECT VARCHAR(256),
+  SOURCE_ALIAS VARCHAR(128),
+  REPRESENTATION_ROLE VARCHAR(64),
+  PRIORITY DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value) return tostring(value):match("^%s*(.-)%s*$") end
+local function normalize_name(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, e.ENTITY_ID,
+           er.REPRESENTATION_ID, er.SOURCE_SCHEMA, er.SOURCE_OBJECT,
+           er.SOURCE_ALIAS, e.SOURCE_ALIAS AS ENTITY_SOURCE_ALIAS,
+           er.REPRESENTATION_ROLE
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID
+     AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name)
+     AND e.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = e.ENTITY_ID
+     AND er.MODEL_ID = e.MODEL_ID
+     AND er.VERSION_ID = e.VERSION_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name,
+    representation_name = representation_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_045: active representation not found: " .. representation_name)
+end
+local row = rows[1]
+local model_id = row_value(row, "MODEL_ID", 1)
+local version_id = row_value(row, "ACTIVE_VERSION_ID", 2)
+local entity_id = row_value(row, "ENTITY_ID", 3)
+local representation_id = row_value(row, "REPRESENTATION_ID", 4)
+local source_schema = row_value(row, "SOURCE_SCHEMA", 5)
+local source_object = row_value(row, "SOURCE_OBJECT", 6)
+local source_alias = row_value(row, "SOURCE_ALIAS", 7)
+local entity_source_alias = row_value(row, "ENTITY_SOURCE_ALIAS", 8)
+if string.upper(tostring(source_alias)) ~= string.upper(tostring(entity_source_alias)) then
+    error("SEMANTIC_ADMIN_048: representation alias does not match the entity alias: "
+        .. tostring(entity_source_alias))
+end
+local previous_rows = query([[
+    SELECT REPRESENTATION_NAME
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND REPRESENTATION_ROLE = 'PRIMARY'
+      AND STATUS = 'ACTIVE'
+]], {entity_id = entity_id})
+local previous_name = previous_rows and previous_rows[1]
+    and row_value(previous_rows[1], "REPRESENTATION_NAME", 1) or null
+local changed = tostring(row_value(row, "REPRESENTATION_ROLE", 9)) ~= "PRIMARY"
+
+if changed then
+    local validation_rows = query([[
+        SELECT VALIDATION_RUN_ID
+        FROM SYS_SEMANTIC.VALIDATION_RUNS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS IN ('OK', 'WARNING') AND ERROR_COUNT = 0
+        ORDER BY VALIDATION_RUN_ID DESC LIMIT 1
+    ]], {model_id = model_id, version_id = version_id})
+    if validation_rows == nil or #validation_rows == 0 then
+        error("SEMANTIC_ADMIN_048: representations must pass VALIDATE_MODEL before promotion")
+    end
+    query([[
+        UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        SET REPRESENTATION_ROLE = 'ALTERNATE',
+            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        WHERE ENTITY_ID = :entity_id
+          AND REPRESENTATION_ROLE = 'PRIMARY'
+          AND STATUS = 'ACTIVE'
+    ]], {entity_id = entity_id})
+    query([[
+        UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        SET REPRESENTATION_ROLE = 'PRIMARY',
+            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        WHERE REPRESENTATION_ID = :representation_id
+    ]], {representation_id = representation_id})
+    query([[
+        UPDATE SYS_SEMANTIC.ENTITIES
+        SET SOURCE_SCHEMA = :source_schema, SOURCE_OBJECT = :source_object,
+            SOURCE_ALIAS = :source_alias
+        WHERE ENTITY_ID = :entity_id
+    ]], {entity_id = entity_id, source_schema = source_schema,
+        source_object = source_object, source_alias = source_alias})
+    query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+        {version_id = version_id})
+    query([[
+        UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS IN ('OK', 'WARNING')
+    ]], {model_id = model_id, version_id = version_id})
+end
+
+exit({{representation_id, model_name, entity_name, previous_name,
+    representation_name, source_schema, source_object, changed}}, [[
+  REPRESENTATION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256),
+  PREVIOUS_PRIMARY VARCHAR(256),
+  PRIMARY_REPRESENTATION VARCHAR(256),
+  SOURCE_SCHEMA VARCHAR(256),
+  SOURCE_OBJECT VARCHAR(256),
+  CHANGED BOOLEAN
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value) return tostring(value):match("^%s*(.-)%s*$") end
+local function normalize_name(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, er.REPRESENTATION_ID,
+           er.REPRESENTATION_ROLE
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID
+     AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name)
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = e.ENTITY_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name,
+    representation_name = representation_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_045: active representation not found: " .. representation_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local representation_id = row_value(rows[1], "REPRESENTATION_ID", 3)
+if tostring(row_value(rows[1], "REPRESENTATION_ROLE", 4)) == "PRIMARY" then
+    error("SEMANTIC_ADMIN_047: cannot remove the PRIMARY representation; promote another representation first")
+end
+query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
+    {representation_id = representation_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query([[
+    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND STATUS IN ('OK', 'WARNING')
+]], {model_id = model_id, version_id = version_id})
+
+exit({{representation_id, model_name, entity_name, representation_name, "REMOVED"}}, [[
+  REPRESENTATION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256),
+  STATUS VARCHAR(32)
+]])
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(
@@ -4502,18 +4865,29 @@ end
 
 local function load_catalog(ctx)
     ctx.entities = {}
+    ctx.representations = {}
+    ctx.representations_by_entity = {}
     ctx.entity_by_id = {}
     ctx.entity_alias_by_id = {}
     ctx.entity_name_by_id = {}
     ctx.entity_id_by_name = {}
     local entity_rows = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS,
-               PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION
-        FROM SYS_SEMANTIC.ENTITIES
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        ORDER BY ENTITY_ID
+        SELECT e.ENTITY_ID, e.ENTITY_NAME,
+               er.SOURCE_SCHEMA, er.SOURCE_OBJECT, er.SOURCE_ALIAS,
+               e.PRIMARY_KEY_EXPR, e.GRAIN_DESCRIPTION,
+               er.REPRESENTATION_ID, er.REPRESENTATION_NAME,
+               er.SOURCE_KIND, er.REPRESENTATION_ROLE, er.PRIORITY
+        FROM SYS_SEMANTIC.ENTITIES e
+        LEFT JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        ORDER BY e.ENTITY_ID
     ]], {model_id = ctx.model_id, version_id = ctx.version_id})
     for _, row in ipairs(entity_rows or {}) do
         local id = row_value(row, "ENTITY_ID", 1)
@@ -4525,12 +4899,61 @@ local function load_catalog(ctx)
             alias = row_value(row, "SOURCE_ALIAS", 5),
             primary_key_expr = row_value(row, "PRIMARY_KEY_EXPR", 6),
             grain_description = row_value(row, "GRAIN_DESCRIPTION", 7),
+            primary_representation = {
+                id = row_value(row, "REPRESENTATION_ID", 8),
+                entity_id = row_value(row, "ENTITY_ID", 1),
+                name = row_value(row, "REPRESENTATION_NAME", 9),
+                source_kind = row_value(row, "SOURCE_KIND", 10),
+                role = row_value(row, "REPRESENTATION_ROLE", 11),
+                priority = row_value(row, "PRIORITY", 12),
+                source_schema = row_value(row, "SOURCE_SCHEMA", 3),
+                source_object = row_value(row, "SOURCE_OBJECT", 4),
+                alias = row_value(row, "SOURCE_ALIAS", 5),
+            },
         }
         table.insert(ctx.entities, entity)
         ctx.entity_by_id[key(id)] = entity
         ctx.entity_alias_by_id[key(id)] = upper(entity.alias)
         ctx.entity_name_by_id[key(id)] = tostring(entity.name)
         ctx.entity_id_by_name[upper(entity.name)] = id
+    end
+
+    local representation_rows = query([[
+        SELECT REPRESENTATION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
+               SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
+               PRIORITY, FRESHNESS_POLICY, COVERAGE_PREDICATE, VALID_FROM, VALID_TO
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID,
+          CASE WHEN REPRESENTATION_ROLE = 'PRIMARY' THEN 0 ELSE 1 END,
+          PRIORITY, REPRESENTATION_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(representation_rows or {}) do
+        local representation = {
+            id = row_value(row, "REPRESENTATION_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "REPRESENTATION_NAME", 3),
+            source_kind = row_value(row, "SOURCE_KIND", 4),
+            source_schema = row_value(row, "SOURCE_SCHEMA", 5),
+            source_object = row_value(row, "SOURCE_OBJECT", 6),
+            alias = row_value(row, "SOURCE_ALIAS", 7),
+            role = row_value(row, "REPRESENTATION_ROLE", 8),
+            priority = row_value(row, "PRIORITY", 9),
+            freshness_policy = row_value(row, "FRESHNESS_POLICY", 10),
+            coverage_predicate = row_value(row, "COVERAGE_PREDICATE", 11),
+            valid_from = row_value(row, "VALID_FROM", 12),
+            valid_to = row_value(row, "VALID_TO", 13),
+        }
+        table.insert(ctx.representations, representation)
+        local entity_key = key(representation.entity_id)
+        ctx.representations_by_entity[entity_key] =
+            ctx.representations_by_entity[entity_key] or {}
+        table.insert(ctx.representations_by_entity[entity_key], representation)
+        if upper(representation.role) == "PRIMARY" and ctx.entity_by_id[entity_key] ~= nil then
+            ctx.entity_by_id[entity_key].primary_representation = representation
+        end
     end
 
     ctx.dimensions = {}
@@ -4782,21 +5205,153 @@ local function load_catalog(ctx)
     end
 end
 
+local function representations_for_entity(ctx, entity)
+    if entity == nil then return {} end
+    local representations = (ctx.representations_by_entity or {})[key(entity.id)] or {}
+    if #representations == 0 and not missing(entity.source_schema)
+        and not missing(entity.source_object) then
+        return {{
+            id = entity.primary_representation and entity.primary_representation.id or nil,
+            entity_id = entity.id,
+            name = entity.primary_representation and entity.primary_representation.name or "primary",
+            source_kind = "RELATION",
+            source_schema = entity.source_schema,
+            source_object = entity.source_object,
+            alias = entity.alias,
+            role = "PRIMARY",
+            priority = 1,
+        }}
+    end
+    return representations
+end
+
+local function missing_representation_columns(ctx, entity, column_name)
+    local names = {}
+    for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+        if not source_column_exists(representation.source_schema,
+            representation.source_object, column_name) then
+            names[#names + 1] = tostring(representation.name)
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+local function representation_suffix(names)
+    if names == nil or #names == 0 then return "" end
+    return " in representation(s): " .. table.concat(names, ", ")
+end
+
 local function validate_structural_rules(ctx)
+    local invalid_representation_rows = query([[
+        SELECT e.ENTITY_NAME, COUNT(er.REPRESENTATION_ID) AS PRIMARY_COUNT
+        FROM SYS_SEMANTIC.ENTITIES e
+        LEFT JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        GROUP BY e.ENTITY_ID, e.ENTITY_NAME
+        HAVING COUNT(er.REPRESENTATION_ID) <> 1
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(invalid_representation_rows or {}) do
+        add_issue(ctx, "ERROR", "ENTITY", row_value(row, "ENTITY_NAME", 1),
+            "SEMANTIC_MODEL_035",
+            "Entity must have exactly one active PRIMARY representation; found "
+                .. tostring(row_value(row, "PRIMARY_COUNT", 2)) .. ".")
+    end
+    local representation_names = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        local entity = ctx.entity_by_id[key(representation.entity_id)]
+        local entity_name = entity and entity.name or tostring(representation.entity_id)
+        local object_name = entity_name .. "." .. tostring(representation.name)
+        local entity_key = key(representation.entity_id)
+        representation_names[entity_key] = representation_names[entity_key] or {}
+        local name_key = upper(representation.name)
+        if representation_names[entity_key][name_key] then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "Representation name is not unique within the entity.")
+        end
+        representation_names[entity_key][name_key] = true
+        if entity == nil then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "Representation references a missing entity.")
+        elseif upper(representation.alias) ~= upper(entity.alias) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "F1 representations must use the entity's stable source alias: "
+                    .. tostring(entity.alias) .. ".")
+        end
+        local source_kind = upper(representation.source_kind)
+        if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "Unsupported F1 source kind: "
+                    .. tostring(representation.source_kind) .. ".")
+        end
+        local role = upper(representation.role)
+        if role ~= "PRIMARY" and role ~= "ALTERNATE" then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "Unsupported F1 representation role: "
+                    .. tostring(representation.role) .. ".")
+        end
+        local priority = tonumber(representation.priority)
+        if priority == nil or priority < 1 or priority % 1 ~= 0 then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "Representation priority must be a positive integer.")
+        end
+        if not missing(representation.coverage_predicate)
+            or not missing(representation.valid_from)
+            or not missing(representation.valid_to) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_036", "Coverage predicates and validity windows require Fusion Phase F3.")
+        end
+        if not source_object_exists(representation.source_schema,
+            representation.source_object) then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
+                "SEMANTIC_MODEL_001", "Source object is not visible: "
+                    .. tostring(representation.source_schema) .. "."
+                    .. tostring(representation.source_object) .. ".")
+        end
+    end
     for _, entity in ipairs(ctx.entities) do
-        if not source_object_exists(entity.source_schema, entity.source_object) then
-            add_issue(ctx, "ERROR", "ENTITY", entity.name, "SEMANTIC_MODEL_001",
-                "Source object is not visible: " .. tostring(entity.source_schema) .. "." .. tostring(entity.source_object) .. ".")
+        if not missing(entity.primary_key_expr) then
+            local owning_alias = upper(entity.alias)
+            for alias, _ in pairs(aliases_in_expression(entity.primary_key_expr)) do
+                if alias ~= owning_alias then
+                    add_issue(ctx, "ERROR", "ENTITY", entity.name,
+                        "SEMANTIC_MODEL_036", "Legacy primary-key expression references alias outside the entity: "
+                            .. tostring(alias) .. ".")
+                end
+            end
+            for _, ref in ipairs(column_refs_in_expression(entity.primary_key_expr)) do
+                local missing_representations =
+                    missing_representation_columns(ctx, entity, ref.column_name)
+                if ref.alias == owning_alias and #missing_representations > 0 then
+                    add_issue(ctx, "ERROR", "ENTITY", entity.name,
+                        "SEMANTIC_MODEL_036", "Legacy primary-key expression references unknown source column: "
+                            .. ref.alias .. "." .. ref.column_name
+                            .. representation_suffix(missing_representations) .. ".")
+                end
+            end
         end
     end
 
     local duplicate_alias_rows = query([[
-        SELECT UPPER(SOURCE_ALIAS) AS SOURCE_ALIAS, COUNT(*) AS ALIAS_COUNT
-        FROM SYS_SEMANTIC.ENTITIES
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        GROUP BY UPPER(SOURCE_ALIAS)
+        SELECT UPPER(er.SOURCE_ALIAS) AS SOURCE_ALIAS, COUNT(*) AS ALIAS_COUNT
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        GROUP BY UPPER(er.SOURCE_ALIAS)
         HAVING COUNT(*) > 1
     ]], {model_id = ctx.model_id, version_id = ctx.version_id})
     for _, row in ipairs(duplicate_alias_rows or {}) do
@@ -4805,10 +5360,16 @@ local function validate_structural_rules(ctx)
     end
 
     local reserved_alias_rows = query([[
-        SELECT e.ENTITY_NAME, e.SOURCE_ALIAS
+        SELECT e.ENTITY_NAME, er.SOURCE_ALIAS
         FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
         JOIN SYS.EXA_SQL_KEYWORDS k
-          ON UPPER(k.KEYWORD) = UPPER(e.SOURCE_ALIAS)
+          ON UPPER(k.KEYWORD) = UPPER(er.SOURCE_ALIAS)
          AND k.RESERVED = TRUE
         WHERE e.MODEL_ID = :model_id
           AND e.VERSION_ID = :version_id
@@ -4951,9 +5512,11 @@ local function validate_unique_key_expression(ctx, unique_key, column, entity, o
             "Unique key expression uses unsupported function: " .. fn .. ".")
     end
     for _, ref in ipairs(column_refs_in_expression(column.expression)) do
-        if ref.alias == owning_alias and not source_column_exists(entity.source_schema, entity.source_object, ref.column_name) then
+        local missing_representations = missing_representation_columns(ctx, entity, ref.column_name)
+        if ref.alias == owning_alias and #missing_representations > 0 then
             add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
-                "Unique key expression references unknown source column: " .. ref.alias .. "." .. ref.column_name .. ".")
+                "Unique key expression references unknown source column: " .. ref.alias .. "."
+                    .. ref.column_name .. representation_suffix(missing_representations) .. ".")
         end
     end
 end
@@ -4999,9 +5562,13 @@ local function validate_unique_keys(ctx)
                     add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
                         "Unique key column must not define both COLUMN_NAME and EXPRESSION.")
                 elseif not missing(column_name) then
-                    if not source_column_exists(entity.source_schema, entity.source_object, column_name) then
+                    local missing_representations =
+                        missing_representation_columns(ctx, entity, column_name)
+                    if #missing_representations > 0 then
                         add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
-                            "Unique key column references unknown source column: " .. tostring(column_name) .. ".")
+                            "Unique key column references unknown source column: "
+                                .. tostring(column_name)
+                                .. representation_suffix(missing_representations) .. ".")
                     end
                 else
                     validate_unique_key_expression(ctx, unique_key, column, entity, owning_alias, column_object_name)
@@ -5031,12 +5598,14 @@ local function validate_relationship_key_mappings(ctx)
                     .. "normalize the expression into a source view and map a column.")
             return
         end
-        if has_column and entity ~= nil
-            and not source_column_exists(entity.source_schema, entity.source_object, column_name) then
+        local missing_representations = has_column and entity ~= nil
+            and missing_representation_columns(ctx, entity, column_name) or {}
+        if has_column and entity ~= nil and #missing_representations > 0 then
             add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
                 "SEMANTIC_MODEL_032",
                 "Relationship key mapping references unknown " .. side
-                    .. " source column: " .. tostring(column_name) .. ".")
+                    .. " source column: " .. tostring(column_name)
+                    .. representation_suffix(missing_representations) .. ".")
         end
     end
 
@@ -5146,6 +5715,24 @@ local function relationship_edges(ctx)
                 "Join condition must reference the relationship endpoint aliases.")
         end
 
+        for _, ref in ipairs(column_refs_in_expression(relationship.join_condition)) do
+            local source_entity = nil
+            for _, entity in ipairs(ctx.entities or {}) do
+                if upper(entity.alias) == ref.alias then
+                    source_entity = entity
+                    break
+                end
+            end
+            local missing_representations = source_entity ~= nil
+                and missing_representation_columns(ctx, source_entity, ref.column_name) or {}
+            if source_entity ~= nil and #missing_representations > 0 then
+                add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                    "SEMANTIC_MODEL_017", "Relationship join condition references unknown source column: "
+                        .. ref.alias .. "." .. ref.column_name
+                        .. representation_suffix(missing_representations) .. ".")
+            end
+        end
+
     end
 
     return grain_graph.build_edges(ctx.relationships)
@@ -5205,9 +5792,13 @@ local function validate_expressions(ctx, safe_edges)
         local entity = ctx.entity_by_id[key(dimension.entity_id)]
         if entity ~= nil then
             for _, ref in ipairs(column_refs_in_expression(dimension.expression)) do
-                if ref.alias == owning_alias and not source_column_exists(entity.source_schema, entity.source_object, ref.column_name) then
+                local missing_representations =
+                    missing_representation_columns(ctx, entity, ref.column_name)
+                if ref.alias == owning_alias and #missing_representations > 0 then
                     add_issue(ctx, "ERROR", "DIMENSION", dimension.name, "SEMANTIC_MODEL_017",
-                        "Dimension expression references unknown source column: " .. ref.alias .. "." .. ref.column_name .. ".")
+                        "Dimension expression references unknown source column: "
+                            .. ref.alias .. "." .. ref.column_name
+                            .. representation_suffix(missing_representations) .. ".")
                 end
             end
         end
@@ -5232,9 +5823,13 @@ local function validate_expressions(ctx, safe_edges)
         local entity = ctx.entity_by_id[key(fact.entity_id)]
         if entity ~= nil then
             for _, ref in ipairs(column_refs_in_expression(fact.expression)) do
-                if ref.alias == owning_alias and not source_column_exists(entity.source_schema, entity.source_object, ref.column_name) then
+                local missing_representations =
+                    missing_representation_columns(ctx, entity, ref.column_name)
+                if ref.alias == owning_alias and #missing_representations > 0 then
                     add_issue(ctx, "ERROR", "FACT", fact.name, "SEMANTIC_MODEL_017",
-                        "Fact expression references unknown source column: " .. ref.alias .. "." .. ref.column_name .. ".")
+                        "Fact expression references unknown source column: "
+                            .. ref.alias .. "." .. ref.column_name
+                            .. representation_suffix(missing_representations) .. ".")
                 end
             end
         end
@@ -5269,9 +5864,13 @@ local function validate_expressions(ctx, safe_edges)
                         break
                     end
                 end
-                if source_entity ~= nil and not source_column_exists(source_entity.source_schema, source_entity.source_object, ref.column_name) then
+                local missing_representations = source_entity ~= nil
+                    and missing_representation_columns(ctx, source_entity, ref.column_name) or {}
+                if source_entity ~= nil and #missing_representations > 0 then
                     add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_017",
-                        "Metric filter references unknown source column: " .. ref.alias .. "." .. ref.column_name .. ".")
+                        "Metric filter references unknown source column: "
+                            .. ref.alias .. "." .. ref.column_name
+                            .. representation_suffix(missing_representations) .. ".")
                 end
             end
         end
@@ -6602,7 +7201,7 @@ ESV_QUERY_SPEC = M
 
 -- Detached model-versioned catalog input for the typed planner.
 
-local M = {VERSION = 1}
+local M = {VERSION = 3}
 
 local function key(value) return tostring(value) end
 
@@ -6664,6 +7263,7 @@ function M.from_context(ctx, selected_metrics)
         version_number = ctx.model and ctx.model.version_number,
         object = clone(ctx.object),
         entities = clone(ctx.entities or {}),
+        representations = clone(ctx.representations or {}),
         dimensions = clone(ctx.dimensions or {}),
         visible_metrics = clone(ctx.metrics or {}),
         metrics = clone(collect_transitive(all_metric_by_id, requested_ids)),
@@ -6672,6 +7272,15 @@ function M.from_context(ctx, selected_metrics)
         unique_keys = clone(ctx.unique_keys or {}),
     }
     snapshot.entity_by_id = index_by(snapshot.entities, "id")
+    snapshot.representation_by_id = index_by(snapshot.representations, "id")
+    snapshot.representations_by_entity = {}
+    for _, representation in ipairs(snapshot.representations) do
+        local entity_key = key(representation.entity_id)
+        snapshot.representations_by_entity[entity_key] =
+            snapshot.representations_by_entity[entity_key] or {}
+        snapshot.representations_by_entity[entity_key]
+            [#snapshot.representations_by_entity[entity_key] + 1] = representation
+    end
     snapshot.dimension_by_id = index_by(snapshot.dimensions, "id")
     snapshot.metric_by_id = index_by(snapshot.metrics, "id")
     snapshot.fact_by_id = index_by(snapshot.facts, "id")
@@ -6697,7 +7306,7 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 7}
+local M = {PLAN_VERSION = 8}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -7441,7 +8050,7 @@ ESV_METRIC_PLAN = M
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
 local M = {
-    VERSION = 4,
+    VERSION = 5,
     DEFAULT_MAX_BRANCHES = 8,
     DEFAULT_MAX_SQL_BYTES = 1000000,
 }
@@ -8076,6 +8685,10 @@ function M.build(logical_plan, snapshot, options)
                 source_kind = "BASE",
                 entity_id = entity.id,
                 entity_name = entity.name,
+                representation_id = entity.primary_representation
+                    and entity.primary_representation.id or nil,
+                representation_name = entity.primary_representation
+                    and entity.primary_representation.name or nil,
                 physical_schema = entity.source_schema,
                 physical_object = entity.source_object,
             },
@@ -9188,6 +9801,8 @@ local function load_catalog(model, object_name)
             root_entity_id = row_value(object_rows[1], "ROOT_ENTITY_ID", 3),
         },
         entities = {},
+        representations = {},
+        representations_by_entity = {},
         entity_by_id = {},
         entity_by_alias = {},
         dimensions = {},
@@ -9209,13 +9824,22 @@ local function load_catalog(model, object_name)
     }
 
     local entity_rows = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS,
-               PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION
-        FROM SYS_SEMANTIC.ENTITIES
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        ORDER BY ENTITY_ID
+        SELECT e.ENTITY_ID, e.ENTITY_NAME,
+               er.SOURCE_SCHEMA, er.SOURCE_OBJECT, er.SOURCE_ALIAS,
+               e.PRIMARY_KEY_EXPR, e.GRAIN_DESCRIPTION,
+               er.REPRESENTATION_ID, er.REPRESENTATION_NAME,
+               er.SOURCE_KIND, er.REPRESENTATION_ROLE, er.PRIORITY
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        ORDER BY e.ENTITY_ID
     ]], {model_id = model.model_id, version_id = model.version_id})
     for _, row in ipairs(entity_rows or {}) do
         local entity = {
@@ -9226,10 +9850,60 @@ local function load_catalog(model, object_name)
             alias = row_value(row, "SOURCE_ALIAS", 5),
             primary_key_expr = row_value(row, "PRIMARY_KEY_EXPR", 6),
             grain_description = row_value(row, "GRAIN_DESCRIPTION", 7),
+            primary_representation = {
+                id = row_value(row, "REPRESENTATION_ID", 8),
+                entity_id = row_value(row, "ENTITY_ID", 1),
+                name = row_value(row, "REPRESENTATION_NAME", 9),
+                source_kind = row_value(row, "SOURCE_KIND", 10),
+                role = row_value(row, "REPRESENTATION_ROLE", 11),
+                priority = row_value(row, "PRIORITY", 12),
+                source_schema = row_value(row, "SOURCE_SCHEMA", 3),
+                source_object = row_value(row, "SOURCE_OBJECT", 4),
+                alias = row_value(row, "SOURCE_ALIAS", 5),
+            },
         }
         ctx.entities[#ctx.entities + 1] = entity
         ctx.entity_by_id[key(entity.id)] = entity
         ctx.entity_by_alias[upper(entity.alias)] = entity
+    end
+
+    local representation_rows = query([[
+        SELECT REPRESENTATION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
+               SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
+               PRIORITY, FRESHNESS_POLICY, COVERAGE_PREDICATE, VALID_FROM, VALID_TO
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID,
+          CASE WHEN REPRESENTATION_ROLE = 'PRIMARY' THEN 0 ELSE 1 END,
+          PRIORITY, REPRESENTATION_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(representation_rows or {}) do
+        local representation = {
+            id = row_value(row, "REPRESENTATION_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "REPRESENTATION_NAME", 3),
+            source_kind = row_value(row, "SOURCE_KIND", 4),
+            source_schema = row_value(row, "SOURCE_SCHEMA", 5),
+            source_object = row_value(row, "SOURCE_OBJECT", 6),
+            alias = row_value(row, "SOURCE_ALIAS", 7),
+            role = row_value(row, "REPRESENTATION_ROLE", 8),
+            priority = row_value(row, "PRIORITY", 9),
+            freshness_policy = row_value(row, "FRESHNESS_POLICY", 10),
+            coverage_predicate = row_value(row, "COVERAGE_PREDICATE", 11),
+            valid_from = row_value(row, "VALID_FROM", 12),
+            valid_to = row_value(row, "VALID_TO", 13),
+        }
+        ctx.representations[#ctx.representations + 1] = representation
+        local entity_key = key(representation.entity_id)
+        ctx.representations_by_entity[entity_key] =
+            ctx.representations_by_entity[entity_key] or {}
+        ctx.representations_by_entity[entity_key]
+            [#ctx.representations_by_entity[entity_key] + 1] = representation
+        if upper(representation.role) == "PRIMARY" and ctx.entity_by_id[entity_key] ~= nil then
+            ctx.entity_by_id[entity_key].primary_representation = representation
+        end
     end
 
     local dimension_rows = query([[
@@ -9982,6 +10656,7 @@ local function plan_joins(ctx, needed_entities)
             path_names[#path_names + 1] = relationship.name
             local join_key = key(relationship.id)
             local to_entity_key = key(edge.to_entity_id)
+            needed_entities[to_entity_key] = true
             if not joined_relationships[join_key] and not joined_entities[to_entity_key] then
                 joins[#joins + 1] = {
                     relationship = relationship,
@@ -10494,6 +11169,7 @@ local function compile_request_table(request, options)
             materialization_decision = materialization_decision,
             validation_run_id = validation_run_id,
             warnings = {},
+            selected_representations = {},
         }
         if selected_materialization ~= nil then
             plan.selected_materialization = {
@@ -10529,6 +11205,29 @@ local function compile_request_table(request, options)
         end
         for _, dimension in ipairs(selected_dimensions) do
             plan.dimensions[#plan.dimensions + 1] = dimension.name
+        end
+        local representation_entity_ids = {}
+        for entity_id, _ in pairs(needed_entities) do
+            representation_entity_ids[#representation_entity_ids + 1] = entity_id
+        end
+        table.sort(representation_entity_ids, function(left, right)
+            return key(left) < key(right)
+        end)
+        for _, entity_id in ipairs(representation_entity_ids) do
+            local entity = ctx.entity_by_id[key(entity_id)]
+            local representation = entity and entity.primary_representation or nil
+            if representation ~= nil then
+                plan.selected_representations[#plan.selected_representations + 1] = {
+                    entity_id = entity.id,
+                    entity_name = entity.name,
+                    representation_id = representation.id,
+                    representation_name = representation.name,
+                    source_kind = representation.source_kind,
+                    source_schema = representation.source_schema,
+                    source_object = representation.source_object,
+                    selection_reason = "STATIC_PRIMARY",
+                }
+            end
         end
         return plan
     end
@@ -11575,12 +12274,18 @@ function M.suggest_grain_metadata(model_name)
     end
     local suggestions = {}
     local entities = query([[
-        SELECT ENTITY_ID, ENTITY_NAME, SOURCE_ALIAS, PRIMARY_KEY_EXPR
-        FROM SYS_SEMANTIC.ENTITIES
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        ORDER BY ENTITY_ID
+        SELECT e.ENTITY_ID, e.ENTITY_NAME, er.SOURCE_ALIAS, e.PRIMARY_KEY_EXPR
+        FROM SYS_SEMANTIC.ENTITIES e
+        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+          ON er.ENTITY_ID = e.ENTITY_ID
+         AND er.MODEL_ID = e.MODEL_ID
+         AND er.VERSION_ID = e.VERSION_ID
+         AND er.REPRESENTATION_ROLE = 'PRIMARY'
+         AND er.STATUS = 'ACTIVE'
+        WHERE e.MODEL_ID = :model_id
+          AND e.VERSION_ID = :version_id
+          AND e.STATUS = 'ACTIVE'
+        ORDER BY e.ENTITY_ID
     ]], {model_id = model.model_id, version_id = model.version_id})
     local alias_by_id = {}
     for _, row in ipairs(entities or {}) do
@@ -14613,12 +15318,18 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
     end
     if missing(object_name) then
         for _, row in ipairs(query([[
-            SELECT e.ENTITY_NAME, e.SOURCE_SCHEMA, e.SOURCE_OBJECT, e.SOURCE_ALIAS,
+            SELECT e.ENTITY_NAME, er.SOURCE_SCHEMA, er.SOURCE_OBJECT, er.SOURCE_ALIAS,
                    e.PRIMARY_KEY_EXPR, e.GRAIN_DESCRIPTION, e.DESCRIPTION
             FROM SYS_SEMANTIC.ENTITIES e
             JOIN SYS_SEMANTIC.MODELS m
               ON m.MODEL_ID = e.MODEL_ID
              AND m.ACTIVE_VERSION_ID = e.VERSION_ID
+            JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+              ON er.ENTITY_ID = e.ENTITY_ID
+             AND er.MODEL_ID = e.MODEL_ID
+             AND er.VERSION_ID = e.VERSION_ID
+             AND er.REPRESENTATION_ROLE = 'PRIMARY'
+             AND er.STATUS = 'ACTIVE'
             WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
               AND e.STATUS = 'ACTIVE'
             ORDER BY ENTITY_ID

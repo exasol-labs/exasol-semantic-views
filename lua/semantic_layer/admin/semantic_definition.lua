@@ -2769,12 +2769,18 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
     end
     if missing(object_name) then
         for _, row in ipairs(query([[
-            SELECT e.ENTITY_NAME, e.SOURCE_SCHEMA, e.SOURCE_OBJECT, e.SOURCE_ALIAS,
+            SELECT e.ENTITY_NAME, er.SOURCE_SCHEMA, er.SOURCE_OBJECT, er.SOURCE_ALIAS,
                    e.PRIMARY_KEY_EXPR, e.GRAIN_DESCRIPTION, e.DESCRIPTION
             FROM SYS_SEMANTIC.ENTITIES e
             JOIN SYS_SEMANTIC.MODELS m
               ON m.MODEL_ID = e.MODEL_ID
              AND m.ACTIVE_VERSION_ID = e.VERSION_ID
+            JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+              ON er.ENTITY_ID = e.ENTITY_ID
+             AND er.MODEL_ID = e.MODEL_ID
+             AND er.VERSION_ID = e.VERSION_ID
+             AND er.REPRESENTATION_ROLE = 'PRIMARY'
+             AND er.STATUS = 'ACTIVE'
             WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
               AND e.STATUS = 'ACTIVE'
             ORDER BY ENTITY_ID

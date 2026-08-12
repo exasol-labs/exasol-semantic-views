@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import ssl
 import sys
 
@@ -12,6 +13,7 @@ EXPECTED_TABLES = {
     "MODELS",
     "MODEL_VERSIONS",
     "ENTITIES",
+    "ENTITY_REPRESENTATIONS",
     "UNIQUE_KEYS",
     "UNIQUE_KEY_COLUMNS",
     "RELATIONSHIP_KEY_MAPPINGS",
@@ -47,6 +49,9 @@ EXPECTED_SCRIPTS = {
     "CREATE_MODEL",
     "DROP_MODEL",
     "ADD_ENTITY",
+    "ADD_ENTITY_REPRESENTATION",
+    "SET_PRIMARY_REPRESENTATION",
+    "REMOVE_ENTITY_REPRESENTATION",
     "ADD_SEMANTIC_OBJECT",
     "CREATE_SEMANTIC_OBJECT",
     "ADD_RELATIONSHIP",
@@ -174,6 +179,7 @@ def main() -> int:
         expected_counts = {
             "SEMANTIC_CATALOG.MODELS WHERE MODEL_NAME = 'sales'": 1,
             "SEMANTIC_CATALOG.ENTITIES WHERE MODEL_NAME = 'sales'": 4,
+            "SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS WHERE MODEL_NAME = 'sales'": 4,
             "SEMANTIC_CATALOG.RELATIONSHIPS WHERE MODEL_NAME = 'sales'": 3,
             "SEMANTIC_CATALOG.RELATIONSHIP_KEY_MAPPINGS WHERE MODEL_NAME = 'sales'": 3,
             "SEMANTIC_CATALOG.DIMENSIONS WHERE MODEL_NAME = 'sales'": 4,
@@ -193,6 +199,110 @@ def main() -> int:
         }
         for table_expr, expected in expected_counts.items():
             assert_equal(table_expr, scalar(con, f"SELECT COUNT(*) FROM {table_expr}"), expected)
+        assert_equal(
+            "one primary representation per entity",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM ("
+                "SELECT ENTITY_ID FROM SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS "
+                "WHERE MODEL_NAME = 'sales' AND REPRESENTATION_ROLE = 'PRIMARY' "
+                "AND STATUS = 'ACTIVE' GROUP BY ENTITY_ID HAVING COUNT(*) = 1)"
+            ),
+            4,
+        )
+
+        con.execute("DROP TABLE IF EXISTS MART.ORDERS_F1_REPLICA")
+        con.execute("CREATE TABLE MART.ORDERS_F1_REPLICA AS SELECT * FROM MART.ORDERS")
+        try:
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'archive', 'RELATION', 'MART', "
+                "'ORDERS_F1_REPLICA', 20, 'MANUAL')"
+            ).fetchall()
+            assert_equal(
+                "F1 alternate representation",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS "
+                    "WHERE MODEL_NAME = 'sales' AND ENTITY_NAME = 'order' "
+                    "AND REPRESENTATION_NAME = 'archive' "
+                    "AND REPRESENTATION_ROLE = 'ALTERNATE'",
+                ),
+                1,
+            )
+            con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
+            assert_equal(
+                "F1 equivalent representation validation errors",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES "
+                    "WHERE MODEL_NAME = 'sales' AND SEVERITY = 'ERROR'",
+                ),
+                0,
+            )
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
+                "'sales', 'order', 'archive')"
+            ).fetchall()
+            assert_equal(
+                "F1 promoted source compatibility mirror",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITIES e "
+                    "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = e.MODEL_ID "
+                    "WHERE m.MODEL_NAME = 'sales' AND e.ENTITY_NAME = 'order' "
+                    "AND e.SOURCE_OBJECT = 'ORDERS_F1_REPLICA'",
+                ),
+                1,
+            )
+            assert_script_fails(
+                con,
+                "remove primary representation",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'archive')",
+                "SEMANTIC_ADMIN_047",
+            )
+            con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
+            compile_row = con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON("
+                "'{\"model\":\"sales\",\"object\":\"SALES\","
+                "\"metrics\":[\"total_revenue\"],"
+                "\"dimensions\":[\"order_status\"]}')"
+            ).fetchall()[0]
+            selected = json.loads(compile_row[5])["selected_representations"]
+            order_source = next(row for row in selected if row["entity_name"] == "order")
+            if order_source["representation_name"] != "archive":
+                raise AssertionError(f"F1 compile selected {order_source!r}")
+            print("ok F1 compile uses promoted representation: archive")
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
+                "'sales', 'order', 'primary')"
+            ).fetchall()
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'archive')"
+            ).fetchall()
+        finally:
+            con.execute(
+                "UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET REPRESENTATION_ROLE = "
+                "CASE WHEN REPRESENTATION_NAME = 'primary' THEN 'PRIMARY' ELSE 'ALTERNATE' END "
+                "WHERE ENTITY_ID = (SELECT e.ENTITY_ID FROM SYS_SEMANTIC.ENTITIES e "
+                "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = e.MODEL_ID "
+                "WHERE m.MODEL_NAME = 'sales' AND e.ENTITY_NAME = 'order')"
+            )
+            con.execute(
+                "UPDATE SYS_SEMANTIC.ENTITIES SET SOURCE_OBJECT = 'ORDERS' "
+                "WHERE ENTITY_NAME = 'order' AND MODEL_ID = "
+                "(SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales')"
+            )
+            con.execute(
+                "DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS "
+                "WHERE REPRESENTATION_NAME = 'archive' AND ENTITY_ID = "
+                "(SELECT e.ENTITY_ID FROM SYS_SEMANTIC.ENTITIES e "
+                "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = e.MODEL_ID "
+                "WHERE m.MODEL_NAME = 'sales' AND e.ENTITY_NAME = 'order')"
+            )
+            con.execute("DROP TABLE IF EXISTS MART.ORDERS_F1_REPLICA")
 
         con.execute(
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION("
@@ -251,6 +361,13 @@ def main() -> int:
                 "SEMANTIC_ADMIN_044",
             )
         finally:
+            con.execute(
+                "DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE ENTITY_ID IN ("
+                "SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES "
+                "WHERE ENTITY_NAME = 'reserved_alias_probe' "
+                "AND MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS "
+                "WHERE MODEL_NAME = 'sales'))"
+            )
             con.execute(
                 "DELETE FROM SYS_SEMANTIC.ENTITIES WHERE ENTITY_NAME = 'reserved_alias_probe' "
                 "AND MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS "

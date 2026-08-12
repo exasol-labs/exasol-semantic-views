@@ -134,11 +134,35 @@ def main() -> int:
 
         with_restore(
             con,
+            "incompatible alternate representation",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION("
+            "'sales', 'order', 'incompatible', 'RELATION', 'MART', 'PRODUCTS', 50, NULL)",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION("
+            "'sales', 'order', 'incompatible')",
+            "SEMANTIC_MODEL_036",
+        )
+
+        with_restore(
+            con,
+            "missing primary representation",
+            "UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET STATUS = 'INACTIVE' "
+            f"WHERE {model_filter} AND ENTITY_ID = (SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES "
+            f"WHERE {model_filter} AND ENTITY_NAME = 'order') AND REPRESENTATION_ROLE = 'PRIMARY'",
+            "UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET STATUS = 'ACTIVE' "
+            f"WHERE {model_filter} AND ENTITY_ID = (SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES "
+            f"WHERE {model_filter} AND ENTITY_NAME = 'order') AND REPRESENTATION_ROLE = 'PRIMARY'",
+            "SEMANTIC_MODEL_035",
+        )
+
+        with_restore(
+            con,
             "missing source object",
-            "UPDATE SYS_SEMANTIC.ENTITIES SET SOURCE_OBJECT = 'MISSING_ORDERS' "
-            f"WHERE {model_filter} AND ENTITY_NAME = 'order'",
-            "UPDATE SYS_SEMANTIC.ENTITIES SET SOURCE_OBJECT = 'ORDERS' "
-            f"WHERE {model_filter} AND ENTITY_NAME = 'order'",
+            "UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET SOURCE_OBJECT = 'MISSING_ORDERS' "
+            f"WHERE {model_filter} AND ENTITY_ID = (SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES "
+            f"WHERE {model_filter} AND ENTITY_NAME = 'order') AND REPRESENTATION_ROLE = 'PRIMARY'",
+            "UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET SOURCE_OBJECT = 'ORDERS' "
+            f"WHERE {model_filter} AND ENTITY_ID = (SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES "
+            f"WHERE {model_filter} AND ENTITY_NAME = 'order') AND REPRESENTATION_ROLE = 'PRIMARY'",
             "SEMANTIC_MODEL_001",
         )
 

@@ -70,6 +70,8 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_031` | warning | Relationship has no structured endpoint mapping; legacy compilation remains available but grain proofs cannot use it. |
 | `SEMANTIC_MODEL_032` | error | Relationship endpoint mapping is malformed, non-contiguous, out of scope, or references an unknown source column. |
 | `SEMANTIC_MODEL_033` | error | Relationship endpoint mappings do not match the unique key required by the declared cardinality. |
+| `SEMANTIC_MODEL_035` | error | An active entity does not have exactly one active `PRIMARY` representation. |
+| `SEMANTIC_MODEL_036` | error | An active representation has invalid F1 metadata, a duplicate name, a missing entity, an unstable alias, or unsupported temporal coverage. |
 
 ## Metric/Dimension Matrix
 

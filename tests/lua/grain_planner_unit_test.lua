@@ -35,6 +35,10 @@ local function base_context()
             {id = 2, name = "customers"},
             {id = 3, name = "regions"},
         },
+        representations = {{
+            id = 101, entity_id = 1, name = "primary", source_kind = "RELATION",
+            role = "PRIMARY", priority = 1,
+        }},
         dimensions = {{id = 30, name = "region", entity_id = 3}},
         metrics = {public},
         all_metrics = {public, profit, revenue},
@@ -59,6 +63,16 @@ local function multi_physical_fixture()
     ctx.entities[3].source_schema = "MART"
     ctx.entities[3].source_object = "REGIONS"
     ctx.entities[3].alias = "r"
+    ctx.representations = {}
+    for index, entity in ipairs(ctx.entities) do
+        entity.primary_representation = {
+            id = 100 + index, entity_id = entity.id, name = "primary",
+            source_kind = "RELATION", role = "PRIMARY", priority = 1,
+            source_schema = entity.source_schema, source_object = entity.source_object,
+            alias = entity.alias,
+        }
+        ctx.representations[#ctx.representations + 1] = entity.primary_representation
+    end
     ctx.dimensions[1].expression = "r.region_name"
     ctx.dimensions[1].data_type = "VARCHAR(20)"
     ctx.facts[1].expression = "o.profit"
@@ -140,9 +154,12 @@ end)
 test("CatalogSnapshot includes transitive private metrics and is detached", function()
     local ctx, public = base_context()
     local snapshot = snapshots.from_context(ctx, {public})
+    assert_equal(snapshot.catalog_snapshot_version, 3)
     assert_equal(snapshot.version_id, 6)
     assert_equal(#snapshot.visible_metrics, 1)
     assert_equal(#snapshot.metrics, 3)
+    assert_equal(#snapshot.representations, 1)
+    assert_equal(snapshot.representation_by_id["101"].role, "PRIMARY")
     assert_equal(snapshot.metrics[1].name, "profit")
     public.name = "changed"
     assert_equal(snapshot.metric_by_id["10"].name, "margin")
@@ -269,7 +286,7 @@ test("C1 logical planner emits a planning-only multi branch plan", function()
     }))
     local plan, reason = planner.logical_plan(spec, snapshot, {}, {public}, {})
     assert_equal(reason, nil)
-    assert_equal(plan.plan_version, 7)
+    assert_equal(plan.plan_version, 8)
     assert_equal(plan.plan_kind, "MULTI_BRANCH")
     assert_equal(plan.proof_mode, "STRICT_GRAIN")
     assert_equal(plan.execution.status, "PLANNING_ONLY")
@@ -404,7 +421,8 @@ test("C2 physical planner binds one typed state branch per leaf", function()
     local snapshot, logical = multi_physical_fixture()
     local physical, physical_error = physical_planner.build(logical, snapshot)
     assert_true(physical ~= nil, physical_error and physical_error.reason_code)
-    assert_equal(physical.physical_plan_version, 4)
+    assert_equal(physical.physical_plan_version, 5)
+    assert_equal(physical.branches[1].source.representation_name, "primary")
     assert_equal(physical.plan_kind, "MULTI_BRANCH_QUERY")
     assert_equal(#physical.branches, 2)
     assert_equal(#physical.states, 2)
