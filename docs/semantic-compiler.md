@@ -54,9 +54,11 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
   base sources include the selected representation id and name
 
 `PLAN_JSON.selected_representations` lists the active representation selected
-for every entity used by the request. F1 always selects the representation
-marked `PRIMARY` and records `selection_reason = STATIC_PRIMARY`; it does not
-perform freshness-, cost-, or request-dependent selection.
+for every entity used by the request. Without F2 attribute bindings, F1 selects
+the representation marked `PRIMARY` and records
+`selection_reason = STATIC_PRIMARY`. With F2 bindings, binding role and priority
+rank candidates first, then `PRIMARY` breaks otherwise-equal candidates before
+representation priority and ID. Selection does not inspect freshness or cost.
 
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the

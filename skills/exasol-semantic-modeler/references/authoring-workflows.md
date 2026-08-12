@@ -255,8 +255,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
 Smoke-test each expression against its target representation before adding the
 binding. A compiled request uses one representation per entity; that source
 must provide bindings for every requested dimension and transitive metric fact.
-`PREFER` outranks `FALLBACK`, then lower binding and representation priorities
-win. F2 does not coalesce rows or values across sources. Inspect
+`PREFER` outranks `FALLBACK`, followed by lower binding priority, the current
+`PRIMARY` role, lower representation priority, and representation ID. F2 does
+not coalesce rows or values across sources. Inspect
 `plan_json.selected_representations[].selected_bindings` to verify the choice.
 
 When several columns are renamed, add all required bindings one at a time

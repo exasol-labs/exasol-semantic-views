@@ -8,6 +8,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Primary representation selection
+
+- F2 complete-candidate ranking now prefers the representation currently marked
+  `PRIMARY` before representation priority and ID, so promotion is effective
+  when retained defaults and explicit bindings otherwise rank equally.
+- Binding role and binding priority remain authoritative ahead of the primary
+  tie-breaker, preserving intentional attribute fallback.
+
 #### Remote representation validation cost
 
 - `VALIDATE_MODEL` now defers F1 source probes until local catalog validation is

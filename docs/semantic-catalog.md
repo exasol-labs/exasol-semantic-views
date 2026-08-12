@@ -112,10 +112,13 @@ before checking the validation gate, allowing a trapped model to promote back.
 At compile time, F2 chooses one active representation per required entity. A
 candidate must bind every requested dimension and every fact used transitively
 by requested metrics. Candidates are ordered by `PREFER` before `FALLBACK`,
-then binding priority, representation priority, and representation ID. This is
-deterministic source fallback, not row-level `COALESCE`: values from different
-representations are never combined. If no representation covers the complete
-attribute set, compilation fails with `SEMANTIC_REQUEST_080`.
+then binding priority, `PRIMARY` role, representation priority, and
+representation ID. Promotion therefore controls otherwise-equivalent complete
+candidates without overriding an intentional binding-role or binding-priority
+fallback. This is deterministic source fallback, not row-level `COALESCE`:
+values from different representations are never combined. If no representation
+covers the complete attribute set, compilation fails with
+`SEMANTIC_REQUEST_080`.
 
 Binding expressions are validated against only their target representation.
 Binding creation is baseline-aware because renamed-column representations can

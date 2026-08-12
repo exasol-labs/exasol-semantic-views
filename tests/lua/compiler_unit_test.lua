@@ -427,6 +427,10 @@ local function compiler_query_fixture(options)
                         "One row per customer"},
                 }
             end
+            if options.promoted_primary then
+                return {{1, "orders", "VS_ARCHIVE", "ORDERS", "o", "o.order_id",
+                    "One row per order", 104, "archive", "VIRTUAL_SCHEMA", "PRIMARY", 40}}
+            end
             return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
                 "One row per order", 101, "primary", "RELATION", "PRIMARY", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
@@ -435,6 +439,12 @@ local function compiler_query_fixture(options)
                     {101, 1, "primary", "RELATION", options.missing_multi_source and "" or "MART", "ORDERS", "o", "PRIMARY", 1},
                     {102, 2, "primary", "RELATION", "MART", "TICKETS", "t", "PRIMARY", 1},
                     {103, 3, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
+                }
+            end
+            if options.promoted_primary then
+                return {
+                    {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "PRIMARY", 40},
+                    {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "ALTERNATE", 1},
                 }
             end
             return {
@@ -523,6 +533,14 @@ local function compiler_query_fixture(options)
             end
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            if options.promoted_primary then
+                return {
+                    {301, 1, "DIMENSION", 10, 101, "o.status", "PREFER", 1, true},
+                    {302, 1, "FACT", 20, 101, "o.amount", "PREFER", 1, true},
+                    {303, 1, "DIMENSION", 10, 104, "o.archive_status", "PREFER", 1, false},
+                    {304, 1, "FACT", 20, 104, "o.archive_amount", "PREFER", 1, false},
+                }
+            end
             if options.f2_fallback then
                 return {
                     {301, 1, "DIMENSION", 10, 104, "o.archive_status", "FALLBACK", 1},
@@ -669,6 +687,20 @@ test("F2 compiler selects one complete fallback representation", function()
     assert_contains(result.plan_json, '"selection_reason":"ATTRIBUTE_FALLBACK"')
     assert_contains(result.plan_json, '"attribute":"DIMENSION:10"')
     assert_contains(result.plan_json, '"attribute":"FACT:20"')
+end)
+
+test("F2 compiler prefers the promoted primary when bindings are equivalent", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+        dimensions = {"status"},
+    }, {promoted_primary = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, 'FROM "VS_ARCHIVE"."ORDERS" o')
+    assert_contains(result.generated_sql, "o.archive_status")
+    assert_contains(result.generated_sql, "SUM((o.archive_amount))")
+    assert_contains(result.plan_json, '"representation_name":"archive"')
 end)
 
 test("structured compiler renders unary null filters and having", function()

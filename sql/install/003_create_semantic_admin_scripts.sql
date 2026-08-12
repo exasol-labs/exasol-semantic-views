@@ -11327,6 +11327,9 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 if left.binding_priority ~= right.binding_priority then
                     return left.binding_priority < right.binding_priority
                 end
+                local left_is_primary = upper(left.representation.role) == "PRIMARY"
+                local right_is_primary = upper(right.representation.role) == "PRIMARY"
+                if left_is_primary ~= right_is_primary then return left_is_primary end
                 local left_priority = tonumber(left.representation.priority or 1)
                 local right_priority = tonumber(right.representation.priority or 1)
                 if left_priority ~= right_priority then return left_priority < right_priority end

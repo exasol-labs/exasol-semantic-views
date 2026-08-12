@@ -52,8 +52,10 @@ validation and compilation resolve physical source metadata through that
 representation while legacy entity source columns remain compatibility mirrors.
 This refactor intentionally does not change source selection or query semantics.
 Phase F1 permits multiple equivalent representations but keeps one explicit
-`PRIMARY`. Admin promotion is the only source-selection mechanism; compilation
-is deterministic and records `STATIC_PRIMARY` representation provenance.
+`PRIMARY`. Admin promotion controls default source selection; F2 binding role
+and priority can intentionally override it. Otherwise, the current `PRIMARY`
+precedes representation priority and ID. Compilation is deterministic and
+records representation provenance.
 Validation requires every active alternate to preserve the entity alias and
 the complete semantic/key column interface before it can be certified.
 

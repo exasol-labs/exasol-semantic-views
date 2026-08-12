@@ -473,8 +473,9 @@ For different physical dimension or fact expressions, add
 `ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark
 the authoritative expression `PREFER` and ordered substitutes `FALLBACK`.
 The compiler chooses one representation that covers every required attribute
-for the entity; it never coalesces values across representations. Verify the
-choice and each expression in
+for the entity. It ranks binding role, binding priority, current `PRIMARY` role,
+representation priority, then ID; it never coalesces values across
+representations. Verify the choice and each expression in
 `plan_json.selected_representations[].selected_bindings`. If no complete source
 exists, compilation returns `SEMANTIC_REQUEST_080`; do not invent a cross-source
 join or silently revert to a partial representation.
