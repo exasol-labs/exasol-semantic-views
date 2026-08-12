@@ -8,6 +8,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Federated representation probe timeout
+
+- `VALIDATE_MODEL` now refuses F1 probes involving a `VIRTUAL_SCHEMA` unless
+  the caller configured session `QUERY_TIMEOUT` between 1 and 60 seconds.
+- The bounded timeout applies to the complete Exasol script, turning an
+  intermittently stuck federated probe into a database timeout instead of an
+  unbounded validation session.
+
 #### Primary representation selection
 
 - F2 complete-candidate ranking now prefers the representation currently marked

@@ -709,6 +709,44 @@ test("validator skips F1 source probes after a local validation error", function
     assert_equal(query_count, 0)
 end)
 
+test("validator requires a bounded session timeout for federated F1 probes", function()
+    local entity = {id = 1, name = "customers"}
+    local primary = {id = 1, entity_id = 1, name = "primary",
+        source_kind = "RELATION"}
+    local remote = {id = 2, entity_id = 1, name = "remote",
+        source_kind = "VIRTUAL_SCHEMA"}
+    local function context()
+        return validation_context({
+            model_name = "sales",
+            entities = {entity},
+            representations_by_entity = {["1"] = {primary, remote}},
+        })
+    end
+
+    local unlimited = context()
+    with_query(function(sql)
+        assert_contains(sql, "FROM EXA_PARAMETERS")
+        return {{0}}
+    end, function()
+        assert_true(not api.validate_representation_probe_timeout(unlimited))
+    end)
+    assert_true(has_rule(unlimited, "SEMANTIC_MODEL_041"))
+    assert_contains(issue_for_rule(unlimited, "SEMANTIC_MODEL_041").message,
+        "ALTER SESSION SET QUERY_TIMEOUT=60")
+
+    local bounded = context()
+    with_query(function() return {{30}} end, function()
+        assert_true(api.validate_representation_probe_timeout(bounded))
+    end)
+    assert_equal(bounded.error_count, 0)
+
+    local excessive = context()
+    with_query(function() return {{120}} end, function()
+        assert_true(not api.validate_representation_probe_timeout(excessive))
+    end)
+    assert_true(has_rule(excessive, "SEMANTIC_MODEL_041"))
+end)
+
 test("validator requires a key before claiming F1 equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary"}
@@ -1019,6 +1057,8 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {{1}}
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return {{1}}
+        elseif contains(sql, "FROM EXA_PARAMETERS") then
+            return {{60}}
         elseif contains(sql, "AS PROBE_COUNT") then
             return {{contains(sql, " MINUS ") and 0 or 4}}
         elseif contains(sql, "HAVING COUNT(*) > 1") then

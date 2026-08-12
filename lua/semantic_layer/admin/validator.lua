@@ -1558,6 +1558,47 @@ local function probe_count(sql_text)
     return tonumber(row_value(rows[1], "PROBE_COUNT", 1) or 0), nil
 end
 
+local MAX_FEDERATED_PROBE_TIMEOUT_SECONDS = 60
+
+local function validate_representation_probe_timeout(ctx)
+    local has_federated_probe = false
+    for _, entity in ipairs(ctx.entities or {}) do
+        local representations = representations_for_entity(ctx, entity)
+        if #representations > 1 then
+            for _, representation in ipairs(representations) do
+                if upper(representation.source_kind) == "VIRTUAL_SCHEMA" then
+                    has_federated_probe = true
+                    break
+                end
+            end
+        end
+        if has_federated_probe then break end
+    end
+    if not has_federated_probe then return true end
+
+    local ok, rows = pcall(query, [[
+        SELECT SESSION_VALUE
+        FROM EXA_PARAMETERS
+        WHERE PARAMETER_NAME = 'QUERY_TIMEOUT'
+    ]])
+    local timeout = ok and rows ~= nil and #rows > 0
+        and tonumber(row_value(rows[1], "SESSION_VALUE", 1)) or nil
+    if timeout == nil or timeout < 1
+        or timeout > MAX_FEDERATED_PROBE_TIMEOUT_SECONDS then
+        add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
+            "SEMANTIC_MODEL_041",
+            "Federated F1 equivalence probes require session QUERY_TIMEOUT between 1 and "
+                .. tostring(MAX_FEDERATED_PROBE_TIMEOUT_SECONDS)
+                .. " seconds; current value is " .. tostring(timeout or "unavailable")
+                .. ". Run ALTER SESSION SET QUERY_TIMEOUT="
+                .. tostring(MAX_FEDERATED_PROBE_TIMEOUT_SECONDS)
+                .. " before EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL."
+                .. " Exasol applies the timeout to the complete script.")
+        return false
+    end
+    return true
+end
+
 local function validate_representation_data_equivalence(ctx)
     if (ctx.error_count or 0) > 0 then return end
     for _, entity in ipairs(ctx.entities or {}) do
@@ -2496,7 +2537,7 @@ function M.validate_model(model_name_arg)
         validate_visible_metric_dimension_pairs(ctx)
         -- Remote equivalence proofs are full data scans. Do not launch them
         -- for a model that is already invalid on local catalog metadata.
-        if ctx.error_count == 0 then
+        if ctx.error_count == 0 and validate_representation_probe_timeout(ctx) then
             validate_representation_data_equivalence(ctx)
         end
         -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
@@ -2533,6 +2574,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_structural_rules = validate_structural_rules,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
+        validate_representation_probe_timeout = validate_representation_probe_timeout,
         validate_representation_data_equivalence = validate_representation_data_equivalence,
         validate_relationship_key_mappings = validate_relationship_key_mappings,
         relationship_edges = relationship_edges,

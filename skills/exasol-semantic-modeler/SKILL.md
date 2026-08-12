@@ -459,6 +459,10 @@ validation proves key uniqueness on every representation and exact key-set
 equality with the primary. Probe failures and duplicate grain are blocking.
 Fix local validation errors before rerunning validation: remote key scans are
 deferred until catalog metadata is clean but remain mandatory before publish.
+Before adding or validating a `VIRTUAL_SCHEMA` alternate, run `ALTER SESSION SET
+QUERY_TIMEOUT=60`; validation refuses federated F1 probes under an unlimited or
+longer timeout. The setting must precede `EXECUTE SCRIPT` because an Exasol
+script cannot change its own active timeout.
 
 F2 does not bind identity or relationship SQL. Before registration, require the
 alternate to expose the same case-sensitive physical names used by the entity

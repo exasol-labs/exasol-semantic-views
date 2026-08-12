@@ -202,6 +202,8 @@ is not acceptable, stop and report that representation-specific identity
 bindings require Fusion Phase F5.
 
 ```sql
+ALTER SESSION SET QUERY_TIMEOUT=60;
+
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
   'sales', 'order', 'lakehouse', 'VIRTUAL_SCHEMA',
   'VS_LAKEHOUSE', 'ORDERS', 20, 'MANUAL'

@@ -82,6 +82,19 @@ caches each representation's key cardinality once per key; exact bidirectional
 set comparisons still run for every alternate. They never run during compiled
 business queries.
 
+When any equivalent representation is a `VIRTUAL_SCHEMA`, set a bounded timeout
+before validation:
+
+```sql
+ALTER SESSION SET QUERY_TIMEOUT=60;
+EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
+```
+
+Validation rejects federated F1 probes when the session timeout is unlimited or
+greater than 60 seconds. Exasol applies `QUERY_TIMEOUT` to the complete
+`EXECUTE SCRIPT`, including nested federated statements; a script cannot lower
+its own active timeout.
+
 Identity and relationship metadata remains representation-invariant through
 F2. Primary-key expressions, unique-key columns, relationship key mappings,
 join conditions, and representation-blind metric filters must resolve against
