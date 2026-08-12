@@ -40,6 +40,12 @@ def split_exasol_sql(text: str) -> list[str]:
         while idx < len(line):
             char = line[idx]
             nxt = line[idx + 1] if idx + 1 < len(line) else ""
+            if char == "-" and nxt == "-" and not in_single and not in_double:
+                # SQL and Lua both use -- for line comments. Ignore comment
+                # quotes and semicolons without treating -- inside a literal
+                # as a comment opener.
+                line = line[:idx]
+                break
             if char == "'" and not in_double:
                 if in_single and nxt == "'":
                     idx += 2
