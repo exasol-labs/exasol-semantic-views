@@ -778,6 +778,7 @@ local function load_catalog(model, object_name)
         entities = {},
         representations = {},
         representations_by_entity = {},
+        representation_by_id = {},
         entity_by_id = {},
         entity_by_alias = {},
         dimensions = {},
@@ -789,6 +790,8 @@ local function load_catalog(model, object_name)
         facts = {},
         fact_by_id = {},
         fact_by_name = {},
+        attribute_bindings = {},
+        bindings_by_attribute = {},
         relationships = {},
         relationship_by_id = {},
         unique_keys = {},
@@ -829,9 +832,9 @@ local function load_catalog(model, object_name)
                 id = row_value(row, "REPRESENTATION_ID", 8),
                 entity_id = row_value(row, "ENTITY_ID", 1),
                 name = row_value(row, "REPRESENTATION_NAME", 9),
-                source_kind = row_value(row, "SOURCE_KIND", 10),
-                role = row_value(row, "REPRESENTATION_ROLE", 11),
-                priority = row_value(row, "PRIORITY", 12),
+                source_kind = row_value(row, "SOURCE_KIND", 10) or "RELATION",
+                role = row_value(row, "REPRESENTATION_ROLE", 11) or "PRIMARY",
+                priority = row_value(row, "PRIORITY", 12) or 1,
                 source_schema = row_value(row, "SOURCE_SCHEMA", 3),
                 source_object = row_value(row, "SOURCE_OBJECT", 4),
                 alias = row_value(row, "SOURCE_ALIAS", 5),
@@ -871,6 +874,7 @@ local function load_catalog(model, object_name)
             valid_to = row_value(row, "VALID_TO", 13),
         }
         ctx.representations[#ctx.representations + 1] = representation
+        ctx.representation_by_id[key(representation.id)] = representation
         local entity_key = key(representation.entity_id)
         ctx.representations_by_entity[entity_key] =
             ctx.representations_by_entity[entity_key] or {}
@@ -1100,6 +1104,39 @@ local function load_catalog(model, object_name)
         ctx.facts[#ctx.facts + 1] = fact
         ctx.fact_by_id[key(fact.id)] = fact
         ctx.fact_by_name[upper(fact.name)] = fact
+    end
+
+    local binding_rows = query([[
+        SELECT ATTRIBUTE_BINDING_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+               REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+               BINDING_PRIORITY, IS_DEFAULT
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          CASE WHEN BINDING_ROLE = 'PREFER' THEN 0 ELSE 1 END,
+          BINDING_PRIORITY, ATTRIBUTE_BINDING_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(binding_rows or {}) do
+        local binding = {
+            id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 3),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 4),
+            representation_id = row_value(row, "REPRESENTATION_ID", 5),
+            expression = row_value(row, "SOURCE_EXPRESSION", 6),
+            role = row_value(row, "BINDING_ROLE", 7),
+            priority = row_value(row, "BINDING_PRIORITY", 8),
+            is_default = row_value(row, "IS_DEFAULT", 9),
+            legacy = row_value(row, "IS_DEFAULT", 9) == true,
+        }
+        ctx.attribute_bindings[#ctx.attribute_bindings + 1] = binding
+        local attribute_key = upper(binding.attribute_type) .. ":" .. key(binding.attribute_id)
+        ctx.bindings_by_attribute[attribute_key] =
+            ctx.bindings_by_attribute[attribute_key] or {}
+        ctx.bindings_by_attribute[attribute_key]
+            [#ctx.bindings_by_attribute[attribute_key] + 1] = binding
     end
 
     local relationship_rows = query([[
@@ -1416,6 +1453,133 @@ local function collect_metric_entities(ctx, metric, needed_entities, seen_metric
             end
         end
     end
+end
+
+local function collect_metric_facts(ctx, metric, required, seen_metrics)
+    local metric_key = key(metric.id)
+    if seen_metrics[metric_key] then return end
+    seen_metrics[metric_key] = true
+    for _, dependency in ipairs(metric.dependencies or {}) do
+        if upper(dependency.object_type) == "FACT" then
+            local fact = ctx.fact_by_id[key(dependency.object_id)]
+            if fact ~= nil then required["FACT:" .. key(fact.id)] = fact end
+        elseif upper(dependency.object_type) == "METRIC" then
+            local nested = ctx.all_metric_by_id[key(dependency.object_id)]
+            if nested ~= nil then collect_metric_facts(ctx, nested, required, seen_metrics) end
+        end
+    end
+end
+
+local function select_attribute_bindings(ctx, dimensions, metrics, needed_entities)
+    local required_by_entity = {}
+    local function require_attribute(attribute_type, attribute)
+        local entity_key = key(attribute.entity_id)
+        required_by_entity[entity_key] = required_by_entity[entity_key] or {}
+        required_by_entity[entity_key][attribute_type .. ":" .. key(attribute.id)] = attribute
+    end
+    for _, dimension in ipairs(dimensions or {}) do
+        require_attribute("DIMENSION", dimension)
+    end
+    local required_facts = {}
+    for _, metric in ipairs(metrics or {}) do
+        collect_metric_facts(ctx, metric, required_facts, {})
+    end
+    for _, fact in pairs(required_facts) do require_attribute("FACT", fact) end
+
+    ctx.selected_representations = {}
+    for entity_id, _ in pairs(needed_entities or {}) do
+        local entity = ctx.entity_by_id[key(entity_id)]
+        if entity ~= nil then
+            local attributes = required_by_entity[key(entity.id)] or {}
+            local candidates = {}
+            local representations = ctx.representations_by_entity[key(entity.id)] or {}
+            if #representations == 0 and entity.primary_representation ~= nil then
+                representations = {entity.primary_representation}
+            end
+            for _, representation in ipairs(representations) do
+                local candidate = {
+                    representation = representation,
+                    bindings = {},
+                    fallback_count = 0,
+                    binding_priority = 0,
+                    complete = true,
+                    legacy_only = true,
+                }
+                for attribute_key, attribute in pairs(attributes) do
+                    local bindings = ctx.bindings_by_attribute[attribute_key] or {}
+                    local selected = nil
+                    for _, binding in ipairs(bindings) do
+                        if key(binding.representation_id) == key(representation.id) then
+                            selected = binding
+                            break
+                        end
+                    end
+                    if selected == nil and #bindings == 0
+                        and upper(representation.role) == "PRIMARY" then
+                        selected = {
+                            id = nil,
+                            representation_id = representation.id,
+                            expression = attribute.expression,
+                            role = "PREFER",
+                            priority = 1,
+                            legacy = true,
+                        }
+                    end
+                    if selected == nil then
+                        candidate.complete = false
+                        break
+                    end
+                    candidate.bindings[attribute_key] = selected
+                    if selected.legacy ~= true then candidate.legacy_only = false end
+                    if upper(selected.role) == "FALLBACK" then
+                        candidate.fallback_count = candidate.fallback_count + 1
+                    end
+                    candidate.binding_priority = candidate.binding_priority
+                        + tonumber(selected.priority or 1)
+                end
+                if candidate.complete then candidates[#candidates + 1] = candidate end
+            end
+            table.sort(candidates, function(left, right)
+                if left.fallback_count ~= right.fallback_count then
+                    return left.fallback_count < right.fallback_count
+                end
+                if left.binding_priority ~= right.binding_priority then
+                    return left.binding_priority < right.binding_priority
+                end
+                local left_priority = tonumber(left.representation.priority or 1)
+                local right_priority = tonumber(right.representation.priority or 1)
+                if left_priority ~= right_priority then return left_priority < right_priority end
+                return tonumber(left.representation.id) < tonumber(right.representation.id)
+            end)
+            local selected = candidates[1]
+            if selected == nil then
+                return nil, "No active representation provides every required attribute for entity '"
+                    .. tostring(entity.name) .. "'. Add compatible PREFER/FALLBACK bindings."
+            end
+            local representation = selected.representation
+            entity.source_schema = representation.source_schema
+            entity.source_object = representation.source_object
+            entity.alias = representation.alias
+            entity.selected_representation = representation
+            for attribute_key, binding in pairs(selected.bindings) do
+                local attribute_type, attribute_id = string.match(attribute_key, "^([^:]+):(.+)$")
+                local attribute = attribute_type == "DIMENSION"
+                    and ctx.dimension_by_id[key(attribute_id)] or ctx.fact_by_id[key(attribute_id)]
+                if attribute ~= nil then
+                    attribute.expression = binding.expression
+                    attribute.selected_binding = binding
+                end
+            end
+            ctx.selected_representations[key(entity.id)] = {
+                representation = representation,
+                fallback_count = selected.fallback_count,
+                binding_priority = selected.binding_priority,
+                bindings = selected.bindings,
+                legacy_only = selected.legacy_only,
+            }
+        end
+    end
+    return true, nil
 end
 
 local function apply_metric_filter(expression, filter_expr)
@@ -2064,6 +2228,7 @@ local function compile_request_table(request, options)
             return having_err
         end
         add_unique(planning_metrics, planning_metric_seen, metric_field)
+        collect_metric_entities(ctx, metric_field, needed_entities, {})
         local op = upper(having_filter.op or having_filter.operator or "=")
         if missing(having_filter.value) and missing(having_filter.value_sql)
             and op ~= "IS NULL" and op ~= "IS NOT NULL" then
@@ -2085,6 +2250,30 @@ local function compile_request_table(request, options)
             value_sql = having_filter.value_sql,
             data_type = metric_field.data_type,
         }
+    end
+
+
+    local binding_ok, binding_error = select_attribute_bindings(
+        ctx, all_dimensions, planning_metrics, needed_entities)
+    if binding_ok == nil then
+        return error_result(error_prefix .. "_080", binding_error)
+    end
+
+    -- Filters and HAVING expressions were resolved while discovering required
+    -- attributes. Rebuild them after representation selection so fallback
+    -- expressions are used consistently in WHERE and HAVING.
+    filters, _, filter_err = build_filters(
+        ctx, request.filters, selected_dimensions, needed_entities)
+    if filter_err ~= nil then return filter_err end
+    having_predicates = {}
+    for index, bound in ipairs(bound_having_filters) do
+        local metric_field = ctx.all_metric_by_id[key(bound.metric_id)]
+        local source = having_list[index]
+        local expression = expand_metric(ctx, metric_field)
+        local predicate, predicate_err = build_dimension_predicate(
+            expression, bound.op, source.value, bound.data_type, source.value_sql)
+        if predicate_err ~= nil then return predicate_err end
+        having_predicates[#having_predicates + 1] = predicate
     end
 
     local snapshot = catalog_snapshot_runtime.from_context(ctx, planning_metrics)
@@ -2190,8 +2379,24 @@ local function compile_request_table(request, options)
         end)
         for _, entity_id in ipairs(representation_entity_ids) do
             local entity = ctx.entity_by_id[key(entity_id)]
-            local representation = entity and entity.primary_representation or nil
+            local selection = entity and ctx.selected_representations[key(entity.id)] or nil
+            local representation = selection and selection.representation
+                or entity and entity.primary_representation or nil
             if representation ~= nil then
+                local selected_bindings = {}
+                for attribute_key, binding in pairs(selection and selection.bindings or {}) do
+                    selected_bindings[#selected_bindings + 1] = {
+                        attribute = attribute_key,
+                        attribute_binding_id = binding.id or JSON_NULL,
+                        binding_role = binding.role,
+                        binding_priority = binding.priority,
+                        source_expression = binding.expression,
+                        legacy = binding.legacy == true,
+                    }
+                end
+                table.sort(selected_bindings, function(left, right)
+                    return left.attribute < right.attribute
+                end)
                 plan.selected_representations[#plan.selected_representations + 1] = {
                     entity_id = entity.id,
                     entity_name = entity.name,
@@ -2200,7 +2405,13 @@ local function compile_request_table(request, options)
                     source_kind = representation.source_kind,
                     source_schema = representation.source_schema,
                     source_object = representation.source_object,
-                    selection_reason = "STATIC_PRIMARY",
+                    selection_reason = (selection == nil or selection.legacy_only)
+                        and "STATIC_PRIMARY"
+                        or selection.fallback_count > 0 and "ATTRIBUTE_FALLBACK"
+                        or "ATTRIBUTE_PREFER",
+                    fallback_binding_count = selection and selection.fallback_count or 0,
+                    binding_priority = selection and selection.binding_priority or 0,
+                    selected_bindings = selected_bindings,
                 }
             end
         end

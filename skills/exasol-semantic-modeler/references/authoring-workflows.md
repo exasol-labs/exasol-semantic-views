@@ -197,11 +197,36 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
 EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 ```
 
-Promotion is manual/static and invalidates cached plans. To remove a
-representation, first promote another one; removing the current primary is
-rejected. Validation probe failures are blocking, so run it as a user that can
-query every source. Do not use F1 for partial columns, temporal partitions,
-fallback, union, or reconciliation.
+Promotion is manual/static unless F2 attribute bindings are present. To remove
+a representation, first remove its attribute bindings and promote another one
+if it is primary. Validation probe failures are blocking, so run it as a user
+that can query every source. Do not use equivalent representations for temporal
+partitions, union, reconciliation, or non-equivalent entity identity.
+
+### Bind Dimensions and Facts Per Representation
+
+`ADD_DIMENSION` and `ADD_FACT` create a preferred binding on `primary`
+automatically. When an equivalent representation uses different physical
+columns, add explicit bindings after creating the semantic attribute:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
+  'sales', 'DIMENSION', 'customer_name', 'mdm',
+  'c.canonical_name', 'PREFER', 1
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
+  'sales', 'DIMENSION', 'customer_name', 'salesforce',
+  'c.account_name', 'FALLBACK', 1
+);
+```
+
+Smoke-test each expression against its target representation before adding the
+binding. A compiled request uses one representation per entity; that source
+must provide bindings for every requested dimension and transitive metric fact.
+`PREFER` outranks `FALLBACK`, then lower binding and representation priorities
+win. F2 does not coalesce rows or values across sources. Inspect
+`plan_json.selected_representations[].selected_bindings` to verify the choice.
 
 ## Rebuild an Existing Model
 

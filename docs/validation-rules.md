@@ -74,6 +74,8 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_036` | error | An active representation has invalid F1 metadata, a duplicate name, a missing entity, an unstable alias, or unsupported temporal coverage. |
 | `SEMANTIC_MODEL_037` | error | F1 equivalence cannot be proven: no key is declared, a key probe failed, or a representation violates a declared key's grain. |
 | `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. |
+| `SEMANTIC_MODEL_039` | error | An attribute binding has invalid ownership, role, priority, representation, or duplicate active membership. |
+| `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses an unsupported function, or references a column absent from its target representation. |
 
 ## Metric/Dimension Matrix
 

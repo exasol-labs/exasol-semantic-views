@@ -461,6 +461,63 @@ test("validator rejects malformed and column-incompatible F1 representations", f
     assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_017").message, "archive")
 end)
 
+test("validator enforces F2 attribute binding ownership and expressions", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "ARCHIVE", source_object = "ORDERS"}
+    local dimension = {id = 10, name = "status", entity_id = 1,
+        expression = "o.status"}
+    local ctx = validation_context({
+        entity_by_id = {["1"] = entity},
+        entity_name_by_id = {["1"] = "orders"},
+        entity_alias_by_id = {["1"] = "O"},
+        representations = {representation},
+        dimensions = {dimension}, dimension_by_id = {["10"] = dimension},
+        facts = {}, fact_by_id = {}, metrics = {},
+        bindings_by_attribute = {['DIMENSION:10'] = {{id = 1}}},
+        attribute_bindings = {
+            {id = 1, entity_id = 1, attribute_type = "DIMENSION", attribute_id = 10,
+                representation_id = 2, expression = "x.missing + QUARTER(o.created_at)",
+                role = "INVALID", priority = 0},
+            {id = 2, entity_id = 1, attribute_type = "DIMENSION", attribute_id = 10,
+                representation_id = 2, expression = "o.status", role = "FALLBACK", priority = 2},
+        },
+    })
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {} end
+        return {}
+    end, function() api.validate_expressions(ctx, {}) end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_039"))
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_040"))
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_040").message,
+        "outside its representation")
+end)
+
+test("validator accepts valid F2 bindings and rejects dangling ownership", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "ARCHIVE", source_object = "ORDERS"}
+    local fact = {id = 20, name = "amount", entity_id = 1, expression = "o.amount"}
+    local ctx = validation_context({
+        entity_by_id = {["1"] = entity}, entity_name_by_id = {["1"] = "orders"},
+        entity_alias_by_id = {["1"] = "O"}, representations = {representation},
+        dimensions = {}, dimension_by_id = {}, facts = {fact}, fact_by_id = {["20"] = fact},
+        metrics = {}, bindings_by_attribute = {['FACT:20'] = {{id = 1}}},
+        attribute_bindings = {
+            {id = 1, entity_id = 1, attribute_type = "FACT", attribute_id = 20,
+                representation_id = 2, expression = "o.amount", role = "PREFER", priority = 1},
+            {id = 2, entity_id = 9, attribute_type = "UNKNOWN", attribute_id = 99,
+                representation_id = 99, expression = "o.amount", role = "FALLBACK", priority = 2},
+        },
+    })
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        return {}
+    end, function() api.validate_expressions(ctx, {}) end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_039"))
+    assert_true(not has_rule(ctx, "SEMANTIC_MODEL_040"))
+end)
+
 test("validator proves F1 representation grain and key-set equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
@@ -787,6 +844,11 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "SELECT FACT_ID, FACT_NAME") then
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)",
                 "Revenue input", "USD", "currency", false, true}}
+        elseif contains(sql, "FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS") then
+            return {
+                {201, 1, "DIMENSION", 10, 100, "o.status", "PREFER", 1, true},
+                {202, 1, "FACT", 20, 100, "o.amount", "PREFER", 1, true},
+            }
         elseif contains(sql, "SELECT METRIC_ID, METRIC_NAME") and not contains(sql, "metric_col") then
             return {{30, "total_revenue", 1, "SUM(net_revenue)", nil, "ADDITIVE",
                 "DECIMAL(18,2)", "Total revenue", "USD", "currency", false, true}}

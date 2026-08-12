@@ -293,6 +293,7 @@ local model_tables = {
     "SYNONYMS",
     "CALCULATION_GROUPS",
     "SEMANTIC_DEFINITION_SOURCES",
+    "ATTRIBUTE_BINDINGS",
     "DIMENSIONS",
     "FACTS",
     "METRICS",
@@ -632,6 +633,11 @@ end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
+local function scalar(sql_text, params)
+    local scalar_rows = query(sql_text, params or {})
+    if scalar_rows == nil or #scalar_rows == 0 then return nil end
+    return scalar_rows[1][1]
+end
 
 local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
@@ -673,14 +679,16 @@ if string.upper(tostring(source_alias)) ~= string.upper(tostring(entity_source_a
         .. tostring(entity_source_alias))
 end
 local previous_rows = query([[
-    SELECT REPRESENTATION_NAME
+    SELECT REPRESENTATION_ID, REPRESENTATION_NAME
     FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
     WHERE ENTITY_ID = :entity_id
       AND REPRESENTATION_ROLE = 'PRIMARY'
       AND STATUS = 'ACTIVE'
 ]], {entity_id = entity_id})
+local previous_representation_id = previous_rows and previous_rows[1]
+    and row_value(previous_rows[1], "REPRESENTATION_ID", 1) or nil
 local previous_name = previous_rows and previous_rows[1]
-    and row_value(previous_rows[1], "REPRESENTATION_NAME", 1) or null
+    and row_value(previous_rows[1], "REPRESENTATION_NAME", 2) or null
 local changed = tostring(row_value(row, "REPRESENTATION_ROLE", 9)) ~= "PRIMARY"
 
 if changed then
@@ -715,6 +723,16 @@ if changed then
         WHERE ENTITY_ID = :entity_id
     ]], {entity_id = entity_id, source_schema = source_schema,
         source_object = source_object, source_alias = source_alias})
+    query([[
+        UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        SET REPRESENTATION_ID = :representation_id,
+            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        WHERE ENTITY_ID = :entity_id
+          AND REPRESENTATION_ID = :previous_representation_id
+          AND IS_DEFAULT = TRUE
+          AND STATUS = 'ACTIVE'
+    ]], {entity_id = entity_id, representation_id = representation_id,
+        previous_representation_id = previous_representation_id})
     query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
         {version_id = version_id})
     query([[
@@ -758,6 +776,11 @@ end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
+local function scalar(sql_text, params)
+    local scalar_rows = query(sql_text, params or {})
+    if scalar_rows == nil or #scalar_rows == 0 then return nil end
+    return scalar_rows[1][1]
+end
 
 local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
@@ -785,6 +808,13 @@ local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local representation_id = row_value(rows[1], "REPRESENTATION_ID", 3)
 if tostring(row_value(rows[1], "REPRESENTATION_ROLE", 4)) == "PRIMARY" then
     error("SEMANTIC_ADMIN_047: cannot remove the PRIMARY representation; promote another representation first")
+end
+local binding_count = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+    WHERE REPRESENTATION_ID = :representation_id AND STATUS = 'ACTIVE'
+]], {representation_id = representation_id})
+if tonumber(binding_count or 0) > 0 then
+    error("SEMANTIC_ADMIN_048: cannot remove a representation with active attribute bindings; remove the bindings first")
 end
 query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
     {representation_id = representation_id})
@@ -1374,6 +1404,10 @@ local function rollback_dimension(model_name, dimension_id_value, object_id_valu
           AND OBJECT_REF_ID = :dimension_id
     ]], {object_id = object_id_value, dimension_id = dimension_id_value})
     query([[
+        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE ATTRIBUTE_TYPE = 'DIMENSION' AND ATTRIBUTE_ID = :dimension_id
+    ]], {dimension_id = dimension_id_value})
+    query([[
         DELETE FROM SYS_SEMANTIC.DIMENSIONS
         WHERE DIMENSION_ID = :dimension_id
     ]], {dimension_id = dimension_id_value})
@@ -1434,6 +1468,29 @@ local dimension_id = scalar([[
       AND VERSION_ID = :version_id
       AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
 ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
+local primary_representation_id = scalar([[
+    SELECT REPRESENTATION_ID
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND REPRESENTATION_ROLE = 'PRIMARY'
+      AND STATUS = 'ACTIVE'
+]], {entity_id = entity_id_value})
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY, IS_DEFAULT, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, 'DIMENSION', :attribute_id,
+      :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
+    )
+]], {
+    model_id = model.model_id,
+    version_id = model.version_id,
+    entity_id = entity_id_value,
+    attribute_id = dimension_id,
+    representation_id = primary_representation_id,
+    expression = tostring(EXPRESSION),
+})
 add_object_column(object_id_value, "DIMENSION", dimension_id, dimension_name)
 local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
 local validation_error = validation_error_summary(validation_rows)
@@ -1662,11 +1719,51 @@ else
     })
 end
 
+local default_binding_id = scalar([[
+    SELECT ATTRIBUTE_BINDING_ID
+    FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+    WHERE ATTRIBUTE_TYPE = 'DIMENSION'
+      AND ATTRIBUTE_ID = :dimension_id
+      AND IS_DEFAULT = TRUE
+      AND STATUS = 'ACTIVE'
+]], {dimension_id = dimension_id})
+local primary_representation_id = scalar([[
+    SELECT REPRESENTATION_ID
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND REPRESENTATION_ROLE = 'PRIMARY'
+      AND STATUS = 'ACTIVE'
+]], {entity_id = entity_id_value})
+if default_binding_id == nil then
+    query([[
+        INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+          BINDING_PRIORITY, IS_DEFAULT, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, 'DIMENSION', :dimension_id,
+          :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
+        )
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_id = entity_id_value, dimension_id = dimension_id,
+        representation_id = primary_representation_id, expression = tostring(EXPRESSION)})
+else
+    query([[
+        UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        SET ENTITY_ID = :entity_id, REPRESENTATION_ID = :representation_id,
+            SOURCE_EXPRESSION = :expression,
+            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        WHERE ATTRIBUTE_BINDING_ID = :binding_id
+    ]], {entity_id = entity_id_value, representation_id = primary_representation_id,
+        expression = tostring(EXPRESSION), binding_id = default_binding_id})
+end
+
 local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
 local validation_error = validation_error_summary(validation_rows)
 if validation_error ~= nil then
     if not was_update then
         query([[DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE OBJECT_ID = :object_id AND COLUMN_KIND = 'DIMENSION' AND OBJECT_REF_ID = :dimension_id]], {object_id = object_id_value, dimension_id = dimension_id})
+        query([[DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_TYPE = 'DIMENSION' AND ATTRIBUTE_ID = :dimension_id]], {dimension_id = dimension_id})
         query([[DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE DIMENSION_ID = :dimension_id]], {dimension_id = dimension_id})
         query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
     end
@@ -1773,6 +1870,12 @@ query([[
        AND COLUMN_KIND = 'DIMENSION'
        AND OBJECT_REF_ID = :dimension_id
 ]], {object_id = object_id_value, dimension_id = dimension_id})
+
+query([[
+    DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+     WHERE ATTRIBUTE_TYPE = 'DIMENSION'
+       AND ATTRIBUTE_ID = :dimension_id
+]], {dimension_id = dimension_id})
 
 query([[
     DELETE FROM SYS_SEMANTIC.DIMENSIONS
@@ -1905,6 +2008,10 @@ end
 
 local function rollback_fact(model_name, fact_id_value)
     query([[
+        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID = :fact_id
+    ]], {fact_id = fact_id_value})
+    query([[
         DELETE FROM SYS_SEMANTIC.FACTS
         WHERE FACT_ID = :fact_id
     ]], {fact_id = fact_id_value})
@@ -1964,6 +2071,29 @@ local fact_id = scalar([[
       AND VERSION_ID = :version_id
       AND UPPER(FACT_NAME) = UPPER(:fact_name)
 ]], {model_id = model.model_id, version_id = model.version_id, fact_name = fact_name})
+local primary_representation_id = scalar([[
+    SELECT REPRESENTATION_ID
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND REPRESENTATION_ROLE = 'PRIMARY'
+      AND STATUS = 'ACTIVE'
+]], {entity_id = entity_id_value})
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY, IS_DEFAULT, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, 'FACT', :attribute_id,
+      :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
+    )
+]], {
+    model_id = model.model_id,
+    version_id = model.version_id,
+    entity_id = entity_id_value,
+    attribute_id = fact_id,
+    representation_id = primary_representation_id,
+    expression = tostring(EXPRESSION),
+})
 local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
 local validation_error = validation_error_summary(validation_rows)
 if validation_error ~= nil then
@@ -1978,6 +2108,194 @@ exit({{fact_id, model_name, entity_name, fact_name, false, bool_value(IS_PRIVATE
   WAS_UPDATE BOOLEAN,
   IS_PRIVATE BOOLEAN,
   IS_CERTIFIED BOOLEAN
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
+  MODEL_NAME,
+  ATTRIBUTE_TYPE,
+  ATTRIBUTE_NAME,
+  REPRESENTATION_NAME,
+  SOURCE_EXPRESSION,
+  BINDING_ROLE,
+  BINDING_PRIORITY
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or string.match(tostring(value), "^%s*$") ~= nil
+end
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+local function normalized(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    return string.match(tostring(value), "^%s*(.-)%s*$")
+end
+local function choice(value, label, allowed)
+    local result = string.upper(normalized(value, label))
+    if not allowed[result] then
+        error("SEMANTIC_ADMIN_001: unsupported " .. label .. ": " .. tostring(value))
+    end
+    return result
+end
+
+local model_name = normalized(MODEL_NAME, "MODEL_NAME")
+local attribute_type = choice(ATTRIBUTE_TYPE, "ATTRIBUTE_TYPE", {DIMENSION = true, FACT = true})
+local attribute_name = normalized(ATTRIBUTE_NAME, "ATTRIBUTE_NAME")
+local representation_name = normalized(REPRESENTATION_NAME, "REPRESENTATION_NAME")
+local source_expression = normalized(SOURCE_EXPRESSION, "SOURCE_EXPRESSION")
+local binding_role = choice(BINDING_ROLE, "BINDING_ROLE", {PREFER = true, FALLBACK = true})
+local priority = tonumber(BINDING_PRIORITY)
+if priority == nil or priority < 1 or priority % 1 ~= 0 then
+    error("SEMANTIC_ADMIN_001: BINDING_PRIORITY must be a positive integer")
+end
+
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID
+    FROM SYS_SEMANTIC.MODELS m
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if rows == nil or #rows == 0 then error("SEMANTIC_ADMIN_011: model not found: " .. model_name) end
+local model_id = rows[1][1]
+local version_id = rows[1][2]
+local table_name = attribute_type == "DIMENSION" and "DIMENSIONS" or "FACTS"
+local id_column = attribute_type == "DIMENSION" and "DIMENSION_ID" or "FACT_ID"
+local name_column = attribute_type == "DIMENSION" and "DIMENSION_NAME" or "FACT_NAME"
+local attribute_rows = query(
+    "SELECT " .. id_column .. ", ENTITY_ID FROM SYS_SEMANTIC." .. table_name
+      .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id"
+      .. " AND UPPER(" .. name_column .. ") = UPPER(:attribute_name) AND STATUS = 'ACTIVE'",
+    {model_id = model_id, version_id = version_id, attribute_name = attribute_name})
+if attribute_rows == nil or #attribute_rows == 0 then
+    error("SEMANTIC_ADMIN_021: " .. attribute_type .. " not found: " .. attribute_name)
+end
+local attribute_id = attribute_rows[1][1]
+local entity_id = attribute_rows[1][2]
+local representation_id = scalar([[
+    SELECT REPRESENTATION_ID
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND ENTITY_ID = :entity_id
+      AND UPPER(REPRESENTATION_NAME) = UPPER(:representation_name)
+      AND STATUS = 'ACTIVE'
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      representation_name = representation_name})
+if representation_id == nil then
+    error("SEMANTIC_ADMIN_015: representation not found for attribute entity: " .. representation_name)
+end
+local duplicate = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+    WHERE ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
+      AND REPRESENTATION_ID = :representation_id AND STATUS = 'ACTIVE'
+]], {attribute_type = attribute_type, attribute_id = attribute_id,
+      representation_id = representation_id})
+if tonumber(duplicate or 0) > 0 then
+    error("SEMANTIC_ADMIN_024: duplicate attribute binding: " .. attribute_name
+        .. " -> " .. representation_name)
+end
+
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, :attribute_type, :attribute_id,
+      :representation_id, :source_expression, :binding_role, :priority, 'ACTIVE'
+    )
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      attribute_type = attribute_type, attribute_id = attribute_id,
+      representation_id = representation_id, source_expression = source_expression,
+      binding_role = binding_role, priority = priority})
+local binding_id = scalar([[
+    SELECT ATTRIBUTE_BINDING_ID FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+    WHERE ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
+      AND REPRESENTATION_ID = :representation_id AND STATUS = 'ACTIVE'
+]], {attribute_type = attribute_type, attribute_id = attribute_id,
+      representation_id = representation_id})
+local validation_rows = query(
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    {model_name = model_name})
+for _, validation_row in ipairs(validation_rows or {}) do
+    local severity = validation_row.SEVERITY or validation_row.severity or validation_row[1]
+    if tostring(severity) == "ERROR" then
+        local rule_code = validation_row.RULE_CODE or validation_row.rule_code
+            or validation_row[4] or "SEMANTIC_MODEL_ERROR"
+        local message = validation_row.MESSAGE or validation_row.message
+            or validation_row[5] or "model validation failed"
+        query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_BINDING_ID = :binding_id",
+            {binding_id = binding_id})
+        query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+            {model_name = model_name})
+        error("SEMANTIC_ADMIN_093: attribute binding rejected; validation failed: "
+            .. tostring(rule_code) .. " " .. tostring(message))
+    end
+end
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+exit({{binding_id, model_name, attribute_type, attribute_name, representation_name,
+    binding_role, priority}}, [[
+  ATTRIBUTE_BINDING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256), BINDING_ROLE VARCHAR(32),
+  BINDING_PRIORITY DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING(
+  MODEL_NAME,
+  ATTRIBUTE_TYPE,
+  ATTRIBUTE_NAME,
+  REPRESENTATION_NAME
+)
+RETURNS TABLE AS
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+local model_name = string.match(tostring(MODEL_NAME or ""), "^%s*(.-)%s*$")
+local attribute_type = string.upper(string.match(tostring(ATTRIBUTE_TYPE or ""), "^%s*(.-)%s*$"))
+local attribute_name = string.match(tostring(ATTRIBUTE_NAME or ""), "^%s*(.-)%s*$")
+local representation_name = string.match(tostring(REPRESENTATION_NAME or ""), "^%s*(.-)%s*$")
+if attribute_type ~= "DIMENSION" and attribute_type ~= "FACT" then
+    error("SEMANTIC_ADMIN_001: ATTRIBUTE_TYPE must be DIMENSION or FACT")
+end
+local table_name = attribute_type == "DIMENSION" and "DIMENSIONS" or "FACTS"
+local id_column = attribute_type == "DIMENSION" and "DIMENSION_ID" or "FACT_ID"
+local name_column = attribute_type == "DIMENSION" and "DIMENSION_NAME" or "FACT_NAME"
+local binding_rows = query(
+    "SELECT ab.ATTRIBUTE_BINDING_ID, ab.MODEL_ID, ab.VERSION_ID FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS ab"
+      .. " JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = ab.MODEL_ID"
+      .. " JOIN SYS_SEMANTIC." .. table_name .. " a ON a." .. id_column .. " = ab.ATTRIBUTE_ID"
+      .. " JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er ON er.REPRESENTATION_ID = ab.REPRESENTATION_ID"
+      .. " WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)"
+      .. " AND ab.ATTRIBUTE_TYPE = :attribute_type"
+      .. " AND UPPER(a." .. name_column .. ") = UPPER(:attribute_name)"
+      .. " AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)"
+      .. " AND ab.STATUS = 'ACTIVE'",
+    {model_name = model_name, attribute_type = attribute_type,
+     attribute_name = attribute_name, representation_name = representation_name})
+if binding_rows == nil or #binding_rows == 0 then
+    error("SEMANTIC_ADMIN_025: attribute binding not found")
+end
+local binding_id = binding_rows[1][1]
+local model_id = binding_rows[1][2]
+local version_id = binding_rows[1][3]
+query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_BINDING_ID = :binding_id",
+    {binding_id = binding_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query([[
+    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND STATUS IN ('OK', 'WARNING')
+]], {model_id = model_id, version_id = version_id})
+exit({{binding_id, model_name, attribute_type, attribute_name, representation_name, "REMOVED"}}, [[
+  ATTRIBUTE_BINDING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256), STATUS VARCHAR(32)
 ]])
 /
 
@@ -5026,6 +5344,39 @@ local function load_catalog(ctx)
         ctx.fact_by_name[upper(fact.name)] = fact
     end
 
+    ctx.attribute_bindings = {}
+    ctx.bindings_by_attribute = {}
+    local binding_rows = query([[
+        SELECT ATTRIBUTE_BINDING_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+               REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+               BINDING_PRIORITY, IS_DEFAULT
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          CASE WHEN BINDING_ROLE = 'PREFER' THEN 0 ELSE 1 END,
+          BINDING_PRIORITY, ATTRIBUTE_BINDING_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(binding_rows or {}) do
+        local binding = {
+            id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 3),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 4),
+            representation_id = row_value(row, "REPRESENTATION_ID", 5),
+            expression = row_value(row, "SOURCE_EXPRESSION", 6),
+            role = row_value(row, "BINDING_ROLE", 7),
+            priority = row_value(row, "BINDING_PRIORITY", 8),
+            is_default = row_value(row, "IS_DEFAULT", 9),
+        }
+        table.insert(ctx.attribute_bindings, binding)
+        local attribute_key = upper(binding.attribute_type) .. ":" .. key(binding.attribute_id)
+        ctx.bindings_by_attribute[attribute_key] =
+            ctx.bindings_by_attribute[attribute_key] or {}
+        table.insert(ctx.bindings_by_attribute[attribute_key], binding)
+    end
+
     ctx.metrics = {}
     ctx.metric_by_id = {}
     ctx.metric_by_name = {}
@@ -5956,7 +6307,12 @@ local function validate_expressions(ctx, safe_edges)
                 "Unsupported function in dimension expression: " .. fn .. ".")
         end
         local entity = ctx.entity_by_id[key(dimension.entity_id)]
-        if entity ~= nil then
+        local bindings = (ctx.bindings_by_attribute or {})["DIMENSION:" .. key(dimension.id)] or {}
+        local explicit_binding = false
+        for _, binding in ipairs(bindings) do
+            if binding.is_default ~= true then explicit_binding = true end
+        end
+        if entity ~= nil and not explicit_binding then
             for _, ref in ipairs(column_refs_in_expression(dimension.expression)) do
                 local missing_representations =
                     missing_representation_columns(ctx, entity, ref.column_name)
@@ -5987,7 +6343,12 @@ local function validate_expressions(ctx, safe_edges)
                 "Unsupported function in fact expression: " .. fn .. ".")
         end
         local entity = ctx.entity_by_id[key(fact.entity_id)]
-        if entity ~= nil then
+        local bindings = (ctx.bindings_by_attribute or {})["FACT:" .. key(fact.id)] or {}
+        local explicit_binding = false
+        for _, binding in ipairs(bindings) do
+            if binding.is_default ~= true then explicit_binding = true end
+        end
+        if entity ~= nil and not explicit_binding then
             for _, ref in ipairs(column_refs_in_expression(fact.expression)) do
                 local missing_representations =
                     missing_representation_columns(ctx, entity, ref.column_name)
@@ -5996,6 +6357,72 @@ local function validate_expressions(ctx, safe_edges)
                         "Fact expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
                             .. representation_suffix(missing_representations) .. ".")
+                end
+            end
+        end
+    end
+
+    local representation_by_id = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        representation_by_id[key(representation.id)] = representation
+    end
+    local seen = {}
+    for _, binding in ipairs(ctx.attribute_bindings or {}) do
+        local attribute_type = upper(binding.attribute_type)
+        local attribute = attribute_type == "DIMENSION"
+            and ctx.dimension_by_id[key(binding.attribute_id)]
+            or attribute_type == "FACT" and ctx.fact_by_id[key(binding.attribute_id)] or nil
+        local representation = representation_by_id[key(binding.representation_id)]
+        local object_name = (attribute and attribute.name or tostring(binding.attribute_id))
+            .. "@" .. (representation and representation.name or tostring(binding.representation_id))
+        local binding_key = attribute_type .. ":" .. key(binding.attribute_id)
+            .. ":" .. key(binding.representation_id)
+        if seen[binding_key] then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Duplicate active binding for attribute and representation.")
+        end
+        seen[binding_key] = true
+        if attribute == nil or (attribute_type ~= "DIMENSION" and attribute_type ~= "FACT") then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding references an unknown dimension or fact.")
+        elseif key(attribute.entity_id) ~= key(binding.entity_id) then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding entity does not match the attribute owner.")
+        end
+        if representation == nil or key(representation.entity_id) ~= key(binding.entity_id) then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding representation does not belong to the attribute entity.")
+        end
+        local role = upper(binding.role)
+        if role ~= "PREFER" and role ~= "FALLBACK" then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding role must be PREFER or FALLBACK.")
+        end
+        local priority = tonumber(binding.priority)
+        if priority == nil or priority < 1 or priority % 1 ~= 0 then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding priority must be a positive integer.")
+        end
+        if attribute ~= nil and representation ~= nil then
+            local owning_alias = upper(representation.alias)
+            for alias, _ in pairs(aliases_in_expression(binding.expression)) do
+                if alias ~= owning_alias then
+                    add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                        "SEMANTIC_MODEL_040", "Binding expression references alias outside its representation: "
+                            .. tostring(alias) .. ".")
+                end
+            end
+            for fn, _ in pairs(unsupported_functions(binding.expression)) do
+                add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                    "SEMANTIC_MODEL_040", "Unsupported function in binding expression: "
+                        .. tostring(fn) .. ".")
+            end
+            for _, ref in ipairs(column_refs_in_expression(binding.expression)) do
+                if ref.alias == owning_alias and not source_column_exists(
+                    representation.source_schema, representation.source_object, ref.column_name) then
+                    add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                        "SEMANTIC_MODEL_040", "Binding expression references unknown source column: "
+                            .. ref.alias .. "." .. ref.column_name .. ".")
                 end
             end
         end
@@ -7474,7 +7901,7 @@ ESV_CATALOG_SNAPSHOT = M
 
 -- Typed metric planning and strict grain-proof boundary.
 
-local M = {PLAN_VERSION = 8}
+local M = {PLAN_VERSION = 9}
 local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 
 local function key(value) return tostring(value) end
@@ -9971,6 +10398,7 @@ local function load_catalog(model, object_name)
         entities = {},
         representations = {},
         representations_by_entity = {},
+        representation_by_id = {},
         entity_by_id = {},
         entity_by_alias = {},
         dimensions = {},
@@ -9982,6 +10410,8 @@ local function load_catalog(model, object_name)
         facts = {},
         fact_by_id = {},
         fact_by_name = {},
+        attribute_bindings = {},
+        bindings_by_attribute = {},
         relationships = {},
         relationship_by_id = {},
         unique_keys = {},
@@ -10022,9 +10452,9 @@ local function load_catalog(model, object_name)
                 id = row_value(row, "REPRESENTATION_ID", 8),
                 entity_id = row_value(row, "ENTITY_ID", 1),
                 name = row_value(row, "REPRESENTATION_NAME", 9),
-                source_kind = row_value(row, "SOURCE_KIND", 10),
-                role = row_value(row, "REPRESENTATION_ROLE", 11),
-                priority = row_value(row, "PRIORITY", 12),
+                source_kind = row_value(row, "SOURCE_KIND", 10) or "RELATION",
+                role = row_value(row, "REPRESENTATION_ROLE", 11) or "PRIMARY",
+                priority = row_value(row, "PRIORITY", 12) or 1,
                 source_schema = row_value(row, "SOURCE_SCHEMA", 3),
                 source_object = row_value(row, "SOURCE_OBJECT", 4),
                 alias = row_value(row, "SOURCE_ALIAS", 5),
@@ -10064,6 +10494,7 @@ local function load_catalog(model, object_name)
             valid_to = row_value(row, "VALID_TO", 13),
         }
         ctx.representations[#ctx.representations + 1] = representation
+        ctx.representation_by_id[key(representation.id)] = representation
         local entity_key = key(representation.entity_id)
         ctx.representations_by_entity[entity_key] =
             ctx.representations_by_entity[entity_key] or {}
@@ -10293,6 +10724,39 @@ local function load_catalog(model, object_name)
         ctx.facts[#ctx.facts + 1] = fact
         ctx.fact_by_id[key(fact.id)] = fact
         ctx.fact_by_name[upper(fact.name)] = fact
+    end
+
+    local binding_rows = query([[
+        SELECT ATTRIBUTE_BINDING_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+               REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+               BINDING_PRIORITY, IS_DEFAULT
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          CASE WHEN BINDING_ROLE = 'PREFER' THEN 0 ELSE 1 END,
+          BINDING_PRIORITY, ATTRIBUTE_BINDING_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(binding_rows or {}) do
+        local binding = {
+            id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 3),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 4),
+            representation_id = row_value(row, "REPRESENTATION_ID", 5),
+            expression = row_value(row, "SOURCE_EXPRESSION", 6),
+            role = row_value(row, "BINDING_ROLE", 7),
+            priority = row_value(row, "BINDING_PRIORITY", 8),
+            is_default = row_value(row, "IS_DEFAULT", 9),
+            legacy = row_value(row, "IS_DEFAULT", 9) == true,
+        }
+        ctx.attribute_bindings[#ctx.attribute_bindings + 1] = binding
+        local attribute_key = upper(binding.attribute_type) .. ":" .. key(binding.attribute_id)
+        ctx.bindings_by_attribute[attribute_key] =
+            ctx.bindings_by_attribute[attribute_key] or {}
+        ctx.bindings_by_attribute[attribute_key]
+            [#ctx.bindings_by_attribute[attribute_key] + 1] = binding
     end
 
     local relationship_rows = query([[
@@ -10609,6 +11073,133 @@ local function collect_metric_entities(ctx, metric, needed_entities, seen_metric
             end
         end
     end
+end
+
+local function collect_metric_facts(ctx, metric, required, seen_metrics)
+    local metric_key = key(metric.id)
+    if seen_metrics[metric_key] then return end
+    seen_metrics[metric_key] = true
+    for _, dependency in ipairs(metric.dependencies or {}) do
+        if upper(dependency.object_type) == "FACT" then
+            local fact = ctx.fact_by_id[key(dependency.object_id)]
+            if fact ~= nil then required["FACT:" .. key(fact.id)] = fact end
+        elseif upper(dependency.object_type) == "METRIC" then
+            local nested = ctx.all_metric_by_id[key(dependency.object_id)]
+            if nested ~= nil then collect_metric_facts(ctx, nested, required, seen_metrics) end
+        end
+    end
+end
+
+local function select_attribute_bindings(ctx, dimensions, metrics, needed_entities)
+    local required_by_entity = {}
+    local function require_attribute(attribute_type, attribute)
+        local entity_key = key(attribute.entity_id)
+        required_by_entity[entity_key] = required_by_entity[entity_key] or {}
+        required_by_entity[entity_key][attribute_type .. ":" .. key(attribute.id)] = attribute
+    end
+    for _, dimension in ipairs(dimensions or {}) do
+        require_attribute("DIMENSION", dimension)
+    end
+    local required_facts = {}
+    for _, metric in ipairs(metrics or {}) do
+        collect_metric_facts(ctx, metric, required_facts, {})
+    end
+    for _, fact in pairs(required_facts) do require_attribute("FACT", fact) end
+
+    ctx.selected_representations = {}
+    for entity_id, _ in pairs(needed_entities or {}) do
+        local entity = ctx.entity_by_id[key(entity_id)]
+        if entity ~= nil then
+            local attributes = required_by_entity[key(entity.id)] or {}
+            local candidates = {}
+            local representations = ctx.representations_by_entity[key(entity.id)] or {}
+            if #representations == 0 and entity.primary_representation ~= nil then
+                representations = {entity.primary_representation}
+            end
+            for _, representation in ipairs(representations) do
+                local candidate = {
+                    representation = representation,
+                    bindings = {},
+                    fallback_count = 0,
+                    binding_priority = 0,
+                    complete = true,
+                    legacy_only = true,
+                }
+                for attribute_key, attribute in pairs(attributes) do
+                    local bindings = ctx.bindings_by_attribute[attribute_key] or {}
+                    local selected = nil
+                    for _, binding in ipairs(bindings) do
+                        if key(binding.representation_id) == key(representation.id) then
+                            selected = binding
+                            break
+                        end
+                    end
+                    if selected == nil and #bindings == 0
+                        and upper(representation.role) == "PRIMARY" then
+                        selected = {
+                            id = nil,
+                            representation_id = representation.id,
+                            expression = attribute.expression,
+                            role = "PREFER",
+                            priority = 1,
+                            legacy = true,
+                        }
+                    end
+                    if selected == nil then
+                        candidate.complete = false
+                        break
+                    end
+                    candidate.bindings[attribute_key] = selected
+                    if selected.legacy ~= true then candidate.legacy_only = false end
+                    if upper(selected.role) == "FALLBACK" then
+                        candidate.fallback_count = candidate.fallback_count + 1
+                    end
+                    candidate.binding_priority = candidate.binding_priority
+                        + tonumber(selected.priority or 1)
+                end
+                if candidate.complete then candidates[#candidates + 1] = candidate end
+            end
+            table.sort(candidates, function(left, right)
+                if left.fallback_count ~= right.fallback_count then
+                    return left.fallback_count < right.fallback_count
+                end
+                if left.binding_priority ~= right.binding_priority then
+                    return left.binding_priority < right.binding_priority
+                end
+                local left_priority = tonumber(left.representation.priority or 1)
+                local right_priority = tonumber(right.representation.priority or 1)
+                if left_priority ~= right_priority then return left_priority < right_priority end
+                return tonumber(left.representation.id) < tonumber(right.representation.id)
+            end)
+            local selected = candidates[1]
+            if selected == nil then
+                return nil, "No active representation provides every required attribute for entity '"
+                    .. tostring(entity.name) .. "'. Add compatible PREFER/FALLBACK bindings."
+            end
+            local representation = selected.representation
+            entity.source_schema = representation.source_schema
+            entity.source_object = representation.source_object
+            entity.alias = representation.alias
+            entity.selected_representation = representation
+            for attribute_key, binding in pairs(selected.bindings) do
+                local attribute_type, attribute_id = string.match(attribute_key, "^([^:]+):(.+)$")
+                local attribute = attribute_type == "DIMENSION"
+                    and ctx.dimension_by_id[key(attribute_id)] or ctx.fact_by_id[key(attribute_id)]
+                if attribute ~= nil then
+                    attribute.expression = binding.expression
+                    attribute.selected_binding = binding
+                end
+            end
+            ctx.selected_representations[key(entity.id)] = {
+                representation = representation,
+                fallback_count = selected.fallback_count,
+                binding_priority = selected.binding_priority,
+                bindings = selected.bindings,
+                legacy_only = selected.legacy_only,
+            }
+        end
+    end
+    return true, nil
 end
 
 local function apply_metric_filter(expression, filter_expr)
@@ -11257,6 +11848,7 @@ local function compile_request_table(request, options)
             return having_err
         end
         add_unique(planning_metrics, planning_metric_seen, metric_field)
+        collect_metric_entities(ctx, metric_field, needed_entities, {})
         local op = upper(having_filter.op or having_filter.operator or "=")
         if missing(having_filter.value) and missing(having_filter.value_sql)
             and op ~= "IS NULL" and op ~= "IS NOT NULL" then
@@ -11278,6 +11870,30 @@ local function compile_request_table(request, options)
             value_sql = having_filter.value_sql,
             data_type = metric_field.data_type,
         }
+    end
+
+
+    local binding_ok, binding_error = select_attribute_bindings(
+        ctx, all_dimensions, planning_metrics, needed_entities)
+    if binding_ok == nil then
+        return error_result(error_prefix .. "_080", binding_error)
+    end
+
+    -- Filters and HAVING expressions were resolved while discovering required
+    -- attributes. Rebuild them after representation selection so fallback
+    -- expressions are used consistently in WHERE and HAVING.
+    filters, _, filter_err = build_filters(
+        ctx, request.filters, selected_dimensions, needed_entities)
+    if filter_err ~= nil then return filter_err end
+    having_predicates = {}
+    for index, bound in ipairs(bound_having_filters) do
+        local metric_field = ctx.all_metric_by_id[key(bound.metric_id)]
+        local source = having_list[index]
+        local expression = expand_metric(ctx, metric_field)
+        local predicate, predicate_err = build_dimension_predicate(
+            expression, bound.op, source.value, bound.data_type, source.value_sql)
+        if predicate_err ~= nil then return predicate_err end
+        having_predicates[#having_predicates + 1] = predicate
     end
 
     local snapshot = catalog_snapshot_runtime.from_context(ctx, planning_metrics)
@@ -11383,8 +11999,24 @@ local function compile_request_table(request, options)
         end)
         for _, entity_id in ipairs(representation_entity_ids) do
             local entity = ctx.entity_by_id[key(entity_id)]
-            local representation = entity and entity.primary_representation or nil
+            local selection = entity and ctx.selected_representations[key(entity.id)] or nil
+            local representation = selection and selection.representation
+                or entity and entity.primary_representation or nil
             if representation ~= nil then
+                local selected_bindings = {}
+                for attribute_key, binding in pairs(selection and selection.bindings or {}) do
+                    selected_bindings[#selected_bindings + 1] = {
+                        attribute = attribute_key,
+                        attribute_binding_id = binding.id or JSON_NULL,
+                        binding_role = binding.role,
+                        binding_priority = binding.priority,
+                        source_expression = binding.expression,
+                        legacy = binding.legacy == true,
+                    }
+                end
+                table.sort(selected_bindings, function(left, right)
+                    return left.attribute < right.attribute
+                end)
                 plan.selected_representations[#plan.selected_representations + 1] = {
                     entity_id = entity.id,
                     entity_name = entity.name,
@@ -11393,7 +12025,13 @@ local function compile_request_table(request, options)
                     source_kind = representation.source_kind,
                     source_schema = representation.source_schema,
                     source_object = representation.source_object,
-                    selection_reason = "STATIC_PRIMARY",
+                    selection_reason = (selection == nil or selection.legacy_only)
+                        and "STATIC_PRIMARY"
+                        or selection.fallback_count > 0 and "ATTRIBUTE_FALLBACK"
+                        or "ATTRIBUTE_PREFER",
+                    fallback_binding_count = selection and selection.fallback_count or 0,
+                    binding_priority = selection and selection.binding_priority or 0,
+                    selected_bindings = selected_bindings,
                 }
             end
         end
@@ -13785,6 +14423,44 @@ local function upsert_fact(model, object_id_value, fact)
             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND UPPER(FACT_NAME) = UPPER(:fact_name)
         ]], {model_id = model.model_id, version_id = model.version_id, fact_name = fact.name})
     end
+    local primary_representation_id = scalar([[
+        SELECT REPRESENTATION_ID
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE ENTITY_ID = :entity_id
+          AND REPRESENTATION_ROLE = 'PRIMARY'
+          AND STATUS = 'ACTIVE'
+    ]], {entity_id = entity})
+    local default_binding_id = scalar([[
+        SELECT ATTRIBUTE_BINDING_ID
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE ATTRIBUTE_TYPE = 'FACT'
+          AND ATTRIBUTE_ID = :fact_id
+          AND IS_DEFAULT = TRUE
+          AND STATUS = 'ACTIVE'
+    ]], {fact_id = existing_id})
+    if default_binding_id == nil then
+        query([[
+            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+              MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+              REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+              BINDING_PRIORITY, IS_DEFAULT, STATUS
+            ) VALUES (
+              :model_id, :version_id, :entity_id, 'FACT', :fact_id,
+              :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
+            )
+        ]], {model_id = model.model_id, version_id = model.version_id,
+            entity_id = entity, fact_id = existing_id,
+            representation_id = primary_representation_id, expression = fact.expression})
+    else
+        query([[
+            UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            SET ENTITY_ID = :entity_id, REPRESENTATION_ID = :representation_id,
+                SOURCE_EXPRESSION = :expression,
+                UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+            WHERE ATTRIBUTE_BINDING_ID = :binding_id
+        ]], {entity_id = entity, representation_id = primary_representation_id,
+            expression = fact.expression, binding_id = default_binding_id})
+    end
     add_object_column(object_id_value, "FACT", existing_id, fact.name, false)
     return existing_id
 end
@@ -14401,6 +15077,14 @@ end
 
 local function snapshot_model_state(model)
     return {
+        attribute_bindings = query([[
+            SELECT ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
+                   ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
+                   SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
+                   IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
+            FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
         facts = query([[
             SELECT FACT_ID, MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
                    ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
@@ -14456,6 +15140,10 @@ local function snapshot_model_state(model)
 end
 
 local function clear_model_state(model)
+    query([[
+        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = model.model_id, version_id = model.version_id})
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_INPUTS
         WHERE METRIC_ID IN (
@@ -14533,6 +15221,38 @@ local function restore_model_state(model, snapshot)
             is_private = row_value(row, "IS_PRIVATE", 15),
             is_certified = row_value(row, "IS_CERTIFIED", 16),
             status = row_value(row, "STATUS", 17),
+        })
+    end
+    for _, row in ipairs(snapshot.attribute_bindings or {}) do
+        query([[
+            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+              ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
+              ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
+              SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
+              IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
+            ) VALUES (
+              :binding_id, :model_id, :version_id, :entity_id,
+              :attribute_type, :attribute_id, :representation_id,
+              :source_expression, :binding_role, :binding_priority,
+              :is_default, :status, :created_at, :created_by, :updated_at, :updated_by
+            )
+        ]], {
+            binding_id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
+            model_id = row_value(row, "MODEL_ID", 2),
+            version_id = row_value(row, "VERSION_ID", 3),
+            entity_id = row_value(row, "ENTITY_ID", 4),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 5),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 6),
+            representation_id = row_value(row, "REPRESENTATION_ID", 7),
+            source_expression = row_value(row, "SOURCE_EXPRESSION", 8),
+            binding_role = row_value(row, "BINDING_ROLE", 9),
+            binding_priority = row_value(row, "BINDING_PRIORITY", 10),
+            is_default = row_value(row, "IS_DEFAULT", 11),
+            status = row_value(row, "STATUS", 12),
+            created_at = null_if_missing(row_value(row, "CREATED_AT", 13)),
+            created_by = null_if_missing(row_value(row, "CREATED_BY", 14)),
+            updated_at = null_if_missing(row_value(row, "UPDATED_AT", 15)),
+            updated_by = null_if_missing(row_value(row, "UPDATED_BY", 16)),
         })
     end
     for _, row in ipairs(snapshot.metrics or {}) do

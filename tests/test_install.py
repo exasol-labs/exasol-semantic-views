@@ -44,6 +44,19 @@ class Connection:
 
 
 class InstallerResetTest(unittest.TestCase):
+    def test_f2_binding_install_surface_is_split_into_statements(self):
+        statements = []
+        for path in INSTALL.INSTALL_FILES:
+            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+        expected_fragments = {
+            "SYS_SEMANTIC.ATTRIBUTE_BINDINGS",
+            "SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS",
+            "SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING",
+            "SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING",
+        }
+        for fragment in expected_fragments:
+            self.assertTrue(any(fragment in sql for sql in statements), fragment)
+
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())
         self.assertEqual(

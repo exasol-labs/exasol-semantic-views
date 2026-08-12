@@ -50,10 +50,10 @@ every existing entity. `VALIDATE_MODEL` rejects active entities that do not
 have exactly one active primary representation.
 
 Phase F1 allows additional active `ALTERNATE` representations for the same
-entity. Selection is manual and static: `SET_PRIMARY_REPRESENTATION` chooses
-the single source used by every compile until another representation is
-promoted. The validator, compiler, grain-metadata assistant, and semantic-definition
-export resolve source schema, object, and alias through the primary representation.
+entity. Without F2 bindings, selection remains manual and static:
+`SET_PRIMARY_REPRESENTATION` chooses the single source used by every compile.
+The grain-metadata assistant and semantic-definition export resolve source
+schema, object, and alias through the primary representation.
 The corresponding columns on `SYS_SEMANTIC.ENTITIES` remain mandatory and are
 kept as compatibility mirrors, including after promotion.
 
@@ -66,8 +66,9 @@ SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 ```
 
 F1 supports `RELATION` and `VIRTUAL_SCHEMA` sources. All active representations
-must expose the same semantic alias and every column used by dimensions, facts,
-filters, unique keys, and relationship mappings. Adding, promoting, or removing
+must expose the same semantic alias and every column used by attributes that
+have only a compatibility-default binding, filters, unique keys, and
+relationship mappings. Adding, promoting, or removing
 a representation clears compile cache entries and marks successful validation
 runs stale. Validate before promotion, then validate and publish after it.
 Validation executes data probes for every declared unique key: each
@@ -77,13 +78,39 @@ representations without a declared key fail validation. Probe errors also fail
 closed, so the validating user must be able to query every representation.
 These full key scans and set comparisons can be expensive for large or remote
 sources; they run during model validation, never during compiled business queries.
-Per-representation field bindings, fallback, temporal coverage, unions,
-reconciliation, and dynamic source selection remain later fusion phases.
+Phase F2 separates semantic dimensions and facts from their source expressions
+through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`
+automatically create a `PREFER` binding on the current primary representation;
+installation backfills the same binding for existing attributes. Additional
+bindings are managed with:
+
+```text
+SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING
+SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING
+```
+
+Compatibility defaults have `IS_DEFAULT = TRUE`. Promoting a representation
+moves those defaults so pre-F2 models retain static-primary behavior. Explicit
+bindings have `IS_DEFAULT = FALSE` and never move during promotion.
+
+At compile time, F2 chooses one active representation per required entity. A
+candidate must bind every requested dimension and every fact used transitively
+by requested metrics. Candidates are ordered by `PREFER` before `FALLBACK`,
+then binding priority, representation priority, and representation ID. This is
+deterministic source fallback, not row-level `COALESCE`: values from different
+representations are never combined. If no representation covers the complete
+attribute set, compilation fails with `SEMANTIC_REQUEST_080`.
+
+Binding expressions are validated against only their target representation.
+The selected representation, reason, expressions, roles, and priorities are
+recorded in `plan_json.selected_representations[].selected_bindings`. Temporal
+coverage, unions, reconciliation, and row-level coalescing remain later phases.
 
 The read-only representation view is available as:
 
 ```text
 SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS
+SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS
 ```
 
 ## Validation Tables

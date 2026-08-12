@@ -909,6 +909,39 @@ local function load_catalog(ctx)
         ctx.fact_by_name[upper(fact.name)] = fact
     end
 
+    ctx.attribute_bindings = {}
+    ctx.bindings_by_attribute = {}
+    local binding_rows = query([[
+        SELECT ATTRIBUTE_BINDING_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+               REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+               BINDING_PRIORITY, IS_DEFAULT
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          CASE WHEN BINDING_ROLE = 'PREFER' THEN 0 ELSE 1 END,
+          BINDING_PRIORITY, ATTRIBUTE_BINDING_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(binding_rows or {}) do
+        local binding = {
+            id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 3),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 4),
+            representation_id = row_value(row, "REPRESENTATION_ID", 5),
+            expression = row_value(row, "SOURCE_EXPRESSION", 6),
+            role = row_value(row, "BINDING_ROLE", 7),
+            priority = row_value(row, "BINDING_PRIORITY", 8),
+            is_default = row_value(row, "IS_DEFAULT", 9),
+        }
+        table.insert(ctx.attribute_bindings, binding)
+        local attribute_key = upper(binding.attribute_type) .. ":" .. key(binding.attribute_id)
+        ctx.bindings_by_attribute[attribute_key] =
+            ctx.bindings_by_attribute[attribute_key] or {}
+        table.insert(ctx.bindings_by_attribute[attribute_key], binding)
+    end
+
     ctx.metrics = {}
     ctx.metric_by_id = {}
     ctx.metric_by_name = {}
@@ -1839,7 +1872,12 @@ local function validate_expressions(ctx, safe_edges)
                 "Unsupported function in dimension expression: " .. fn .. ".")
         end
         local entity = ctx.entity_by_id[key(dimension.entity_id)]
-        if entity ~= nil then
+        local bindings = (ctx.bindings_by_attribute or {})["DIMENSION:" .. key(dimension.id)] or {}
+        local explicit_binding = false
+        for _, binding in ipairs(bindings) do
+            if binding.is_default ~= true then explicit_binding = true end
+        end
+        if entity ~= nil and not explicit_binding then
             for _, ref in ipairs(column_refs_in_expression(dimension.expression)) do
                 local missing_representations =
                     missing_representation_columns(ctx, entity, ref.column_name)
@@ -1870,7 +1908,12 @@ local function validate_expressions(ctx, safe_edges)
                 "Unsupported function in fact expression: " .. fn .. ".")
         end
         local entity = ctx.entity_by_id[key(fact.entity_id)]
-        if entity ~= nil then
+        local bindings = (ctx.bindings_by_attribute or {})["FACT:" .. key(fact.id)] or {}
+        local explicit_binding = false
+        for _, binding in ipairs(bindings) do
+            if binding.is_default ~= true then explicit_binding = true end
+        end
+        if entity ~= nil and not explicit_binding then
             for _, ref in ipairs(column_refs_in_expression(fact.expression)) do
                 local missing_representations =
                     missing_representation_columns(ctx, entity, ref.column_name)
@@ -1879,6 +1922,72 @@ local function validate_expressions(ctx, safe_edges)
                         "Fact expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
                             .. representation_suffix(missing_representations) .. ".")
+                end
+            end
+        end
+    end
+
+    local representation_by_id = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        representation_by_id[key(representation.id)] = representation
+    end
+    local seen = {}
+    for _, binding in ipairs(ctx.attribute_bindings or {}) do
+        local attribute_type = upper(binding.attribute_type)
+        local attribute = attribute_type == "DIMENSION"
+            and ctx.dimension_by_id[key(binding.attribute_id)]
+            or attribute_type == "FACT" and ctx.fact_by_id[key(binding.attribute_id)] or nil
+        local representation = representation_by_id[key(binding.representation_id)]
+        local object_name = (attribute and attribute.name or tostring(binding.attribute_id))
+            .. "@" .. (representation and representation.name or tostring(binding.representation_id))
+        local binding_key = attribute_type .. ":" .. key(binding.attribute_id)
+            .. ":" .. key(binding.representation_id)
+        if seen[binding_key] then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Duplicate active binding for attribute and representation.")
+        end
+        seen[binding_key] = true
+        if attribute == nil or (attribute_type ~= "DIMENSION" and attribute_type ~= "FACT") then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding references an unknown dimension or fact.")
+        elseif key(attribute.entity_id) ~= key(binding.entity_id) then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding entity does not match the attribute owner.")
+        end
+        if representation == nil or key(representation.entity_id) ~= key(binding.entity_id) then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding representation does not belong to the attribute entity.")
+        end
+        local role = upper(binding.role)
+        if role ~= "PREFER" and role ~= "FALLBACK" then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding role must be PREFER or FALLBACK.")
+        end
+        local priority = tonumber(binding.priority)
+        if priority == nil or priority < 1 or priority % 1 ~= 0 then
+            add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                "SEMANTIC_MODEL_039", "Binding priority must be a positive integer.")
+        end
+        if attribute ~= nil and representation ~= nil then
+            local owning_alias = upper(representation.alias)
+            for alias, _ in pairs(aliases_in_expression(binding.expression)) do
+                if alias ~= owning_alias then
+                    add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                        "SEMANTIC_MODEL_040", "Binding expression references alias outside its representation: "
+                            .. tostring(alias) .. ".")
+                end
+            end
+            for fn, _ in pairs(unsupported_functions(binding.expression)) do
+                add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                    "SEMANTIC_MODEL_040", "Unsupported function in binding expression: "
+                        .. tostring(fn) .. ".")
+            end
+            for _, ref in ipairs(column_refs_in_expression(binding.expression)) do
+                if ref.alias == owning_alias and not source_column_exists(
+                    representation.source_schema, representation.source_object, ref.column_name) then
+                    add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                        "SEMANTIC_MODEL_040", "Binding expression references unknown source column: "
+                            .. ref.alias .. "." .. ref.column_name .. ".")
                 end
             end
         end

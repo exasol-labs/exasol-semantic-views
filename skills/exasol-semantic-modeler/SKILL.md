@@ -372,10 +372,11 @@ previous to succeed.
 6. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
 7. ADD_FACT (per row-level expression — entities must exist)
 8. ADD_DIMENSION (per dimension — entity and semantic object must exist)
-9. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
+9. Optional ADD_ATTRIBUTE_BINDING (per representation-specific dimension/fact expression)
+10. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED)
-10. VALIDATE_MODEL
-11. PUBLISH_MODEL
+11. VALIDATE_MODEL
+12. PUBLISH_MODEL
 ```
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
@@ -452,14 +453,20 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(
 );
 ```
 
-When several relations are equivalent at the same grain and expose the same
-alias and semantic/key columns, register alternates with
-`ADD_ENTITY_REPRESENTATION`. Validate before promoting one, then use
-`SET_PRIMARY_REPRESENTATION`; selection is static and all queries use that
-primary until explicitly changed. Declare the entity key first: validation
-proves key uniqueness on every representation and exact key-set equality with
-the primary. Probe failures, duplicate grain, and partial coverage are blocking
-errors. Never model partial coverage or field fallback this way.
+When several relations are equivalent at the same grain and identity, register
+alternates with `ADD_ENTITY_REPRESENTATION`. Declare the entity key first:
+validation proves key uniqueness on every representation and exact key-set
+equality with the primary. Probe failures and duplicate grain are blocking.
+
+For different physical dimension or fact expressions, add
+`ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark
+the authoritative expression `PREFER` and ordered substitutes `FALLBACK`.
+The compiler chooses one representation that covers every required attribute
+for the entity; it never coalesces values across representations. Verify the
+choice and each expression in
+`plan_json.selected_representations[].selected_bindings`. If no complete source
+exists, compilation returns `SEMANTIC_REQUEST_080`; do not invent a cross-source
+join or silently revert to a partial representation.
 
 Register relationships with `ADD_RELATIONSHIP`:
 

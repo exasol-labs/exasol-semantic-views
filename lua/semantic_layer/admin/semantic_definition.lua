@@ -1068,6 +1068,44 @@ local function upsert_fact(model, object_id_value, fact)
             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND UPPER(FACT_NAME) = UPPER(:fact_name)
         ]], {model_id = model.model_id, version_id = model.version_id, fact_name = fact.name})
     end
+    local primary_representation_id = scalar([[
+        SELECT REPRESENTATION_ID
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE ENTITY_ID = :entity_id
+          AND REPRESENTATION_ROLE = 'PRIMARY'
+          AND STATUS = 'ACTIVE'
+    ]], {entity_id = entity})
+    local default_binding_id = scalar([[
+        SELECT ATTRIBUTE_BINDING_ID
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE ATTRIBUTE_TYPE = 'FACT'
+          AND ATTRIBUTE_ID = :fact_id
+          AND IS_DEFAULT = TRUE
+          AND STATUS = 'ACTIVE'
+    ]], {fact_id = existing_id})
+    if default_binding_id == nil then
+        query([[
+            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+              MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+              REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+              BINDING_PRIORITY, IS_DEFAULT, STATUS
+            ) VALUES (
+              :model_id, :version_id, :entity_id, 'FACT', :fact_id,
+              :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
+            )
+        ]], {model_id = model.model_id, version_id = model.version_id,
+            entity_id = entity, fact_id = existing_id,
+            representation_id = primary_representation_id, expression = fact.expression})
+    else
+        query([[
+            UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            SET ENTITY_ID = :entity_id, REPRESENTATION_ID = :representation_id,
+                SOURCE_EXPRESSION = :expression,
+                UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+            WHERE ATTRIBUTE_BINDING_ID = :binding_id
+        ]], {entity_id = entity, representation_id = primary_representation_id,
+            expression = fact.expression, binding_id = default_binding_id})
+    end
     add_object_column(object_id_value, "FACT", existing_id, fact.name, false)
     return existing_id
 end
@@ -1684,6 +1722,14 @@ end
 
 local function snapshot_model_state(model)
     return {
+        attribute_bindings = query([[
+            SELECT ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
+                   ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
+                   SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
+                   IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
+            FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
         facts = query([[
             SELECT FACT_ID, MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
                    ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
@@ -1739,6 +1785,10 @@ local function snapshot_model_state(model)
 end
 
 local function clear_model_state(model)
+    query([[
+        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = model.model_id, version_id = model.version_id})
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_INPUTS
         WHERE METRIC_ID IN (
@@ -1816,6 +1866,38 @@ local function restore_model_state(model, snapshot)
             is_private = row_value(row, "IS_PRIVATE", 15),
             is_certified = row_value(row, "IS_CERTIFIED", 16),
             status = row_value(row, "STATUS", 17),
+        })
+    end
+    for _, row in ipairs(snapshot.attribute_bindings or {}) do
+        query([[
+            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+              ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
+              ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
+              SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
+              IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
+            ) VALUES (
+              :binding_id, :model_id, :version_id, :entity_id,
+              :attribute_type, :attribute_id, :representation_id,
+              :source_expression, :binding_role, :binding_priority,
+              :is_default, :status, :created_at, :created_by, :updated_at, :updated_by
+            )
+        ]], {
+            binding_id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
+            model_id = row_value(row, "MODEL_ID", 2),
+            version_id = row_value(row, "VERSION_ID", 3),
+            entity_id = row_value(row, "ENTITY_ID", 4),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 5),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 6),
+            representation_id = row_value(row, "REPRESENTATION_ID", 7),
+            source_expression = row_value(row, "SOURCE_EXPRESSION", 8),
+            binding_role = row_value(row, "BINDING_ROLE", 9),
+            binding_priority = row_value(row, "BINDING_PRIORITY", 10),
+            is_default = row_value(row, "IS_DEFAULT", 11),
+            status = row_value(row, "STATUS", 12),
+            created_at = null_if_missing(row_value(row, "CREATED_AT", 13)),
+            created_by = null_if_missing(row_value(row, "CREATED_BY", 14)),
+            updated_at = null_if_missing(row_value(row, "UPDATED_AT", 15)),
+            updated_by = null_if_missing(row_value(row, "UPDATED_BY", 16)),
         })
     end
     for _, row in ipairs(snapshot.metrics or {}) do

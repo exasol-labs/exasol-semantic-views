@@ -432,7 +432,7 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
             if options.multi_fact then
                 return {
-                    {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1},
+                    {101, 1, "primary", "RELATION", options.missing_multi_source and "" or "MART", "ORDERS", "o", "PRIMARY", 1},
                     {102, 2, "primary", "RELATION", "MART", "TICKETS", "t", "PRIMARY", 1},
                     {103, 3, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
                 }
@@ -522,6 +522,14 @@ local function compiler_query_fixture(options)
                 }
             end
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
+        elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            if options.f2_fallback then
+                return {
+                    {301, 1, "DIMENSION", 10, 104, "o.archive_status", "FALLBACK", 1},
+                    {302, 1, "FACT", 20, 104, "o.archive_amount", "FALLBACK", 1},
+                }
+            end
+            return {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
             if options.multi_fact then
                 return {
@@ -647,6 +655,22 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_equal(#state.request_logs, 2)
 end)
 
+test("F2 compiler selects one complete fallback representation", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"revenue"},
+        dimensions = {"status"},
+    }, {f2_fallback = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, 'FROM "VS_ARCHIVE"."ORDERS" o')
+    assert_contains(result.generated_sql, "o.archive_status")
+    assert_contains(result.generated_sql, "SUM((o.archive_amount))")
+    assert_contains(result.plan_json, '"selection_reason":"ATTRIBUTE_FALLBACK"')
+    assert_contains(result.plan_json, '"attribute":"DIMENSION:10"')
+    assert_contains(result.plan_json, '"attribute":"FACT:20"')
+end)
+
 test("structured compiler renders unary null filters and having", function()
     local result = compile_with_fixture({
         model = "sales",
@@ -682,7 +706,7 @@ test("C3 compiler activates a versioned multi branch query", function()
     assert_contains(result.generated_sql, 'ORDER BY "activity_ratio" DESC')
     assert_contains(result.generated_sql, "LIMIT 10")
     local envelope = api.json_decode(result.plan_json)
-    assert_equal(envelope.plan_version, 8)
+    assert_equal(envelope.plan_version, 9)
     assert_equal(envelope.logical_plan.plan_kind, "MULTI_BRANCH")
     assert_equal(envelope.logical_plan.execution.status, "EXECUTABLE")
     assert_equal(envelope.logical_plan.physical_plan.physical_plan_version, 5)

@@ -27,6 +27,21 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Semantic fusion Phase F2
+
+- Dimensions and facts now support representation-specific expressions through
+  governed `ATTRIBUTE_BINDINGS` with deterministic `PREFER` and `FALLBACK`
+  source selection.
+- The compiler selects one complete representation per entity, records binding
+  provenance in plan version 9, and fails with `SEMANTIC_REQUEST_080` rather
+  than combining partial sources.
+- Legacy attributes receive compatibility-default bindings automatically;
+  primary representation promotion moves only those defaults and leaves
+  explicit F2 bindings unchanged.
+- Added binding lifecycle scripts, catalog visibility, validation rules
+  `SEMANTIC_MODEL_039`/`040`, cache invalidation, rollback coverage, and
+  modeler-skill guidance.
+
 #### Official Exasol MCP Server integration
 
 - Added a user and autonomous-agent workflow for discovering, activating, and
