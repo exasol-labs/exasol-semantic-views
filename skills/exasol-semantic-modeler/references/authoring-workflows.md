@@ -228,6 +228,13 @@ must provide bindings for every requested dimension and transitive metric fact.
 win. F2 does not coalesce rows or values across sources. Inspect
 `plan_json.selected_representations[].selected_bindings` to verify the choice.
 
+When several columns are renamed, add all required bindings one at a time
+before the final `VALIDATE_MODEL`. Intermediate validation errors for the
+remaining unbound attributes are expected. `ADD_ATTRIBUTE_BINDING` treats each
+call as a repair: it accepts a binding that removes errors without introducing
+new ones, but rolls back malformed bindings. Publication remains blocked until
+the complete representation validates cleanly.
+
 ## Rebuild an Existing Model
 
 Bootstrap scripts are not idempotent. Prefer incremental add/replace operations

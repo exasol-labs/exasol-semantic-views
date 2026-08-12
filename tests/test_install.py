@@ -57,6 +57,17 @@ class InstallerResetTest(unittest.TestCase):
         for fragment in expected_fragments:
             self.assertTrue(any(fragment in sql for sql in statements), fragment)
 
+        add_binding = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING" in sql
+        )
+        self.assertLess(
+            add_binding.index("baseline_validation_rows"),
+            add_binding.index("INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS"),
+        )
+        self.assertIn("if not baseline_errors[signature]", add_binding)
+
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())
         self.assertEqual(

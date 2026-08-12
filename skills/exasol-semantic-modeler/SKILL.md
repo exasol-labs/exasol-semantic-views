@@ -468,6 +468,11 @@ choice and each expression in
 exists, compilation returns `SEMANTIC_REQUEST_080`; do not invent a cross-source
 join or silently revert to a partial representation.
 
+For a representation with several renamed columns, add every required binding
+sequentially. Intermediate errors for attributes not yet bound do not reject a
+repairing binding, but the model cannot be published until the final validation
+is clean. A candidate that introduces a new validation error is rolled back.
+
 Register relationships with `ADD_RELATIONSHIP`:
 
 ```sql

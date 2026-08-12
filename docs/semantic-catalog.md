@@ -102,6 +102,12 @@ representations are never combined. If no representation covers the complete
 attribute set, compilation fails with `SEMANTIC_REQUEST_080`.
 
 Binding expressions are validated against only their target representation.
+Binding creation is baseline-aware because renamed-column representations can
+be temporarily invalid while several bindings are authored. The admin script
+accepts a candidate when post-application validation introduces no new error
+signature; malformed candidates are rolled back. Existing errors continue to
+block publication until subsequent bindings resolve them.
+
 The selected representation, reason, expressions, roles, and priorities are
 recorded in `plan_json.selected_representations[].selected_bindings`. Temporal
 coverage, unions, reconciliation, and row-level coalescing remain later phases.

@@ -8,6 +8,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Attribute-binding repair ordering
+
+- `ADD_ATTRIBUTE_BINDING` now compares validation before and after the
+  candidate mutation, allowing bindings to repair multi-column representation
+  mismatches sequentially while still rolling back newly introduced errors.
+- Intermediate representation errors continue to block publication until all
+  required bindings are present and validation succeeds.
+
 #### Unary null predicates
 
 - Structured filters and `having`, plus Semantic SQL `WHERE` and `HAVING`, now

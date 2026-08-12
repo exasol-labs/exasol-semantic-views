@@ -2140,6 +2140,24 @@ local function choice(value, label, allowed)
     end
     return result
 end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function validation_error_signatures(rows)
+    local signatures = {}
+    for _, validation_row in ipairs(rows or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local signature = table.concat({
+                tostring(row_value(validation_row, "OBJECT_TYPE", 2) or ""),
+                tostring(row_value(validation_row, "OBJECT_NAME", 3) or ""),
+                tostring(row_value(validation_row, "RULE_CODE", 4) or ""),
+                tostring(row_value(validation_row, "MESSAGE", 5) or ""),
+            }, "\31")
+            signatures[signature] = true
+        end
+    end
+    return signatures
+end
 
 local model_name = normalized(MODEL_NAME, "MODEL_NAME")
 local attribute_type = choice(ATTRIBUTE_TYPE, "ATTRIBUTE_TYPE", {DIMENSION = true, FACT = true})
@@ -2196,6 +2214,14 @@ if tonumber(duplicate or 0) > 0 then
         .. " -> " .. representation_name)
 end
 
+-- Binding authoring is a repair operation: an alternate with renamed columns
+-- can be invalid until all of its bindings exist. Preserve the pre-application
+-- errors and reject only errors introduced by this candidate binding.
+local baseline_validation_rows = query(
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    {model_name = model_name})
+local baseline_errors = validation_error_signatures(baseline_validation_rows)
+
 query([[
     INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
       MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
@@ -2218,18 +2244,26 @@ local validation_rows = query(
     "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
     {model_name = model_name})
 for _, validation_row in ipairs(validation_rows or {}) do
-    local severity = validation_row.SEVERITY or validation_row.severity or validation_row[1]
+    local severity = row_value(validation_row, "SEVERITY", 1)
     if tostring(severity) == "ERROR" then
-        local rule_code = validation_row.RULE_CODE or validation_row.rule_code
-            or validation_row[4] or "SEMANTIC_MODEL_ERROR"
-        local message = validation_row.MESSAGE or validation_row.message
-            or validation_row[5] or "model validation failed"
-        query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_BINDING_ID = :binding_id",
-            {binding_id = binding_id})
-        query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
-            {model_name = model_name})
-        error("SEMANTIC_ADMIN_093: attribute binding rejected; validation failed: "
-            .. tostring(rule_code) .. " " .. tostring(message))
+        local signature = table.concat({
+            tostring(row_value(validation_row, "OBJECT_TYPE", 2) or ""),
+            tostring(row_value(validation_row, "OBJECT_NAME", 3) or ""),
+            tostring(row_value(validation_row, "RULE_CODE", 4) or ""),
+            tostring(row_value(validation_row, "MESSAGE", 5) or ""),
+        }, "\31")
+        if not baseline_errors[signature] then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_BINDING_ID = :binding_id",
+                {binding_id = binding_id})
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_093: attribute binding rejected; candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
     end
 end
 query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",

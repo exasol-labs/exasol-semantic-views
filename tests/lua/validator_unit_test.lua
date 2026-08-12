@@ -518,6 +518,75 @@ test("validator accepts valid F2 bindings and rejects dangling ownership", funct
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_040"))
 end)
 
+test("F2 bindings monotonically repair renamed representation columns", function()
+    local entity = {id = 1, name = "customer", alias = "c"}
+    local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMERS"}
+    local alternate = {id = 2, entity_id = 1, name = "renamed", alias = "c",
+        source_schema = "F2PROBE", source_object = "CUSTOMERS_RENAMED"}
+    local loyalty = {id = 10, name = "loyalty_tier", entity_id = 1,
+        expression = "c.loyalty_tier"}
+    local city = {id = 11, name = "city", entity_id = 1,
+        expression = "c.city"}
+    local default_loyalty = {id = 100, entity_id = 1, attribute_type = "DIMENSION",
+        attribute_id = 10, representation_id = 1, expression = "c.loyalty_tier",
+        role = "PREFER", priority = 1, is_default = true}
+    local default_city = {id = 101, entity_id = 1, attribute_type = "DIMENSION",
+        attribute_id = 11, representation_id = 1, expression = "c.city",
+        role = "PREFER", priority = 1, is_default = true}
+    local tier_binding = {id = 102, entity_id = 1, attribute_type = "DIMENSION",
+        attribute_id = 10, representation_id = 2, expression = "c.tier_code",
+        role = "PREFER", priority = 1, is_default = false}
+    local city_binding = {id = 103, entity_id = 1, attribute_type = "DIMENSION",
+        attribute_id = 11, representation_id = 2, expression = "c.town_name",
+        role = "PREFER", priority = 1, is_default = false}
+
+    local function context(explicit_city)
+        local bindings = {default_loyalty, default_city, tier_binding}
+        if explicit_city then bindings[#bindings + 1] = city_binding end
+        return validation_context({
+            entity_by_id = {["1"] = entity}, entity_name_by_id = {["1"] = "customer"},
+            entity_alias_by_id = {["1"] = "C"},
+            representations = {primary, alternate},
+            representations_by_entity = {["1"] = {primary, alternate}},
+            dimensions = {loyalty, city},
+            dimension_by_id = {["10"] = loyalty, ["11"] = city},
+            facts = {}, fact_by_id = {}, metrics = {},
+            bindings_by_attribute = {
+                ["DIMENSION:10"] = {default_loyalty, tier_binding},
+                ["DIMENSION:11"] = explicit_city
+                    and {default_city, city_binding} or {default_city},
+            },
+            attribute_bindings = bindings,
+        })
+    end
+    local function validate(ctx)
+        with_query(function(sql, params)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+                local column_name = string.lower(tostring(params.column_name))
+                local available = params.object_name == "CUSTOMERS"
+                    and (column_name == "loyalty_tier" or column_name == "city")
+                    or params.object_name == "CUSTOMERS_RENAMED"
+                    and (column_name == "tier_code" or column_name == "town_name")
+                return {{available and 1 or 0}}
+            end
+            return {}
+        end, function() api.validate_expressions(ctx, {}) end)
+    end
+
+    local partial = context(false)
+    validate(partial)
+    assert_true(has_rule(partial, "SEMANTIC_MODEL_017"))
+    assert_contains(issue_for_rule(partial, "SEMANTIC_MODEL_017").message, "CITY")
+    assert_true(not string.find(issue_for_rule(partial, "SEMANTIC_MODEL_017").message,
+        "LOYALTY_TIER", 1, true))
+
+    local complete = context(true)
+    validate(complete)
+    assert_true(not has_rule(complete, "SEMANTIC_MODEL_017"))
+    assert_true(not has_rule(complete, "SEMANTIC_MODEL_040"))
+end)
+
 test("validator proves F1 representation grain and key-set equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
