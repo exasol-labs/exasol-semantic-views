@@ -462,12 +462,11 @@ This F1 equality rule does not apply after every active representation has a
 valid F3 temporal coverage contract; F3 proves grain within each partition.
 Fix local validation errors before rerunning validation: remote key scans are
 deferred until catalog metadata is clean but remain mandatory before publish.
-Before adding or validating an alternate whose source schema is physically a
-Virtual Schema, run `ALTER SESSION SET QUERY_TIMEOUT=60`; validation derives
-this from `SYS.EXA_ALL_VIRTUAL_SCHEMAS`, even if `SOURCE_KIND` was mistakenly
-declared as `RELATION`, and refuses federated probes under an unlimited or
-longer timeout. The setting must precede `EXECUTE SCRIPT` because an Exasol
-script cannot change its own active timeout.
+Before adding or validating any alternate, run `ALTER SESSION SET
+QUERY_TIMEOUT=60`. Validation requires the bound for every multi-representation
+key probe; it deliberately does not trust `SOURCE_KIND` or try to classify views
+that may hide Virtual Schema dependencies. The setting must precede `EXECUTE
+SCRIPT` because an Exasol script cannot change its own active timeout.
 
 F2 does not bind identity or relationship SQL. Before registration, require the
 alternate to expose the same case-sensitive physical names used by the entity
@@ -510,9 +509,9 @@ the cold edge is open at the start, the hot edge is open at the end, and their
 boundary timestamps are identical. Use exactly one qualified temporal column
 and canonical predicates: `column >= VALID_FROM` and `column < VALID_TO`,
 omitting the comparison for each `NULL` bound. Predicate timestamp literals
-must exactly match the metadata; free-form coverage SQL is rejected. Validate under
-`QUERY_TIMEOUT=60` when any partition's source is physically a Virtual Schema;
-the catalog-derived guard does not trust `SOURCE_KIND` alone.
+must exactly match the metadata; free-form coverage SQL is rejected. Set
+`QUERY_TIMEOUT=60` before validating any partitioned entity, regardless of the
+declared source kinds or whether a local view wraps a Virtual Schema.
 Before declaring coverage, confirm the entity appears as `BASE_ENTITY_NAME` for
 an active metric in `SEMANTIC_CATALOG.METRICS`. `VALIDATE_MODEL` rejects
 partitioning an entity used only as a joined dimension with

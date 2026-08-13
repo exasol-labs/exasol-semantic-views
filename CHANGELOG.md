@@ -47,12 +47,13 @@ All notable changes to Exasol Semantic Views are documented here.
   `SEMANTIC_MODEL_042` before publication instead of invalidating the interval
   proof and silently changing `UNION ALL` results.
 
-#### Federated representation probe timeout
+#### Multi-representation probe timeout
 
-- `VALIDATE_MODEL` now refuses F1/F3 key probes involving a physical Virtual
-  Schema unless the caller configured session `QUERY_TIMEOUT` between 1 and 60
-  seconds. Detection consults `SYS.EXA_ALL_VIRTUAL_SCHEMAS`, so a mistaken
-  `RELATION` declaration cannot bypass the gate.
+- `VALIDATE_MODEL` now refuses every multi-representation F1/F3 key probe unless
+  the caller configured session `QUERY_TIMEOUT` between 1 and 60 seconds.
+- The guard no longer classifies source schemas, so declared `RELATION` sources,
+  normalization views over Virtual Schemas, and deeper dependency chains cannot
+  bypass it.
 - The bounded timeout applies to the complete Exasol script, turning an
   intermittently stuck federated probe into a database timeout instead of an
   unbounded validation session.

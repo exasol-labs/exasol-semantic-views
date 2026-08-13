@@ -1760,49 +1760,17 @@ local function probe_count(sql_text)
     return tonumber(row_value(rows[1], "PROBE_COUNT", 1) or 0), nil
 end
 
-local MAX_FEDERATED_PROBE_TIMEOUT_SECONDS = 60
+local MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS = 60
 
 local function validate_representation_probe_timeout(ctx)
-    local has_federated_probe = false
-    local probe_source_schemas = {}
+    local has_multi_representation_probe = false
     for _, entity in ipairs(ctx.entities or {}) do
-        local representations = representations_for_entity(ctx, entity)
-        if #representations > 1 then
-            for _, representation in ipairs(representations) do
-                if upper(representation.source_kind) == "VIRTUAL_SCHEMA" then
-                    has_federated_probe = true
-                    break
-                end
-                if not missing(representation.source_schema) then
-                    probe_source_schemas[upper(representation.source_schema)] = true
-                end
-            end
-        end
-        if has_federated_probe then break end
-    end
-    if not has_federated_probe and next(probe_source_schemas) ~= nil then
-        local catalog_ok, catalog_rows = pcall(query, [[
-            SELECT SCHEMA_NAME
-            FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS
-        ]])
-        if not catalog_ok then
-            add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
-                "SEMANTIC_MODEL_041",
-                "Cannot determine whether representation probes are federated because "
-                    .. "SYS.EXA_ALL_VIRTUAL_SCHEMAS is unavailable; probes were refused: "
-                    .. tostring(catalog_rows) .. ".")
-            return false
-        end
-        for _, row in ipairs(catalog_rows or {}) do
-            local schema_name = row_value(row, "SCHEMA_NAME", 1)
-            if not missing(schema_name)
-                and probe_source_schemas[upper(schema_name)] then
-                has_federated_probe = true
-                break
-            end
+        if #representations_for_entity(ctx, entity) > 1 then
+            has_multi_representation_probe = true
+            break
         end
     end
-    if not has_federated_probe then return true end
+    if not has_multi_representation_probe then return true end
 
     local ok, rows = pcall(query, [[
         SELECT SESSION_VALUE
@@ -1812,14 +1780,14 @@ local function validate_representation_probe_timeout(ctx)
     local timeout = ok and rows ~= nil and #rows > 0
         and tonumber(row_value(rows[1], "SESSION_VALUE", 1)) or nil
     if timeout == nil or timeout < 1
-        or timeout > MAX_FEDERATED_PROBE_TIMEOUT_SECONDS then
+        or timeout > MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS then
         add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
             "SEMANTIC_MODEL_041",
-            "Federated representation key probes require session QUERY_TIMEOUT between 1 and "
-                .. tostring(MAX_FEDERATED_PROBE_TIMEOUT_SECONDS)
+            "Multi-representation key probes require session QUERY_TIMEOUT between 1 and "
+                .. tostring(MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS)
                 .. " seconds; current value is " .. tostring(timeout or "unavailable")
                 .. ". Run ALTER SESSION SET QUERY_TIMEOUT="
-                .. tostring(MAX_FEDERATED_PROBE_TIMEOUT_SECONDS)
+                .. tostring(MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS)
                 .. " before EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL."
                 .. " Exasol applies the timeout to the complete script.")
         return false

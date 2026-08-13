@@ -76,7 +76,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. |
 | `SEMANTIC_MODEL_039` | error | An attribute binding has invalid ownership, role, priority, representation, or duplicate active membership. |
 | `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses an unsupported function, or references a column absent from its target representation. |
-| `SEMANTIC_MODEL_041` | error | A declared or catalog-derived federated F1/F3 probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds, or federation could not be determined safely. |
+| `SEMANTIC_MODEL_041` | error | A multi-representation F1/F3 key probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds. The guard applies regardless of declared source kind or view dependencies. |
 | `SEMANTIC_MODEL_042` | error | F3 `UNION` coverage is partial, gapped, overlapping, not open-ended, or its canonical predicate does not exactly encode the declared half-open interval. |
 | `SEMANTIC_MODEL_043` | error | Once a model has active metrics, coverage partitions an entity that is the base of none of them and therefore can only use the unsupported partitioned joined-dimension path. |
 

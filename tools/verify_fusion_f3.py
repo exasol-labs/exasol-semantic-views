@@ -39,6 +39,7 @@ def execute(con: Any, sql: str) -> list[tuple[Any, ...]]:
 def main() -> int:
     con = connect()
     try:
+        con.execute("ALTER SESSION SET QUERY_TIMEOUT=60")
         try:
             execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('f3_verify')")
         except Exception:

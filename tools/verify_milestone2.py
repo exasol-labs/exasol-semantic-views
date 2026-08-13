@@ -79,6 +79,7 @@ def with_restore(con, name: str, mutate_sql: str, restore_sql: str, expected_cod
 def main() -> int:
     con = connect()
     try:
+        execute(con, "ALTER SESSION SET QUERY_TIMEOUT=60")
         assert_equal(
             "validation tables",
             scalar(

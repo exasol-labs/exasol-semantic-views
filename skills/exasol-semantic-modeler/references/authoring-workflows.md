@@ -185,9 +185,9 @@ key-set equality, then promotion can proceed:
 Before `ADD_ENTITY_REPRESENTATION`, compare exact `EXA_ALL_COLUMNS.COLUMN_NAME`
 values for the primary-key expression, unique-key columns, relationship key
 mappings, join-condition columns, and representation-blind metric filters.
-Set `QUERY_TIMEOUT=60` whenever the source schema appears in
-`SYS.EXA_ALL_VIRTUAL_SCHEMAS`; declaring it as `RELATION` does not make its
-validation probes local or bypass the timeout guard.
+Set `QUERY_TIMEOUT=60` before adding or validating any alternate. The guard
+applies to every multi-representation key probe because a local view may hide a
+Virtual Schema dependency and local scans can also be expensive.
 F2 binds only dimensions and facts; it cannot remap identity or join SQL. Case
 differences in quoted identifiers are physical differences. If a source uses
 `"customer_id"` where the model requires `CUSTOMER_ID`, normalize it first:

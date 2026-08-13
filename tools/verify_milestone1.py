@@ -217,6 +217,7 @@ def main() -> int:
 
         con.execute("DROP TABLE IF EXISTS MART.ORDERS_F1_REPLICA")
         con.execute("CREATE TABLE MART.ORDERS_F1_REPLICA AS SELECT * FROM MART.ORDERS")
+        con.execute("ALTER SESSION SET QUERY_TIMEOUT=60")
         try:
             con.execute(
                 "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION("
