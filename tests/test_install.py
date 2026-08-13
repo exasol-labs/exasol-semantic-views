@@ -264,22 +264,59 @@ class InstallerResetTest(unittest.TestCase):
                 f"{name} can stale a published model without recertifying",
             )
 
-        lifecycle_pairs = {
+        inverse_overrides = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING": "REMOVE_ENTITY_REPRESENTATION",
-            "ADD_UNIQUE_KEY_WITH_COLUMNS": "REMOVE_UNIQUE_KEY_WITH_COLUMNS",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
-            "ADD_SEMANTIC_IDENTITY": "REMOVE_SEMANTIC_IDENTITY",
-            "ADD_IDENTITY_BINDING": "REMOVE_IDENTITY_BINDING",
-            "ADD_IDENTITY_MAPPING_RELATION": "REMOVE_IDENTITY_MAPPING_RELATION",
-            "ADD_RELATIONSHIP": "REMOVE_RELATIONSHIP",
-            "ADD_RELATIONSHIP_KEY_MAPPING": "REMOVE_RELATIONSHIP_KEY_MAPPING",
-            "ADD_ATTRIBUTE_BINDING": "REMOVE_ATTRIBUTE_BINDING",
-            "ADD_DIMENSION": "REMOVE_DIMENSION",
+            "ADD_OR_REPLACE_DIMENSION": "REMOVE_DIMENSION",
+            # Metrics use governed Semantic SQL rather than a standalone admin script.
+            "ADD_METRIC": "DDL:DROP METRIC",
         }
-        for add_name, remove_name in lifecycle_pairs.items():
-            self.assertIn(add_name, scripts)
-            self.assertIn(remove_name, scripts)
+        intentionally_permanent = {
+            "ADD_CUSTOM_EXTENSION":
+                "Extension removal is intentionally deferred until extension ownership semantics exist.",
+            "ADD_ENTITY":
+                "Entities own dependent model structure and are removed only with DROP_MODEL.",
+            "ADD_FACT":
+                "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
+            "ADD_MATERIALIZATION_COLUMN":
+                "Column removal is unsupported; deactivate the owning materialization instead.",
+            "ADD_SEMANTIC_OBJECT":
+                "Semantic objects are part of the published contract and currently require model rebuild.",
+            "ADD_SYNONYM":
+                "Synonym removal is intentionally deferred until ambiguity revalidation is transactional.",
+        }
+        add_scripts = {name for name in scripts if name.startswith("ADD_")}
+        self.assertLessEqual(set(intentionally_permanent), add_scripts)
+        self.assertTrue(all(reason.strip() for reason in intentionally_permanent.values()))
+        for add_name in intentionally_permanent:
+            self.assertNotIn(
+                f"REMOVE_{add_name.removeprefix('ADD_')}",
+                scripts,
+                f"remove stale permanence exception for {add_name}",
+            )
+            self.assertNotIn(
+                add_name,
+                inverse_overrides,
+                f"remove stale permanence exception for {add_name}",
+            )
+        semantic_definition = (
+            ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
+        ).read_text(encoding="utf-8")
+        for add_name in sorted(add_scripts):
+            if add_name in intentionally_permanent:
+                continue
+            inverse = inverse_overrides.get(
+                add_name, f"REMOVE_{add_name.removeprefix('ADD_')}"
+            )
+            if inverse == "DDL:DROP METRIC":
+                self.assertIn('find_sequence(tokens, {"DROP", "METRIC"}', semantic_definition)
+            else:
+                self.assertIn(
+                    inverse,
+                    scripts,
+                    f"{add_name} needs {inverse} or an explicit permanence reason",
+                )
 
         published_reachability = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE":

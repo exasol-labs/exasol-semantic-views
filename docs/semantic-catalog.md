@@ -486,6 +486,20 @@ remove its key mappings from highest ordinal to lowest, then call
 `REMOVE_RELATIONSHIP`. Published additions and removals validate prospectively
 and restore the prior relationship state on error.
 
+The installer test enumerates every `ADD_*` admin script and requires a direct,
+compound, or governed-DDL inverse. These intentionally one-way operations are
+the explicit exceptions in this release:
+
+- `ADD_CUSTOM_EXTENSION`: extension removal waits for defined ownership semantics.
+- `ADD_ENTITY`: dependent structure has no scoped transactional cascade; use `DROP_MODEL`.
+- `ADD_FACT`: removal waits for transactional dependent-metric rewrites.
+- `ADD_MATERIALIZATION_COLUMN`: deactivate the owning materialization instead.
+- `ADD_SEMANTIC_OBJECT`: published contract removal currently requires model rebuild.
+- `ADD_SYNONYM`: removal waits for transactional ambiguity revalidation.
+
+Adding another `ADD_*` operation fails the installer test until it has an
+inverse or an explicit reviewed exception with a reason.
+
 On a published model, use `ADD_UNIQUE_KEY_WITH_COLUMNS` for a new key. Its JSON
 array contains ordered objects with `column_name` or `expression` and optional
 `ordinal_position`; all components are inserted before one validation. The
