@@ -100,6 +100,33 @@ test("canonical composite keys match ordered relationship mappings", function()
     ))
 end)
 
+test("F5.1 direct relationship remap requires a scalar anchored identity", function()
+    local key = graph.canonical_key({id = 50, entity_id = 2, name = "customer_pk",
+        columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}})
+    local mappings = {{ordinal_position = 1, from_column_name = "CUSTOMER_ID",
+        to_column_name = "CUSTOMER_ID"}}
+    local matched = graph.scalar_mapping_key({key}, mappings, "to")
+    assert_equal(matched.id, 50)
+
+    local primary = {id = 10, alias = "c"}
+    local mongo = {id = 11, alias = "c"}
+    local identity = {binding_by_representation = {
+        ['10'] = {id = 20, kind = "DIRECT", expression = "c.CUSTOMER_ID"},
+        ['11'] = {id = 21, kind = "DIRECT",
+            expression = 'CAST(c."customer_id" AS DECIMAL(18,0))'},
+    }}
+    local remap = graph.direct_identity_remap(identity, primary, mongo, key)
+    assert_equal(remap.binding.id, 21)
+
+    identity.binding_by_representation['10'].expression = "c.EMAIL"
+    local rejected, reason = graph.direct_identity_remap(identity, primary, mongo, key)
+    assert_equal(rejected, nil)
+    assert_equal(reason, "SEMANTIC_IDENTITY_NOT_ANCHORED_TO_RELATIONSHIP_KEY")
+
+    local composite = graph.scalar_mapping_key({key}, {mappings[1], mappings[1]}, "to")
+    assert_equal(composite, nil)
+end)
+
 test("validator and compiler expose the same canonical path proof", function()
     local relationships = {
         {id = 1, name = "orders_customer", from_entity_id = 1, to_entity_id = 2,

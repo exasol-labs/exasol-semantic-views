@@ -584,8 +584,20 @@ Smoke-test local expressions and mapping joins first. Then set
 `QUERY_TIMEOUT=60` and validate. Do not publish unless `_049` proves each local
 key non-null and unique, every mapping total and one-to-one, and every canonical
 key set equal to the primary. Never infer or fuzzy-match identities at runtime.
-Composite identities, uncertified mappings, relationship remapping, and F3 plus
-F5 on one entity are unsupported; use a governed canonical view instead.
+Composite identities, uncertified mappings, general relationship remapping, and
+F3 plus F5 on one entity are unsupported; use a governed canonical view instead.
+The anchored scalar `DIRECT` exception is described below.
+
+F5.1 supports joined entities when the missing relationship endpoint is the
+same scalar unique key anchored by the primary `DIRECT` identity binding and
+the alternate also uses `DIRECT`. No extra relationship declaration is needed.
+Compile a representative joined request and verify
+`relationship_identity_remaps` names the relationship, side, representation,
+unique key, and identity binding. `_050` means some representations remain
+usable only for non-traversing requests; inspect `relationship_candidate_rejections`.
+If `_080` says the relationship eliminated the last candidate, use a canonical
+view or add a valid anchored `DIRECT` binding. `MAPPED`, composite, role-key,
+and expression-valued relationship endpoints remain unsupported.
 
 To abandon F5 or switch the entity to F3, remove declarations in dependency
 order: `REMOVE_IDENTITY_MAPPING_RELATION` for every mapped binding,

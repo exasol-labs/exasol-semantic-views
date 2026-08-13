@@ -286,8 +286,30 @@ F4 compilation joins contributors on the semantic key. Mapped contributors are
 joined through the certified relation, and the plan records semantic identity,
 binding, and mapping IDs. Mapping is deterministic and validation-time
 certified; the compiler never performs fuzzy matching. Composite identities,
-relationship remapping, F3 identity mapping, and multi-fact reconciliation are
-not supported in F5.
+general relationship remapping, F3 identity mapping, and multi-fact
+reconciliation are not supported in F5. The scalar `DIRECT` F5.1 exception is
+described below.
+
+F5.1 routes relationships through scalar `DIRECT` identity bindings. No new
+declaration is required: the structured relationship endpoint must match one
+declared scalar unique key, and the primary identity binding must be exactly
+that key column. An alternate `DIRECT` binding may use a deterministic
+expression such as `CAST(c."customer_id" AS DECIMAL(18,0))`; when its source
+lacks the canonical relationship column, compilation substitutes that
+expression on the endpoint.
+
+Validation reports `_050` when a relationship remains usable but excludes some
+representations. Request planning evaluates only relationships traversed by the
+request, removes incompatible candidates, and returns `_080` naming the
+relationship and side only when no complete candidate remains. Successful plan
+JSON records `relationship_identity_remaps`; candidate degradation records
+`relationship_candidate_rejections`. Models that need no remap retain their
+existing SQL and omit both fields.
+
+`MAPPED` relationship endpoints still require a canonical source view. They
+need a bounded foreign-key referential-coverage proof beyond F5's identity-set
+proof. Composite endpoints, expression-valued relationship mappings, and
+identity bindings not anchored to the mapped unique key also fail closed.
 
 Read-only metadata is exposed through:
 

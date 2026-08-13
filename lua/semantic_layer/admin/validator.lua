@@ -2168,6 +2168,35 @@ local function validate_semantic_identity_data(ctx)
     end
 end
 
+local function relationship_side_identity_remap(ctx, relationship, side,
+        entity, representation)
+    if entity == nil or representation == nil then
+        return nil, "RELATIONSHIP_ENDPOINT_MISSING"
+    end
+    local unique_key, key_error = grain_graph.scalar_mapping_key(
+        ctx.unique_keys_by_entity[key(entity.id)] or {},
+        relationship.key_mappings or {}, side)
+    if unique_key == nil then return nil, key_error end
+    local identity = complete_semantic_identity(ctx, entity)
+    if identity == nil then return nil, "COMPLETE_SEMANTIC_IDENTITY_MISSING" end
+    return grain_graph.direct_identity_remap(identity,
+        entity.primary_representation, representation, unique_key)
+end
+
+local function relationship_mapping_side(relationship, entity, ref)
+    if entity == nil or upper(entity.alias) ~= ref.alias then return nil end
+    local side = key(entity.id) == key(relationship.from_entity_id) and "from"
+        or key(entity.id) == key(relationship.to_entity_id) and "to" or nil
+    if side == nil then return nil end
+    for _, mapping in ipairs(relationship.key_mappings or {}) do
+        local column_name = mapping[side .. "_column_name"]
+        if not missing(column_name) and upper(column_name) == upper(ref.column_name) then
+            return side
+        end
+    end
+    return nil
+end
+
 local MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS = 60
 
 local function validate_representation_probe_timeout(ctx)
@@ -2349,15 +2378,35 @@ local function validate_relationship_key_mappings(ctx)
                     .. "normalize the expression into a source view and map a column.")
             return
         end
-        local missing_representations = has_column and entity ~= nil
-            and missing_representation_columns(ctx, entity, column_name) or {}
-        if has_column and entity ~= nil and #missing_representations > 0 then
+        local unavailable = {}
+        local available_count = 0
+        if has_column and entity ~= nil then
+            for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+                if source_column_exists(representation.source_schema,
+                    representation.source_object, column_name) then
+                    available_count = available_count + 1
+                else
+                    local remap = relationship_side_identity_remap(ctx,
+                        relationship, side, entity, representation)
+                    if remap ~= nil then
+                        available_count = available_count + 1
+                    else
+                        unavailable[#unavailable + 1] = tostring(representation.name)
+                    end
+                end
+            end
+        end
+        table.sort(unavailable)
+        if has_column and entity ~= nil and available_count == 0 then
             add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
-                "SEMANTIC_MODEL_032",
-                "Relationship key mapping references unknown " .. side
-                    .. " source column: " .. tostring(column_name)
-                    .. representation_suffix(missing_representations) .. "."
-                    .. identity_binding_remedy())
+                "SEMANTIC_MODEL_032", "No active representation can provide or safely remap the "
+                    .. side .. " relationship key column: " .. tostring(column_name)
+                    .. "." .. identity_binding_remedy())
+        elseif #unavailable > 0 then
+            add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
+                "SEMANTIC_MODEL_050", "Relationship candidate excludes " .. side
+                    .. " representation(s): " .. table.concat(unavailable, ", ")
+                    .. "; the endpoint key is absent and no anchored DIRECT F5 identity remap is available.")
         end
     end
 
@@ -2477,7 +2526,10 @@ local function relationship_edges(ctx)
             end
             local missing_representations = source_entity ~= nil
                 and missing_representation_columns(ctx, source_entity, ref.column_name) or {}
-            if source_entity ~= nil and #missing_representations > 0 then
+            local mapped_side = relationship_mapping_side(relationship,
+                source_entity, ref)
+            if source_entity ~= nil and #missing_representations > 0
+                and mapped_side == nil then
                 add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
                     "SEMANTIC_MODEL_017", "Relationship join condition references unknown source column: "
                         .. ref.alias .. "." .. ref.column_name

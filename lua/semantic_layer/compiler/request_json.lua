@@ -834,6 +834,8 @@ local function load_catalog(model, object_name)
         unique_keys = {},
         unique_key_by_id = {},
         unique_keys_by_entity = {},
+        relationship_identity_remaps = {},
+        relationship_candidate_rejections = {},
         canonical_fields = {},
         synonym_fields = {},
     }
@@ -1671,6 +1673,59 @@ local function complete_semantic_identity(ctx, entity)
     return nil
 end
 
+local function compiler_source_column_exists(ctx, representation, column_name)
+    ctx._source_column_exists = ctx._source_column_exists or {}
+    local cache_key = tostring(representation.source_schema) .. "\31"
+        .. tostring(representation.source_object) .. "\31" .. tostring(column_name)
+    if ctx._source_column_exists[cache_key] ~= nil then
+        return ctx._source_column_exists[cache_key]
+    end
+    local rows = query([[
+        SELECT COUNT(*) AS COLUMN_COUNT
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE COLUMN_SCHEMA = :schema_name
+          AND COLUMN_TABLE = :object_name
+          AND COLUMN_NAME = :column_name
+    ]], {schema_name = representation.source_schema,
+          object_name = representation.source_object,
+          column_name = column_name})
+    local exists = rows ~= nil and #rows > 0
+        and tonumber(row_value(rows[1], "COLUMN_COUNT", 1) or 0) > 0
+    ctx._source_column_exists[cache_key] = exists
+    return exists
+end
+
+local function relationship_candidate(ctx, requirement, entity, representation)
+    local relationship = requirement.relationship
+    local side = requirement.side
+    local mapping = relationship.key_mappings and relationship.key_mappings[1] or nil
+    local column_name = mapping and mapping[side .. "_column_name"] or nil
+    if missing(column_name) then
+        return nil, "relationship endpoint is not a scalar physical column"
+    end
+    if compiler_source_column_exists(ctx, representation, column_name) then
+        return {kind = "PHYSICAL", column_name = column_name}, nil
+    end
+    if key(representation.id) == key(entity.primary_representation.id) then
+        return nil, "primary representation is missing the relationship key column"
+    end
+    local unique_key, key_error = grain_graph.scalar_mapping_key(
+        ctx.unique_keys_by_entity[key(entity.id)] or {},
+        relationship.key_mappings or {}, side)
+    if unique_key == nil then return nil, key_error end
+    local identity = complete_semantic_identity(ctx, entity)
+    local remap, remap_error = grain_graph.direct_identity_remap(identity,
+        entity.primary_representation, representation, unique_key)
+    if remap == nil then return nil, remap_error end
+    return {
+        kind = "DIRECT_IDENTITY",
+        column_name = column_name,
+        identity = identity,
+        unique_key = unique_key,
+        binding = remap.binding,
+    }, nil
+end
+
 local function base_semantic_key_expression(entity, representation, identity_binding)
     if upper(identity_binding.kind) == "DIRECT" then
         return tostring(identity_binding.expression)
@@ -1913,6 +1968,33 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                     candidate.binding_priority = candidate.binding_priority
                         + tonumber(selected.priority or 1)
                 end
+                for _, requirement in ipairs(
+                    (ctx.relationship_requirements_by_entity or {})[key(entity.id)] or {}) do
+                    if candidate.complete then
+                        local route, route_error = relationship_candidate(ctx,
+                            requirement, entity, representation)
+                        if route == nil then
+                            candidate.complete = false
+                            candidate.relationship_error = route_error
+                            candidate.relationship_name = requirement.relationship.name
+                            candidate.relationship_side = requirement.side
+                            ctx.relationship_candidate_rejections[#ctx.relationship_candidate_rejections + 1] = {
+                                relationship_id = requirement.relationship.id,
+                                relationship_name = requirement.relationship.name,
+                                side = requirement.side,
+                                entity_id = entity.id,
+                                entity_name = entity.name,
+                                representation_id = representation.id,
+                                representation_name = representation.name,
+                                reason = route_error,
+                            }
+                            break
+                        end
+                        candidate.relationship_routes = candidate.relationship_routes or {}
+                        candidate.relationship_routes[key(requirement.relationship.id)
+                            .. ":" .. requirement.side] = route
+                    end
+                end
                 if candidate.complete then
                     candidates[#candidates + 1] = candidate
                 else
@@ -1968,6 +2050,20 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
             end
             local selected = candidates[1]
             if selected == nil then
+                local relationship_failure = nil
+                for _, incomplete in ipairs(incomplete_candidates) do
+                    if incomplete.relationship_name ~= nil then
+                        relationship_failure = incomplete
+                        break
+                    end
+                end
+                if relationship_failure ~= nil then
+                    return nil, "No active representation can traverse relationship '"
+                        .. tostring(relationship_failure.relationship_name) .. "' on "
+                        .. tostring(relationship_failure.relationship_side) .. " entity '"
+                        .. tostring(entity.name) .. "': "
+                        .. tostring(relationship_failure.relationship_error) .. "."
+                end
                 return nil, "No active representation provides every required attribute for entity '"
                     .. tostring(entity.name) .. "'. Add compatible PREFER/FALLBACK bindings."
             end
@@ -2011,6 +2107,7 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 legacy_only = selected.legacy_only,
                 fusion_strategy = partitioned and "UNION" or nil,
                 candidates = partitioned and candidates or nil,
+                relationship_routes = selected.relationship_routes or {},
             }
         end
     end
@@ -2245,6 +2342,140 @@ local function plan_joins(ctx, needed_entities)
     return joins, relationship_paths, nil
 end
 
+local function configure_relationship_requirements(ctx, joins)
+    ctx.relationship_requirements_by_entity = {}
+    for _, join in ipairs(joins or {}) do
+        local relationship = join.relationship
+        if #(relationship.key_mappings or {}) > 0 then
+            for _, endpoint in ipairs({
+                {side = "from", entity_id = relationship.from_entity_id},
+                {side = "to", entity_id = relationship.to_entity_id},
+            }) do
+                local entity_key = key(endpoint.entity_id)
+                ctx.relationship_requirements_by_entity[entity_key] =
+                    ctx.relationship_requirements_by_entity[entity_key] or {}
+                ctx.relationship_requirements_by_entity[entity_key][#ctx.relationship_requirements_by_entity[entity_key] + 1] = {
+                    relationship = relationship,
+                    side = endpoint.side,
+                }
+            end
+        end
+    end
+end
+
+local function replace_qualified_column(expression, source_alias, source_column,
+        replacement)
+    local text = tostring(expression)
+    local out = {}
+    local i = 1
+    local in_string = false
+    while i <= #text do
+        local char = string.sub(text, i, i)
+        local next_char = string.sub(text, i + 1, i + 1)
+        if char == "'" then
+            out[#out + 1] = char
+            if in_string and next_char == "'" then
+                out[#out + 1] = next_char
+                i = i + 2
+            else
+                in_string = not in_string
+                i = i + 1
+            end
+        elseif not in_string and string.match(char, "[A-Za-z_]") then
+            local alias_end = i + 1
+            while alias_end <= #text
+                and string.match(string.sub(text, alias_end, alias_end), "[A-Za-z0-9_]") do
+                alias_end = alias_end + 1
+            end
+            local alias = string.sub(text, i, alias_end - 1)
+            local cursor = alias_end
+            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
+            if upper(alias) == upper(source_alias)
+                and string.sub(text, cursor, cursor) == "." then
+                cursor = cursor + 1
+                while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
+                local column = nil
+                local column_end = cursor
+                if string.sub(text, cursor, cursor) == '"' then
+                    local parts = {}
+                    column_end = cursor + 1
+                    while column_end <= #text do
+                        local current = string.sub(text, column_end, column_end)
+                        local following = string.sub(text, column_end + 1, column_end + 1)
+                        if current == '"' and following == '"' then
+                            parts[#parts + 1] = '"'
+                            column_end = column_end + 2
+                        elseif current == '"' then
+                            column = table.concat(parts)
+                            column_end = column_end + 1
+                            break
+                        else
+                            parts[#parts + 1] = current
+                            column_end = column_end + 1
+                        end
+                    end
+                else
+                    local start_pos, end_pos, value = string.find(text,
+                        "([A-Za-z_][A-Za-z0-9_]*)", cursor)
+                    if start_pos == cursor then
+                        column = value
+                        column_end = end_pos + 1
+                    end
+                end
+                if column ~= nil and upper(column) == upper(source_column) then
+                    out[#out + 1] = tostring(replacement)
+                    i = column_end
+                else
+                    out[#out + 1] = alias
+                    i = alias_end
+                end
+            else
+                out[#out + 1] = alias
+                i = alias_end
+            end
+        else
+            out[#out + 1] = char
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+local function relationship_join_condition(ctx, relationship)
+    local condition = tostring(relationship.join_condition)
+    local provenance = {}
+    for _, endpoint in ipairs({
+        {side = "from", entity_id = relationship.from_entity_id},
+        {side = "to", entity_id = relationship.to_entity_id},
+    }) do
+        local entity = ctx.entity_by_id[key(endpoint.entity_id)]
+        local selection = entity and ctx.selected_representations
+            and ctx.selected_representations[key(entity.id)] or nil
+        local route = selection and selection.relationship_routes[
+            key(relationship.id) .. ":" .. endpoint.side] or nil
+        if route ~= nil and route.kind == "DIRECT_IDENTITY" then
+            condition = replace_qualified_column(condition, entity.alias,
+                route.column_name, route.binding.expression)
+            provenance[#provenance + 1] = {
+                relationship_id = relationship.id,
+                relationship_name = relationship.name,
+                side = endpoint.side,
+                entity_id = entity.id,
+                entity_name = entity.name,
+                representation_id = selection.representation.id,
+                representation_name = selection.representation.name,
+                semantic_identity_id = route.identity.id,
+                semantic_identity_name = route.identity.name,
+                identity_binding_id = route.binding.id,
+                identity_mapping_id = nil,
+                source_expression = route.binding.expression,
+                unique_key_id = route.unique_key.id,
+            }
+        end
+    end
+    return condition, provenance
+end
+
 local function build_order_by(ctx, request_order_by, output_fields)
     local clauses = {}
     for _, item in ipairs(as_array(request_order_by, "order_by")) do
@@ -2293,10 +2524,15 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
     end
     append_fusion_joins(root)
     for _, join in ipairs(joins) do
+        local join_condition, remaps = relationship_join_condition(ctx,
+            join.relationship)
+        for _, remap in ipairs(remaps) do
+            ctx.relationship_identity_remaps[#ctx.relationship_identity_remaps + 1] = remap
+        end
         join_sql[#join_sql + 1] = tostring(join.relationship.join_type or "LEFT") .. " JOIN "
             .. quote_qualified(join.entity.source_schema, join.entity.source_object)
             .. " " .. tostring(join.entity.alias)
-            .. " ON " .. tostring(join.relationship.join_condition)
+            .. " ON " .. join_condition
         append_fusion_joins(join.entity)
     end
     for _, filter in ipairs(filters) do
@@ -2717,6 +2953,27 @@ local function compile_request_table(request, options)
     end
 
 
+    local metric_base_entities = {}
+    for _, planning_metric in ipairs(planning_metrics) do
+        metric_base_entities[key(planning_metric.base_entity_id)] = true
+        local planning_facts = {}
+        collect_metric_facts(ctx, planning_metric, planning_facts, {})
+        for _, planning_fact in pairs(planning_facts) do
+            metric_base_entities[key(planning_fact.entity_id)] = true
+        end
+    end
+    local metric_base_entity_count = 0
+    for _, _ in pairs(metric_base_entities) do
+        metric_base_entity_count = metric_base_entity_count + 1
+    end
+    local joins, relationship_paths = {}, {}
+    if metric_base_entity_count <= 1 then
+        local join_err
+        joins, relationship_paths, join_err = plan_joins(ctx, needed_entities)
+        if join_err ~= nil then return join_err end
+        configure_relationship_requirements(ctx, joins)
+    end
+
     local binding_ok, binding_error = select_attribute_bindings(
         ctx, all_dimensions, planning_metrics, needed_entities)
     if binding_ok == nil then
@@ -2799,6 +3056,13 @@ local function compile_request_table(request, options)
             warnings = {},
             selected_representations = {},
         }
+        if #(ctx.relationship_identity_remaps or {}) > 0 then
+            plan.relationship_identity_remaps = ctx.relationship_identity_remaps
+        end
+        if #(ctx.relationship_candidate_rejections or {}) > 0 then
+            plan.relationship_candidate_rejections =
+                ctx.relationship_candidate_rejections
+        end
         if selected_materialization ~= nil then
             plan.selected_materialization = {
                 materialization_id = selected_materialization.materialization_id,
@@ -2991,11 +3255,6 @@ local function compile_request_table(request, options)
     local matrix_err = validate_metric_dimensions(ctx, selected_metrics, all_dimensions)
     if matrix_err ~= nil then
         return matrix_err
-    end
-
-    local joins, relationship_paths, join_err = plan_joins(ctx, needed_entities)
-    if join_err ~= nil then
-        return join_err
     end
 
     local selected_materialization = nil

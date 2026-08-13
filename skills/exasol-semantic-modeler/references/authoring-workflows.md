@@ -336,7 +336,14 @@ F5 supplies the join key for F4 `COALESCE` and `RECONCILE`. Verify
 `semantic_identity_id`, `identity_binding_id`, and `identity_mapping_id` in each
 fusion contributor. F5 does not rewrite relationship endpoint mappings,
 free-form filters, composite identities, partitioned F3 plans, or multi-fact
-reconciliation; normalize those shapes in a governed source view.
+reconciliation. F5.1 is the narrow relationship exception: a structured scalar
+endpoint matching a declared unique key can use an alternate `DIRECT` identity
+expression when the primary `DIRECT` binding is exactly that key. No new DDL is
+needed. Compile a traversing request and inspect `relationship_identity_remaps`.
+`MAPPED`, role-key, composite, and expression endpoint shapes still require a
+governed canonical view. `_050` and `relationship_candidate_rejections` identify
+alternates excluded only for joined requests; `_080` names the relationship
+when none remain.
 
 To retract an identity experiment or move the entity to F3, unwind F5 in this
 order:

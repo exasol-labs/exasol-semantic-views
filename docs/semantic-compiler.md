@@ -89,6 +89,17 @@ mapping IDs, so source precedence and identity resolution remain explainable.
 F4 bypasses aggregate materialization substitution and currently fails closed
 for multi-fact branch plans rather than dropping reconciliation semantics.
 
+F5.1 makes single-branch representation selection relationship-aware. Before
+ranking candidates, the compiler resolves the safe relationship path and checks
+each endpoint representation. A canonical physical endpoint remains unchanged.
+If it is absent, the candidate is usable only when the endpoint mapping matches
+a scalar unique key, the primary `DIRECT` identity binding is exactly that key,
+and the candidate has a `DIRECT` identity binding. SQL rendering replaces only
+that qualified endpoint reference. `relationship_identity_remaps` records the
+relationship, side, representation, unique key, identity, and binding; rejected
+candidates are recorded separately. Multi-fact branch planning remains outside
+this first relationship-remapping increment.
+
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the
 plan as `PLANNER_BRANCH_LIMIT_EXCEEDED` or

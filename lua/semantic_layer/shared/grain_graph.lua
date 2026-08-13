@@ -284,4 +284,71 @@ function M.mapping_matches_key(mappings, side, unique_key)
     return true
 end
 
+local function direct_column_expression(expression, source_alias)
+    local text = tostring(expression or ""):match("^%s*(.-)%s*$")
+    local alias, column = string.match(text,
+        "^([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)$")
+    if alias ~= nil and upper(alias) == upper(source_alias) then
+        return upper(column)
+    end
+    alias, column = string.match(text,
+        '^([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*"([^"]+)"$')
+    if alias ~= nil and upper(alias) == upper(source_alias) then
+        return column
+    end
+    return nil
+end
+
+function M.scalar_mapping_key(unique_keys, mappings, side)
+    if #(mappings or {}) ~= 1 then
+        return nil, "COMPOSITE_RELATIONSHIP_KEY_UNSUPPORTED"
+    end
+    local mapping = mappings[1]
+    if missing(mapping[side .. "_column_name"])
+        or not missing(mapping[side .. "_expression"]) then
+        return nil, "EXPRESSION_RELATIONSHIP_KEY_UNSUPPORTED"
+    end
+    for _, unique_key in ipairs(unique_keys or {}) do
+        local columns = unique_key.columns or {}
+        if #columns == 1 and not missing(columns[1].column_name)
+            and missing(columns[1].expression)
+            and M.mapping_matches_key(mappings, side, unique_key) then
+            return unique_key, nil
+        end
+    end
+    return nil, "RELATIONSHIP_ENDPOINT_IS_NOT_SCALAR_UNIQUE_KEY"
+end
+
+function M.direct_identity_remap(identity, primary_representation,
+        target_representation, unique_key)
+    if identity == nil or primary_representation == nil
+        or target_representation == nil or unique_key == nil then
+        return nil, "SEMANTIC_IDENTITY_REMAP_METADATA_MISSING"
+    end
+    local primary_binding = identity.binding_by_representation
+        and identity.binding_by_representation[key(primary_representation.id)] or nil
+    local target_binding = identity.binding_by_representation
+        and identity.binding_by_representation[key(target_representation.id)] or nil
+    if primary_binding == nil or upper(primary_binding.kind) ~= "DIRECT" then
+        return nil, "PRIMARY_IDENTITY_BINDING_NOT_DIRECT"
+    end
+    if target_binding == nil or upper(target_binding.kind) ~= "DIRECT" then
+        return nil, "REPRESENTATION_IDENTITY_BINDING_NOT_DIRECT"
+    end
+    local key_column = unique_key.columns and unique_key.columns[1]
+        and unique_key.columns[1].column_name or nil
+    local anchor_column = direct_column_expression(primary_binding.expression,
+        primary_representation.alias)
+    if missing(key_column) or anchor_column == nil
+        or upper(anchor_column) ~= upper(key_column) then
+        return nil, "SEMANTIC_IDENTITY_NOT_ANCHORED_TO_RELATIONSHIP_KEY"
+    end
+    return {
+        identity = identity,
+        unique_key = unique_key,
+        primary_binding = primary_binding,
+        binding = target_binding,
+    }, nil
+end
+
 ESV_GRAIN_GRAPH = M

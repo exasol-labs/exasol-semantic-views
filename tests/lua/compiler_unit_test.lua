@@ -445,6 +445,13 @@ local function compiler_query_fixture(options)
                     {103, 3, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
                 }
             end
+            if options.f51_direct then
+                return {
+                    {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1},
+                    {103, 2, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
+                    {106, 2, "mongo", "VIRTUAL_SCHEMA", "MONGO", "CUSTOMERS", "c", "ALTERNATE", 20},
+                }
+            end
             if options.promoted_primary then
                 return {
                     {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "PRIMARY", 40},
@@ -555,6 +562,15 @@ local function compiler_query_fixture(options)
             end
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            if options.f51_direct then
+                local bindings = {{305, 2, "DIMENSION", 10, 106,
+                    'c."status"', "PREFER", 1, false}}
+                if options.f51_unusable and not options.f51_no_candidate then
+                    bindings[#bindings + 1] = {306, 2, "DIMENSION", 10, 103,
+                        "c.status", "FALLBACK", 1, false}
+                end
+                return bindings
+            end
             if options.f3_union then
                 local bindings = {
                     {301, 1, "DIMENSION", 10, 104, "o.status", "PREFER", 1, true},
@@ -594,11 +610,30 @@ local function compiler_query_fixture(options)
             end
             return options.f4_policies or {}
         elseif normalized:find("FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES", 1, true) then
+            if options.f51_direct then
+                return {{502, 2, "customer_identity", "GLOBAL", "DECIMAL(18,0)"}}
+            end
             if options.f5_identity then
                 return {{501, 1, "customer_identity", "GLOBAL", "DECIMAL(18,0)"}}
             end
             return options.f5_identities or {}
         elseif normalized:find("FROM SYS_SEMANTIC.IDENTITY_BINDINGS", 1, true) then
+            if options.f51_direct then
+                return {
+                    {603, 2, 502, 103, "c.CUSTOMER_ID", "DIRECT",
+                        null, null, null, null, null, null},
+                    {604, 2, 502, 106,
+                        'CAST(c."customer_id" AS DECIMAL(18,0))',
+                        (options.f51_unusable or options.f51_no_candidate)
+                            and "MAPPED" or "DIRECT",
+                        (options.f51_unusable or options.f51_no_candidate) and 705 or null,
+                        (options.f51_unusable or options.f51_no_candidate) and "IDENTITY_MAP" or null,
+                        (options.f51_unusable or options.f51_no_candidate) and "CUSTOMER_XREF" or null,
+                        (options.f51_unusable or options.f51_no_candidate) and "customer_id" or null,
+                        (options.f51_unusable or options.f51_no_candidate) and "CUSTOMER_ID" or null,
+                        (options.f51_unusable or options.f51_no_candidate) and "CERTIFIED" or null},
+                }
+            end
             if options.f5_identity then
                 return {
                     {601, 1, 501, 101, "o.order_id", "DIRECT",
@@ -618,9 +653,9 @@ local function compiler_query_fixture(options)
                         "t.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100},
                 }
             end
-            if options.strict_target then
+            if options.strict_target or options.f51_direct then
                 return {{60, "orders_customer", 1, 2,
-                    "o.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100}}
+                    "o.CUSTOMER_ID = c.CUSTOMER_ID", "MANY_TO_ONE", "LEFT", nil, 100}}
             end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
@@ -630,16 +665,23 @@ local function compiler_query_fixture(options)
                     {61, 1, "customer_id", nil, "customer_id", nil},
                 }
             end
+            if options.f51_direct then
+                return {{60, 1, "CUSTOMER_ID", nil, "CUSTOMER_ID", nil}}
+            end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEYS", 1, true) then
             if options.multi_fact then
                 return {{50, 3, "customer_pk", "PRIMARY", "NATIVE"}}
+            end
+            if options.f51_direct then
+                return {{50, 2, "customer_pk", "PRIMARY", "NATIVE"}}
             end
             return {{50, 1, "orders_pk", "PRIMARY", "NATIVE"}}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS", 1, true) then
             if options.multi_fact then
                 return {{50, 1, "customer_id", nil}}
             end
+            if options.f51_direct then return {{50, 1, "CUSTOMER_ID", nil}} end
             return {{50, 1, "order_id", nil}}
         elseif normalized:find("FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
             if options.multi_fact then
@@ -677,6 +719,10 @@ local function compiler_query_fixture(options)
             return {{true, "OK", "SELF"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS", 1, true) then
             return {{"MEASURE", "FACT", "net_revenue"}}
+        elseif normalized:find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
+            if options.f51_direct and params.schema_name == "MONGO"
+                and params.column_name == "CUSTOMER_ID" then return {{0}} end
+            return {{1}}
         end
         error("unexpected compiler fixture query: " .. normalized)
     end
@@ -722,6 +768,10 @@ test("structured compiler executes catalog pipeline and reuses cache", function(
     assert_contains(first.plan_json, '"input_roles"')
     assert_contains(first.plan_json, '"selection_reason":"STATIC_PRIMARY"')
     assert_contains(first.plan_json, '"representation_name":"primary"')
+    assert_true(not string.find(first.plan_json,
+        '"relationship_identity_remaps"', 1, true))
+    assert_true(not string.find(first.plan_json,
+        '"relationship_candidate_rejections"', 1, true))
     assert_true(not string.find(first.generated_sql, "VS_ARCHIVE", 1, true))
     assert_equal(state.cache_inserts, 1)
     assert_equal(#state.request_logs, 1)
@@ -747,7 +797,7 @@ test("F2 compiler selects one complete fallback representation", function()
         metrics = {"revenue"},
         dimensions = {"status"},
     }, {f2_fallback = true})
-    assert_equal(result.status, "OK")
+    assert_equal(result.status, "OK", result.error_message)
     assert_contains(result.generated_sql, 'FROM "VS_ARCHIVE"."ORDERS" o')
     assert_contains(result.generated_sql, "o.archive_status")
     assert_contains(result.generated_sql, "SUM((o.archive_amount))")
@@ -809,6 +859,52 @@ test("F5 compiler reconciles through a certified source-local identity map", fun
     local primary = contributors[1]
     assert_equal(primary.representation_name, "primary")
     assert_equal(primary.identity_mapping_id, nil)
+end)
+
+test("F5.1 compiler selects and rewrites an anchored DIRECT relationship endpoint", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"total_revenue"},
+        dimensions = {"order_status"},
+        proof_mode = "STRICT_GRAIN",
+    }, {strict_target = true, f51_direct = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, 'LEFT JOIN "MONGO"."CUSTOMERS" c')
+    assert_contains(result.generated_sql,
+        'o.CUSTOMER_ID = CAST(c."customer_id" AS DECIMAL(18,0))')
+    assert_contains(result.plan_json, '"relationship_identity_remaps"')
+    assert_contains(result.plan_json, '"relationship_name":"orders_customer"')
+    assert_contains(result.plan_json, '"representation_name":"mongo"')
+    assert_contains(result.plan_json, '"identity_binding_id":604')
+    assert_contains(result.plan_json, '"unique_key_id":50')
+end)
+
+test("F5.1 compiler excludes an unsupported relationship candidate", function()
+    local result = compile_with_fixture({
+        model = "sales", object = "SALES", metrics = {"total_revenue"},
+        dimensions = {"order_status"}, proof_mode = "STRICT_GRAIN",
+    }, {strict_target = true, f51_direct = true, f51_unusable = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, 'LEFT JOIN "MART"."CUSTOMERS" c')
+    assert_contains(result.generated_sql, 'o.CUSTOMER_ID = c.CUSTOMER_ID')
+    assert_true(not string.find(result.generated_sql, '"MONGO"."CUSTOMERS"', 1, true))
+    assert_contains(result.plan_json, '"representation_name":"primary"')
+    assert_contains(result.plan_json, '"selection_reason":"ATTRIBUTE_FALLBACK"')
+    assert_contains(result.plan_json, '"relationship_candidate_rejections"')
+    assert_contains(result.plan_json, '"representation_name":"mongo"')
+    assert_contains(result.plan_json, '"reason":"REPRESENTATION_IDENTITY_BINDING_NOT_DIRECT"')
+end)
+
+test("F5.1 compiler names the relationship that eliminates the last candidate", function()
+    local result = compile_with_fixture({
+        model = "sales", object = "SALES", metrics = {"total_revenue"},
+        dimensions = {"order_status"}, proof_mode = "STRICT_GRAIN",
+    }, {strict_target = true, f51_direct = true, f51_no_candidate = true})
+    assert_equal(result.error_code, "SEMANTIC_REQUEST_080")
+    assert_contains(result.error_message, "orders_customer")
+    assert_contains(result.error_message, "to entity 'customers'")
+    assert_contains(result.error_message, "REPRESENTATION_IDENTITY_BINDING_NOT_DIRECT")
 end)
 
 test("F3 compiler unions hot and cold aggregate-state partitions", function()
@@ -890,7 +986,7 @@ test("C3 compiler activates a versioned multi branch query", function()
         limit = 10,
     }
     local result, state, mock = compile_with_fixture(request, {multi_fact = true})
-    assert_equal(result.status, "OK")
+    assert_equal(result.status, "OK", result.error_message)
     assert_equal(result.error_code, nil)
     assert_contains(result.generated_sql, "UNION ALL")
     assert_contains(result.generated_sql, 'COALESCE(ms."__esv_s_32", 0)')

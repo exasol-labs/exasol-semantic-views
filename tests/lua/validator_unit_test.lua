@@ -629,12 +629,12 @@ test("F2 identity mismatches prescribe canonical views and Phase F5", function()
         api.validate_relationship_key_mappings(ctx)
     end)
     local key_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_029")
-    local mapping_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_032")
+    local mapping_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_050")
     assert_true(key_issue ~= nil)
     assert_true(mapping_issue ~= nil)
     assert_contains(key_issue.message, "certified F5 semantic identity")
-    assert_contains(mapping_issue.message, "source view")
-    assert_contains(mapping_issue.message, "certified F5 semantic identity")
+    assert_contains(mapping_issue.message, "mongo")
+    assert_contains(mapping_issue.message, "anchored DIRECT F5 identity")
 end)
 
 test("validator proves F1 representation grain and key-set equivalence", function()
@@ -1192,6 +1192,75 @@ test("F5 validator detects fusion conflicts through mapped semantic identity", f
     assert_contains(conflict_sql, 'AS "F5_SEMANTIC_KEY"')
     assert_contains(conflict_sql, 'f4_left.customer_id = f4_right."F5_SEMANTIC_KEY"')
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_045"))
+end)
+
+test("F5.1 validator accepts anchored DIRECT relationship remaps", function()
+    local order = {id = 1, name = "order", alias = "o"}
+    local customer = {id = 2, name = "customer", alias = "c"}
+    local order_primary = {id = 5, entity_id = 1, name = "primary", alias = "o",
+        role = "PRIMARY", source_schema = "MART", source_object = "ORDERS"}
+    local customer_primary = {id = 10, entity_id = 2, name = "primary", alias = "c",
+        role = "PRIMARY", source_schema = "MDM", source_object = "CUSTOMERS"}
+    local mongo = {id = 11, entity_id = 2, name = "mongo", alias = "c",
+        role = "ALTERNATE", source_schema = "MONGO", source_object = "CUSTOMERS"}
+    order.primary_representation = order_primary
+    customer.primary_representation = customer_primary
+    local unique_key = {id = 50, entity_id = 2, name = "customer_pk",
+        columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}}
+    local identity = {id = 60, entity_id = 2, name = "customer_identity",
+        binding_by_representation = {}, bindings = {}}
+    local primary_binding = {id = 70, representation_id = 10,
+        kind = "DIRECT", expression = "c.CUSTOMER_ID"}
+    local mongo_binding = {id = 71, representation_id = 11,
+        kind = "DIRECT", expression = 'CAST(c."customer_id" AS DECIMAL(18,0))'}
+    identity.bindings = {primary_binding, mongo_binding}
+    identity.binding_by_representation = {['10'] = primary_binding, ['11'] = mongo_binding}
+    local relationship = {id = 80, name = "order_to_customer",
+        from_entity_id = 1, to_entity_id = 2,
+        join_condition = "o.CUSTOMER_ID = c.CUSTOMER_ID",
+        cardinality = "MANY_TO_ONE", join_type = "LEFT",
+        key_mappings = {{ordinal_position = 1, from_column_name = "CUSTOMER_ID",
+            to_column_name = "CUSTOMER_ID"}}}
+    local function context()
+        return validation_context({
+            entities = {order, customer},
+            entity_by_id = {['1'] = order, ['2'] = customer},
+            entity_name_by_id = {['1'] = "order", ['2'] = "customer"},
+            entity_alias_by_id = {['1'] = "O", ['2'] = "C"},
+            representations = {order_primary, customer_primary, mongo},
+            representations_by_entity = {
+                ['1'] = {order_primary}, ['2'] = {customer_primary, mongo}},
+            unique_keys_by_entity = {['2'] = {unique_key}},
+            semantic_identities = {identity},
+            identities_by_entity = {['2'] = {identity}},
+            relationships = {relationship},
+        })
+    end
+    local function run(ctx)
+        with_query(function(sql, params)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+                if params.schema_name == "MONGO"
+                    and params.column_name == "CUSTOMER_ID" then return {{0}} end
+                return {{1}}
+            end
+            return {}
+        end, function()
+            api.validate_relationship_key_mappings(ctx)
+            api.relationship_edges(ctx)
+        end)
+    end
+
+    local valid = context()
+    run(valid)
+    assert_equal(valid.error_count, 0)
+    assert_equal(valid.warning_count, 0)
+
+    mongo_binding.kind = "MAPPED"
+    local excluded = context()
+    run(excluded)
+    assert_equal(excluded.error_count, 0)
+    assert_true(has_rule(excluded, "SEMANTIC_MODEL_050"))
+    mongo_binding.kind = "DIRECT"
 end)
 
 test("validator bounds views over virtual schemas without dependency classification", function()

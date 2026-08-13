@@ -68,6 +68,7 @@ python3 tools/verify_grain_phase_c3.py
 python3 tools/verify_fusion_f3.py
 python3 tools/verify_fusion_f4.py
 python3 tools/verify_fusion_f5.py
+python3 tools/verify_fusion_f51.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -81,6 +82,9 @@ mapping totality and bijection, executes mapped F4 reconciliation, and rejects
 missing or many-to-one identity mappings. It then removes the mapping relation,
 bindings, and semantic identity in dependency order and verifies catalog
 cleanup.
+The F5.1 verifier selects an alternate customer representation whose local key
+needs a deterministic `DIRECT` cast, executes a relationship join with the
+rewritten endpoint, and checks relationship-side provenance in the plan.
 
 The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently
