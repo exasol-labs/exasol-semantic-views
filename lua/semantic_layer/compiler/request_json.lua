@@ -2092,6 +2092,9 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                         attribute.fusion_strategy = strategy
                         attribute.fusion_contributors = contributors
                         ctx.has_attribute_fusion = true
+                        if attribute_type == "FACT" then
+                            ctx.has_fact_fusion = true
+                        end
                     else
                         attribute.expression = binding.expression
                         attribute.fusion_strategy = "PREFER"
@@ -3184,9 +3187,9 @@ local function compile_request_table(request, options)
         return plan_error(code, typed_failure_message(typed_plan.failure))
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
-        if ctx.has_attribute_fusion then
+        if ctx.has_fact_fusion then
             return plan_error("_074",
-                "F4 attribute reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical source.")
+                "F4 fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
         end
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,

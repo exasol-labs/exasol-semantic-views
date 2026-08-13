@@ -13162,10 +13162,48 @@ local function collect_dimensions(logical_plan, snapshot)
     return dimensions, nil
 end
 
+local function append_fusion_joins(joins, joined_fusion_joins, entity)
+    for _, fusion_join in ipairs(entity and entity.fusion_joins or {}) do
+        local join_id = "join:fusion:" .. key(entity.id) .. ":"
+            .. key(fusion_join.alias)
+        if not joined_fusion_joins[join_id] then
+            local target_sql = fusion_join.source_sql
+            if missing(target_sql) and fusion_join.representation ~= nil then
+                target_sql = quote_qualified(
+                    fusion_join.representation.source_schema,
+                    fusion_join.representation.source_object)
+            end
+            if missing(target_sql) or missing(fusion_join.alias)
+                or #(fusion_join.predicates or {}) == 0 then
+                return fail("PHYSICAL_BINDING_INCOMPLETE", {
+                    binding_kind = "FUSION_JOIN",
+                    entity_id = entity.id,
+                })
+            end
+            joins[#joins + 1] = {
+                join_id = join_id,
+                fusion = true,
+                entity_id = entity.id,
+                join_type = "LEFT",
+                target_sql = target_sql .. " " .. tostring(fusion_join.alias),
+                condition = table.concat(fusion_join.predicates, " AND "),
+            }
+            joined_fusion_joins[join_id] = true
+        end
+    end
+    return joins, nil
+end
+
 local function branch_joins(branch, snapshot)
     local joins = {}
     local joined_relationships = {}
+    local joined_fusion_joins = {}
     local joined_entities = {[key(branch.leaf_entity_id)] = true}
+    local leaf = (snapshot.entity_by_id or {})[key(branch.leaf_entity_id)]
+    local fusion_error
+    joins, fusion_error = append_fusion_joins(
+        joins, joined_fusion_joins, leaf)
+    if joins == nil then return nil, fusion_error end
     for _, proof in ipairs(branch.proofs or {}) do
         for _, proof_edge in ipairs(proof.edges or {}) do
             local relationship = (snapshot.relationship_by_id or {})[
@@ -13207,6 +13245,9 @@ local function branch_joins(branch, snapshot)
                 }
                 joined_relationships[key(relationship.id)] = true
                 joined_entities[key(proof_edge.to_entity_id)] = true
+                joins, fusion_error = append_fusion_joins(
+                    joins, joined_fusion_joins, target)
+                if joins == nil then return nil, fusion_error end
             end
         end
     end
@@ -16074,6 +16115,9 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                         attribute.fusion_strategy = strategy
                         attribute.fusion_contributors = contributors
                         ctx.has_attribute_fusion = true
+                        if attribute_type == "FACT" then
+                            ctx.has_fact_fusion = true
+                        end
                     else
                         attribute.expression = binding.expression
                         attribute.fusion_strategy = "PREFER"
@@ -17166,9 +17210,9 @@ local function compile_request_table(request, options)
         return plan_error(code, typed_failure_message(typed_plan.failure))
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
-        if ctx.has_attribute_fusion then
+        if ctx.has_fact_fusion then
             return plan_error("_074",
-                "F4 attribute reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical source.")
+                "F4 fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
         end
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,

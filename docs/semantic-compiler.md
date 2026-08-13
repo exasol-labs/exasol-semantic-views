@@ -86,8 +86,10 @@ source-local expression through its certified two-column mapping relation and
 joins on the resulting semantic key. The plan's selected-binding entries
 include `fusion_strategy`, ordered `fusion_contributors`, and identity/binding/
 mapping IDs, so source precedence and identity resolution remain explainable.
-F4 bypasses aggregate materialization substitution and currently fails closed
-for multi-fact branch plans rather than dropping reconciliation semantics.
+F4 bypasses aggregate materialization substitution. Reconciled dimensions are
+joined and grouped inside every grain-proven multi-fact branch before aggregate
+states are merged. Reconciled facts still fail closed with `_074`; combining a
+measure across source reconciliation and fact branches is not grain-safe.
 
 F5.1 makes single-branch representation selection relationship-aware. Before
 ranking candidates, the compiler resolves the safe relationship path and checks

@@ -277,9 +277,12 @@ fanout. The generated
 `COALESCE` expression and each contributor's binding, authority, source, and
 expression appear in
 `plan_json.selected_representations[].selected_bindings[].fusion_contributors`.
-Materialization substitution is bypassed while reconciliation is active, and
-multi-fact branch requests fail closed; use a canonical pre-reconciled source
-for those shapes.
+Materialization substitution is bypassed while reconciliation is active.
+Reconciled dimensions may participate in multi-fact requests: their
+key-preserving joins execute independently in every fact branch. Reconciled
+facts remain unsupported in multi-fact plans and fail closed with
+`SEMANTIC_REQUEST_074`; use a canonical pre-reconciled measure source for that
+shape.
 
 The read-only representation view is available as:
 

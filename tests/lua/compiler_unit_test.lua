@@ -439,11 +439,24 @@ local function compiler_query_fixture(options)
                 "One row per order", 101, "primary", "RELATION", "PRIMARY", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
             if options.multi_fact then
-                return {
+                local representations = {
                     {101, 1, "primary", "RELATION", options.missing_multi_source and "" or "MART", "ORDERS", "o", "PRIMARY", 1},
                     {102, 2, "primary", "RELATION", "MART", "TICKETS", "t", "PRIMARY", 1},
                     {103, 3, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
                 }
+                if options.f4_reconcile then
+                    representations[#representations + 1] =
+                        {106, 3, "crm", "RELATION", "CRM", "CUSTOMERS", "c",
+                            "ALTERNATE", 20, nil, nil, nil, nil, "SUPPLEMENTAL"}
+                    representations[3][14] = "AUTHORITATIVE"
+                end
+                if options.f4_fact_reconcile then
+                    representations[#representations + 1] =
+                        {104, 1, "archive", "RELATION", "ARCHIVE", "ORDERS", "o",
+                            "ALTERNATE", 20, nil, nil, nil, nil, "SUPPLEMENTAL"}
+                    representations[1][14] = "AUTHORITATIVE"
+                end
+                return representations
             end
             if options.f51_direct then
                 return {
@@ -562,6 +575,20 @@ local function compiler_query_fixture(options)
             end
             return {{20, "net_revenue", 1, "o.amount", "DECIMAL(18,2)"}}
         elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            if options.multi_fact and options.f4_reconcile then
+                return {
+                    {301, 3, "DIMENSION", 10, 103, "c.region", "PREFER", 1, false},
+                    {302, 3, "DIMENSION", 10, 106, "c.region_name", "PREFER", 1, false},
+                }
+            end
+            if options.multi_fact and options.f4_fact_reconcile then
+                return {
+                    {301, 1, "FACT", 20, 101, "o.amount", "PREFER", 1, false},
+                    {302, 1, "FACT", 20, 104, "o.archive_amount", "PREFER", 1, false},
+                    {303, 2, "FACT", 21, 102, "t.ticket_id", "PREFER", 1, false},
+                    {304, 3, "DIMENSION", 10, 103, "c.region", "PREFER", 1, false},
+                }
+            end
             if options.f51_direct then
                 local bindings = {{305, 2, "DIMENSION", 10, 106,
                     'c."status"', "PREFER", 1, false}}
@@ -605,6 +632,9 @@ local function compiler_query_fixture(options)
             end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES", 1, true) then
+            if options.multi_fact and options.f4_fact_reconcile then
+                return {{1, "FACT", 20, "RECONCILE"}}
+            end
             if options.f4_reconcile then
                 return {{1, "DIMENSION", 10, "RECONCILE"}}
             end
@@ -671,6 +701,12 @@ local function compiler_query_fixture(options)
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEYS", 1, true) then
             if options.multi_fact then
+                if options.f4_fact_reconcile then
+                    return {
+                        {50, 3, "customer_pk", "PRIMARY", "NATIVE"},
+                        {51, 1, "orders_pk", "PRIMARY", "NATIVE"},
+                    }
+                end
                 return {{50, 3, "customer_pk", "PRIMARY", "NATIVE"}}
             end
             if options.f51_direct then
@@ -679,6 +715,12 @@ local function compiler_query_fixture(options)
             return {{50, 1, "orders_pk", "PRIMARY", "NATIVE"}}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS", 1, true) then
             if options.multi_fact then
+                if options.f4_fact_reconcile then
+                    return {
+                        {50, 1, "customer_id", nil},
+                        {51, 1, "order_id", nil},
+                    }
+                end
                 return {{50, 1, "customer_id", nil}}
             end
             if options.f51_direct then return {{50, 1, "CUSTOMER_ID", nil}} end
@@ -973,6 +1015,43 @@ test("structured compiler renders unary null filters and having", function()
     assert_equal(result.status, "OK")
     assert_contains(result.generated_sql, "WHERE o.status IS NULL")
     assert_contains(result.generated_sql, "HAVING SUM((o.amount)) IS NOT NULL")
+end)
+
+test("F4 reconciled dimensions participate in every multi-fact branch", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"activity_ratio"},
+        dimensions = {"customer_region"},
+    }, {multi_fact = true, f4_reconcile = true})
+    assert_equal(result.status, "OK", result.error_message)
+    assert_contains(result.generated_sql, "UNION ALL")
+    assert_contains(result.generated_sql,
+        "COALESCE(c.region, f4_rep_106.region_name)")
+    local _, fusion_join_count = result.generated_sql:gsub(
+        'LEFT JOIN "CRM"%."CUSTOMERS" f4_rep_106', "")
+    assert_equal(fusion_join_count, 2)
+
+    local physical_plan = api.json_decode(result.plan_json)
+        .logical_plan.physical_plan
+    for _, branch in ipairs(physical_plan.branches) do
+        local found_fusion_join = false
+        for _, join in ipairs(branch.joins) do
+            if join.fusion == true then found_fusion_join = true end
+        end
+        assert_true(found_fusion_join)
+    end
+end)
+
+test("F4 reconciled facts remain blocked in multi-fact plans", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"activity_ratio"},
+        dimensions = {"customer_region"},
+    }, {multi_fact = true, f4_fact_reconcile = true})
+    assert_equal(result.error_code, "SEMANTIC_REQUEST_074")
+    assert_contains(result.error_message, "fact reconciliation")
 end)
 
 test("C3 compiler activates a versioned multi branch query", function()

@@ -308,8 +308,11 @@ shared physical-column unique key or the complete F5 identity graph below, and
 same entity. After compiling representative requests,
 inspect `selected_bindings[].fusion_contributors` for ordered authority,
 binding IDs, sources, expressions, and identity mapping IDs.
-F4 bypasses aggregate materializations and rejects multi-fact branch plans.
-Use a canonical pre-reconciled source if either execution shape is required.
+F4 bypasses aggregate materializations. Reconciled dimensions may group a
+grain-proven multi-fact plan; the compiler applies their key-preserving joins in
+every fact branch. Reconciled facts remain unsupported in multi-fact plans and
+fail with `SEMANTIC_REQUEST_074`; use a canonical pre-reconciled measure source
+for that execution shape.
 
 ### Map Cross-System Entity Identity
 

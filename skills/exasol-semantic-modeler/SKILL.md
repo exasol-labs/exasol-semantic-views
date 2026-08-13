@@ -597,8 +597,10 @@ on the same entity. Keep `QUERY_TIMEOUT` bounded because validation compares
 values across the sources. Inspect each selected binding's `fusion_strategy`
 and `fusion_contributors`; confirm authority, source expressions, and F5
 identity provenance.
-Do not expect F4 to use aggregate materializations or multi-fact plans; those
-paths fail or bypass substitution rather than silently dropping reconciliation.
+F4 does not use aggregate materializations. Reconciled dimensions can group
+grain-proven multi-fact plans because reconciliation runs inside every fact
+branch. Reconciled facts cannot participate in multi-fact plans and fail with
+`SEMANTIC_REQUEST_074`; model a canonical pre-reconciled measure source instead.
 
 For F5, declare one semantic identity per entity and bind every active
 representation. Use `DIRECT` when its expression already returns the semantic
