@@ -151,6 +151,7 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("for _, item in ipairs(prepared) do", batch)
         self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", batch)
         self.assertIn("published coverage batch rejected and restored", batch)
+        self.assertIn('or "array is empty"', batch)
         self.assertLess(
             batch.index("for _, item in ipairs(prepared) do"),
             batch.index("candidate_validation"),
@@ -227,6 +228,20 @@ class InstallerResetTest(unittest.TestCase):
             key_batch.index("INSERT INTO SYS_SEMANTIC.UNIQUE_KEY_COLUMNS"),
             key_batch.index("candidate_validation"),
         )
+        complete_key_remove = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS" in sql
+        )
+        self.assertIn("SET STATUS = 'INACTIVE'", complete_key_remove)
+        self.assertIn("published complete-key removal rejected", complete_key_remove)
+        self.assertLess(
+            complete_key_remove.index("candidate_validation"),
+            complete_key_remove.index(
+                "DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS",
+                complete_key_remove.index("candidate_validation"),
+            ),
+        )
 
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []
@@ -269,6 +284,9 @@ class InstallerResetTest(unittest.TestCase):
             if "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY" in sql
         )
         self.assertIn("entity already has an active semantic identity", add_identity)
+        self.assertIn('tostring(model_status) == "PUBLISHED"', add_identity)
+        self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", add_identity)
+        self.assertIn("published semantic-identity change rejected", add_identity)
         add_binding = next(
             sql for sql in statements
             if "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING" in sql
@@ -296,7 +314,12 @@ class InstallerResetTest(unittest.TestCase):
             if "SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION" in sql
         )
         self.assertIn("cannot remove a representation with active identity bindings", remove_representation)
-        self.assertNotIn("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS", remove_representation)
+        self.assertIn("SET COVERAGE_PREDICATE = NULL", remove_representation)
+        self.assertIn("published representation removal rejected", remove_representation)
+        self.assertLess(
+            remove_representation.index("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL"),
+            remove_representation.index("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS"),
+        )
 
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())

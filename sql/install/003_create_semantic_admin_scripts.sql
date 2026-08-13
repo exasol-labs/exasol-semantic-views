@@ -661,7 +661,7 @@ if identity_kind ~= "BUSINESS" and identity_kind ~= "GLOBAL" then
     error("SEMANTIC_ADMIN_003: IDENTITY_KIND must be BUSINESS or GLOBAL")
 end
 local rows = query([[
-    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, e.ENTITY_ID
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, e.ENTITY_ID, m.STATUS
     FROM SYS_SEMANTIC.MODELS m JOIN SYS_SEMANTIC.ENTITIES e
       ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
      AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name) AND e.STATUS = 'ACTIVE'
@@ -673,8 +673,10 @@ end
 local model_id = row_value(rows[1], "MODEL_ID", 1)
 local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local entity_id = row_value(rows[1], "ENTITY_ID", 3)
+local model_status = row_value(rows[1], "STATUS", 4)
 local existing = query([[
-    SELECT IDENTITY_ID FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+    SELECT IDENTITY_ID, IDENTITY_KIND, DATA_TYPE, DESCRIPTION
+    FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND ENTITY_ID = :entity_id AND UPPER(IDENTITY_NAME) = UPPER(:identity_name)
       AND STATUS = 'ACTIVE'
@@ -702,6 +704,13 @@ if entity_identity ~= nil and #entity_identity > 0 then
         .. tostring(row_value(entity_identity[1], "IDENTITY_NAME", 1)))
 end
 local identity_id
+local was_update = existing ~= nil and #existing > 0
+local previous_identity_kind = was_update
+    and row_value(existing[1], "IDENTITY_KIND", 2) or nil
+local previous_data_type = was_update
+    and row_value(existing[1], "DATA_TYPE", 3) or nil
+local previous_description = was_update
+    and (row_value(existing[1], "DESCRIPTION", 4) or null) or null
 if existing ~= nil and #existing > 0 then
     identity_id = row_value(existing[1], "IDENTITY_ID", 1)
     query([[
@@ -732,6 +741,39 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
     {version_id = version_id})
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
+if tostring(model_status) == "PUBLISHED" then
+    local validation_rows = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(validation_rows or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            if was_update then
+                query([[
+                    UPDATE SYS_SEMANTIC.SEMANTIC_IDENTITIES
+                    SET IDENTITY_KIND = :identity_kind, DATA_TYPE = :data_type,
+                        DESCRIPTION = :description, UPDATED_AT = CURRENT_TIMESTAMP,
+                        UPDATED_BY = CURRENT_USER
+                    WHERE IDENTITY_ID = :identity_id
+                ]], {identity_id = identity_id,
+                      identity_kind = previous_identity_kind,
+                      data_type = previous_data_type,
+                      description = previous_description})
+            else
+                query("DELETE FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES WHERE IDENTITY_ID = :identity_id",
+                    {identity_id = identity_id})
+            end
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published semantic-identity change rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
 exit({{identity_id, model_name, entity_name, identity_name, identity_kind, data_type}}, [[
   IDENTITY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   IDENTITY_NAME VARCHAR(256), IDENTITY_KIND VARCHAR(32), DATA_TYPE VARCHAR(128)
@@ -1548,8 +1590,11 @@ local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
 local ok, declarations = pcall(json_decode, COVERAGE_JSON)
 if not ok or type(declarations) ~= "table" or #declarations == 0 then
+    local detail = not ok and tostring(declarations)
+        or (type(declarations) ~= "table" and "top-level value is not an array"
+            or "array is empty")
     error("SEMANTIC_ADMIN_060: COVERAGE_JSON must be a non-empty JSON array: "
-        .. tostring(declarations))
+        .. detail)
 end
 local rows = query([[
     SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, er.REPRESENTATION_ID,
@@ -2271,7 +2316,7 @@ local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
 local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
 local rows = query([[
     SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, er.REPRESENTATION_ID,
-           er.REPRESENTATION_ROLE
+           er.REPRESENTATION_ROLE, m.STATUS
     FROM SYS_SEMANTIC.MODELS m
     JOIN SYS_SEMANTIC.ENTITIES e
       ON e.MODEL_ID = m.MODEL_ID
@@ -2290,15 +2335,19 @@ end
 local model_id = row_value(rows[1], "MODEL_ID", 1)
 local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local representation_id = row_value(rows[1], "REPRESENTATION_ID", 3)
+local model_status = row_value(rows[1], "STATUS", 5)
 if tostring(row_value(rows[1], "REPRESENTATION_ROLE", 4)) == "PRIMARY" then
     error("SEMANTIC_ADMIN_047: cannot remove the PRIMARY representation; promote another representation first")
 end
-local binding_count = scalar([[
-    SELECT COUNT(*) FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+local binding_rows = query([[
+    SELECT ATTRIBUTE_BINDING_ID FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
     WHERE REPRESENTATION_ID = :representation_id AND STATUS = 'ACTIVE'
 ]], {representation_id = representation_id})
-if tonumber(binding_count or 0) > 0 then
-    error("SEMANTIC_ADMIN_048: cannot remove a representation with active attribute bindings; remove the bindings first")
+for _, binding_row in ipairs(binding_rows or {}) do
+    query([[
+        UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS SET STATUS = 'INACTIVE'
+        WHERE ATTRIBUTE_BINDING_ID = :binding_id
+    ]], {binding_id = row_value(binding_row, "ATTRIBUTE_BINDING_ID", 1)})
 end
 local identity_binding_count = scalar([[
     SELECT COUNT(*) FROM SYS_SEMANTIC.IDENTITY_BINDINGS
@@ -2307,10 +2356,36 @@ local identity_binding_count = scalar([[
 if tonumber(identity_binding_count or 0) > 0 then
     error("SEMANTIC_ADMIN_057: cannot remove a representation with active identity bindings; remove mapping relations and identity bindings first")
 end
-query("DELETE FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES WHERE REPRESENTATION_ID = :representation_id",
+local survivor_rows = query([[
+    SELECT REPRESENTATION_ID, COVERAGE_PREDICATE, VALID_FROM, VALID_TO
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = (
+      SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+      WHERE REPRESENTATION_ID = :representation_id
+    )
+      AND REPRESENTATION_ID <> :representation_id
+      AND STATUS = 'ACTIVE'
+    ORDER BY REPRESENTATION_ID
+]], {representation_id = representation_id})
+local survivor = nil
+if survivor_rows ~= nil and #survivor_rows == 1 then
+    survivor = {
+        id = row_value(survivor_rows[1], "REPRESENTATION_ID", 1),
+        predicate = row_value(survivor_rows[1], "COVERAGE_PREDICATE", 2) or null,
+        valid_from = row_value(survivor_rows[1], "VALID_FROM", 3) or null,
+        valid_to = row_value(survivor_rows[1], "VALID_TO", 4) or null,
+    }
+end
+query("UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET STATUS = 'INACTIVE' WHERE REPRESENTATION_ID = :representation_id",
     {representation_id = representation_id})
-query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
-    {representation_id = representation_id})
+if survivor ~= nil then
+    query([[
+        UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        SET COVERAGE_PREDICATE = NULL, VALID_FROM = NULL, VALID_TO = NULL,
+            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        WHERE REPRESENTATION_ID = :representation_id
+    ]], {representation_id = survivor.id})
+end
 query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
     {version_id = version_id})
 query([[
@@ -2318,6 +2393,51 @@ query([[
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND STATUS IN ('OK', 'WARNING')
 ]], {model_id = model_id, version_id = version_id})
+
+if tostring(model_status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query("UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS SET STATUS = 'ACTIVE' WHERE REPRESENTATION_ID = :representation_id",
+                {representation_id = representation_id})
+            for _, binding_row in ipairs(binding_rows or {}) do
+                query([[
+                    UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS SET STATUS = 'ACTIVE'
+                    WHERE ATTRIBUTE_BINDING_ID = :binding_id
+                ]], {binding_id = row_value(binding_row, "ATTRIBUTE_BINDING_ID", 1)})
+            end
+            if survivor ~= nil then
+                query([[
+                    UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+                    SET COVERAGE_PREDICATE = :coverage_predicate,
+                        VALID_FROM = :valid_from, VALID_TO = :valid_to,
+                        UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+                    WHERE REPRESENTATION_ID = :representation_id
+                ]], {representation_id = survivor.id,
+                      coverage_predicate = survivor.predicate,
+                      valid_from = survivor.valid_from,
+                      valid_to = survivor.valid_to})
+            end
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published representation removal rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
+query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE REPRESENTATION_ID = :representation_id",
+    {representation_id = representation_id})
+query("DELETE FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES WHERE REPRESENTATION_ID = :representation_id",
+    {representation_id = representation_id})
+query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
+    {representation_id = representation_id})
 
 exit({{representation_id, model_name, entity_name, representation_name, "REMOVED"}}, [[
   REPRESENTATION_ID DECIMAL(18,0),
@@ -5420,6 +5540,90 @@ query("DELETE FROM SYS_SEMANTIC.UNIQUE_KEYS WHERE UNIQUE_KEY_ID = :unique_key_id
 exit({{unique_key_id, model_name, entity_name, key_name, "REMOVED"}}, [[
   UNIQUE_KEY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   KEY_NAME VARCHAR(256), STATUS VARCHAR(32)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS(
+  MODEL_NAME,
+  ENTITY_NAME,
+  KEY_NAME
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local model_name = trim(MODEL_NAME)
+local entity_name = trim(ENTITY_NAME)
+local key_name = trim(KEY_NAME)
+if model_name == "" or entity_name == "" or key_name == "" then
+    error("SEMANTIC_ADMIN_001: model, entity, and key names are required")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, uk.UNIQUE_KEY_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name) AND e.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.UNIQUE_KEYS uk
+      ON uk.ENTITY_ID = e.ENTITY_ID AND uk.VERSION_ID = e.VERSION_ID
+     AND UPPER(uk.KEY_NAME) = UPPER(:key_name) AND uk.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name, key_name = key_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_096: active unique key not found: " .. key_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local model_status = row_value(rows[1], "STATUS", 3)
+local unique_key_id = row_value(rows[1], "UNIQUE_KEY_ID", 4)
+local column_count_rows = query([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS
+    WHERE UNIQUE_KEY_ID = :unique_key_id
+]], {unique_key_id = unique_key_id})
+local column_count = column_count_rows[1][1]
+query([[
+    UPDATE SYS_SEMANTIC.UNIQUE_KEYS SET STATUS = 'INACTIVE',
+        UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+    WHERE UNIQUE_KEY_ID = :unique_key_id
+]], {unique_key_id = unique_key_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query([[
+    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND STATUS IN ('OK', 'WARNING')
+]], {model_id = model_id, version_id = version_id})
+if tostring(model_status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query([[
+                UPDATE SYS_SEMANTIC.UNIQUE_KEYS SET STATUS = 'ACTIVE',
+                    UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+                WHERE UNIQUE_KEY_ID = :unique_key_id
+            ]], {unique_key_id = unique_key_id})
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published complete-key removal rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
+query("DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS WHERE UNIQUE_KEY_ID = :unique_key_id",
+    {unique_key_id = unique_key_id})
+query("DELETE FROM SYS_SEMANTIC.UNIQUE_KEYS WHERE UNIQUE_KEY_ID = :unique_key_id",
+    {unique_key_id = unique_key_id})
+exit({{unique_key_id, model_name, entity_name, key_name, column_count, "REMOVED"}}, [[
+  UNIQUE_KEY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  KEY_NAME VARCHAR(256), REMOVED_COLUMN_COUNT DECIMAL(18,0), STATUS VARCHAR(32)
 ]])
 /
 

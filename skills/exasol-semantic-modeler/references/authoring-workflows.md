@@ -569,7 +569,7 @@ The complete key is validated once and is removed automatically if validation
 fails. Use the sequential key calls only while the model is still a draft or
 when updating an already valid key.
 
-Remove a mistaken declaration in reverse dependency order:
+Remove a mistaken declaration from a draft in reverse dependency order:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_COLUMN(
@@ -580,8 +580,18 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY(
 );
 ```
 
-`REMOVE_UNIQUE_KEY` refuses while columns remain. On published models, either
-call is restored automatically if the candidate breaks validation.
+`REMOVE_UNIQUE_KEY` refuses while columns remain. On a published model, this
+sequential removal is unreachable because the final column would leave an empty key.
+Remove the complete published declaration instead:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS(
+  'sales', 'customer', 'customer_pk'
+);
+```
+
+The complete inverse validates before deleting rows and restores the key when
+another declaration still depends on it.
 
 ## Register Semantic Object
 

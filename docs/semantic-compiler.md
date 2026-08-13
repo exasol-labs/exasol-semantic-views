@@ -309,6 +309,12 @@ be invalid if declarations were validated individually.
 physical representation and its compatibility bindings, while
 `ADD_UNIQUE_KEY_WITH_COLUMNS` validates a complete key instead of exposing an
 empty key between calls.
+The inverse `REMOVE_UNIQUE_KEY_WITH_COLUMNS` hides the complete key for one
+prospective validation before deleting it. Removing the final alternate
+representation similarly clears coverage on the survivor and validates the
+single-source model before physical cleanup. Successful published semantic
+identity changes run validation immediately rather than leaving the surface
+stale.
 
 This fail-closed behavior is intentional: reusing an earlier successful
 validation would certify newly mutated catalog rows that were never validated.

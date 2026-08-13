@@ -75,6 +75,7 @@ python3 tools/verify_bug20_published_authoring_isolation.py
 python3 tools/verify_bug25_published_mutation_protection.py
 python3 tools/verify_bug26_published_f3_batch.py
 python3 tools/verify_bug27_published_multistep_declarations.py
+python3 tools/verify_bug28_composite_removal_and_recertification.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -101,6 +102,9 @@ coverage set and proves the published result remains stable.
 The BUG-27 verifier registers a genuinely smaller hot partition together with
 its complete F3 coverage, then adds a complete composite key to the same
 published model without exposing either invalid intermediate state.
+The BUG-28 verifier removes a complete key, tears F3 back down to one source,
+checks immediate recertification after semantic-identity creation, and verifies
+stable malformed-coverage diagnostics.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

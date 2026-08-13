@@ -247,8 +247,10 @@ continuing. If uniqueness cannot be proven, do not invent a key or mapping;
 retain `SEMANTIC_MODEL_031` for legacy single-branch compilation and surface it
 for review.
 
-To withdraw an incorrect declaration, call `REMOVE_UNIQUE_KEY_COLUMN` for each
-component before `REMOVE_UNIQUE_KEY`. Do not edit `SYS_SEMANTIC` directly.
+To withdraw an incorrect declaration from a draft, call
+`REMOVE_UNIQUE_KEY_COLUMN` for each component before `REMOVE_UNIQUE_KEY`. On a
+published model, call `REMOVE_UNIQUE_KEY_WITH_COLUMNS` so the complete key is
+validated as one removal candidate. Do not edit `SYS_SEMANTIC` directly.
 Published removals that would invalidate relationship grain proofs are rejected
 and restored with `SEMANTIC_ADMIN_094`.
 
@@ -550,6 +552,12 @@ omitting the comparison for each `NULL` bound. Predicate timestamp literals
 must exactly match the metadata; free-form coverage SQL is rejected. Set
 `QUERY_TIMEOUT=60` before validating any partitioned entity, regardless of the
 declared source kinds or whether a local view wraps a Virtual Schema.
+
+To leave F3 when only one alternate remains, call
+`REMOVE_ENTITY_REPRESENTATION` for that alternate. It removes the
+representation-local attribute bindings and clears coverage on the surviving
+primary as one validated candidate. Do not clear coverage first: genuine
+partitions usually fail F1 key-set equality without coverage.
 Before declaring coverage, confirm the entity appears as `BASE_ENTITY_NAME` for
 an active metric in `SEMANTIC_CATALOG.METRICS`. `VALIDATE_MODEL` rejects
 partitioning an entity used only as a joined dimension with
