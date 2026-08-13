@@ -678,6 +678,12 @@ expressions into a source view, then map the projected column. If
 repair the metadata and rerun `VALIDATE_MODEL`; `APPLY_SEMANTIC_DEFINITION`
 cannot apply metric edits while the model has a blocking validation error.
 
+Resolve both endpoint columns through `EXA_ALL_COLUMNS` before registration.
+`SEMANTIC_MODEL_051` rejects simple equalities across incompatible type
+families and names both resolved types. To remove a relationship, call
+`REMOVE_RELATIONSHIP_KEY_MAPPING` from the highest ordinal down, then call
+`REMOVE_RELATIONSHIP`; both operations protect published validation state.
+
 ## Add Facts
 
 Smoke-test each row-level expression against its owning source entity before

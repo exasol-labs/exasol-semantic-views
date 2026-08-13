@@ -272,6 +272,8 @@ class InstallerResetTest(unittest.TestCase):
             "ADD_SEMANTIC_IDENTITY": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_IDENTITY_BINDING": "REMOVE_IDENTITY_BINDING",
             "ADD_IDENTITY_MAPPING_RELATION": "REMOVE_IDENTITY_MAPPING_RELATION",
+            "ADD_RELATIONSHIP": "REMOVE_RELATIONSHIP",
+            "ADD_RELATIONSHIP_KEY_MAPPING": "REMOVE_RELATIONSHIP_KEY_MAPPING",
             "ADD_ATTRIBUTE_BINDING": "REMOVE_ATTRIBUTE_BINDING",
             "ADD_DIMENSION": "REMOVE_DIMENSION",
         }
@@ -288,11 +290,22 @@ class InstallerResetTest(unittest.TestCase):
                 "tools/verify_bug30_published_identity_setup.py",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING":
                 "tools/verify_bug31_representation_with_identity.py",
+            "ADD_RELATIONSHIP":
+                "tools/verify_bug32_relationship_types_and_removal.py",
         }
         for operation, relative_path in published_reachability.items():
             verifier = (ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(f"SEMANTIC_ADMIN.{operation}", verifier)
             self.assertIn("SEMANTIC_ADMIN.PUBLISH_MODEL", verifier)
+
+        add_relationship = scripts["ADD_RELATIONSHIP"]
+        self.assertIn("published relationship change rejected", add_relationship)
+        self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", add_relationship)
+        remove_mapping = scripts["REMOVE_RELATIONSHIP_KEY_MAPPING"]
+        self.assertIn("published relationship-mapping removal rejected", remove_mapping)
+        remove_relationship = scripts["REMOVE_RELATIONSHIP"]
+        self.assertIn("cannot remove a relationship with active key mappings", remove_relationship)
+        self.assertIn("published relationship removal rejected", remove_relationship)
 
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []

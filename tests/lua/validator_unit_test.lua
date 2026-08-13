@@ -353,6 +353,48 @@ test("source catalog probes preserve non-uppercase identifiers", function()
     end)
 end)
 
+test("validator rejects type-incompatible relationship endpoints", function()
+    local from_entity = {id = 1, name = "order_line", alias = "li"}
+    local to_entity = {id = 2, name = "campaign", alias = "cp"}
+    local ctx = validation_context({
+        entities = {from_entity, to_entity},
+        entity_by_id = {['1'] = from_entity, ['2'] = to_entity},
+        entity_name_by_id = {['1'] = "order_line", ['2'] = "campaign"},
+        entity_alias_by_id = {['1'] = "LI", ['2'] = "CP"},
+        representations_by_entity = {
+            ['1'] = {{id = 11, entity_id = 1, name = "primary",
+                source_schema = "HUBV", source_object = "ORDER_LINES", alias = "li"}},
+            ['2'] = {{id = 12, entity_id = 2, name = "primary",
+                source_schema = "HUBV", source_object = "CAMPAIGNS", alias = "cp"}},
+        },
+        relationships = {{
+            name = "line_campaign", from_entity_id = 1, to_entity_id = 2,
+            cardinality = "MANY_TO_ONE", join_type = "LEFT",
+            join_condition = "li.PRODUCT_ID = cp.CAMPAIGN_ID",
+        }},
+    })
+    with_query(function(sql, params)
+        if contains(sql, "SELECT COUNT(*)")
+            and contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            return {{1}}
+        elseif contains(sql, "SELECT COLUMN_TYPE") then
+            if params.column_name == "PRODUCT_ID" then
+                return {{COLUMN_TYPE = "DECIMAL(10,0)"}}
+            end
+            return {{COLUMN_TYPE = "VARCHAR(2000000) UTF8"}}
+        end
+        error("unexpected relationship type SQL: " .. tostring(sql))
+    end, function()
+        api.relationship_edges(ctx)
+    end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_051")
+    assert_true(issue ~= nil)
+    assert_contains(issue.message, "LI.PRODUCT_ID")
+    assert_contains(issue.message, "DECIMAL(10,0)")
+    assert_contains(issue.message, "CP.CAMPAIGN_ID")
+    assert_contains(issue.message, "VARCHAR(2000000) UTF8")
+end)
+
 test("validator structural rules reject invisible and dangling catalog objects", function()
     local ctx = validation_context({
         version_id = 2,

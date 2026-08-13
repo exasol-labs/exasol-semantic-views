@@ -3170,7 +3170,7 @@ end
 
 local function model_row(model_name)
     local rows = query([[
-        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID
+        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID, m.STATUS
         FROM SYS_SEMANTIC.MODELS m
         WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
     ]], {model_name = model_name})
@@ -3179,7 +3179,8 @@ local function model_row(model_name)
     end
     return {
         model_id = row_value(rows[1], "MODEL_ID", 1),
-        version_id = row_value(rows[1], "VERSION_ID", 2)
+        version_id = row_value(rows[1], "VERSION_ID", 2),
+        status = row_value(rows[1], "STATUS", 3)
     }
 end
 
@@ -3221,6 +3222,7 @@ local duplicate = scalar([[
     WHERE MODEL_ID = :model_id
       AND VERSION_ID = :version_id
       AND UPPER(RELATIONSHIP_NAME) = UPPER(:relationship_name)
+      AND STATUS = 'ACTIVE'
 ]], {model_id = model.model_id, version_id = model.version_id, relationship_name = relationship_name})
 if tonumber(duplicate or 0) > 0 then
     error("SEMANTIC_ADMIN_016: duplicate relationship: " .. relationship_name)
@@ -3247,6 +3249,37 @@ query([[
     join_type = join_type,
     fanout_policy = optional_text(FANOUT_POLICY)
 })
+local relationship_id = scalar([[
+    SELECT RELATIONSHIP_ID FROM SYS_SEMANTIC.RELATIONSHIPS
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND UPPER(RELATIONSHIP_NAME) = UPPER(:relationship_name)
+      AND STATUS = 'ACTIVE'
+]], {model_id = model.model_id, version_id = model.version_id,
+      relationship_name = relationship_name})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = model.version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model.model_id, version_id = model.version_id})
+if tostring(model.status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query("DELETE FROM SYS_SEMANTIC.RELATIONSHIPS WHERE RELATIONSHIP_ID = :relationship_id",
+                {relationship_id = relationship_id})
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published relationship change rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
@@ -3388,6 +3421,169 @@ query([[
 ]], {relationship_id = relationship_id})
 query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
     {model_name = trim(MODEL_NAME)})
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_RELATIONSHIP_KEY_MAPPING(
+  MODEL_NAME,
+  RELATIONSHIP_NAME,
+  ORDINAL_POSITION
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local model_name = trim(MODEL_NAME)
+local relationship_name = trim(RELATIONSHIP_NAME)
+local ordinal = tonumber(ORDINAL_POSITION)
+if model_name == "" or relationship_name == "" then
+    error("SEMANTIC_ADMIN_001: MODEL_NAME and RELATIONSHIP_NAME are required")
+end
+if ordinal == nil or ordinal < 1 or ordinal % 1 ~= 0 then
+    error("SEMANTIC_ADMIN_003: ORDINAL_POSITION must be a positive integer")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, r.RELATIONSHIP_ID,
+           rkm.FROM_COLUMN_NAME, rkm.FROM_EXPRESSION,
+           rkm.TO_COLUMN_NAME, rkm.TO_EXPRESSION
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.RELATIONSHIPS r
+      ON r.MODEL_ID = m.MODEL_ID AND r.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(r.RELATIONSHIP_NAME) = UPPER(:relationship_name)
+     AND r.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS rkm
+      ON rkm.RELATIONSHIP_ID = r.RELATIONSHIP_ID
+     AND rkm.ORDINAL_POSITION = :ordinal
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, relationship_name = relationship_name,
+      ordinal = ordinal})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_065: active relationship key mapping not found: "
+        .. relationship_name .. "[" .. tostring(ordinal) .. "]")
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local model_status = row_value(rows[1], "STATUS", 3)
+local relationship_id = row_value(rows[1], "RELATIONSHIP_ID", 4)
+local from_column = row_value(rows[1], "FROM_COLUMN_NAME", 5) or null
+local from_expression = row_value(rows[1], "FROM_EXPRESSION", 6) or null
+local to_column = row_value(rows[1], "TO_COLUMN_NAME", 7) or null
+local to_expression = row_value(rows[1], "TO_EXPRESSION", 8) or null
+query([[
+    DELETE FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+    WHERE RELATIONSHIP_ID = :relationship_id AND ORDINAL_POSITION = :ordinal
+]], {relationship_id = relationship_id, ordinal = ordinal})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+if tostring(model_status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query([[
+                INSERT INTO SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS (
+                  RELATIONSHIP_ID, ORDINAL_POSITION, FROM_COLUMN_NAME,
+                  FROM_EXPRESSION, TO_COLUMN_NAME, TO_EXPRESSION
+                ) VALUES (
+                  :relationship_id, :ordinal, :from_column, :from_expression,
+                  :to_column, :to_expression
+                )
+            ]], {relationship_id = relationship_id, ordinal = ordinal,
+                  from_column = from_column, from_expression = from_expression,
+                  to_column = to_column, to_expression = to_expression})
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published relationship-mapping removal rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
+exit({{model_name, relationship_name, ordinal, "REMOVED"}}, [[
+  MODEL_NAME VARCHAR(256), RELATIONSHIP_NAME VARCHAR(256),
+  ORDINAL_POSITION DECIMAL(18,0), STATUS VARCHAR(32)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_RELATIONSHIP(
+  MODEL_NAME,
+  RELATIONSHIP_NAME
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local model_name = trim(MODEL_NAME)
+local relationship_name = trim(RELATIONSHIP_NAME)
+if model_name == "" or relationship_name == "" then
+    error("SEMANTIC_ADMIN_001: MODEL_NAME and RELATIONSHIP_NAME are required")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, r.RELATIONSHIP_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.RELATIONSHIPS r
+      ON r.MODEL_ID = m.MODEL_ID AND r.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(r.RELATIONSHIP_NAME) = UPPER(:relationship_name)
+     AND r.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, relationship_name = relationship_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_016: active relationship not found: " .. relationship_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local model_status = row_value(rows[1], "STATUS", 3)
+local relationship_id = row_value(rows[1], "RELATIONSHIP_ID", 4)
+local mapping_rows = query([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+    WHERE RELATIONSHIP_ID = :relationship_id
+]], {relationship_id = relationship_id})
+local mapping_count = mapping_rows ~= nil and #mapping_rows > 0
+    and tonumber(mapping_rows[1][1]) or 0
+if mapping_count > 0 then
+    error("SEMANTIC_ADMIN_066: cannot remove a relationship with active key mappings; "
+        .. "remove mappings in descending ordinal order first")
+end
+query([[
+    UPDATE SYS_SEMANTIC.RELATIONSHIPS SET STATUS = 'REMOVED'
+    WHERE RELATIONSHIP_ID = :relationship_id
+]], {relationship_id = relationship_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+if tostring(model_status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query("UPDATE SYS_SEMANTIC.RELATIONSHIPS SET STATUS = 'ACTIVE' WHERE RELATIONSHIP_ID = :relationship_id",
+                {relationship_id = relationship_id})
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published relationship removal rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
+exit({{relationship_id, model_name, relationship_name, "REMOVED"}}, [[
+  RELATIONSHIP_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  RELATIONSHIP_NAME VARCHAR(256), STATUS VARCHAR(32)
+]])
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
@@ -7770,6 +7966,54 @@ local function source_column_exists(schema_name, object_name, column_name)
     ]], {schema_name = schema_name, object_name = object_name, column_name = column_name}) > 0
 end
 
+local function source_column_type(schema_name, object_name, column_name)
+    local ok, rows = pcall(query, [[
+        SELECT COLUMN_TYPE
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
+          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
+          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
+        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
+        LIMIT 1
+    ]], {schema_name = schema_name, object_name = object_name,
+          column_name = column_name})
+    if not ok or rows == nil or #rows == 0 then return nil end
+    local data_type = row_value(rows[1], "COLUMN_TYPE", 1)
+    if type(data_type) ~= "string" then return nil end
+    return data_type
+end
+
+local function relationship_type_family(data_type)
+    local value = upper(data_type)
+    if value:match("^DECIMAL") or value:match("^DOUBLE")
+        or value:match("^FLOAT") or value:match("^INTEGER")
+        or value:match("^BIGINT") or value:match("^SMALLINT") then
+        return "NUMERIC"
+    elseif value:match("^CHAR") or value:match("^VARCHAR") then
+        return "STRING"
+    elseif value:match("^DATE") or value:match("^TIMESTAMP") then
+        return "TEMPORAL"
+    elseif value:match("^INTERVAL") then
+        return "INTERVAL"
+    elseif value:match("^BOOLEAN") then
+        return "BOOLEAN"
+    elseif value:match("^GEOMETRY") then
+        return "GEOMETRY"
+    elseif value:match("^HASHTYPE") then
+        return "HASHTYPE"
+    end
+    return value:match("^([A-Z_]+)") or value
+end
+
+local function simple_relationship_equality(expression)
+    local shape = tostring(expression or "")
+    shape = shape:gsub('[A-Za-z_][A-Za-z0-9_]*%s*%.%s*"[^"]+"', "REF")
+    shape = shape:gsub("[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*", "REF")
+    shape = shape:gsub("%s+", "")
+    while shape:match("^%b()$") do shape = shape:sub(2, -2) end
+    return shape == "REF=REF"
+end
+
 local function quote_ident(value)
     return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
 end
@@ -8517,6 +8761,29 @@ local function representations_for_entity(ctx, entity)
         }}
     end
     return representations
+end
+
+local function entity_column_types(ctx, entity, column_name)
+    local result = {}
+    local seen = {}
+    for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+        local data_type = source_column_type(representation.source_schema,
+            representation.source_object, column_name)
+        if not missing(data_type) then
+            local descriptor = tostring(representation.name) .. "=" .. tostring(data_type)
+            if not seen[descriptor] then
+                seen[descriptor] = true
+                result[#result + 1] = {
+                    family = relationship_type_family(data_type),
+                    descriptor = descriptor,
+                }
+            end
+        end
+    end
+    table.sort(result, function(left, right)
+        return left.descriptor < right.descriptor
+    end)
+    return result
 end
 
 local function entity_uses_partition_fusion(ctx, entity)
@@ -9758,7 +10025,8 @@ local function relationship_edges(ctx)
                 "Join condition must reference the relationship endpoint aliases.")
         end
 
-        for _, ref in ipairs(column_refs_in_expression(relationship.join_condition)) do
+        local join_refs = column_refs_in_expression(relationship.join_condition)
+        for _, ref in ipairs(join_refs) do
             local source_entity = nil
             for _, entity in ipairs(ctx.entities or {}) do
                 if upper(entity.alias) == ref.alias then
@@ -9777,6 +10045,54 @@ local function relationship_edges(ctx)
                         .. ref.alias .. "." .. ref.column_name
                         .. representation_suffix(missing_representations) .. "."
                         .. identity_binding_remedy())
+            end
+        end
+
+        if simple_relationship_equality(relationship.join_condition)
+            and #join_refs == 2 and from_exists and to_exists then
+            local from_entity = ctx.entity_by_id[key(relationship.from_entity_id)]
+            local to_entity = ctx.entity_by_id[key(relationship.to_entity_id)]
+            local from_alias = ctx.entity_alias_by_id[key(relationship.from_entity_id)]
+            local to_alias = ctx.entity_alias_by_id[key(relationship.to_entity_id)]
+            local from_ref, to_ref
+            for _, ref in ipairs(join_refs) do
+                if ref.alias == from_alias then from_ref = ref end
+                if ref.alias == to_alias then to_ref = ref end
+            end
+            if from_ref ~= nil and to_ref ~= nil then
+                local from_types = entity_column_types(
+                    ctx, from_entity, from_ref.column_name)
+                local to_types = entity_column_types(
+                    ctx, to_entity, to_ref.column_name)
+                local incompatible = false
+                for _, from_type in ipairs(from_types) do
+                    for _, to_type in ipairs(to_types) do
+                        if from_type.family ~= to_type.family then
+                            incompatible = true
+                            break
+                        end
+                    end
+                    if incompatible then break end
+                end
+                if incompatible then
+                    local from_descriptions = {}
+                    local to_descriptions = {}
+                    for _, item in ipairs(from_types) do
+                        from_descriptions[#from_descriptions + 1] = item.descriptor
+                    end
+                    for _, item in ipairs(to_types) do
+                        to_descriptions[#to_descriptions + 1] = item.descriptor
+                    end
+                    add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name,
+                        "SEMANTIC_MODEL_051",
+                        "Relationship join endpoints are type-incompatible: "
+                            .. tostring(from_alias) .. "."
+                            .. tostring(from_ref.column_name) .. " ["
+                            .. table.concat(from_descriptions, ", ") .. "] vs "
+                            .. tostring(to_alias) .. "."
+                            .. tostring(to_ref.column_name) .. " ["
+                            .. table.concat(to_descriptions, ", ") .. "].")
+                end
             end
         end
 

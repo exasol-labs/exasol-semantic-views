@@ -111,6 +111,9 @@ while incomplete candidates leave no catalog or surface impact.
 The BUG-31 verifier adds a representation whose physical key differs from the
 published entity key together with its F5 binding, and proves candidate rollback
 and continuous surface certification.
+The BUG-32 verifier rejects a numeric-to-string relationship with endpoint type
+diagnostics, then removes a valid mapping and relationship in dependency order
+without interrupting the published surface.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

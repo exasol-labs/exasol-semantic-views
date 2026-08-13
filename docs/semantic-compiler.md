@@ -312,6 +312,9 @@ empty key between calls.
 `ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` similarly adds a heterogeneous
 representation and its F5 binding as one candidate, so legacy key validation
 never observes the unbound representation.
+Relationship additions and removals use the same prospective boundary.
+`SEMANTIC_MODEL_051` blocks simple equality joins whose resolved endpoint type
+families differ before the relationship can affect a published query.
 The inverse `REMOVE_UNIQUE_KEY_WITH_COLUMNS` hides the complete key for one
 prospective validation before deleting it. Removing the final alternate
 representation similarly clears coverage on the survivor and validates the

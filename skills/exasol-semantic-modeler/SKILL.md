@@ -665,6 +665,12 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
 );
 ```
 
+Before adding a relationship, compare resolved endpoint types in
+`EXA_ALL_COLUMNS`; do not rely on implicit casts. Validation blocks simple
+equality joins across incompatible type families with `SEMANTIC_MODEL_051`.
+To withdraw a relationship, call `REMOVE_RELATIONSHIP_KEY_MAPPING` for each
+mapping in descending ordinal order, then `REMOVE_RELATIONSHIP`.
+
 ## Dimension Maintenance
 
 Use the Lua admin script for all dimension changes. `ALTER SEMANTIC VIEW … ADD

@@ -464,6 +464,8 @@ SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_COLUMN
 SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY
 SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS
 SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
+SEMANTIC_ADMIN.REMOVE_RELATIONSHIP_KEY_MAPPING
+SEMANTIC_ADMIN.REMOVE_RELATIONSHIP
 SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA
 ```
 
@@ -478,6 +480,11 @@ store either a simple source column name or a native expression, but not both.
 Relationship mappings follow the same rule independently for each endpoint.
 They are optional for legacy single-branch compilation but required for
 grain-aware relationship proofs.
+Simple equality relationships must join compatible physical type families on
+every active representation. Remove a relationship in dependency order:
+remove its key mappings from highest ordinal to lowest, then call
+`REMOVE_RELATIONSHIP`. Published additions and removals validate prospectively
+and restore the prior relationship state on error.
 
 On a published model, use `ADD_UNIQUE_KEY_WITH_COLUMNS` for a new key. Its JSON
 array contains ordered objects with `column_name` or `expression` and optional
