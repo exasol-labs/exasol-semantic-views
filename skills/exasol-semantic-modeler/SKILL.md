@@ -259,6 +259,9 @@ standalone add, update, or remove leaves the published surface queryable without
 a separate `VALIDATE_MODEL` call. Use `ADD_SEMANTIC_IDENTITY_WITH_BINDINGS` for
 F5 setup on an already published multi-representation entity; the standalone
 identity call is rejected because the required bindings do not exist yet.
+When an existing published F5 entity gains a heterogeneous representation, use
+`ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING`; ordinary representation
+registration validates before its required binding can be added.
 
 ### Step 4 — Derive facts from numeric columns
 

@@ -243,7 +243,7 @@ class InstallerResetTest(unittest.TestCase):
             ),
         )
 
-    def test_stale_mutators_recertify_and_lifecycle_pairs_have_inverses(self):
+    def test_stale_mutators_recertify_and_managed_lifecycles_are_exercised(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
                 encoding="utf-8"
@@ -266,6 +266,7 @@ class InstallerResetTest(unittest.TestCase):
 
         lifecycle_pairs = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE": "REMOVE_ENTITY_REPRESENTATION",
+            "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_UNIQUE_KEY_WITH_COLUMNS": "REMOVE_UNIQUE_KEY_WITH_COLUMNS",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_SEMANTIC_IDENTITY": "REMOVE_SEMANTIC_IDENTITY",
@@ -277,6 +278,21 @@ class InstallerResetTest(unittest.TestCase):
         for add_name, remove_name in lifecycle_pairs.items():
             self.assertIn(add_name, scripts)
             self.assertIn(remove_name, scripts)
+
+        published_reachability = {
+            "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE":
+                "tools/verify_bug27_published_multistep_declarations.py",
+            "ADD_UNIQUE_KEY_WITH_COLUMNS":
+                "tools/verify_bug27_published_multistep_declarations.py",
+            "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS":
+                "tools/verify_bug30_published_identity_setup.py",
+            "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING":
+                "tools/verify_bug31_representation_with_identity.py",
+        }
+        for operation, relative_path in published_reachability.items():
+            verifier = (ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn(f"SEMANTIC_ADMIN.{operation}", verifier)
+            self.assertIn("SEMANTIC_ADMIN.PUBLISH_MODEL", verifier)
 
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []
@@ -339,6 +355,16 @@ class InstallerResetTest(unittest.TestCase):
         )
         self.assertIn('if binding_kind == "DIRECT"', add_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_binding)
+
+        add_representation_binding = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING" in sql
+        )
+        self.assertIn("MAPPED binding requires MAPPING_JSON", add_representation_binding)
+        self.assertIn("published representation-with-identity candidate rejected", add_representation_binding)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_representation_binding)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS", add_representation_binding)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", add_representation_binding)
 
         remove_mapping = next(
             sql for sql in statements

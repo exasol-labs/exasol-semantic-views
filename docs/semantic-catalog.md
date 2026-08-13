@@ -62,6 +62,7 @@ Manage the F1 lifecycle through:
 ```text
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE
+SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH
 SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
@@ -330,6 +331,13 @@ binding as one prospective candidate. Use it for published models, where the
 standalone identity declaration is necessarily incomplete and is restored with
 `SEMANTIC_ADMIN_094`. A failed compound candidate removes all inserted mapping,
 binding, and identity rows before re-certifying the previous surface.
+
+When a published entity already has an F5 identity, use
+`ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` to register a heterogeneous
+source together with its `DIRECT` or `MAPPED` binding. `MAPPED` registration
+takes the same certified relation fields in `MAPPING_JSON`. The complete
+candidate is validated once and removes the mapping, binding, and representation
+if validation fails.
 
 F4 compilation joins contributors on the semantic key. Mapped contributors are
 joined through the certified relation, and the plan records semantic identity,

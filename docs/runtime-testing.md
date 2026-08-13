@@ -108,6 +108,9 @@ operations, and verifies stable malformed-coverage diagnostics.
 The BUG-30 verifier proves that a complete identity and all representation
 bindings can be added atomically to a published multi-representation entity,
 while incomplete candidates leave no catalog or surface impact.
+The BUG-31 verifier adds a representation whose physical key differs from the
+published entity key together with its F5 binding, and proves candidate rollback
+and continuous surface certification.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

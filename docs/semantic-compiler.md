@@ -309,6 +309,9 @@ be invalid if declarations were validated individually.
 physical representation and its compatibility bindings, while
 `ADD_UNIQUE_KEY_WITH_COLUMNS` validates a complete key instead of exposing an
 empty key between calls.
+`ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` similarly adds a heterogeneous
+representation and its F5 binding as one candidate, so legacy key validation
+never observes the unbound representation.
 The inverse `REMOVE_UNIQUE_KEY_WITH_COLUMNS` hides the complete key for one
 prospective validation before deleting it. Removing the final alternate
 representation similarly clears coverage on the survivor and validates the

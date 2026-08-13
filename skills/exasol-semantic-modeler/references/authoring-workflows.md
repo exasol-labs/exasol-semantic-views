@@ -337,6 +337,23 @@ and rolls the entire candidate back if published validation fails. The separate
 `ADD_SEMANTIC_IDENTITY`, `ADD_IDENTITY_BINDING`, and
 `ADD_IDENTITY_MAPPING_RELATION` calls remain suitable while building a draft.
 
+If the published entity already has the identity and the new source uses a
+different physical key, register the representation and binding atomically:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING(
+  'customer_360', 'customer', 'mongo', 'VIRTUAL_SCHEMA',
+  'SRC_MONGO_CUSTOMERS', 'CUSTOMERS', 20, 'MANUAL',
+  'customer_identity', 'CAST(c."customer_id" AS DECIMAL(18,0))',
+  'DIRECT', NULL
+);
+```
+
+For `MAPPED`, pass `MAPPING_JSON` with `source_schema`, `source_object`,
+`source_local_column`, `semantic_key_column`, and `certification_status`.
+Smoke-test any renamed attribute bindings separately before this call; the
+compound operation covers representation identity, not F2 attribute remapping.
+
 The mapping relation must be queryable by the validating user and contain one
 non-null semantic key for every source-local key, with no duplicate local or
 semantic key. Set `QUERY_TIMEOUT=60`; `VALIDATE_MODEL` proves local uniqueness,
