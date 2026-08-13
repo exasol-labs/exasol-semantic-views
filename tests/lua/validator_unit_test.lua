@@ -931,6 +931,89 @@ test("validator requires a bounded session timeout for every multi-representatio
     assert_true(has_rule(excessive, "SEMANTIC_MODEL_041"))
 end)
 
+local function fusion_validation_context(strategy)
+    local entity = {id = 1, name = "customers", alias = "c"}
+    local primary = {id = 10, entity_id = 1, name = "mdm", alias = "c",
+        source_schema = "MDM", source_object = "CUSTOMERS", authority_role = "AUTHORITATIVE"}
+    local alternate = {id = 11, entity_id = 1, name = "crm", alias = "c",
+        source_schema = "CRM", source_object = "CUSTOMERS", authority_role = "SUPPLEMENTAL"}
+    entity.primary_representation = primary
+    local dimension = {id = 20, entity_id = 1, name = "customer_name"}
+    local unique_key = {id = 30, entity_id = 1, name = "customer_pk",
+        columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}}
+    return validation_context({
+        entities = {entity},
+        entity_by_id = {["1"] = entity},
+        representations = {primary, alternate},
+        representations_by_entity = {["1"] = {primary, alternate}},
+        dimension_by_id = {["20"] = dimension},
+        unique_keys_by_entity = {["1"] = {unique_key}},
+        bindings_by_attribute = {["DIMENSION:20"] = {
+            {id = 40, entity_id = 1, attribute_type = "DIMENSION", attribute_id = 20,
+                representation_id = 10, expression = "c.customer_name", role = "PREFER", priority = 1},
+            {id = 41, entity_id = 1, attribute_type = "DIMENSION", attribute_id = 20,
+                representation_id = 11, expression = "c.display_name", role = "PREFER", priority = 1},
+        }},
+        attribute_fusion_policies = {{entity_id = 1, attribute_type = "DIMENSION",
+            attribute_id = 20, strategy = strategy}},
+    })
+end
+
+test("F4 validator requires coherent authority identity and contributors", function()
+    local valid = fusion_validation_context("RECONCILE")
+    api.validate_fusion_policies(valid)
+    assert_equal(valid.error_count, 0)
+
+    local malformed = fusion_validation_context("RECONCILE")
+    malformed.representations[1].authority_role = "UNKNOWN"
+    malformed.representations[2].authority_role = "AUTHORITATIVE"
+    malformed.attribute_fusion_policies[#malformed.attribute_fusion_policies + 1] = {
+        entity_id = 1, attribute_type = "MEASURE", attribute_id = 999, strategy = "MERGE"}
+    api.validate_fusion_policies(malformed)
+    assert_true(has_rule(malformed, "SEMANTIC_MODEL_044"))
+    assert_true(malformed.error_count >= 2)
+
+    local unsafe = fusion_validation_context("COALESCE")
+    unsafe.bindings_by_attribute["DIMENSION:20"] = {
+        unsafe.bindings_by_attribute["DIMENSION:20"][1]}
+    unsafe.unique_keys_by_entity["1"][1].columns[1].expression = "c.customer_id"
+    unsafe.representations[1].coverage_predicate = "c.customer_id < 10"
+    unsafe.representations[2].coverage_predicate = "c.customer_id >= 10"
+    api.validate_fusion_policies(unsafe)
+    assert_true(unsafe.error_count >= 3)
+end)
+
+test("F4 validator rejects COALESCE conflicts and reports RECONCILE decisions", function()
+    local function run(strategy, count)
+        local ctx = fusion_validation_context(strategy)
+        with_query(function(sql, params)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+                return {{params.column_name}}
+            end
+            assert_contains(sql, 'FROM "MDM"."CUSTOMERS" f4_left')
+            assert_contains(sql, 'JOIN "CRM"."CUSTOMERS" f4_right')
+            assert_contains(sql, 'f4_left."CUSTOMER_ID" = f4_right."CUSTOMER_ID"')
+            assert_contains(sql, "f4_left.customer_name")
+            assert_contains(sql, "f4_right.display_name")
+            return {{count}}
+        end, function()
+            api.validate_fusion_conflicts(ctx)
+        end)
+        return ctx
+    end
+
+    local coalesced = run("COALESCE", 2)
+    assert_true(has_rule(coalesced, "SEMANTIC_MODEL_045"))
+    assert_equal(coalesced.error_count, 1)
+
+    local reconciled = run("RECONCILE", 3)
+    assert_true(has_rule(reconciled, "SEMANTIC_MODEL_046"))
+    assert_equal(reconciled.warning_count, 1)
+
+    local clean = run("COALESCE", 0)
+    assert_equal(clean.error_count, 0)
+end)
+
 test("validator bounds views over virtual schemas without dependency classification", function()
     local entity = {id = 1, name = "customers"}
     local primary = {id = 1, entity_id = 1, name = "primary",
@@ -1268,6 +1351,8 @@ test("validator public entry point loads and validates a coherent catalog", func
                 {201, 1, "DIMENSION", 10, 100, "o.status", "PREFER", 1, true},
                 {202, 1, "FACT", 20, 100, "o.amount", "PREFER", 1, true},
             }
+        elseif contains(sql, "FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES") then
+            return {}
         elseif contains(sql, "SELECT METRIC_ID, METRIC_NAME") and not contains(sql, "metric_col") then
             return {{30, "total_revenue", 1, "SUM(net_revenue)", nil, "ADDITIVE",
                 "DECIMAL(18,2)", "Total revenue", "USD", "currency", false, true}}

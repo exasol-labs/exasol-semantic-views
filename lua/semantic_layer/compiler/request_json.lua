@@ -822,6 +822,8 @@ local function load_catalog(model, object_name)
         fact_by_name = {},
         attribute_bindings = {},
         bindings_by_attribute = {},
+        attribute_fusion_policies = {},
+        fusion_policy_by_attribute = {},
         relationships = {},
         relationship_by_id = {},
         unique_keys = {},
@@ -876,16 +878,21 @@ local function load_catalog(model, object_name)
     end
 
     local representation_rows = query([[
-        SELECT REPRESENTATION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
-               SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
-               PRIORITY, FRESHNESS_POLICY, COVERAGE_PREDICATE, VALID_FROM, VALID_TO
-        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
-        WHERE MODEL_ID = :model_id
-          AND VERSION_ID = :version_id
-          AND STATUS = 'ACTIVE'
-        ORDER BY ENTITY_ID,
-          CASE WHEN REPRESENTATION_ROLE = 'PRIMARY' THEN 0 ELSE 1 END,
-          PRIORITY, REPRESENTATION_ID
+        SELECT er.REPRESENTATION_ID, er.ENTITY_ID, er.REPRESENTATION_NAME,
+               er.SOURCE_KIND, er.SOURCE_SCHEMA, er.SOURCE_OBJECT,
+               er.SOURCE_ALIAS, er.REPRESENTATION_ROLE, er.PRIORITY,
+               er.FRESHNESS_POLICY, er.COVERAGE_PREDICATE, er.VALID_FROM,
+               er.VALID_TO, COALESCE(ra.AUTHORITY_ROLE, 'PREFER') AS AUTHORITY_ROLE
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+        LEFT JOIN SYS_SEMANTIC.REPRESENTATION_AUTHORITIES ra
+          ON ra.MODEL_ID = er.MODEL_ID AND ra.VERSION_ID = er.VERSION_ID
+         AND ra.REPRESENTATION_ID = er.REPRESENTATION_ID AND ra.STATUS = 'ACTIVE'
+        WHERE er.MODEL_ID = :model_id
+          AND er.VERSION_ID = :version_id
+          AND er.STATUS = 'ACTIVE'
+        ORDER BY er.ENTITY_ID,
+          CASE WHEN er.REPRESENTATION_ROLE = 'PRIMARY' THEN 0 ELSE 1 END,
+          er.PRIORITY, er.REPRESENTATION_ID
     ]], {model_id = model.model_id, version_id = model.version_id})
     for _, row in ipairs(representation_rows or {}) do
         local representation = {
@@ -902,6 +909,7 @@ local function load_catalog(model, object_name)
             coverage_predicate = row_value(row, "COVERAGE_PREDICATE", 11),
             valid_from = row_value(row, "VALID_FROM", 12),
             valid_to = row_value(row, "VALID_TO", 13),
+            authority_role = row_value(row, "AUTHORITY_ROLE", 14) or "PREFER",
         }
         ctx.representations[#ctx.representations + 1] = representation
         ctx.representation_by_id[key(representation.id)] = representation
@@ -1167,6 +1175,25 @@ local function load_catalog(model, object_name)
             ctx.bindings_by_attribute[attribute_key] or {}
         ctx.bindings_by_attribute[attribute_key]
             [#ctx.bindings_by_attribute[attribute_key] + 1] = binding
+    end
+
+    local fusion_policy_rows = query([[
+        SELECT ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID, FUSION_STRATEGY
+        FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ATTRIBUTE_TYPE, ATTRIBUTE_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(fusion_policy_rows or {}) do
+        local policy = {
+            entity_id = row_value(row, "ENTITY_ID", 1),
+            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 2),
+            attribute_id = row_value(row, "ATTRIBUTE_ID", 3),
+            strategy = row_value(row, "FUSION_STRATEGY", 4),
+        }
+        local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
+        ctx.attribute_fusion_policies[#ctx.attribute_fusion_policies + 1] = policy
+        ctx.fusion_policy_by_attribute[attribute_key] = policy
     end
 
     local relationship_rows = query([[
@@ -1500,6 +1527,154 @@ local function collect_metric_facts(ctx, metric, required, seen_metrics)
     end
 end
 
+local function replace_qualified_alias(expression, source_alias, target_alias)
+    local source = upper(source_alias)
+    local text = tostring(expression)
+    local out = {}
+    local i = 1
+    local in_quote = false
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            out[#out + 1] = c
+            if in_quote and n == "'" then
+                out[#out + 1] = n
+                i = i + 2
+            else
+                in_quote = not in_quote
+                i = i + 1
+            end
+        elseif not in_quote and string.match(c, "[A-Za-z_]") then
+            local j = i + 1
+            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
+                j = j + 1
+            end
+            local cursor = j
+            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
+            local token = string.sub(text, i, j - 1)
+            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
+                out[#out + 1] = target_alias
+            else
+                out[#out + 1] = token
+            end
+            i = j
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+local function physical_unique_key(ctx, entity_id)
+    for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity_id)] or {}) do
+        if #(unique_key.columns or {}) > 0 then
+            local physical = true
+            for _, column in ipairs(unique_key.columns) do
+                if missing(column.column_name) or not missing(column.expression) then
+                    physical = false
+                    break
+                end
+            end
+            if physical then return unique_key end
+        end
+    end
+    return nil
+end
+
+local function representation_by_id(ctx, representation_id)
+    for _, representation in ipairs(ctx.representations or {}) do
+        if key(representation.id) == key(representation_id) then return representation end
+    end
+    return nil
+end
+
+local function fusion_contributor_rank(ctx, binding)
+    local representation = representation_by_id(ctx, binding.representation_id) or {}
+    local authority = upper(representation.authority_role or "PREFER")
+    local authority_rank = authority == "AUTHORITATIVE" and 0
+        or authority == "PREFER" and 1 or 2
+    local role_rank = upper(binding.role) == "PREFER" and 0 or 1
+    return authority_rank, role_rank, tonumber(binding.priority or 1),
+        tonumber(representation.priority or 1), tonumber(representation.id or 0)
+end
+
+local function sorted_fusion_bindings(ctx, bindings)
+    local result = {}
+    for _, binding in ipairs(bindings or {}) do result[#result + 1] = binding end
+    table.sort(result, function(left, right)
+        local la, lr, lb, lp, li = fusion_contributor_rank(ctx, left)
+        local ra, rr, rb, rp, ri = fusion_contributor_rank(ctx, right)
+        if la ~= ra then return la < ra end
+        if lr ~= rr then return lr < rr end
+        if lb ~= rb then return lb < rb end
+        if lp ~= rp then return lp < rp end
+        return li < ri
+    end)
+    return result
+end
+
+local function fused_attribute_expression(ctx, entity, base_representation,
+        attribute_key, strategy)
+    local unique_key = physical_unique_key(ctx, entity.id)
+    if unique_key == nil then
+        return nil, nil, "Attribute fusion on entity '" .. tostring(entity.name)
+            .. "' requires a declared unique key containing physical columns only."
+    end
+    local bindings = sorted_fusion_bindings(ctx,
+        ctx.bindings_by_attribute[attribute_key] or {})
+    if #bindings < 2 then
+        return nil, nil, "Fusion strategy " .. tostring(strategy) .. " for attribute '"
+            .. tostring(attribute_key) .. "' requires bindings on at least two representations."
+    end
+
+    local expressions = {}
+    local contributors = {}
+    for _, binding in ipairs(bindings) do
+        local representation = representation_by_id(ctx, binding.representation_id)
+        if representation ~= nil then
+            local expression = nil
+            if key(representation.id) == key(base_representation.id) then
+                expression = binding.expression
+            else
+                local lookup_alias = "f4_rep_" .. tostring(representation.id)
+                local predicates = {}
+                for _, column in ipairs(unique_key.columns) do
+                    predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
+                        .. " = " .. quote_column(base_representation.alias, column.column_name)
+                end
+                entity.fusion_joins = entity.fusion_joins or {}
+                entity.fusion_join_by_representation =
+                    entity.fusion_join_by_representation or {}
+                if not entity.fusion_join_by_representation[key(representation.id)] then
+                    entity.fusion_joins[#entity.fusion_joins + 1] = {
+                        representation = representation,
+                        alias = lookup_alias,
+                        predicates = predicates,
+                    }
+                    entity.fusion_join_by_representation[key(representation.id)] = true
+                end
+                expression = replace_qualified_alias(binding.expression,
+                    representation.alias, lookup_alias)
+            end
+            expressions[#expressions + 1] = expression
+            contributors[#contributors + 1] = {
+                representation_id = representation.id,
+                representation_name = representation.name,
+                authority_role = upper(representation.authority_role or "PREFER"),
+                attribute_binding_id = binding.id,
+                source_expression = binding.expression,
+            }
+        end
+    end
+    if #expressions < 2 then
+        return nil, nil, "Fusion strategy " .. tostring(strategy) .. " for attribute '"
+            .. tostring(attribute_key) .. "' has fewer than two active contributors."
+    end
+    return "COALESCE(" .. table.concat(expressions, ", ") .. ")", contributors, nil
+end
+
 local function select_attribute_bindings(ctx, dimensions, metrics, needed_entities)
     local required_by_entity = {}
     local function require_attribute(attribute_type, attribute)
@@ -1620,6 +1795,15 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 return nil, "No complete UNION binding set exists for every partition of entity '"
                     .. tostring(entity.name) .. "'."
             end
+            for attribute_key, _ in pairs(attributes) do
+                local policy = ctx.fusion_policy_by_attribute[attribute_key]
+                local strategy = upper(policy and policy.strategy or "PREFER")
+                if partitioned and strategy ~= "PREFER" then
+                    return nil, "Entity '" .. tostring(entity.name)
+                        .. "' cannot combine partition UNION with attribute strategy "
+                        .. tostring(strategy) .. "."
+                end
+            end
             local selected = candidates[1]
             if selected == nil then
                 return nil, "No active representation provides every required attribute for entity '"
@@ -1639,7 +1823,21 @@ local function select_attribute_bindings(ctx, dimensions, metrics, needed_entiti
                 local attribute = attribute_type == "DIMENSION"
                     and ctx.dimension_by_id[key(attribute_id)] or ctx.fact_by_id[key(attribute_id)]
                 if attribute ~= nil then
-                    attribute.expression = binding.expression
+                    local policy = ctx.fusion_policy_by_attribute[attribute_key]
+                    local strategy = upper(policy and policy.strategy or "PREFER")
+                    if strategy == "COALESCE" or strategy == "RECONCILE" then
+                        local fused_expression, contributors, fusion_error =
+                            fused_attribute_expression(ctx, entity, representation,
+                                attribute_key, strategy)
+                        if fused_expression == nil then return nil, fusion_error end
+                        attribute.expression = fused_expression
+                        attribute.fusion_strategy = strategy
+                        attribute.fusion_contributors = contributors
+                        ctx.has_attribute_fusion = true
+                    else
+                        attribute.expression = binding.expression
+                        attribute.fusion_strategy = "PREFER"
+                    end
                     attribute.selected_binding = binding
                 end
             end
@@ -1921,11 +2119,23 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
         select_parts[#select_parts + 1] = expand_metric(ctx, metric) .. " AS " .. quote_alias(metric.name)
     end
 
+    local function append_fusion_joins(entity)
+        for _, fusion_join in ipairs(entity.fusion_joins or {}) do
+            local representation = fusion_join.representation
+            join_sql[#join_sql + 1] = "LEFT JOIN "
+                .. quote_qualified(representation.source_schema,
+                    representation.source_object)
+                .. " " .. fusion_join.alias
+                .. " ON " .. table.concat(fusion_join.predicates, " AND ")
+        end
+    end
+    append_fusion_joins(root)
     for _, join in ipairs(joins) do
         join_sql[#join_sql + 1] = tostring(join.relationship.join_type or "LEFT") .. " JOIN "
             .. quote_qualified(join.entity.source_schema, join.entity.source_object)
             .. " " .. tostring(join.entity.alias)
             .. " ON " .. tostring(join.relationship.join_condition)
+        append_fusion_joins(join.entity)
     end
     for _, filter in ipairs(filters) do
         where_predicates[#where_predicates + 1] = filter.predicate
@@ -2460,6 +2670,11 @@ local function compile_request_table(request, options)
             if representation ~= nil then
                 local selected_bindings = {}
                 for attribute_key, binding in pairs(selection and selection.bindings or {}) do
+                    local attribute_type, attribute_id = string.match(
+                        attribute_key, "^([^:]+):(.+)$")
+                    local attribute = attribute_type == "DIMENSION"
+                        and ctx.dimension_by_id[key(attribute_id)]
+                        or ctx.fact_by_id[key(attribute_id)]
                     selected_bindings[#selected_bindings + 1] = {
                         attribute = attribute_key,
                         attribute_binding_id = binding.id or JSON_NULL,
@@ -2467,6 +2682,9 @@ local function compile_request_table(request, options)
                         binding_priority = binding.priority,
                         source_expression = binding.expression,
                         legacy = binding.legacy == true,
+                        fusion_strategy = attribute and attribute.fusion_strategy or "PREFER",
+                        fusion_contributors = attribute
+                            and attribute.fusion_contributors or {},
                     }
                 end
                 table.sort(selected_bindings, function(left, right)
@@ -2523,6 +2741,10 @@ local function compile_request_table(request, options)
         return plan_error(code, typed_failure_message(typed_plan.failure))
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
+        if ctx.has_attribute_fusion then
+            return plan_error("_074",
+                "F4 attribute reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical source.")
+        end
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,
             snapshot,
@@ -2610,7 +2832,8 @@ local function compile_request_table(request, options)
     if materialization_runtime ~= nil
         and type(materialization_runtime.select_materialization) == "function"
         and #having_predicates == 0
-        and #selected_metrics > 0 then
+        and #selected_metrics > 0
+        and not ctx.has_attribute_fusion then
         selected_materialization, materialization_decision = materialization_runtime.select_materialization(
             ctx,
             selected_dimensions,

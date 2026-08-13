@@ -226,7 +226,8 @@ a representation, first remove its attribute bindings and promote another one
 if it is primary. Validation probe failures are blocking, so run it as a user
 that can query every source. Do not leave temporal partitions modeled as F1
 equivalents; configure every active representation through the F3 coverage
-workflow below. Reconciliation and non-equivalent identity remain unsupported.
+workflow below. Row reconciliation is available only through the exact-identity
+F4 workflow below; non-equivalent identity remains unsupported.
 Resolve local catalog errors before retrying validation. Remote equivalence
 probes are deferred while those errors exist, then run in full once metadata is
 clean; every representation's key cardinality is scanned once per declared key.
@@ -265,6 +266,40 @@ must provide bindings for every requested dimension and transitive metric fact.
 `PRIMARY` role, lower representation priority, and representation ID. F2 does
 not coalesce rows or values across sources. Inspect
 `plan_json.selected_representations[].selected_bindings` to verify the choice.
+
+### Reconcile Overlapping Attribute Values
+
+F4 applies to overlapping representations that already pass F1 unique-grain
+and exact key-set proofs. Give one source semantic authority, classify the
+others, and then choose a policy per dimension or fact:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
+  'customer_360', 'customer', 'mdm', 'AUTHORITATIVE'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
+  'customer_360', 'customer', 'crm', 'SUPPLEMENTAL'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY(
+  'customer_360', 'DIMENSION', 'customer_name', 'RECONCILE'
+);
+```
+
+Use `PREFER` for ordinary F2 single-source selection. Use `COALESCE` for null
+fallback only when every overlapping non-null value agrees; validation reports
+conflicts as blocking `SEMANTIC_MODEL_045`. Use `RECONCILE` when exactly one
+bound representation is `AUTHORITATIVE` and its value should win; observed
+conflicts remain visible as `SEMANTIC_MODEL_046` warnings.
+
+Before validation, require bindings on at least two representations, one declared
+physical-column unique key, exact F1 identity, and `QUERY_TIMEOUT` between 1 and
+60 seconds. Do not configure F3 coverage on the same entity. Expression keys,
+renamed identity columns, and cross-representation identity mappings require
+canonical source views or Phase F5. After compiling representative requests,
+inspect `selected_bindings[].fusion_contributors` for ordered authority,
+binding IDs, sources, and expressions.
+F4 bypasses aggregate materializations and rejects multi-fact branch plans.
+Use a canonical pre-reconciled source if either execution shape is required.
 
 When several columns are renamed, add all required bindings one at a time
 before the final `VALIDATE_MODEL`. Intermediate validation errors for the

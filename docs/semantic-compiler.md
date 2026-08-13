@@ -76,6 +76,16 @@ dimension or filter usage from the typed failure and state the supported F3
 remedy. `_080` names the first missing attribute and partition and points to
 `ADD_ATTRIBUTE_BINDING`.
 
+F4 attribute policies run after complete F2 representation selection. `PREFER`
+keeps the selected binding unchanged. `COALESCE` and `RECONCILE` emit
+key-preserving joins to alternate representations and combine them in declared
+authority order. Exact F1 key identity and uniqueness keep each join key-preserving;
+validation rejects unsupported identity shapes before compilation. The plan's
+selected-binding entries include `fusion_strategy` and ordered
+`fusion_contributors`, so source precedence remains explainable.
+F4 bypasses aggregate materialization substitution and currently fails closed
+for multi-fact branch plans rather than dropping reconciliation semantics.
+
 The initial safeguards allow at most eight physical branches and at most
 1,000,000 bytes of internally rendered SQL. Limit failures are reported in the
 plan as `PLANNER_BRANCH_LIMIT_EXCEEDED` or

@@ -374,10 +374,12 @@ previous to succeed.
 8. ADD_DIMENSION (per dimension — entity and semantic object must exist)
 9. Optional ADD_ATTRIBUTE_BINDING (per representation-specific dimension/fact expression)
 10. Optional SET_REPRESENTATION_COVERAGE (every active hot/cold partition)
-11. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
+11. Optional SET_REPRESENTATION_AUTHORITY, then SET_ATTRIBUTE_FUSION_POLICY
+    (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
+12. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED)
-12. VALIDATE_MODEL
-13. PUBLISH_MODEL
+13. VALIDATE_MODEL
+14. PUBLISH_MODEL
 ```
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
@@ -480,10 +482,9 @@ view. Representation-specific identity mapping is Phase F5, not F2.
 For different physical dimension or fact expressions, add
 `ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark
 the authoritative expression `PREFER` and ordered substitutes `FALLBACK`.
-The compiler chooses one representation that covers every required attribute
-for the entity. It ranks binding role, binding priority, current `PRIMARY` role,
-representation priority, then ID; it never coalesces values across
-representations. Verify the choice and each expression in
+By default, the compiler chooses one representation that covers every required
+attribute for the entity. It ranks binding role, binding priority, current
+`PRIMARY` role, representation priority, then ID. Verify the choice and each expression in
 `plan_json.selected_representations[].selected_bindings`. If no complete source
 exists, compilation returns `SEMANTIC_REQUEST_080`; do not invent a cross-source
 join or silently revert to a partial representation.
@@ -527,6 +528,23 @@ Act on F3 compiler diagnostics directly: `_070` names the non-mergeable metric
 and aggregate, `_074` names the unsupported partitioned joined dimension or
 filter, and `_080` names the attribute and partition requiring
 `ADD_ATTRIBUTE_BINDING`. Do not work around these refusals by removing coverage.
+
+For overlapping Customer 360 sources with the same proven key set, use F4
+attribute fusion. Declare at most one representation `AUTHORITATIVE`; use
+`PREFER` or `SUPPLEMENTAL` for the others. Set an attribute policy to
+`COALESCE` only when overlapping non-null values must agree. Validation blocks
+conflicts with `SEMANTIC_MODEL_045`. Use `RECONCILE` when the authoritative
+source is allowed to win; conflicts are surfaced as `SEMANTIC_MODEL_046`
+warnings and must be reviewed before publication.
+
+F4 requires bindings on two representations and a physical-column unique key. It does not
+support expression keys, different identity column names, or F3 coverage on the
+same entity. Keep `QUERY_TIMEOUT` bounded because validation compares values
+across the sources. Inspect each selected binding's `fusion_strategy` and
+`fusion_contributors`; confirm the authoritative source is first and every
+source expression is expected.
+Do not expect F4 to use aggregate materializations or multi-fact plans; those
+paths fail or bypass substitution rather than silently dropping reconciliation.
 
 Register relationships with `ADD_RELATIONSHIP`:
 

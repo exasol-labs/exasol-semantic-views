@@ -461,6 +461,14 @@ local function compiler_query_fixture(options)
                         nil, "2026-01-01 00:00:00"},
                 }
             end
+            if options.f4_reconcile then
+                return {
+                    {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1,
+                        nil, nil, nil, nil, "AUTHORITATIVE"},
+                    {104, 1, "archive", "RELATION", "ARCHIVE", "ORDERS", "o", "ALTERNATE", 20,
+                        nil, nil, nil, nil, "SUPPLEMENTAL"},
+                }
+            end
             return {
                 {101, 1, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1},
                 {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "ALTERNATE", 20},
@@ -571,7 +579,20 @@ local function compiler_query_fixture(options)
                     {302, 1, "FACT", 20, 104, "o.archive_amount", "FALLBACK", 1},
                 }
             end
+            if options.f4_reconcile then
+                return {
+                    {301, 1, "DIMENSION", 10, 101, "o.status", "PREFER", 1, false},
+                    {302, 1, "DIMENSION", 10, 104, "o.archive_status", "PREFER", 1, false},
+                    {303, 1, "FACT", 20, 101, "o.amount", "PREFER", 1, false},
+                    {304, 1, "FACT", 20, 104, "o.archive_amount", "PREFER", 1, false},
+                }
+            end
             return {}
+        elseif normalized:find("FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES", 1, true) then
+            if options.f4_reconcile then
+                return {{1, "DIMENSION", 10, "RECONCILE"}}
+            end
+            return options.f4_policies or {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
             if options.multi_fact then
                 return {
@@ -725,6 +746,22 @@ test("F2 compiler prefers the promoted primary when bindings are equivalent", fu
     assert_contains(result.generated_sql, "o.archive_status")
     assert_contains(result.generated_sql, "SUM((o.archive_amount))")
     assert_contains(result.plan_json, '"representation_name":"archive"')
+end)
+
+test("F4 compiler reconciles attribute values by declared authority", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"total_revenue"},
+        dimensions = {"order_status"},
+    }, {f4_reconcile = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, "COALESCE(o.status, f4_rep_104.archive_status)")
+    assert_contains(result.generated_sql, 'LEFT JOIN "ARCHIVE"."ORDERS" f4_rep_104')
+    assert_contains(result.generated_sql, 'ON f4_rep_104."order_id" = o."order_id"')
+    assert_contains(result.plan_json, '"fusion_strategy":"RECONCILE"')
+    assert_contains(result.plan_json, '"authority_role":"AUTHORITATIVE"')
+    assert_contains(result.plan_json, '"authority_role":"SUPPLEMENTAL"')
 end)
 
 test("F3 compiler unions hot and cold aggregate-state partitions", function()

@@ -195,11 +195,56 @@ mergeable `SUM` and `COUNT` aggregate states and records all partitions under
 Partitioned joined dimensions and materialization substitution are not supported
 in F3; both remain explicit, fail-closed boundaries.
 
+### F4 Authority And Reconciliation
+
+F4 adds row-level value fusion for dimensions and facts whose representations
+already satisfy F1 identity equivalence. Configure source precedence and the
+attribute operation with:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
+  'customer_360', 'customer', 'mdm', 'AUTHORITATIVE'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
+  'customer_360', 'customer', 'crm', 'SUPPLEMENTAL'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY(
+  'customer_360', 'DIMENSION', 'customer_name', 'RECONCILE'
+);
+```
+
+`PREFER` retains F2 single-source behavior. `COALESCE` fills null values from
+ordered equivalent representations, but validation rejects any overlapping key
+whose non-null values conflict (`SEMANTIC_MODEL_045`). `RECONCILE` uses the
+single bound `AUTHORITATIVE` representation first and permits conflicting
+non-null values, reporting the number resolved as `SEMANTIC_MODEL_046`.
+Authority ordering is `AUTHORITATIVE`, `PREFER`, then `SUPPLEMENTAL`, followed
+by binding and representation priority.
+
+F4 requires active bindings on at least two representations and a declared
+unique key containing physical columns only. Validation still proves unique grain and exact key-set
+equivalence before checking value conflicts. Expression keys, differing key
+names, and cross-source identity mappings remain F5. F3 partition `UNION` and
+F4 attribute reconciliation cannot be enabled on the same entity. Conflict
+probes obey the same session `QUERY_TIMEOUT` gate as F1/F3 probes.
+
+Compilation keeps the selected representation as the entity relation and uses
+key-preserving `LEFT JOIN`s for alternate values. Validated uniqueness prevents
+fanout. The generated
+`COALESCE` expression and each contributor's binding, authority, source, and
+expression appear in
+`plan_json.selected_representations[].selected_bindings[].fusion_contributors`.
+Materialization substitution is bypassed while reconciliation is active, and
+multi-fact branch requests fail closed; use a canonical pre-reconciled source
+for those shapes.
+
 The read-only representation view is available as:
 
 ```text
 SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS
 SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS
+SEMANTIC_CATALOG.REPRESENTATION_AUTHORITIES
+SEMANTIC_CATALOG.ATTRIBUTE_FUSION_POLICIES
 ```
 
 ## Validation Tables

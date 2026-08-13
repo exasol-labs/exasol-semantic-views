@@ -105,6 +105,21 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", coverage)
         self.assertIn("STATUS = 'STALE'", coverage)
 
+    def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
+        statements = []
+        for path in INSTALL.INSTALL_FILES:
+            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+        expected_fragments = {
+            "SYS_SEMANTIC.REPRESENTATION_AUTHORITIES",
+            "SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES",
+            "SEMANTIC_CATALOG.REPRESENTATION_AUTHORITIES",
+            "SEMANTIC_CATALOG.ATTRIBUTE_FUSION_POLICIES",
+            "SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY",
+            "SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY",
+        }
+        for fragment in expected_fragments:
+            self.assertTrue(any(fragment in sql for sql in statements), fragment)
+
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())
         self.assertEqual(
