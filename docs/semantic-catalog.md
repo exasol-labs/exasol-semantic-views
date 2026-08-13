@@ -62,6 +62,7 @@ Manage the F1 lifecycle through:
 ```text
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
+SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH
 SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
 SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 ```
@@ -180,13 +181,14 @@ predicate validation, this proves the predicates executed by `UNION ALL` are
 complete, contiguous, and non-overlapping. Passing `NULL` for predicate and both
 bounds clears a declaration.
 
-For a model whose status is `PUBLISHED`, each coverage change is validated as a
-candidate. If it introduces an error, the script restores the previous
-predicate and bounds, revalidates the restored catalog, and returns
-`SEMANTIC_ADMIN_059`. This keeps the existing published surface available but
-also means a multi-step transition that is invalid between calls cannot be
-assembled in place; build it on an unpublished model and cut over after clean
-validation.
+For a model whose status is `PUBLISHED`, coverage changes are validated as
+candidates. Use `SET_REPRESENTATION_COVERAGE_BATCH` when starting, clearing, or
+repartitioning F3: it requires exactly one declaration for every active
+representation, applies the complete set before validating, and retains it only
+when the assembled model is valid. On error it restores every previous
+predicate and bound, revalidates the restored catalog, and returns
+`SEMANTIC_ADMIN_059`. Use the single-row call only for a change that leaves an
+already-complete coverage set valid by itself.
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
@@ -199,6 +201,21 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
   'sales', 'order', 'primary',
   'o.order_ts >= TIMESTAMP ''2026-01-01 00:00:00''',
   TIMESTAMP '2026-01-01 00:00:00', NULL
+);
+```
+
+When configuring an existing published model, submit those declarations as one
+JSON array instead:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH(
+  'sales', 'order',
+  '[{"representation_name":"lakehouse",'
+  || '"coverage_predicate":"o.order_ts < TIMESTAMP ''''2026-01-01 00:00:00''''",'
+  || '"valid_from":null,"valid_to":"2026-01-01 00:00:00"},'
+  || '{"representation_name":"primary",'
+  || '"coverage_predicate":"o.order_ts >= TIMESTAMP ''''2026-01-01 00:00:00''''",'
+  || '"valid_from":"2026-01-01 00:00:00","valid_to":null}]'
 );
 ```
 

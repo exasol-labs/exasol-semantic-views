@@ -378,7 +378,7 @@ previous to succeed.
 7. ADD_FACT (per row-level expression — entities must exist)
 8. ADD_DIMENSION (per dimension — entity and semantic object must exist)
 9. Optional ADD_ATTRIBUTE_BINDING (per representation-specific dimension/fact expression)
-10. Optional SET_REPRESENTATION_COVERAGE (every active hot/cold partition)
+10. Optional SET_REPRESENTATION_COVERAGE_BATCH (every active hot/cold partition)
 11. Optional SET_REPRESENTATION_AUTHORITY, then SET_ATTRIBUTE_FUSION_POLICY
     (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
 12. Optional ADD_SEMANTIC_IDENTITY, ADD_IDENTITY_BINDING for every representation,
@@ -405,7 +405,9 @@ and coverage changes validate prospectively on published models. Invalid
 candidates restore the prior catalog and certification before returning
 `SEMANTIC_ADMIN_094` (`SEMANTIC_ADMIN_059` for coverage), so these experiments
 do not produce `SEMANTIC_QUERY_010`. A partial multi-step transition can still
-be invalid; assemble it on an unpublished model or use an external cutover.
+be invalid. For F3, use `SET_REPRESENTATION_COVERAGE_BATCH` so every active
+representation is validated as one candidate; sequential coverage calls cannot
+initialize or clear a published partition set.
 Schedule a maintenance window, prepare and smoke-test all other statements first,
 apply them consecutively, then validate immediately. Never work around the
 outage by retaining an older validation row: it did not certify the changed
@@ -534,7 +536,7 @@ history or unrelated stale evidence.
 
 For hot/cold data, use F3 `UNION` fusion only on a metric-leaf entity with
 mergeable `SUM` or `COUNT` metrics. Add all representations and attribute
-bindings first, then call `SET_REPRESENTATION_COVERAGE` for every active
+bindings first, then call `SET_REPRESENTATION_COVERAGE_BATCH` with every active
 representation. Declare contiguous half-open `[VALID_FROM, VALID_TO)` intervals:
 the cold edge is open at the start, the hot edge is open at the end, and their
 boundary timestamps are identical. Use exactly one qualified temporal column

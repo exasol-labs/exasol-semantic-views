@@ -73,6 +73,7 @@ python3 tools/verify_fusion_f7.py
 python3 tools/verify_bug24_promotion_gate.py
 python3 tools/verify_bug20_published_authoring_isolation.py
 python3 tools/verify_bug25_published_mutation_protection.py
+python3 tools/verify_bug26_published_f3_batch.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -93,6 +94,9 @@ The BUG-25 verifier rejects invalid published representation, unique-key, and
 attribute-binding mutations, checks restoration after each attempt, and proves
 that the published query remains available. It also exercises unique-key
 removal in dependency order.
+The BUG-26 verifier starts from a published F1 model, demonstrates why the first
+sequential F3 declaration is incomplete, then atomically applies the complete
+coverage set and proves the published result remains stable.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

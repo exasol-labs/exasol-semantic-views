@@ -142,6 +142,20 @@ class InstallerResetTest(unittest.TestCase):
             coverage.index("published coverage change rejected and restored"),
         )
 
+        batch = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH" in sql
+        )
+        self.assertIn("coverage batch must declare every active representation", batch)
+        self.assertIn("for _, item in ipairs(prepared) do", batch)
+        self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", batch)
+        self.assertIn("published coverage batch rejected and restored", batch)
+        self.assertLess(
+            batch.index("for _, item in ipairs(prepared) do"),
+            batch.index("candidate_validation"),
+        )
+
     def test_published_structural_mutations_are_prospective_and_reversible(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(

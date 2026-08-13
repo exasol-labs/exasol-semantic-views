@@ -412,20 +412,23 @@ representation:
 ```sql
 ALTER SESSION SET QUERY_TIMEOUT=60;
 
-EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
-  'sales', 'order', 'lakehouse',
-  'o.order_ts < TIMESTAMP ''2026-01-01 00:00:00''',
-  NULL, TIMESTAMP '2026-01-01 00:00:00'
-);
-
-EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
-  'sales', 'order', 'primary',
-  'o.order_ts >= TIMESTAMP ''2026-01-01 00:00:00''',
-  TIMESTAMP '2026-01-01 00:00:00', NULL
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH(
+  'sales', 'order',
+  '[{"representation_name":"lakehouse",'
+  || '"coverage_predicate":"o.order_ts < TIMESTAMP ''''2026-01-01 00:00:00''''",'
+  || '"valid_from":null,"valid_to":"2026-01-01 00:00:00"},'
+  || '{"representation_name":"primary",'
+  || '"coverage_predicate":"o.order_ts >= TIMESTAMP ''''2026-01-01 00:00:00''''",'
+  || '"valid_from":"2026-01-01 00:00:00","valid_to":null}]'
 );
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 ```
+
+The batch must name every active representation exactly once. It updates the
+whole set before one validation and restores the whole previous set on failure.
+This is mandatory when initializing, clearing, or repartitioning F3 on a
+published model; the first sequential declaration is necessarily incomplete.
 
 The first partition must have no `VALID_FROM`, the last no `VALID_TO`, and each
 adjacent boundary must match exactly. Each predicate must be canonical half-open
@@ -458,6 +461,8 @@ clean validation before returning `SEMANTIC_ADMIN_094` (`SEMANTIC_ADMIN_059`
 for coverage), leaving the published surface queryable. This does not create a
 general draft, and publish history is audit metadata rather than a queryable
 catalog snapshot.
+Use `SET_REPRESENTATION_COVERAGE_BATCH` for a complete F3 transition; it avoids
+the invalid intermediate state created by sequential declarations.
 
 For an existing published model, assemble and smoke-test the full change set
 before the maintenance window. Apply sequential representation, binding,

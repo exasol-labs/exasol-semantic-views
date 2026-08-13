@@ -302,6 +302,9 @@ prospective and atomic. Coverage changes return `SEMANTIC_ADMIN_059`; rejected
 representation, attribute-binding removal, and unique-key changes return
 `SEMANTIC_ADMIN_094`. Each restores the prior catalog state and revalidates it,
 so the rejected candidate does not decertify the existing surface.
+`SET_REPRESENTATION_COVERAGE_BATCH` makes an entire F3 coverage set one
+candidate, allowing a published model to cross intermediate states that would
+be invalid if declarations were validated individually.
 
 This fail-closed behavior is intentional: reusing an earlier successful
 validation would certify newly mutated catalog rows that were never validated.
