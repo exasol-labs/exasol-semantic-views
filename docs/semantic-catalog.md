@@ -118,6 +118,10 @@ filters must resolve against the same case-sensitive physical column names in
 every representation. F2 attribute bindings cannot repair those differences.
 F5 can map one scalar source-local entity key per representation; it does not
 rewrite relationship SQL or arbitrary filter columns.
+Relationship key mappings store raw physical column names and support names
+that require SQL quoting, including spaces, reserved words, and JSON Tables
+markers such as `profile|object`. Rendered join conditions remain responsible
+for SQL quoting; do not include surrounding double quotes in mapping values.
 
 Phase F2 separates semantic dimensions and facts from their source expressions
 through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`

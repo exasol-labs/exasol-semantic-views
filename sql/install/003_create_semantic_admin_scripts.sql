@@ -3339,6 +3339,13 @@ local function optional_text(value)
     return trim(value)
 end
 
+local function validate_physical_column(value, label)
+    if value == null then return end
+    if value == "" or #value > 256 or string.find(value, "%c") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. tostring(value))
+    end
+end
+
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -3371,12 +3378,8 @@ end
 if from_expression ~= null or to_expression ~= null then
     error("SEMANTIC_ADMIN_043: expression relationship key mappings are not supported by typed grain proofs; normalize the expression into a source view and map a column")
 end
-if from_column ~= null and not string.match(from_column, "^[A-Za-z_][A-Za-z0-9_]*$") then
-    error("SEMANTIC_ADMIN_002: invalid FROM_COLUMN_NAME: " .. from_column)
-end
-if to_column ~= null and not string.match(to_column, "^[A-Za-z_][A-Za-z0-9_]*$") then
-    error("SEMANTIC_ADMIN_002: invalid TO_COLUMN_NAME: " .. to_column)
-end
+validate_physical_column(from_column, "FROM_COLUMN_NAME")
+validate_physical_column(to_column, "TO_COLUMN_NAME")
 
 local relationship_id = scalar([[
     SELECT r.RELATIONSHIP_ID

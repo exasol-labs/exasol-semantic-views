@@ -684,6 +684,19 @@ expressions into a source view, then map the projected column. If
 repair the metadata and rerun `VALIDATE_MODEL`; `APPLY_SEMANTIC_DEFINITION`
 cannot apply metric edits while the model has a blocking validation error.
 
+Pass physical column names as catalog values without SQL identifier quotes.
+Names that require quoting in SQL are supported, including JSON Tables markers:
+
+```sql
+-- Join SQL: c."profile|object" = p."_id"
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(
+  'customer_360', 'customer_to_profile',
+  'profile|object', NULL,
+  '_id', NULL,
+  1
+);
+```
+
 Resolve both endpoint columns through `EXA_ALL_COLUMNS` before registration.
 `SEMANTIC_MODEL_051` rejects simple equalities across incompatible type
 families and names both resolved types. To remove a relationship, call

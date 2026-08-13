@@ -77,6 +77,7 @@ python3 tools/verify_bug26_published_f3_batch.py
 python3 tools/verify_bug27_published_multistep_declarations.py
 python3 tools/verify_bug28_composite_removal_and_recertification.py
 python3 tools/verify_bug31_representation_with_identity.py
+python3 tools/verify_json_table_relationship_mapping.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -116,6 +117,9 @@ diagnostics, candidate rollback, and continuous surface certification.
 The BUG-32 verifier rejects a numeric-to-string relationship with endpoint type
 diagnostics, then removes a valid mapping and relationship in dependency order
 without interrupting the published surface.
+The JSON Tables relationship verifier registers `profile|object` as a physical
+mapping column, proves the nested object join in strict-grain mode, and executes
+a metric grouped by the nested profile dimension without an aliasing view.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

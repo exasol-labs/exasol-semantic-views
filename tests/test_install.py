@@ -166,6 +166,21 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("SET_REPRESENTATION_COVERAGE_BATCH", representation_batch)
         self.assertIn("representation-plus-coverage candidate rejected", representation_batch)
 
+    def test_relationship_mappings_accept_quoted_physical_columns(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        add_mapping = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING" in sql
+        )
+        self.assertIn("validate_physical_column", add_mapping)
+        self.assertIn('string.find(value, "%c")', add_mapping)
+        self.assertNotIn('^[A-Za-z_][A-Za-z0-9_]*$', add_mapping)
+
     def test_published_structural_mutations_are_prospective_and_reversible(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(

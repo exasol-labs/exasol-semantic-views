@@ -515,6 +515,9 @@ lowercase `"customer_id"` is not the same physical column as `CUSTOMER_ID`. If
 any differ, do not register the raw source: create a relation or Virtual Schema
 view that aliases them to the canonical names, or use F5 for a scalar entity
 key. F5 does not remap relationship joins or filter columns.
+Structured relationship mappings accept physical names that require SQL
+quoting, such as `_parent` and `profile|object`; pass the raw catalog name
+without surrounding double quotes.
 
 For different physical dimension or fact expressions, add
 `ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark

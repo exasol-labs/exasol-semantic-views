@@ -253,6 +253,29 @@ test("validator accepts composite relationship mappings backed by a unique key",
     assert_equal(ctx.warning_count, 0)
 end)
 
+test("validator accepts JSON Tables object-reference key mappings", function()
+    local ctx = validation_context({
+        unique_keys_by_entity = {['2'] = {{
+            entity_id = 2,
+            columns = {{ordinal_position = 1, column_name = "_id"}},
+        }}},
+        relationships = {{
+            name = "customer_profile",
+            from_entity_id = 1,
+            to_entity_id = 2,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {{
+                ordinal_position = 1,
+                from_column_name = "profile|object",
+                to_column_name = "_id",
+            }},
+        }},
+    })
+    api.validate_relationship_key_mappings(ctx)
+    assert_equal(ctx.error_count, 0)
+    assert_equal(ctx.warning_count, 0)
+end)
+
 test("validator rejects expression relationship key mappings before publication", function()
     local ctx = validation_context({
         unique_keys_by_entity = {['2'] = {{
