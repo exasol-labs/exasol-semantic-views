@@ -4141,6 +4141,10 @@ function M.import_databricks_metric_view(yaml_text, model_name, published_schema
     }}
 end
 
+function M.decode_json(json_text)
+    return json_decode(json_text)
+end
+
 apply_semantic_definition = M.apply_semantic_definition
 apply_normalized_osi_import = M.apply_normalized_osi_import
 import_databricks_metric_view = M.import_databricks_metric_view
@@ -4148,6 +4152,7 @@ describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition
 preprocess_sql = M.preprocess_sql
+decode_json = M.decode_json
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {

@@ -61,6 +61,7 @@ Manage the F1 lifecycle through:
 
 ```text
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
+SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH
 SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
@@ -189,6 +190,14 @@ when the assembled model is valid. On error it restores every previous
 predicate and bound, revalidates the restored catalog, and returns
 `SEMANTIC_ADMIN_059`. Use the single-row call only for a change that leaves an
 already-complete coverage set valid by itself.
+
+If a genuine hot/cold source is not registered yet, ordinary
+`ADD_ENTITY_REPRESENTATION` may fail published F1 key-set equality before
+coverage can be declared. Use `ADD_ENTITY_REPRESENTATION_WITH_COVERAGE` with
+the new source and the complete coverage JSON set. It stages the representation,
+creates explicit dimension/fact bindings from the governed legacy expressions,
+and applies all coverage as one candidate. A failed candidate removes the
+representation and generated bindings and restores the prior certification.
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
@@ -435,6 +444,7 @@ SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
 SEMANTIC_ADMIN.DROP_MODEL
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
+SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS
 SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_COLUMN
 SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
@@ -452,6 +462,12 @@ store either a simple source column name or a native expression, but not both.
 Relationship mappings follow the same rule independently for each endpoint.
 They are optional for legacy single-branch compilation but required for
 grain-aware relationship proofs.
+
+On a published model, use `ADD_UNIQUE_KEY_WITH_COLUMNS` for a new key. Its JSON
+array contains ordered objects with `column_name` or `expression` and optional
+`ordinal_position`; all components are inserted before one validation. The
+sequential `ADD_UNIQUE_KEY` then `ADD_UNIQUE_KEY_COLUMN` form remains suitable
+for drafts, but its empty intermediate key is invalid on a published model.
 
 Every key or relationship-mapping mutation deletes the affected model
 version's compile-cache entries and marks its earlier successful validation

@@ -430,6 +430,27 @@ whole set before one validation and restores the whole previous set on failure.
 This is mandatory when initializing, clearing, or repartitioning F3 on a
 published model; the first sequential declaration is necessarily incomplete.
 
+If the new partition itself is not registered on a published model, combine
+registration with that same complete JSON set:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE(
+  'sales', 'order', 'lakehouse', 'RELATION',
+  'ARCHIVE', 'ORDERS', 20, 'DAILY',
+  '[{"representation_name":"lakehouse",'
+  || '"coverage_predicate":"o.order_ts < TIMESTAMP ''''2026-01-01 00:00:00''''",'
+  || '"valid_from":null,"valid_to":"2026-01-01 00:00:00"},'
+  || '{"representation_name":"primary",'
+  || '"coverage_predicate":"o.order_ts >= TIMESTAMP ''''2026-01-01 00:00:00''''",'
+  || '"valid_from":"2026-01-01 00:00:00","valid_to":null}]'
+);
+```
+
+The compound call seeds explicit bindings from existing dimension and fact
+expressions, then validates the complete F3 candidate. If the new source uses
+different physical expressions, expose canonical columns through a view first;
+do not accept generated bindings that fail source validation.
+
 The first partition must have no `VALID_FROM`, the last no `VALID_TO`, and each
 adjacent boundary must match exactly. Each predicate must be canonical half-open
 SQL over one qualified temporal column: `column >= VALID_FROM` and
@@ -532,6 +553,21 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
   'sales', 'customer', 'customer_pk', 'customer_id', NULL, 1
 );
 ```
+
+For a new key on a published model, avoid the invalid empty-key intermediate:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS(
+  'sales', 'order_line', 'order_line_pk', 'PRIMARY',
+  'Order-line row grain', 'NATIVE',
+  '[{"ordinal_position":1,"column_name":"order_id"},'
+  || '{"ordinal_position":2,"column_name":"line_id"}]'
+);
+```
+
+The complete key is validated once and is removed automatically if validation
+fails. Use the sequential key calls only while the model is still a draft or
+when updating an already valid key.
 
 Remove a mistaken declaration in reverse dependency order:
 

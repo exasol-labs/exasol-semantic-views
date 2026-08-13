@@ -535,9 +535,14 @@ canonical-anchor checks. It still refuses targets with no clean validation
 history or unrelated stale evidence.
 
 For hot/cold data, use F3 `UNION` fusion only on a metric-leaf entity with
-mergeable `SUM` or `COUNT` metrics. Add all representations and attribute
-bindings first, then call `SET_REPRESENTATION_COVERAGE_BATCH` with every active
-representation. Declare contiguous half-open `[VALID_FROM, VALID_TO)` intervals:
+mergeable `SUM` or `COUNT` metrics. On a draft, add all representations and
+attribute bindings first, then call `SET_REPRESENTATION_COVERAGE_BATCH`. On a
+published model where a genuine partition is not registered yet, use
+`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE`; ordinary registration validates as
+F1 first and rejects the expected partition key-set difference. The compound
+call seeds compatibility bindings and validates the new representation plus
+every coverage declaration as one candidate. Declare contiguous half-open
+`[VALID_FROM, VALID_TO)` intervals:
 the cold edge is open at the start, the hot edge is open at the end, and their
 boundary timestamps are identical. Use exactly one qualified temporal column
 and canonical predicates: `column >= VALID_FROM` and `column < VALID_TO`,

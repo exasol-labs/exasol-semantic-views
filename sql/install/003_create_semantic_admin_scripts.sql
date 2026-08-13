@@ -1689,6 +1689,155 @@ exit(result, [[
 ]])
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME,
+  SOURCE_KIND,
+  SOURCE_SCHEMA,
+  SOURCE_OBJECT,
+  PRIORITY,
+  FRESHNESS_POLICY,
+  COVERAGE_JSON
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value) return tostring(value):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function normalize_name(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
+local source_schema = normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA")
+local source_object = normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT")
+local source_kind = missing(SOURCE_KIND) and "RELATION" or upper(SOURCE_KIND)
+if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
+    error("SEMANTIC_ADMIN_003: invalid SOURCE_KIND: " .. tostring(SOURCE_KIND))
+end
+local priority = missing(PRIORITY) and 100 or tonumber(PRIORITY)
+if priority == nil or priority < 1 or priority % 1 ~= 0 then
+    error("SEMANTIC_ADMIN_003: PRIORITY must be a positive integer")
+end
+if missing(COVERAGE_JSON) then
+    error("SEMANTIC_ADMIN_060: COVERAGE_JSON is required")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, e.ENTITY_ID,
+           p.SOURCE_ALIAS
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name) AND e.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS p
+      ON p.ENTITY_ID = e.ENTITY_ID AND p.VERSION_ID = e.VERSION_ID
+     AND p.REPRESENTATION_ROLE = 'PRIMARY' AND p.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_014: entity or active primary representation not found: "
+        .. entity_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local model_status = row_value(rows[1], "STATUS", 3)
+local entity_id = row_value(rows[1], "ENTITY_ID", 4)
+local source_alias = row_value(rows[1], "SOURCE_ALIAS", 5)
+local duplicate = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND UPPER(REPRESENTATION_NAME) = UPPER(:representation_name)
+]], {entity_id = entity_id, representation_name = representation_name})
+if tonumber(duplicate or 0) > 0 then
+    error("SEMANTIC_ADMIN_046: duplicate representation name: " .. representation_name)
+end
+query([[
+    INSERT INTO SYS_SEMANTIC.ENTITY_REPRESENTATIONS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
+      SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
+      PRIORITY, FRESHNESS_POLICY, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, :representation_name, :source_kind,
+      :source_schema, :source_object, :source_alias, 'ALTERNATE',
+      :priority, :freshness_policy, 'ACTIVE'
+    )
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      representation_name = representation_name, source_kind = source_kind,
+      source_schema = source_schema, source_object = source_object,
+      source_alias = source_alias, priority = priority,
+      freshness_policy = missing(FRESHNESS_POLICY) and null or tostring(FRESHNESS_POLICY)})
+local representation_id = scalar([[
+    SELECT REPRESENTATION_ID FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE ENTITY_ID = :entity_id
+      AND UPPER(REPRESENTATION_NAME) = UPPER(:representation_name)
+]], {entity_id = entity_id, representation_name = representation_name})
+-- F3 compilation requires an explicit binding on every partition. Seed the
+-- new representation from the governed legacy expressions; validation below
+-- proves that those expressions exist on the new physical source.
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+      BINDING_PRIORITY, IS_DEFAULT, STATUS
+    )
+    SELECT d.MODEL_ID, d.VERSION_ID, d.ENTITY_ID, 'DIMENSION', d.DIMENSION_ID,
+           :representation_id, d.EXPRESSION, 'PREFER', 1, FALSE, 'ACTIVE'
+    FROM SYS_SEMANTIC.DIMENSIONS d
+    WHERE d.MODEL_ID = :model_id AND d.VERSION_ID = :version_id
+      AND d.ENTITY_ID = :entity_id AND d.STATUS = 'ACTIVE'
+    UNION ALL
+    SELECT f.MODEL_ID, f.VERSION_ID, f.ENTITY_ID, 'FACT', f.FACT_ID,
+           :representation_id, f.EXPRESSION, 'PREFER', 1, FALSE, 'ACTIVE'
+    FROM SYS_SEMANTIC.FACTS f
+    WHERE f.MODEL_ID = :model_id AND f.VERSION_ID = :version_id
+      AND f.ENTITY_ID = :entity_id AND f.STATUS = 'ACTIVE'
+]], {representation_id = representation_id, model_id = model_id,
+      version_id = version_id, entity_id = entity_id})
+local applied, apply_result = pcall(query,
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH("
+      .. ":model_name, :entity_name, :coverage_json)",
+    {model_name = model_name, entity_name = entity_name,
+     coverage_json = tostring(COVERAGE_JSON)})
+if not applied then
+    query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE REPRESENTATION_ID = :representation_id",
+        {representation_id = representation_id})
+    query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
+        {representation_id = representation_id})
+    query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+        {version_id = version_id})
+    if tostring(model_status) == "PUBLISHED" then
+        query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+            {model_name = model_name})
+    end
+    error("SEMANTIC_ADMIN_061: representation-plus-coverage candidate rejected and restored: "
+        .. tostring(apply_result))
+end
+exit({{representation_id, model_name, entity_name, representation_name,
+    source_kind, source_schema, source_object, source_alias, "ALTERNATE", priority}}, [[
+  REPRESENTATION_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256),
+  SOURCE_KIND VARCHAR(64), SOURCE_SCHEMA VARCHAR(256), SOURCE_OBJECT VARCHAR(256),
+  SOURCE_ALIAS VARCHAR(128), REPRESENTATION_ROLE VARCHAR(64), PRIORITY DECIMAL(18,0)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
   MODEL_NAME,
   ENTITY_NAME,
@@ -4918,6 +5067,186 @@ exit({{unique_key_id, model_name, entity_name, key_name, ordinal, column_name, e
   COLUMN_NAME VARCHAR(256),
   EXPRESSION VARCHAR(2000000),
   WAS_UPDATE BOOLEAN
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS(
+  MODEL_NAME,
+  ENTITY_NAME,
+  KEY_NAME,
+  KEY_KIND,
+  DESCRIPTION,
+  SOURCE_FORMAT,
+  COLUMNS_JSON
+)
+RETURNS TABLE AS
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value) return tostring(value):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function normalize_name(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function json_scalar(value)
+    if type(value) == "table" then return nil end
+    return value
+end
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
+local key_name = normalize_name(KEY_NAME, "KEY_NAME")
+local key_kind = missing(KEY_KIND) and "UNIQUE" or upper(KEY_KIND)
+if key_kind ~= "PRIMARY" and key_kind ~= "UNIQUE" and key_kind ~= "ALTERNATE" then
+    error("SEMANTIC_ADMIN_003: invalid KEY_KIND: " .. tostring(KEY_KIND))
+end
+local source_format = missing(SOURCE_FORMAT) and "OSI" or upper(SOURCE_FORMAT)
+local decoded, columns = pcall(semantic_definition.decode_json, tostring(COLUMNS_JSON or ""))
+if not decoded or type(columns) ~= "table" or #columns == 0 then
+    error("SEMANTIC_ADMIN_062: COLUMNS_JSON must be a non-empty JSON array: "
+        .. tostring(columns))
+end
+local prepared = {}
+local ordinals = {}
+for index, item in ipairs(columns) do
+    if type(item) ~= "table" then
+        error("SEMANTIC_ADMIN_062: key column " .. tostring(index) .. " must be an object")
+    end
+    local ordinal = tonumber(json_scalar(item.ordinal_position) or index)
+    if ordinal == nil or ordinal < 1 or ordinal % 1 ~= 0 then
+        error("SEMANTIC_ADMIN_062: key-column ordinals must be positive integers")
+    end
+    if ordinals[ordinal] then
+        error("SEMANTIC_ADMIN_062: duplicate key-column ordinal: " .. tostring(ordinal))
+    end
+    ordinals[ordinal] = true
+    local column_name = json_scalar(item.column_name)
+    local expression = json_scalar(item.expression)
+    if not missing(column_name) then column_name = trim(column_name) else column_name = nil end
+    if not missing(expression) then expression = trim(expression) else expression = nil end
+    if (column_name == nil) == (expression == nil) then
+        error("SEMANTIC_ADMIN_041: key column " .. tostring(ordinal)
+            .. " must specify either column_name or expression, not both")
+    end
+    if column_name ~= nil
+        and not string.match(column_name, "^[A-Za-z_][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid column_name: " .. column_name)
+    end
+    prepared[#prepared + 1] = {
+        ordinal = ordinal,
+        column_name = column_name == nil and null or column_name,
+        expression = expression == nil and null or expression,
+    }
+end
+table.sort(prepared, function(left, right) return left.ordinal < right.ordinal end)
+for index, item in ipairs(prepared) do
+    if item.ordinal ~= index then
+        error("SEMANTIC_ADMIN_062: key-column ordinals must be contiguous from 1")
+    end
+end
+
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, e.ENTITY_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name) AND e.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_014: entity not found: " .. entity_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local model_status = row_value(rows[1], "STATUS", 3)
+local entity_id = row_value(rows[1], "ENTITY_ID", 4)
+local duplicate = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.UNIQUE_KEYS
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND ENTITY_ID = :entity_id AND UPPER(KEY_NAME) = UPPER(:key_name)
+]], {model_id = model_id, version_id = version_id,
+      entity_id = entity_id, key_name = key_name})
+if tonumber(duplicate or 0) > 0 then
+    error("SEMANTIC_ADMIN_011: duplicate unique key name: " .. key_name)
+end
+query([[
+    INSERT INTO SYS_SEMANTIC.UNIQUE_KEYS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, KEY_NAME, KEY_KIND,
+      DESCRIPTION, SOURCE_FORMAT, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, :key_name, :key_kind,
+      :description, :source_format, 'ACTIVE'
+    )
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      key_name = key_name, key_kind = key_kind,
+      description = missing(DESCRIPTION) and null or tostring(DESCRIPTION),
+      source_format = source_format})
+local unique_key_id = scalar([[
+    SELECT UNIQUE_KEY_ID FROM SYS_SEMANTIC.UNIQUE_KEYS
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND ENTITY_ID = :entity_id AND UPPER(KEY_NAME) = UPPER(:key_name)
+]], {model_id = model_id, version_id = version_id,
+      entity_id = entity_id, key_name = key_name})
+for _, item in ipairs(prepared) do
+    query([[
+        INSERT INTO SYS_SEMANTIC.UNIQUE_KEY_COLUMNS (
+          UNIQUE_KEY_ID, ORDINAL_POSITION, COLUMN_NAME, EXPRESSION
+        ) VALUES (:unique_key_id, :ordinal, :column_name, :expression)
+    ]], {unique_key_id = unique_key_id, ordinal = item.ordinal,
+          column_name = item.column_name, expression = item.expression})
+end
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query([[
+    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND STATUS IN ('OK', 'WARNING')
+]], {model_id = model_id, version_id = version_id})
+if tostring(model_status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query("DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS WHERE UNIQUE_KEY_ID = :unique_key_id",
+                {unique_key_id = unique_key_id})
+            query("DELETE FROM SYS_SEMANTIC.UNIQUE_KEYS WHERE UNIQUE_KEY_ID = :unique_key_id",
+                {unique_key_id = unique_key_id})
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_094: published unique-key candidate rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
+local result = {}
+for _, item in ipairs(prepared) do
+    result[#result + 1] = {unique_key_id, model_name, entity_name, key_name,
+        key_kind, item.ordinal, item.column_name, item.expression}
+end
+exit(result, [[
+  UNIQUE_KEY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  KEY_NAME VARCHAR(256), KEY_KIND VARCHAR(64), ORDINAL_POSITION DECIMAL(18,0),
+  COLUMN_NAME VARCHAR(256), EXPRESSION VARCHAR(2000000)
 ]])
 /
 
@@ -21233,6 +21562,10 @@ function M.import_databricks_metric_view(yaml_text, model_name, published_schema
     }}
 end
 
+function M.decode_json(json_text)
+    return json_decode(json_text)
+end
+
 apply_semantic_definition = M.apply_semantic_definition
 apply_normalized_osi_import = M.apply_normalized_osi_import
 import_databricks_metric_view = M.import_databricks_metric_view
@@ -21240,6 +21573,7 @@ describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition
 preprocess_sql = M.preprocess_sql
+decode_json = M.decode_json
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {

@@ -305,6 +305,10 @@ so the rejected candidate does not decertify the existing surface.
 `SET_REPRESENTATION_COVERAGE_BATCH` makes an entire F3 coverage set one
 candidate, allowing a published model to cross intermediate states that would
 be invalid if declarations were validated individually.
+`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE` extends that candidate to a new
+physical representation and its compatibility bindings, while
+`ADD_UNIQUE_KEY_WITH_COLUMNS` validates a complete key instead of exposing an
+empty key between calls.
 
 This fail-closed behavior is intentional: reusing an earlier successful
 validation would certify newly mutated catalog rows that were never validated.

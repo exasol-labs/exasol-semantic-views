@@ -156,6 +156,15 @@ class InstallerResetTest(unittest.TestCase):
             batch.index("candidate_validation"),
         )
 
+        representation_batch = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE" in sql
+        )
+        self.assertIn("INSERT INTO SYS_SEMANTIC.ENTITY_REPRESENTATIONS", representation_batch)
+        self.assertIn("SET_REPRESENTATION_COVERAGE_BATCH", representation_batch)
+        self.assertIn("representation-plus-coverage candidate rejected", representation_batch)
+
     def test_published_structural_mutations_are_prospective_and_reversible(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
@@ -205,6 +214,18 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn(
             "remove its unique-key columns first",
             scripts["REMOVE_UNIQUE_KEY"],
+        )
+
+        key_batch = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS" in sql
+        )
+        self.assertIn("semantic_definition.decode_json", key_batch)
+        self.assertIn("key-column ordinals must be contiguous from 1", key_batch)
+        self.assertLess(
+            key_batch.index("INSERT INTO SYS_SEMANTIC.UNIQUE_KEY_COLUMNS"),
+            key_batch.index("candidate_validation"),
         )
 
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
