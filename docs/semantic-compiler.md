@@ -316,6 +316,14 @@ single-source model before physical cleanup. Successful published semantic
 identity changes run validation immediately rather than leaving the surface
 stale.
 
+All admin scripts that mark validation `STALE` must then either run their own
+prospective validation or call `RECERTIFY_MODEL_IF_PUBLISHED`. The centralized
+helper validates only published models; draft multi-step authoring is unchanged.
+Installer tests enumerate the parsed admin-script list and fail when a
+stale-producing mutator has neither path. The same audit enumerates managed
+compound and F5 add/remove pairs so one-sided lifecycle APIs cannot be added
+silently.
+
 This fail-closed behavior is intentional: reusing an earlier successful
 validation would certify newly mutated catalog rows that were never validated.
 It is not draft isolation. Perform multi-step F2/F3/F4/F5 changes in a maintenance

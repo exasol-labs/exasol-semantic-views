@@ -484,6 +484,10 @@ general draft, and publish history is audit metadata rather than a queryable
 catalog snapshot.
 Use `SET_REPRESENTATION_COVERAGE_BATCH` for a complete F3 transition; it avoids
 the invalid intermediate state created by sequential declarations.
+Every published mutator revalidates before returning. Valid standalone changes
+therefore remain queryable without a manual `VALIDATE_MODEL`; incomplete F4/F5
+steps may retain validation errors until the remaining declarations repair the
+model.
 
 For an existing published model, assemble and smoke-test the full change set
 before the maintenance window. Apply sequential representation, binding,

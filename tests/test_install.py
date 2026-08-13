@@ -243,6 +243,40 @@ class InstallerResetTest(unittest.TestCase):
             ),
         )
 
+    def test_stale_mutators_recertify_and_lifecycle_pairs_have_inverses(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        scripts = {
+            sql.split("SEMANTIC_ADMIN.", 1)[1].split("(", 1)[0]: sql
+            for sql in statements
+            if sql.startswith("CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.")
+        }
+        self.assertIn("RECERTIFY_MODEL_IF_PUBLISHED", scripts)
+        for name, script in scripts.items():
+            if "STATUS = 'STALE'" not in script:
+                continue
+            self.assertTrue(
+                "VALIDATE_MODEL" in script
+                or "RECERTIFY_MODEL_IF_PUBLISHED" in script,
+                f"{name} can stale a published model without recertifying",
+            )
+
+        lifecycle_pairs = {
+            "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE": "REMOVE_ENTITY_REPRESENTATION",
+            "ADD_UNIQUE_KEY_WITH_COLUMNS": "REMOVE_UNIQUE_KEY_WITH_COLUMNS",
+            "ADD_SEMANTIC_IDENTITY": "REMOVE_SEMANTIC_IDENTITY",
+            "ADD_IDENTITY_BINDING": "REMOVE_IDENTITY_BINDING",
+            "ADD_IDENTITY_MAPPING_RELATION": "REMOVE_IDENTITY_MAPPING_RELATION",
+            "ADD_ATTRIBUTE_BINDING": "REMOVE_ATTRIBUTE_BINDING",
+            "ADD_DIMENSION": "REMOVE_DIMENSION",
+        }
+        for add_name, remove_name in lifecycle_pairs.items():
+            self.assertIn(add_name, scripts)
+            self.assertIn(remove_name, scripts)
+
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:

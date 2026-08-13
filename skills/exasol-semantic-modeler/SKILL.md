@@ -254,6 +254,12 @@ validated as one removal candidate. Do not edit `SYS_SEMANTIC` directly.
 Published removals that would invalidate relationship grain proofs are rejected
 and restored with `SEMANTIC_ADMIN_094`.
 
+Every published mutation that returns successfully also revalidates. A valid
+standalone add, update, or remove leaves the published surface queryable without
+a separate `VALIDATE_MODEL` call. Multi-step F4/F5 operations may still return
+with validation errors while incomplete; finish the declared sequence and
+confirm the final validation state before leaving the workflow.
+
 ### Step 4 — Derive facts from numeric columns
 
 A fact is a row-level expression that can be meaningfully aggregated. For each

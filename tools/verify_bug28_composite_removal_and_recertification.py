@@ -199,10 +199,29 @@ def main() -> int:
             "'DECIMAL(18,0)', 'Order identity')",
         )
         assert_surface(con)
+        execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING("
+            "'bug28_verify', 'order_identity', 'primary', "
+            "'o.order_id', 'DIRECT')",
+        )
+        assert_surface(con)
+        execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING("
+            "'bug28_verify', 'order_identity', 'primary')",
+        )
+        assert_surface(con)
+        execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY("
+            "'bug28_verify', 'orders', 'order_identity')",
+        )
+        assert_surface(con)
 
         print("ok BUG-28 key: complete key and columns removed atomically")
         print("ok BUG-28 F3: final alternate removal cleared survivor coverage")
-        print("ok BUG-28 identity: valid published change remained certified")
+        print("ok BUG-28 identity: identity and binding lifecycle remained certified")
         print("ok BUG-28 diagnostic: empty coverage JSON has stable text")
         return 0
     finally:

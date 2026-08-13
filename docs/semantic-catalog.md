@@ -475,6 +475,11 @@ version's compile-cache entries and marks its earlier successful validation
 runs `STALE`. Run `SEMANTIC_ADMIN.VALIDATE_MODEL` after completing a related
 set of changes.
 
+Published mutators revalidate before returning. Standalone valid changes leave
+the surface certified immediately; incomplete F4/F5 steps persist their current
+validation errors until a later repairing operation makes the model valid.
+Draft mutators do not run automatic validation.
+
 On a draft, remove a key in dependency order: call `REMOVE_UNIQUE_KEY_COLUMN`
 for every component, then `REMOVE_UNIQUE_KEY`. The latter refuses keys that
 still have columns. On a published model, use

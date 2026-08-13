@@ -474,6 +474,44 @@ query([[
 })
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(
+  MODEL_NAME
+)
+RETURNS TABLE AS
+local model_name = tostring(MODEL_NAME or ""):match("^%s*(.-)%s*$")
+if model_name == "" then
+    error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
+end
+local rows = query([[
+    SELECT STATUS FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+local model_status = rows[1].STATUS or rows[1].status or rows[1][1]
+local validation_status = "NOT_REQUIRED"
+if tostring(model_status) == "PUBLISHED" then
+    local validation_rows = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    validation_status = "OK"
+    for _, validation_row in ipairs(validation_rows or {}) do
+        local severity = validation_row.SEVERITY or validation_row.severity
+            or validation_row[1]
+        if tostring(severity) == "ERROR" then
+            validation_status = "ERROR"
+            break
+        elseif tostring(severity) == "WARNING" and validation_status == "OK" then
+            validation_status = "WARNING"
+        end
+    end
+end
+exit({{model_name, model_status, validation_status}}, [[
+  MODEL_NAME VARCHAR(256), MODEL_STATUS VARCHAR(32), VALIDATION_STATUS VARCHAR(32)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
   MODEL_NAME,
   ENTITY_NAME,
@@ -859,6 +897,8 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
     {version_id = version_id})
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = model_name})
 exit({{binding_id, model_name, identity_name, representation_name,
     source_expression, binding_kind}}, [[
   IDENTITY_BINDING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
@@ -930,6 +970,8 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
     {version_id = version_id})
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = trim(MODEL_NAME)})
 exit({{mapping_id, trim(MODEL_NAME), trim(IDENTITY_NAME),
     trim(REPRESENTATION_NAME), trim(SOURCE_SCHEMA), trim(SOURCE_OBJECT), certification}}, [[
   IDENTITY_MAPPING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
@@ -983,6 +1025,8 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
     {version_id = version_id})
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = model_name})
 exit({{mapping_id, model_name, identity_name, representation_name, "REMOVED"}}, [[
   IDENTITY_MAPPING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
   IDENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256), STATUS VARCHAR(32)
@@ -1043,6 +1087,8 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
     {version_id = version_id})
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = model_name})
 exit({{binding_id, model_name, identity_name, representation_name, "REMOVED"}}, [[
   IDENTITY_BINDING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
   IDENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256), STATUS VARCHAR(32)
@@ -1099,6 +1145,8 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
     {version_id = version_id})
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = model_name})
 exit({{identity_id, model_name, entity_name, identity_name, "REMOVED"}}, [[
   IDENTITY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   IDENTITY_NAME VARCHAR(256), STATUS VARCHAR(32)
@@ -1181,6 +1229,8 @@ query([[
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND STATUS IN ('OK', 'WARNING')
 ]], {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = model_name})
 exit({{model_name, entity_name, representation_name, authority_role}}, [[
   MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   REPRESENTATION_NAME VARCHAR(256), AUTHORITY_ROLE VARCHAR(32)
@@ -1263,6 +1313,8 @@ query([[
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND STATUS IN ('OK', 'WARNING')
 ]], {model_id = model_id, version_id = version_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = model_name})
 exit({{model_name, attribute_type, attribute_name, fusion_strategy}}, [[
   MODEL_NAME VARCHAR(256), ATTRIBUTE_TYPE VARCHAR(32),
   ATTRIBUTE_NAME VARCHAR(256), FUSION_STRATEGY VARCHAR(32)
@@ -2850,6 +2902,8 @@ query([[
     )
       AND STATUS IN ('OK', 'WARNING')
 ]], {relationship_id = relationship_id})
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+    {model_name = trim(MODEL_NAME)})
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(

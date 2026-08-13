@@ -103,8 +103,8 @@ The BUG-27 verifier registers a genuinely smaller hot partition together with
 its complete F3 coverage, then adds a complete composite key to the same
 published model without exposing either invalid intermediate state.
 The BUG-28 verifier removes a complete key, tears F3 back down to one source,
-checks immediate recertification after semantic-identity creation, and verifies
-stable malformed-coverage diagnostics.
+checks immediate recertification across semantic-identity and binding add/remove
+operations, and verifies stable malformed-coverage diagnostics.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective
