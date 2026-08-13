@@ -72,6 +72,14 @@ have only a compatibility-default binding, filters, unique keys, and
 relationship mappings. Adding, promoting, or removing
 a representation clears compile cache entries and marks successful validation
 runs stale. Validate before promotion, then validate and publish after it.
+Promotion does not rely on that current-state result alone: before changing
+roles it verifies that the target physically exposes every declared unique-key
+column and that any F5.1 relationship-key identity is a bare `DIRECT` binding
+to the canonical key. A cast-bound alternate therefore remains usable for
+routing but is rejected as primary with `SEMANTIC_ADMIN_058`. A prior clean run
+marked `STALE` remains valid recovery evidence only while the current primary
+fails those canonical-anchor checks, so an older trapped promotion can be
+reversed without allowing unrelated stale state to authorize promotion.
 Validation executes data probes for every declared unique key: each
 representation must preserve key uniqueness, and every alternate must have the
 same key cardinality and bidirectional key set as the primary. Multiple

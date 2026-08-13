@@ -1335,6 +1335,20 @@ local function scalar(sql_text, params)
     if scalar_rows == nil or #scalar_rows == 0 then return nil end
     return scalar_rows[1][1]
 end
+local function direct_column(expression, source_alias)
+    local text = tostring(expression or ""):match("^%s*(.-)%s*$")
+    local alias, column = string.match(text,
+        "^([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)$")
+    if alias ~= nil and string.upper(alias) == string.upper(tostring(source_alias)) then
+        return string.upper(column)
+    end
+    alias, column = string.match(text,
+        '^([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*"([^"]+)"$')
+    if alias ~= nil and string.upper(alias) == string.upper(tostring(source_alias)) then
+        return column
+    end
+    return nil
+end
 
 local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
@@ -1376,7 +1390,8 @@ if string.upper(tostring(source_alias)) ~= string.upper(tostring(entity_source_a
         .. tostring(entity_source_alias))
 end
 local previous_rows = query([[
-    SELECT REPRESENTATION_ID, REPRESENTATION_NAME
+    SELECT REPRESENTATION_ID, REPRESENTATION_NAME, SOURCE_SCHEMA,
+           SOURCE_OBJECT, SOURCE_ALIAS
     FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
     WHERE ENTITY_ID = :entity_id
       AND REPRESENTATION_ROLE = 'PRIMARY'
@@ -1386,9 +1401,151 @@ local previous_representation_id = previous_rows and previous_rows[1]
     and row_value(previous_rows[1], "REPRESENTATION_ID", 1) or nil
 local previous_name = previous_rows and previous_rows[1]
     and row_value(previous_rows[1], "REPRESENTATION_NAME", 2) or null
+local previous_source_schema = previous_rows and previous_rows[1]
+    and row_value(previous_rows[1], "SOURCE_SCHEMA", 3) or nil
+local previous_source_object = previous_rows and previous_rows[1]
+    and row_value(previous_rows[1], "SOURCE_OBJECT", 4) or nil
+local previous_source_alias = previous_rows and previous_rows[1]
+    and row_value(previous_rows[1], "SOURCE_ALIAS", 5) or nil
 local changed = tostring(row_value(row, "REPRESENTATION_ROLE", 9)) ~= "PRIMARY"
 
 if changed then
+    -- Promotion changes which representation anchors canonical keys. Reject a
+    -- target that can only be valid as an alternate before mutating roles.
+    local key_columns = query([[
+        SELECT DISTINCT ukc.COLUMN_NAME
+        FROM SYS_SEMANTIC.UNIQUE_KEYS uk
+        JOIN SYS_SEMANTIC.UNIQUE_KEY_COLUMNS ukc
+          ON ukc.UNIQUE_KEY_ID = uk.UNIQUE_KEY_ID
+        WHERE uk.ENTITY_ID = :entity_id
+          AND uk.STATUS = 'ACTIVE'
+          AND ukc.COLUMN_NAME IS NOT NULL
+          AND ukc.EXPRESSION IS NULL
+        ORDER BY ukc.COLUMN_NAME
+    ]], {entity_id = entity_id})
+    for _, key_row in ipairs(key_columns or {}) do
+        local key_column = row_value(key_row, "COLUMN_NAME", 1)
+        local column_count = scalar([[
+            SELECT COUNT(*)
+            FROM SYS.EXA_ALL_COLUMNS
+            WHERE COLUMN_SCHEMA = :source_schema
+              AND COLUMN_TABLE = :source_object
+              AND COLUMN_NAME = :column_name
+        ]], {source_schema = source_schema, source_object = source_object,
+            column_name = key_column})
+        if tonumber(column_count or 0) == 0 then
+            error("SEMANTIC_ADMIN_058: promotion rejected; target representation '"
+                .. representation_name .. "' cannot anchor declared unique-key column "
+                .. tostring(key_column) .. ". Normalize the source to expose the canonical "
+                .. "column or keep it as an alternate representation.")
+        end
+    end
+
+    local anchored_identity_rows = query([[
+        SELECT DISTINCT ukc.COLUMN_NAME, ib.BINDING_KIND, ib.SOURCE_EXPRESSION
+        FROM SYS_SEMANTIC.UNIQUE_KEYS uk
+        JOIN SYS_SEMANTIC.UNIQUE_KEY_COLUMNS ukc
+          ON ukc.UNIQUE_KEY_ID = uk.UNIQUE_KEY_ID
+        JOIN SYS_SEMANTIC.RELATIONSHIPS r
+          ON r.MODEL_ID = uk.MODEL_ID AND r.VERSION_ID = uk.VERSION_ID
+         AND (r.FROM_ENTITY_ID = uk.ENTITY_ID OR r.TO_ENTITY_ID = uk.ENTITY_ID)
+         AND r.STATUS = 'ACTIVE'
+        JOIN SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS rkm
+          ON rkm.RELATIONSHIP_ID = r.RELATIONSHIP_ID
+         AND ((r.FROM_ENTITY_ID = uk.ENTITY_ID
+               AND rkm.FROM_COLUMN_NAME = ukc.COLUMN_NAME)
+           OR (r.TO_ENTITY_ID = uk.ENTITY_ID
+               AND rkm.TO_COLUMN_NAME = ukc.COLUMN_NAME))
+        JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+          ON si.ENTITY_ID = uk.ENTITY_ID AND si.STATUS = 'ACTIVE'
+        LEFT JOIN SYS_SEMANTIC.IDENTITY_BINDINGS ib
+          ON ib.IDENTITY_ID = si.IDENTITY_ID
+         AND ib.REPRESENTATION_ID = :representation_id
+         AND ib.STATUS = 'ACTIVE'
+        WHERE uk.ENTITY_ID = :entity_id
+          AND uk.STATUS = 'ACTIVE'
+          AND ukc.COLUMN_NAME IS NOT NULL
+          AND ukc.EXPRESSION IS NULL
+          AND 1 = (SELECT COUNT(*)
+                   FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS scalar_key
+                   WHERE scalar_key.UNIQUE_KEY_ID = uk.UNIQUE_KEY_ID)
+    ]], {entity_id = entity_id, representation_id = representation_id})
+    for _, identity_row in ipairs(anchored_identity_rows or {}) do
+        local key_column = row_value(identity_row, "COLUMN_NAME", 1)
+        local binding_kind = row_value(identity_row, "BINDING_KIND", 2)
+        local binding_expression = row_value(identity_row, "SOURCE_EXPRESSION", 3)
+        local bound_column = direct_column(binding_expression, source_alias)
+        if tostring(binding_kind) ~= "DIRECT"
+            or bound_column == nil
+            or tostring(bound_column) ~= tostring(key_column) then
+            error("SEMANTIC_ADMIN_058: promotion rejected; target representation '"
+                .. representation_name .. "' does not anchor relationship key "
+                .. tostring(key_column) .. " with a bare DIRECT identity binding. "
+                .. "Keep it as an alternate or bind the canonical key directly.")
+        end
+    end
+
+    -- A stale clean run is recovery evidence only when the current primary is
+    -- itself trapped by one of the prospective checks above. Unrelated stale
+    -- validation history must not authorize a new promotion.
+    local recovery_from_invalid_primary = false
+    for _, key_row in ipairs(key_columns or {}) do
+        local key_column = row_value(key_row, "COLUMN_NAME", 1)
+        local column_count = scalar([[
+            SELECT COUNT(*)
+            FROM SYS.EXA_ALL_COLUMNS
+            WHERE COLUMN_SCHEMA = :source_schema
+              AND COLUMN_TABLE = :source_object
+              AND COLUMN_NAME = :column_name
+        ]], {source_schema = previous_source_schema,
+            source_object = previous_source_object, column_name = key_column})
+        if tonumber(column_count or 0) == 0 then
+            recovery_from_invalid_primary = true
+        end
+    end
+    local previous_identity_rows = query([[
+        SELECT DISTINCT ukc.COLUMN_NAME, ib.BINDING_KIND, ib.SOURCE_EXPRESSION
+        FROM SYS_SEMANTIC.UNIQUE_KEYS uk
+        JOIN SYS_SEMANTIC.UNIQUE_KEY_COLUMNS ukc
+          ON ukc.UNIQUE_KEY_ID = uk.UNIQUE_KEY_ID
+        JOIN SYS_SEMANTIC.RELATIONSHIPS r
+          ON r.MODEL_ID = uk.MODEL_ID AND r.VERSION_ID = uk.VERSION_ID
+         AND (r.FROM_ENTITY_ID = uk.ENTITY_ID OR r.TO_ENTITY_ID = uk.ENTITY_ID)
+         AND r.STATUS = 'ACTIVE'
+        JOIN SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS rkm
+          ON rkm.RELATIONSHIP_ID = r.RELATIONSHIP_ID
+         AND ((r.FROM_ENTITY_ID = uk.ENTITY_ID
+               AND rkm.FROM_COLUMN_NAME = ukc.COLUMN_NAME)
+           OR (r.TO_ENTITY_ID = uk.ENTITY_ID
+               AND rkm.TO_COLUMN_NAME = ukc.COLUMN_NAME))
+        JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+          ON si.ENTITY_ID = uk.ENTITY_ID AND si.STATUS = 'ACTIVE'
+        LEFT JOIN SYS_SEMANTIC.IDENTITY_BINDINGS ib
+          ON ib.IDENTITY_ID = si.IDENTITY_ID
+         AND ib.REPRESENTATION_ID = :representation_id
+         AND ib.STATUS = 'ACTIVE'
+        WHERE uk.ENTITY_ID = :entity_id
+          AND uk.STATUS = 'ACTIVE'
+          AND ukc.COLUMN_NAME IS NOT NULL
+          AND ukc.EXPRESSION IS NULL
+          AND 1 = (SELECT COUNT(*)
+                   FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS scalar_key
+                   WHERE scalar_key.UNIQUE_KEY_ID = uk.UNIQUE_KEY_ID)
+    ]], {entity_id = entity_id,
+        representation_id = previous_representation_id})
+    for _, identity_row in ipairs(previous_identity_rows or {}) do
+        local key_column = row_value(identity_row, "COLUMN_NAME", 1)
+        local binding_kind = row_value(identity_row, "BINDING_KIND", 2)
+        local binding_expression = row_value(identity_row, "SOURCE_EXPRESSION", 3)
+        local bound_column = direct_column(binding_expression,
+            previous_source_alias)
+        if tostring(binding_kind) ~= "DIRECT"
+            or bound_column == nil
+            or tostring(bound_column) ~= tostring(key_column) then
+            recovery_from_invalid_primary = true
+        end
+    end
+
     local stale_default_count = scalar([[
         SELECT COUNT(*)
         FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS defaults
@@ -1477,11 +1634,14 @@ if changed then
             SELECT VALIDATION_RUN_ID
             FROM SYS_SEMANTIC.VALIDATION_RUNS
             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-              AND STATUS IN ('OK', 'WARNING') AND ERROR_COUNT = 0
+              AND (STATUS IN ('OK', 'WARNING')
+                   OR STATUS = 'STALE' AND :allow_stale_recovery = TRUE)
+              AND ERROR_COUNT = 0
             ORDER BY VALIDATION_RUN_ID DESC LIMIT 1
-        ]], {model_id = model_id, version_id = version_id})
+        ]], {model_id = model_id, version_id = version_id,
+            allow_stale_recovery = recovery_from_invalid_primary})
         if validation_rows == nil or #validation_rows == 0 then
-            error("SEMANTIC_ADMIN_048: representations must pass VALIDATE_MODEL before promotion")
+            error("SEMANTIC_ADMIN_048: representations must have a clean VALIDATE_MODEL run before promotion")
         end
     end
     query([[

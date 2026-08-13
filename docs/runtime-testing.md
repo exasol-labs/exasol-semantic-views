@@ -70,6 +70,7 @@ python3 tools/verify_fusion_f4.py
 python3 tools/verify_fusion_f5.py
 python3 tools/verify_fusion_f51.py
 python3 tools/verify_fusion_f7.py
+python3 tools/verify_bug24_promotion_gate.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -88,6 +89,9 @@ needs a deterministic `DIRECT` cast, executes a relationship join with the
 rewritten endpoint, and checks relationship-side provenance in the plan.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
+The BUG-24 verifier rejects missing-column and expression-bound prospective
+primaries before mutation, then reconstructs the historical trapped state and
+proves recovery through a prior clean validation run marked `STALE`.
 
 The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently

@@ -100,6 +100,15 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("explicit.IS_DEFAULT = FALSE", promotion)
         self.assertIn("explicit.REPRESENTATION_ID = :representation_id", promotion)
         self.assertIn("AND NOT EXISTS (", promotion)
+        self.assertIn("target representation '", promotion)
+        self.assertIn("cannot anchor declared unique-key column", promotion)
+        self.assertIn("bare DIRECT identity binding", promotion)
+        self.assertIn("STATUS = 'STALE' AND :allow_stale_recovery = TRUE", promotion)
+        self.assertIn("recovery_from_invalid_primary", promotion)
+        self.assertLess(
+            promotion.index("cannot anchor declared unique-key column"),
+            promotion.index("SET REPRESENTATION_ROLE = 'ALTERNATE'"),
+        )
         self.assertLess(
             promotion.index("stale_default_count"),
             promotion.index("SET REPRESENTATION_ROLE = 'ALTERNATE'"),

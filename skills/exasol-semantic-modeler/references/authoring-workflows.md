@@ -221,6 +221,16 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
 EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
 ```
 
+A clean current validation is necessary evidence, but promotion additionally
+checks the prospective primary contract before mutation. The target must expose
+every physical unique-key column. Where an F5.1 identity anchors a traversed
+scalar relationship key, its target binding must be a bare `DIRECT` reference
+to that key. A cast or source-local expression may remain an alternate binding,
+but promotion rejects it with `SEMANTIC_ADMIN_058` instead of invalidating the
+model. For recovery from an older trapped promotion, restore a canonical target;
+the gate accepts the last zero-error run after it was marked `STALE` only when
+the current primary fails the canonical-anchor checks.
+
 Promotion is manual/static unless F2 attribute bindings are present. To remove
 a representation, first remove its attribute bindings and promote another one
 if it is primary. Validation probe failures are blocking, so run it as a user
@@ -239,7 +249,8 @@ remain on the outgoing representation. After promotion, inspect
 binding per attribute and representation. Older F2 installs could create stale
 default/explicit collisions and block rollback. Re-running
 `SET_PRIMARY_REPRESENTATION` toward the intended recovery source now repairs
-those collisions before applying the validation gate.
+those collisions before applying the validation gate. It also rejects targets
+that cannot prospectively anchor canonical unique and relationship keys.
 
 ### Bind Dimensions and Facts Per Representation
 

@@ -510,9 +510,19 @@ Before `SET_PRIMARY_REPRESENTATION`, validate that every differing attribute
 has an explicit binding on the target. Promotion preserves those explicit
 bindings and leaves their compatibility defaults on the outgoing source; it
 must not create two bindings for the same attribute and target representation.
+Also verify that the target physically exposes every declared unique-key
+column. If a traversed scalar relationship key uses F5.1, the target identity
+binding must be a bare `DIRECT` reference to that canonical key; an alternate
+binding such as `CAST(c."customer_id" AS DECIMAL(18,0))` is valid for routing
+but cannot become the primary anchor. `SET_PRIMARY_REPRESENTATION` enforces
+these prospective checks before changing roles and returns
+`SEMANTIC_ADMIN_058` when the target can only remain an alternate.
 If upgrading a model trapped by the older behavior, call
 `SET_PRIMARY_REPRESENTATION` for the desired recovery target: the script repairs
-stale default/explicit collisions before enforcing its clean-validation gate.
+stale default/explicit collisions and accepts the last clean validation run
+after promotion marked it `STALE` only when the current primary fails the same
+canonical-anchor checks. It still refuses targets with no clean validation
+history or unrelated stale evidence.
 
 For hot/cold data, use F3 `UNION` fusion only on a metric-leaf entity with
 mergeable `SUM` or `COUNT` metrics. Add all representations and attribute
