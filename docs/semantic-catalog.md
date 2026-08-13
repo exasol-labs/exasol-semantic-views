@@ -324,6 +324,13 @@ local expression uniqueness, mapping totality, bijection, and exact canonical
 key-set equality with the primary. Incomplete, ambiguous, uncertified, or
 probabilistic mappings fail closed as `SEMANTIC_MODEL_047` to `_049`.
 
+`ADD_SEMANTIC_IDENTITY_WITH_BINDINGS` installs the identity, exactly one binding
+for every active representation, and nested mapping metadata for each `MAPPED`
+binding as one prospective candidate. Use it for published models, where the
+standalone identity declaration is necessarily incomplete and is restored with
+`SEMANTIC_ADMIN_094`. A failed compound candidate removes all inserted mapping,
+binding, and identity rows before re-certifying the previous surface.
+
 F4 compilation joins contributors on the semantic key. Mapped contributors are
 joined through the certified relation, and the plan records semantic identity,
 binding, and mapping IDs. Mapping is deterministic and validation-time
@@ -476,9 +483,10 @@ runs `STALE`. Run `SEMANTIC_ADMIN.VALIDATE_MODEL` after completing a related
 set of changes.
 
 Published mutators revalidate before returning. Standalone valid changes leave
-the surface certified immediately; incomplete F4/F5 steps persist their current
-validation errors until a later repairing operation makes the model valid.
-Draft mutators do not run automatic validation.
+the surface certified immediately. Prospectively guarded operations reject and
+restore invalid intermediate states; use their compound forms when the complete
+declaration spans several catalog rows. Draft mutators do not run automatic
+validation.
 
 On a draft, remove a key in dependency order: call `REMOVE_UNIQUE_KEY_COLUMN`
 for every component, then `REMOVE_UNIQUE_KEY`. The latter refuses keys that

@@ -105,6 +105,9 @@ published model without exposing either invalid intermediate state.
 The BUG-28 verifier removes a complete key, tears F3 back down to one source,
 checks immediate recertification across semantic-identity and binding add/remove
 operations, and verifies stable malformed-coverage diagnostics.
+The BUG-30 verifier proves that a complete identity and all representation
+bindings can be added atomically to a published multi-representation entity,
+while incomplete candidates leave no catalog or surface impact.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

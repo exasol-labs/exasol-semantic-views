@@ -267,6 +267,7 @@ class InstallerResetTest(unittest.TestCase):
         lifecycle_pairs = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_UNIQUE_KEY_WITH_COLUMNS": "REMOVE_UNIQUE_KEY_WITH_COLUMNS",
+            "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_SEMANTIC_IDENTITY": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_IDENTITY_BINDING": "REMOVE_IDENTITY_BINDING",
             "ADD_IDENTITY_MAPPING_RELATION": "REMOVE_IDENTITY_MAPPING_RELATION",
@@ -304,6 +305,7 @@ class InstallerResetTest(unittest.TestCase):
             "SEMANTIC_CATALOG.IDENTITY_BINDINGS",
             "SEMANTIC_CATALOG.IDENTITY_MAPPING_RELATIONS",
             "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY",
+            "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY_WITH_BINDINGS",
             "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING",
             "SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION",
             "SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION",
@@ -321,6 +323,16 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn('tostring(model_status) == "PUBLISHED"', add_identity)
         self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", add_identity)
         self.assertIn("published semantic-identity change rejected", add_identity)
+        add_complete_identity = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY_WITH_BINDINGS" in sql
+        )
+        self.assertIn("BINDINGS_JSON must be a non-empty JSON array", add_complete_identity)
+        self.assertIn("no binding supplied for active representation", add_complete_identity)
+        self.assertIn("published identity-with-bindings candidate rejected", add_complete_identity)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_complete_identity)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS", add_complete_identity)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES", add_complete_identity)
         add_binding = next(
             sql for sql in statements
             if "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING" in sql

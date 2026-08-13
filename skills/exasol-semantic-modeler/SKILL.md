@@ -256,9 +256,9 @@ and restored with `SEMANTIC_ADMIN_094`.
 
 Every published mutation that returns successfully also revalidates. A valid
 standalone add, update, or remove leaves the published surface queryable without
-a separate `VALIDATE_MODEL` call. Multi-step F4/F5 operations may still return
-with validation errors while incomplete; finish the declared sequence and
-confirm the final validation state before leaving the workflow.
+a separate `VALIDATE_MODEL` call. Use `ADD_SEMANTIC_IDENTITY_WITH_BINDINGS` for
+F5 setup on an already published multi-representation entity; the standalone
+identity call is rejected because the required bindings do not exist yet.
 
 ### Step 4 — Derive facts from numeric columns
 
@@ -600,7 +600,9 @@ paths fail or bypass substitution rather than silently dropping reconciliation.
 For F5, declare one semantic identity per entity and bind every active
 representation. Use `DIRECT` when its expression already returns the semantic
 key. Use `MAPPED` only with a certified two-column relation from the source-local
-key to the semantic key:
+key to the semantic key. On a draft, use the separate calls below; on a
+published model use the compound call documented in
+`references/authoring-workflows.md`:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(

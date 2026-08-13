@@ -314,27 +314,28 @@ Use a canonical pre-reconciled source if either execution shape is required.
 ### Map Cross-System Entity Identity
 
 Use F5 only for deterministic scalar identity. Identity names are unique within
-the model, and an entity can have one active semantic identity. Add a binding
-for every active representation:
+the model, and an entity can have one active semantic identity. On a published
+multi-representation model, add the identity, every binding, and any mapping
+relations as one validated candidate:
 
 ```sql
-EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY_WITH_BINDINGS(
   'customer_360', 'customer', 'customer_identity', 'GLOBAL',
-  'DECIMAL(18,0)', 'Certified customer identity'
-);
-EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
-  'customer_360', 'customer_identity', 'primary',
-  'c.customer_id', 'DIRECT'
-);
-EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
-  'customer_360', 'customer_identity', 'crm',
-  'c.account_id', 'MAPPED'
-);
-EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
-  'customer_360', 'customer_identity', 'crm',
-  'IDENTITY_MAP', 'CUSTOMER_XREF', 'ACCOUNT_ID', 'CUSTOMER_ID', 'CERTIFIED'
+  'DECIMAL(18,0)', 'Certified customer identity',
+  '[
+    {"representation_name":"primary","source_expression":"c.customer_id","binding_kind":"DIRECT"},
+    {"representation_name":"crm","source_expression":"c.account_id","binding_kind":"MAPPED",
+     "mapping":{"source_schema":"IDENTITY_MAP","source_object":"CUSTOMER_XREF",
+                "source_local_column":"ACCOUNT_ID","semantic_key_column":"CUSTOMER_ID",
+                "certification_status":"CERTIFIED"}}
+  ]'
 );
 ```
+
+The compound call requires exactly one binding for every active representation
+and rolls the entire candidate back if published validation fails. The separate
+`ADD_SEMANTIC_IDENTITY`, `ADD_IDENTITY_BINDING`, and
+`ADD_IDENTITY_MAPPING_RELATION` calls remain suitable while building a draft.
 
 The mapping relation must be queryable by the validating user and contain one
 non-null semantic key for every source-local key, with no duplicate local or
@@ -485,9 +486,10 @@ catalog snapshot.
 Use `SET_REPRESENTATION_COVERAGE_BATCH` for a complete F3 transition; it avoids
 the invalid intermediate state created by sequential declarations.
 Every published mutator revalidates before returning. Valid standalone changes
-therefore remain queryable without a manual `VALIDATE_MODEL`; incomplete F4/F5
-steps may retain validation errors until the remaining declarations repair the
-model.
+therefore remain queryable without a manual `VALIDATE_MODEL`. Use the compound
+F3, key, representation, and identity operations where the standalone first
+step would be invalid; prospectively guarded operations reject and restore an
+incomplete candidate rather than persisting it.
 
 For an existing published model, assemble and smoke-test the full change set
 before the maintenance window. Apply sequential representation, binding,
