@@ -71,6 +71,7 @@ python3 tools/verify_fusion_f5.py
 python3 tools/verify_fusion_f51.py
 python3 tools/verify_fusion_f7.py
 python3 tools/verify_bug24_promotion_gate.py
+python3 tools/verify_bug20_published_authoring_isolation.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -92,6 +93,8 @@ review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective
 primaries before mutation, then reconstructs the historical trapped state and
 proves recovery through a prior clean validation run marked `STALE`.
+The BUG-20 verifier publishes an F3 surface, rejects invalid coverage with
+rollback, and proves the published query returns the same result afterward.
 
 The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently

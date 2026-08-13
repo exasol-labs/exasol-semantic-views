@@ -295,8 +295,11 @@ The current catalog has one mutable `ACTIVE_VERSION_ID` per model. Although
 `MODEL_VERSIONS` and publish history record version metadata, publication does
 not create an immutable catalog snapshot or a separate draft. Admin authoring
 therefore edits the same version used by the published preprocessor surface.
-Any operation that marks validation stale makes that surface return
+Any operation that leaves validation stale makes that surface return
 `SEMANTIC_QUERY_010` until the active version validates successfully again.
+Published `SET_REPRESENTATION_COVERAGE` changes are prospective and atomic: an
+invalid candidate is restored and revalidated before the script returns
+`SEMANTIC_ADMIN_059`, so it does not decertify the existing surface.
 
 This fail-closed behavior is intentional: reusing an earlier successful
 validation would certify newly mutated catalog rows that were never validated.

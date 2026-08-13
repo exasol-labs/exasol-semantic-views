@@ -129,6 +129,18 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("VALID_FROM = :valid_from", coverage)
         self.assertIn("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", coverage)
         self.assertIn("STATUS = 'STALE'", coverage)
+        self.assertIn('if tostring(model_status) == "PUBLISHED"', coverage)
+        self.assertIn("previous_predicate", coverage)
+        self.assertIn("published coverage change rejected and restored", coverage)
+        self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", coverage)
+        self.assertLess(
+            coverage.index("SET COVERAGE_PREDICATE = :coverage_predicate"),
+            coverage.index("published coverage change rejected and restored"),
+        )
+        self.assertLess(
+            coverage.index("VALID_TO = :valid_to", coverage.index("candidate_validation")),
+            coverage.index("published coverage change rejected and restored"),
+        )
 
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []

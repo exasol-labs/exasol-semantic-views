@@ -1248,7 +1248,8 @@ if predicate ~= null and valid_from == null and valid_to == null then
 end
 
 local rows = query([[
-    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, er.REPRESENTATION_ID
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, er.REPRESENTATION_ID,
+           m.STATUS, er.COVERAGE_PREDICATE, er.VALID_FROM, er.VALID_TO
     FROM SYS_SEMANTIC.MODELS m
     JOIN SYS_SEMANTIC.ENTITIES e
       ON e.MODEL_ID = m.MODEL_ID
@@ -1273,6 +1274,10 @@ end
 local model_id = row_value(rows[1], "MODEL_ID", 1)
 local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local representation_id = row_value(rows[1], "REPRESENTATION_ID", 3)
+local model_status = row_value(rows[1], "STATUS", 4)
+local previous_predicate = row_value(rows[1], "COVERAGE_PREDICATE", 5) or null
+local previous_valid_from = row_value(rows[1], "VALID_FROM", 6) or null
+local previous_valid_to = row_value(rows[1], "VALID_TO", 7) or null
 
 query([[
     UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
@@ -1295,6 +1300,39 @@ query([[
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND STATUS IN ('OK', 'WARNING')
 ]], {model_id = model_id, version_id = version_id})
+
+if tostring(model_status) == "PUBLISHED" then
+    local candidate_validation = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    for _, validation_row in ipairs(candidate_validation or {}) do
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+            local rule_code = row_value(validation_row, "RULE_CODE", 4)
+                or "SEMANTIC_MODEL_ERROR"
+            local message = row_value(validation_row, "MESSAGE", 5)
+                or "model validation failed"
+            query([[
+                UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+                SET COVERAGE_PREDICATE = :coverage_predicate,
+                    VALID_FROM = :valid_from,
+                    VALID_TO = :valid_to,
+                    UPDATED_AT = CURRENT_TIMESTAMP,
+                    UPDATED_BY = CURRENT_USER
+                WHERE REPRESENTATION_ID = :representation_id
+            ]], {representation_id = representation_id,
+                coverage_predicate = previous_predicate,
+                valid_from = previous_valid_from,
+                valid_to = previous_valid_to})
+            -- Re-certify the restored published catalog. The failed candidate
+            -- run remains as audit history but never gates the live surface.
+            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+                {model_name = model_name})
+            error("SEMANTIC_ADMIN_059: published coverage change rejected and restored; "
+                .. "candidate introduced validation error: "
+                .. tostring(rule_code) .. " " .. tostring(message))
+        end
+    end
+end
 
 exit({{representation_id, model_name, entity_name, representation_name,
     predicate == null and "NONE" or "UNION", predicate, valid_from, valid_to}}, [[

@@ -393,12 +393,16 @@ Do not rerun the bootstrap sequence against an existing model: `CREATE_MODEL`
 and structural `ADD_*` calls reject duplicate names. Inspect the current model
 first and choose one path:
 
-**Published models have no isolated draft in this release.** Every admin change
-targets the same active version used by published semantic views and marks its
-validation stale. From the first mutating call until a clean `VALIDATE_MODEL`,
-consumers receive `SEMANTIC_QUERY_010`. Do not perform exploratory or multi-step
-authoring on a published model while continuous availability is required.
-Schedule a maintenance window, prepare and smoke-test all statements first,
+**Published models have no general isolated draft in this release.** Admin
+changes target the same active version used by published semantic views and can
+mark validation stale. `SET_REPRESENTATION_COVERAGE` is protected specially:
+on a published model it validates the candidate, restores the previous coverage
+and certification on error, and returns `SEMANTIC_ADMIN_059`, so a rejected
+coverage experiment does not produce `SEMANTIC_QUERY_010`. Because a partial
+published F3 transition is invalid, assemble new multi-representation coverage
+on an unpublished model or use an external cutover. Do not assume other
+multi-step authoring has draft isolation.
+Schedule a maintenance window, prepare and smoke-test all other statements first,
 apply them consecutively, then validate immediately. Never work around the
 outage by retaining an older validation row: it did not certify the changed
 catalog.

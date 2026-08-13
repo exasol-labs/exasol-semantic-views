@@ -180,6 +180,14 @@ predicate validation, this proves the predicates executed by `UNION ALL` are
 complete, contiguous, and non-overlapping. Passing `NULL` for predicate and both
 bounds clears a declaration.
 
+For a model whose status is `PUBLISHED`, each coverage change is validated as a
+candidate. If it introduces an error, the script restores the previous
+predicate and bounds, revalidates the restored catalog, and returns
+`SEMANTIC_ADMIN_059`. This keeps the existing published surface available but
+also means a multi-step transition that is invalid between calls cannot be
+assembled in place; build it on an unpublished model and cut over after clean
+validation.
+
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(
   'sales', 'order', 'lakehouse',

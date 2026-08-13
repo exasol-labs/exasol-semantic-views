@@ -452,9 +452,12 @@ remove temporal coverage to force single-source compilation.
 
 Publication does not fork an immutable draft. Admin scripts mutate the active
 version that the published preprocessor compiles, and successful validation
-runs are marked `STALE` after a mutation. The published surface then fails
-closed with `SEMANTIC_QUERY_010` until validation succeeds again. Publish
-history is audit metadata, not a queryable catalog snapshot.
+runs can be marked `STALE` after a mutation. Published coverage changes are the
+fail-safe exception: `SET_REPRESENTATION_COVERAGE` validates the candidate and,
+on error, restores the prior predicate, bounds, and clean validation before
+returning `SEMANTIC_ADMIN_059`. The published surface remains queryable. This
+does not create a general draft, and publish history is audit metadata rather
+than a queryable catalog snapshot.
 
 For an existing published model, assemble and smoke-test the full change set
 before the maintenance window. Apply sequential representation, binding,
