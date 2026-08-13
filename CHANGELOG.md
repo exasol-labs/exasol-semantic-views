@@ -23,6 +23,15 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Unusable F3 partition declarations
+
+- Once a model has active metrics, `VALIDATE_MODEL` now rejects coverage on an
+  entity that is the base of none of them, because F3 cannot fuse an entity used
+  only as a joined dimension. Empty-model authoring remains repairable while
+  its first metric is created.
+- `SEMANTIC_MODEL_043` names the entity and blocks publication before existing
+  dimension queries can regress to `SEMANTIC_QUERY_074`.
+
 #### F3 fail-closed diagnostics
 
 - F3 typed-planning errors now name the unsupported metric and aggregate, the

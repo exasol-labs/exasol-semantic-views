@@ -280,6 +280,18 @@ F3 `UNION` fusion applies only to metric-leaf entities and mergeable `SUM` or
 binding. Do not validate the sources as F1 equivalents before coverage is
 complete: temporal partitions intentionally have different key sets.
 
+Before declaring coverage, verify the entity is the base of an active metric:
+
+```sql
+SELECT METRIC_NAME, BASE_ENTITY_NAME
+FROM SEMANTIC_CATALOG.METRICS
+WHERE UPPER(MODEL_NAME) = UPPER('sales')
+  AND UPPER(BASE_ENTITY_NAME) = UPPER('order');
+```
+
+If this returns no rows, stop. F3 cannot fuse that entity when it is used only
+as a joined dimension, and validation will fail with `SEMANTIC_MODEL_043`.
+
 Declare a certified SQL predicate and half-open interval for every active
 representation:
 

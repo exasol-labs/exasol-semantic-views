@@ -513,6 +513,10 @@ omitting the comparison for each `NULL` bound. Predicate timestamp literals
 must exactly match the metadata; free-form coverage SQL is rejected. Validate under
 `QUERY_TIMEOUT=60` when any partition's source is physically a Virtual Schema;
 the catalog-derived guard does not trust `SOURCE_KIND` alone.
+Before declaring coverage, confirm the entity appears as `BASE_ENTITY_NAME` for
+an active metric in `SEMANTIC_CATALOG.METRICS`. `VALIDATE_MODEL` rejects
+partitioning an entity used only as a joined dimension with
+`SEMANTIC_MODEL_043`.
 
 Do not use F3 for a partitioned entity that is only joined to supply dimensions,
 for overlapping snapshots, or for non-additive/distinct/window metrics. Inspect

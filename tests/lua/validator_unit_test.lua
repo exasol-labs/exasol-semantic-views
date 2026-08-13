@@ -697,6 +697,7 @@ test("validator accepts contiguous F3 coverage and rejects boundary gaps", funct
     local function context()
         return validation_context({
             entities = {entity},
+            metrics = {{id = 10, name = "revenue", base_entity_id = 1}},
             representations_by_entity = {["1"] = {cold, hot}},
         })
     end
@@ -729,6 +730,7 @@ test("validator rejects F3 predicates that disagree with declared intervals", fu
     local function validate()
         local ctx = validation_context({
             entities = {entity},
+            metrics = {{id = 10, name = "conversions", base_entity_id = 1}},
             representations_by_entity = {["1"] = {cold, hot}},
         })
         with_query(function(sql)
@@ -765,6 +767,47 @@ test("validator certifies bounded F3 predicates only in canonical form", functio
         "YEAR(o.order_ts) >= TIMESTAMP '2026-01-01 00:00:00'"), nil)
     assert_equal(api.parse_partition_predicate(
         "o.order_ts < TIMESTAMP '2026-01-01 00:00:00' OR 1 = 1"), nil)
+end)
+
+test("validator rejects partitioning an entity used only as a joined dimension", function()
+    local customer = {id = 1, name = "customer", alias = "c"}
+    local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
+        source_schema = "HUB", source_object = "CUSTOMER",
+        coverage_predicate = "c.signup_date < TIMESTAMP '2025-01-01 00:00:00'",
+        valid_to = "2025-01-01 00:00:00"}
+    local local_copy = {id = 2, entity_id = 1, name = "cust_local", alias = "c",
+        source_schema = "MART", source_object = "CUSTOMER",
+        coverage_predicate = "c.signup_date >= TIMESTAMP '2025-01-01 00:00:00'",
+        valid_from = "2025-01-01 00:00:00"}
+    local metrics = {
+        {id = 10, name = "sessions", base_entity_id = 2},
+        {id = 11, name = "orders", base_entity_id = 3},
+    }
+    local function validate(metric_rows)
+        local ctx = validation_context({
+            entities = {customer}, metrics = metric_rows,
+            representations_by_entity = {["1"] = {primary, local_copy}},
+        })
+        with_query(function(sql)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+            error("unexpected coverage SQL: " .. tostring(sql))
+        end, function() api.validate_partition_coverage(ctx, customer) end)
+        return ctx
+    end
+
+    local invalid = validate(metrics)
+    assert_true(has_rule(invalid, "SEMANTIC_MODEL_043"))
+    local issue = issue_for_rule(invalid, "SEMANTIC_MODEL_043")
+    assert_equal(issue.object_name, "customer")
+    assert_contains(issue.message, "base entity of no active metric")
+    assert_contains(issue.message, "partitioned joined dimensions are unsupported")
+
+    local authoring = validate({})
+    assert_true(not has_rule(authoring, "SEMANTIC_MODEL_043"))
+
+    metrics[#metrics + 1] = {id = 12, name = "customer_count", base_entity_id = 1}
+    local valid = validate(metrics)
+    assert_true(not has_rule(valid, "SEMANTIC_MODEL_043"))
 end)
 
 test("validator rejects partial and malformed F3 coverage contracts", function()

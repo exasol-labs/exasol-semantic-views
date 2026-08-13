@@ -1242,6 +1242,13 @@ local function predicate_matches_partition_interval(representation)
     return actual_from == expected_from and actual_to == expected_to, key_expression
 end
 
+local function entity_has_base_metric(ctx, entity)
+    for _, metric in ipairs(ctx.metrics or {}) do
+        if key(metric.base_entity_id) == key(entity.id) then return true end
+    end
+    return false
+end
+
 local function validate_partition_coverage(ctx, entity)
     local representations = representations_for_entity(ctx, entity)
     local metadata_count = 0
@@ -1259,6 +1266,15 @@ local function validate_partition_coverage(ctx, entity)
         add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_042",
             "UNION fusion requires coverage metadata on every active representation.")
         return
+    end
+    -- Admin authoring scripts validate after each mutation. An empty model must
+    -- be able to add its first metric and satisfy this rule in that operation.
+    if #(ctx.metrics or {}) > 0 and not entity_has_base_metric(ctx, entity) then
+        add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_043",
+            "Partitioned entity '" .. entity_name
+                .. "' is the base entity of no active metric. F3 UNION fusion applies only "
+                .. "to metric-leaf entities; partitioned joined dimensions are unsupported. "
+                .. "Remove the coverage declarations or define a metric based on this entity.")
     end
 
     local ordered = {}
@@ -2787,6 +2803,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
         parse_partition_predicate = parse_partition_predicate,
+        entity_has_base_metric = entity_has_base_metric,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
         validate_representation_probe_timeout = validate_representation_probe_timeout,
