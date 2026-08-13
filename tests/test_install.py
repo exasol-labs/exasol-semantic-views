@@ -120,6 +120,36 @@ class InstallerResetTest(unittest.TestCase):
         for fragment in expected_fragments:
             self.assertTrue(any(fragment in sql for sql in statements), fragment)
 
+    def test_f5_identity_graph_surfaces_are_installable(self):
+        statements = []
+        for path in INSTALL.INSTALL_FILES:
+            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+        expected_fragments = {
+            "SYS_SEMANTIC.SEMANTIC_IDENTITIES",
+            "SYS_SEMANTIC.IDENTITY_BINDINGS",
+            "SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS",
+            "SEMANTIC_CATALOG.SEMANTIC_IDENTITIES",
+            "SEMANTIC_CATALOG.IDENTITY_BINDINGS",
+            "SEMANTIC_CATALOG.IDENTITY_MAPPING_RELATIONS",
+            "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY",
+            "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING",
+            "SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION",
+        }
+        for fragment in expected_fragments:
+            self.assertTrue(any(fragment in sql for sql in statements), fragment)
+
+        add_identity = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY" in sql
+        )
+        self.assertIn("entity already has an active semantic identity", add_identity)
+        add_binding = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING" in sql
+        )
+        self.assertIn('if binding_kind == "DIRECT"', add_binding)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_binding)
+
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())
         self.assertEqual(

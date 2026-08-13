@@ -79,9 +79,12 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_041` | error | A multi-representation F1/F3 key probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds. The guard applies regardless of declared source kind or view dependencies. |
 | `SEMANTIC_MODEL_042` | error | F3 `UNION` coverage is partial, gapped, overlapping, not open-ended, or its canonical predicate does not exactly encode the declared half-open interval. |
 | `SEMANTIC_MODEL_043` | error | Once a model has active metrics, coverage partitions an entity that is the base of none of them and therefore can only use the unsupported partitioned joined-dimension path. |
-| `SEMANTIC_MODEL_044` | error | F4 authority or attribute-fusion metadata is malformed, lacks two contributors or a physical unique key, has no single authority for `RECONCILE`, or conflicts with F3 partition fusion. |
+| `SEMANTIC_MODEL_044` | error | F4 authority or attribute-fusion metadata is malformed, lacks two contributors or a physical unique key/complete semantic identity, has no single authority for `RECONCILE`, or conflicts with F3 partition fusion. |
 | `SEMANTIC_MODEL_045` | error | `COALESCE` contributors have conflicting non-null values for one or more overlapping entity keys. |
 | `SEMANTIC_MODEL_046` | warning | `RECONCILE` observed conflicting non-null values and deterministically selected the declared `AUTHORITATIVE` representation. |
+| `SEMANTIC_MODEL_047` | error | F5 semantic identity or source-local binding metadata is malformed, ambiguous, incomplete, or uses an unsupported expression. |
+| `SEMANTIC_MODEL_048` | error | A `DIRECT` binding incorrectly has a mapping, or a `MAPPED` binding lacks one visible `CERTIFIED` mapping relation. |
+| `SEMANTIC_MODEL_049` | error | F5 data probes could not prove local uniqueness, mapping totality and bijection, or exact canonical semantic-key equivalence. |
 
 ## Metric/Dimension Matrix
 

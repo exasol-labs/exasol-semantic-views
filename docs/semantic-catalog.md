@@ -100,13 +100,13 @@ the session timeout is unlimited or greater than 60 seconds. Exasol applies
 `QUERY_TIMEOUT` to the complete `EXECUTE SCRIPT`, including nested federated
 statements; a script cannot lower its own active timeout.
 
-Identity and relationship metadata remains representation-invariant through
-F2. Primary-key expressions, unique-key columns, relationship key mappings,
-join conditions, and representation-blind metric filters must resolve against
-the same case-sensitive physical column names in every representation. F2
-attribute bindings cannot repair those differences. Normalize incompatible
-sources behind a view with canonical aliases before registration; native
-representation-specific identity mappings are reserved for Fusion Phase F5.
+Without an F5 semantic identity, identity and relationship metadata remains
+representation-invariant. Primary-key expressions, unique-key columns,
+relationship key mappings, join conditions, and representation-blind metric
+filters must resolve against the same case-sensitive physical column names in
+every representation. F2 attribute bindings cannot repair those differences.
+F5 can map one scalar source-local entity key per representation; it does not
+rewrite relationship SQL or arbitrary filter columns.
 
 Phase F2 separates semantic dimensions and facts from their source expressions
 through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`
@@ -221,12 +221,12 @@ non-null values, reporting the number resolved as `SEMANTIC_MODEL_046`.
 Authority ordering is `AUTHORITATIVE`, `PREFER`, then `SUPPLEMENTAL`, followed
 by binding and representation priority.
 
-F4 requires active bindings on at least two representations and a declared
-unique key containing physical columns only. Validation still proves unique grain and exact key-set
-equivalence before checking value conflicts. Expression keys, differing key
-names, and cross-source identity mappings remain F5. F3 partition `UNION` and
-F4 attribute reconciliation cannot be enabled on the same entity. Conflict
-probes obey the same session `QUERY_TIMEOUT` gate as F1/F3 probes.
+F4 requires active bindings on at least two representations and either a
+physical-column unique key shared by every representation or a complete F5
+semantic identity. Validation proves unique grain and exact canonical key-set
+equivalence before checking value conflicts. F3 partition `UNION` and F4
+attribute reconciliation cannot be enabled on the same entity. Conflict probes
+obey the same session `QUERY_TIMEOUT` gate as F1/F3 probes.
 
 Compilation keeps the selected representation as the entity relation and uses
 key-preserving `LEFT JOIN`s for alternate values. Validated uniqueness prevents
@@ -245,6 +245,56 @@ SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS
 SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS
 SEMANTIC_CATALOG.REPRESENTATION_AUTHORITIES
 SEMANTIC_CATALOG.ATTRIBUTE_FUSION_POLICIES
+```
+
+### F5 Identity Graph
+
+F5 lets one entity use different scalar keys in different systems without
+fuzzy runtime matching. Declare one model-global semantic identity name, bind
+each active representation's source-local expression, and use a certified
+two-column mapping relation where a local value is not already the semantic
+key:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(
+  'customer_360', 'customer', 'customer_identity', 'GLOBAL',
+  'DECIMAL(18,0)', 'Certified customer identity'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'primary',
+  'c.customer_id', 'DIRECT'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'crm',
+  'c.account_id', 'MAPPED'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
+  'customer_360', 'customer_identity', 'crm',
+  'IDENTITY_MAP', 'CUSTOMER_XREF', 'ACCOUNT_ID', 'CUSTOMER_ID', 'CERTIFIED'
+);
+```
+
+The MVP permits one active semantic identity per entity and requires a binding
+for every active representation. `DIRECT` means the local expression already
+produces the semantic key. `MAPPED` requires one visible, certified relation
+whose local and semantic columns are non-null and one-to-one. Validation proves
+local expression uniqueness, mapping totality, bijection, and exact canonical
+key-set equality with the primary. Incomplete, ambiguous, uncertified, or
+probabilistic mappings fail closed as `SEMANTIC_MODEL_047` to `_049`.
+
+F4 compilation joins contributors on the semantic key. Mapped contributors are
+joined through the certified relation, and the plan records semantic identity,
+binding, and mapping IDs. Mapping is deterministic and validation-time
+certified; the compiler never performs fuzzy matching. Composite identities,
+relationship remapping, F3 identity mapping, and multi-fact reconciliation are
+not supported in F5.
+
+Read-only metadata is exposed through:
+
+```text
+SEMANTIC_CATALOG.SEMANTIC_IDENTITIES
+SEMANTIC_CATALOG.IDENTITY_BINDINGS
+SEMANTIC_CATALOG.IDENTITY_MAPPING_RELATIONS
 ```
 
 ## Validation Tables

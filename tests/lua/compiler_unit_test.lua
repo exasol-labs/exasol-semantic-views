@@ -593,6 +593,21 @@ local function compiler_query_fixture(options)
                 return {{1, "DIMENSION", 10, "RECONCILE"}}
             end
             return options.f4_policies or {}
+        elseif normalized:find("FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES", 1, true) then
+            if options.f5_identity then
+                return {{501, 1, "customer_identity", "GLOBAL", "DECIMAL(18,0)"}}
+            end
+            return options.f5_identities or {}
+        elseif normalized:find("FROM SYS_SEMANTIC.IDENTITY_BINDINGS", 1, true) then
+            if options.f5_identity then
+                return {
+                    {601, 1, 501, 101, "o.order_id", "DIRECT"},
+                    {602, 1, 501, 104, "o.legacy_order_id", "MAPPED",
+                        701, "IDENTITY_MAP", "ORDER_XREF", "LEGACY_ORDER_ID",
+                        "ORDER_ID", "CERTIFIED"},
+                }
+            end
+            return options.f5_identity_bindings or {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
             if options.multi_fact then
                 return {
@@ -645,6 +660,12 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS", 1, true) then
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.VALIDATION_RUNS", 1, true) then
+            if options.stale_validation then
+                if normalized:find("SELECT STATUS, ERROR_COUNT", 1, true) then
+                    return {{"STALE", 0}}
+                end
+                return {}
+            end
             if options.no_validation then return {} end
             return {{77, "OK", 0}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX", 1, true) then
@@ -762,6 +783,26 @@ test("F4 compiler reconciles attribute values by declared authority", function()
     assert_contains(result.plan_json, '"fusion_strategy":"RECONCILE"')
     assert_contains(result.plan_json, '"authority_role":"AUTHORITATIVE"')
     assert_contains(result.plan_json, '"authority_role":"SUPPLEMENTAL"')
+end)
+
+test("F5 compiler reconciles through a certified source-local identity map", function()
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"total_revenue"},
+        dimensions = {"order_status"},
+    }, {f4_reconcile = true, f5_identity = true})
+    assert_equal(result.status, "OK")
+    assert_contains(result.generated_sql, 'FROM "ARCHIVE"."ORDERS" f5_src_104')
+    assert_contains(result.generated_sql, 'JOIN "IDENTITY_MAP"."ORDER_XREF" f5_map_602')
+    assert_contains(result.generated_sql,
+        'f5_src_104.legacy_order_id = f5_map_602."LEGACY_ORDER_ID"')
+    assert_contains(result.generated_sql, 'AS "F5_SEMANTIC_KEY"')
+    assert_contains(result.generated_sql,
+        'f4_rep_104."F5_SEMANTIC_KEY" = o.order_id')
+    assert_contains(result.plan_json, '"semantic_identity_name":"customer_identity"')
+    assert_contains(result.plan_json, '"identity_binding_id":602')
+    assert_contains(result.plan_json, '"identity_mapping_id":701')
 end)
 
 test("F3 compiler unions hot and cold aggregate-state partitions", function()
@@ -983,6 +1024,18 @@ test("structured compiler maps request and validation failures", function()
         {unsupported_metric = true})
     assert_equal(legacy_unsupported.status, "OK")
     assert_contains(legacy_unsupported.generated_sql, "COUNT(DISTINCT")
+end)
+
+test("published compiler explains stale in-place authoring state", function()
+    local result = compile_with_fixture({
+        model = "sales", object = "SALES", metrics = {"revenue"},
+    }, {stale_validation = true})
+    assert_equal(result.status, "ERROR")
+    assert_equal(result.error_code, "SEMANTIC_REQUEST_010")
+    assert_contains(result.error_message,
+        "active catalog version changed after its last successful validation")
+    assert_contains(result.error_message,
+        "published surface is unavailable until VALIDATE_MODEL succeeds")
 end)
 
 test("semantic SQL public APIs compile debug and preserve non-semantic SQL", function()

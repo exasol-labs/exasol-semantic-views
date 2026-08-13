@@ -67,6 +67,7 @@ python3 tools/verify_grain_phase_b.py
 python3 tools/verify_grain_phase_c3.py
 python3 tools/verify_fusion_f3.py
 python3 tools/verify_fusion_f4.py
+python3 tools/verify_fusion_f5.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -75,6 +76,9 @@ the executed `UNION ALL` result with the expected cross-partition totals.
 The F4 verifier proves null fallback with agreeing overlap, rejects conflicting
 `COALESCE` values, and confirms `RECONCILE` authority in results and plan
 provenance.
+The F5 verifier uses different source-local customer keys, proves certified
+mapping totality and bijection, executes mapped F4 reconciliation, and rejects
+missing or many-to-one identity mappings.
 
 The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently

@@ -200,9 +200,9 @@ SELECT
 FROM SRC_MONGO_CUSTOMERS."CUSTOMERS";
 ```
 
-Register the canonicalizing view, not the raw source. If creating such a view
-is not acceptable, stop and report that representation-specific identity
-bindings require Fusion Phase F5.
+Register the canonicalizing view when relationship or filter columns differ.
+For a scalar entity key alone, the F5 identity workflow below can bind a
+source-local key without changing the source.
 
 ```sql
 ALTER SESSION SET QUERY_TIMEOUT=60;
@@ -226,8 +226,8 @@ a representation, first remove its attribute bindings and promote another one
 if it is primary. Validation probe failures are blocking, so run it as a user
 that can query every source. Do not leave temporal partitions modeled as F1
 equivalents; configure every active representation through the F3 coverage
-workflow below. Row reconciliation is available only through the exact-identity
-F4 workflow below; non-equivalent identity remains unsupported.
+workflow below. Use F4 for row reconciliation and F5 when those sources need a
+certified cross-system identity mapping.
 Resolve local catalog errors before retrying validation. Remote equivalence
 probes are deferred while those errors exist, then run in full once metadata is
 clean; every representation's key cardinality is scanned once per declared key.
@@ -269,8 +269,8 @@ not coalesce rows or values across sources. Inspect
 
 ### Reconcile Overlapping Attribute Values
 
-F4 applies to overlapping representations that already pass F1 unique-grain
-and exact key-set proofs. Give one source semantic authority, classify the
+F4 applies to overlapping representations that pass unique-grain and exact
+canonical key-set proofs through F1 or F5. Give one source semantic authority, classify the
 others, and then choose a policy per dimension or fact:
 
 ```sql
@@ -291,15 +291,52 @@ conflicts as blocking `SEMANTIC_MODEL_045`. Use `RECONCILE` when exactly one
 bound representation is `AUTHORITATIVE` and its value should win; observed
 conflicts remain visible as `SEMANTIC_MODEL_046` warnings.
 
-Before validation, require bindings on at least two representations, one declared
-physical-column unique key, exact F1 identity, and `QUERY_TIMEOUT` between 1 and
-60 seconds. Do not configure F3 coverage on the same entity. Expression keys,
-renamed identity columns, and cross-representation identity mappings require
-canonical source views or Phase F5. After compiling representative requests,
+Before validation, require bindings on at least two representations, either one
+shared physical-column unique key or the complete F5 identity graph below, and
+`QUERY_TIMEOUT` between 1 and 60 seconds. Do not configure F3 coverage on the
+same entity. After compiling representative requests,
 inspect `selected_bindings[].fusion_contributors` for ordered authority,
-binding IDs, sources, and expressions.
+binding IDs, sources, expressions, and identity mapping IDs.
 F4 bypasses aggregate materializations and rejects multi-fact branch plans.
 Use a canonical pre-reconciled source if either execution shape is required.
+
+### Map Cross-System Entity Identity
+
+Use F5 only for deterministic scalar identity. Identity names are unique within
+the model, and an entity can have one active semantic identity. Add a binding
+for every active representation:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(
+  'customer_360', 'customer', 'customer_identity', 'GLOBAL',
+  'DECIMAL(18,0)', 'Certified customer identity'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'primary',
+  'c.customer_id', 'DIRECT'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'crm',
+  'c.account_id', 'MAPPED'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
+  'customer_360', 'customer_identity', 'crm',
+  'IDENTITY_MAP', 'CUSTOMER_XREF', 'ACCOUNT_ID', 'CUSTOMER_ID', 'CERTIFIED'
+);
+```
+
+The mapping relation must be queryable by the validating user and contain one
+non-null semantic key for every source-local key, with no duplicate local or
+semantic key. Set `QUERY_TIMEOUT=60`; `VALIDATE_MODEL` proves local uniqueness,
+mapping totality and bijection, and bidirectional canonical key-set equality.
+Treat `_047`, `_048`, and `_049` as blocking identity failures. Do not use
+probabilistic matches, confidence thresholds, or an uncertified crosswalk.
+
+F5 supplies the join key for F4 `COALESCE` and `RECONCILE`. Verify
+`semantic_identity_id`, `identity_binding_id`, and `identity_mapping_id` in each
+fusion contributor. F5 does not rewrite relationship endpoint mappings,
+free-form filters, composite identities, partitioned F3 plans, or multi-fact
+reconciliation; normalize those shapes in a governed source view.
 
 When several columns are renamed, add all required bindings one at a time
 before the final `VALIDATE_MODEL`. Intermediate validation errors for the
@@ -368,6 +405,22 @@ dimension or filter and entity (`_074`), or missing attribute and partition
 remove temporal coverage to force single-source compilation.
 
 ## Rebuild an Existing Model
+
+### Published Model Maintenance Boundary
+
+Publication does not fork an immutable draft. Admin scripts mutate the active
+version that the published preprocessor compiles, and successful validation
+runs are marked `STALE` after a mutation. The published surface then fails
+closed with `SEMANTIC_QUERY_010` until validation succeeds again. Publish
+history is audit metadata, not a queryable catalog snapshot.
+
+For an existing published model, assemble and smoke-test the full change set
+before the maintenance window. Apply sequential representation, binding,
+coverage, authority, and metric operations without pausing, run
+`VALIDATE_MODEL`, resolve every error, and republish when the visible contract
+changes. If uninterrupted consumers are required, build and validate a separate
+model/schema and cut clients over externally; in-place zero-downtime drafts are
+not supported yet.
 
 Bootstrap scripts are not idempotent. Prefer incremental add/replace operations
 for maintenance. For an intentional full rebuild, inspect and export anything

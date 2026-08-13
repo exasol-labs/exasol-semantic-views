@@ -293,6 +293,9 @@ local model_tables = {
     "SYNONYMS",
     "CALCULATION_GROUPS",
     "SEMANTIC_DEFINITION_SOURCES",
+    "IDENTITY_MAPPING_RELATIONS",
+    "IDENTITY_BINDINGS",
+    "SEMANTIC_IDENTITIES",
     "ATTRIBUTE_FUSION_POLICIES",
     "ATTRIBUTE_BINDINGS",
     "DIMENSIONS",
@@ -611,6 +614,263 @@ exit({{representation_id, model_name, entity_name, representation_name,
   SOURCE_ALIAS VARCHAR(128),
   REPRESENTATION_ROLE VARCHAR(64),
   PRIORITY DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(
+  MODEL_NAME, ENTITY_NAME, IDENTITY_NAME, IDENTITY_KIND, DATA_TYPE, DESCRIPTION
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local model_name = trim(MODEL_NAME)
+local entity_name = trim(ENTITY_NAME)
+local identity_name = trim(IDENTITY_NAME)
+local identity_kind = upper(IDENTITY_KIND)
+local data_type = trim(DATA_TYPE)
+if model_name == "" or entity_name == "" or identity_name == "" or data_type == "" then
+    error("SEMANTIC_ADMIN_001: model, entity, identity, and data type are required")
+end
+if identity_kind ~= "BUSINESS" and identity_kind ~= "GLOBAL" then
+    error("SEMANTIC_ADMIN_003: IDENTITY_KIND must be BUSINESS or GLOBAL")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, e.ENTITY_ID
+    FROM SYS_SEMANTIC.MODELS m JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name) AND e.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_014: entity not found: " .. entity_name)
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local entity_id = row_value(rows[1], "ENTITY_ID", 3)
+local existing = query([[
+    SELECT IDENTITY_ID FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND ENTITY_ID = :entity_id AND UPPER(IDENTITY_NAME) = UPPER(:identity_name)
+      AND STATUS = 'ACTIVE'
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      identity_name = identity_name})
+local conflicting = query([[
+    SELECT IDENTITY_ID FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND UPPER(IDENTITY_NAME) = UPPER(:identity_name)
+      AND ENTITY_ID <> :entity_id AND STATUS = 'ACTIVE'
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      identity_name = identity_name})
+if conflicting ~= nil and #conflicting > 0 then
+    error("SEMANTIC_ADMIN_011: duplicate semantic identity name: " .. identity_name)
+end
+local entity_identity = query([[
+    SELECT IDENTITY_NAME FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND ENTITY_ID = :entity_id AND UPPER(IDENTITY_NAME) <> UPPER(:identity_name)
+      AND STATUS = 'ACTIVE'
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      identity_name = identity_name})
+if entity_identity ~= nil and #entity_identity > 0 then
+    error("SEMANTIC_ADMIN_051: entity already has an active semantic identity: "
+        .. tostring(row_value(entity_identity[1], "IDENTITY_NAME", 1)))
+end
+local identity_id
+if existing ~= nil and #existing > 0 then
+    identity_id = row_value(existing[1], "IDENTITY_ID", 1)
+    query([[
+        UPDATE SYS_SEMANTIC.SEMANTIC_IDENTITIES
+        SET IDENTITY_KIND = :identity_kind, DATA_TYPE = :data_type,
+            DESCRIPTION = :description, UPDATED_AT = CURRENT_TIMESTAMP,
+            UPDATED_BY = CURRENT_USER
+        WHERE IDENTITY_ID = :identity_id
+    ]], {identity_id = identity_id, identity_kind = identity_kind,
+          data_type = data_type, description = DESCRIPTION})
+else
+    query([[
+        INSERT INTO SYS_SEMANTIC.SEMANTIC_IDENTITIES (
+          MODEL_ID, VERSION_ID, ENTITY_ID, IDENTITY_NAME, IDENTITY_KIND,
+          DATA_TYPE, DESCRIPTION, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, :identity_name, :identity_kind,
+          :data_type, :description, 'ACTIVE'
+        )
+    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+          identity_name = identity_name, identity_kind = identity_kind,
+          data_type = data_type, description = DESCRIPTION})
+    local ids = query("SELECT MAX(IDENTITY_ID) FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id",
+        {model_id = model_id, version_id = version_id})
+    identity_id = ids[1][1]
+end
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+exit({{identity_id, model_name, entity_name, identity_name, identity_kind, data_type}}, [[
+  IDENTITY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  IDENTITY_NAME VARCHAR(256), IDENTITY_KIND VARCHAR(32), DATA_TYPE VARCHAR(128)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME, SOURCE_EXPRESSION, BINDING_KIND
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local model_name = trim(MODEL_NAME)
+local identity_name = trim(IDENTITY_NAME)
+local representation_name = trim(REPRESENTATION_NAME)
+local source_expression = trim(SOURCE_EXPRESSION)
+local binding_kind = upper(BINDING_KIND)
+if source_expression == "" then error("SEMANTIC_ADMIN_001: SOURCE_EXPRESSION is required") end
+if binding_kind ~= "DIRECT" and binding_kind ~= "MAPPED" then
+    error("SEMANTIC_ADMIN_003: BINDING_KIND must be DIRECT or MAPPED")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, si.ENTITY_ID, si.IDENTITY_ID,
+           er.REPRESENTATION_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+      ON si.MODEL_ID = m.MODEL_ID AND si.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(si.IDENTITY_NAME) = UPPER(:identity_name) AND si.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = si.ENTITY_ID AND er.VERSION_ID = si.VERSION_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, identity_name = identity_name,
+      representation_name = representation_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_049: identity or representation not found")
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local entity_id = row_value(rows[1], "ENTITY_ID", 3)
+local identity_id = row_value(rows[1], "IDENTITY_ID", 4)
+local representation_id = row_value(rows[1], "REPRESENTATION_ID", 5)
+local existing = query([[
+    SELECT IDENTITY_BINDING_ID FROM SYS_SEMANTIC.IDENTITY_BINDINGS
+    WHERE IDENTITY_ID = :identity_id AND REPRESENTATION_ID = :representation_id
+      AND STATUS = 'ACTIVE'
+]], {identity_id = identity_id, representation_id = representation_id})
+local binding_id
+if existing ~= nil and #existing > 0 then
+    binding_id = row_value(existing[1], "IDENTITY_BINDING_ID", 1)
+    query([[
+        UPDATE SYS_SEMANTIC.IDENTITY_BINDINGS
+        SET SOURCE_EXPRESSION = :source_expression, BINDING_KIND = :binding_kind,
+            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        WHERE IDENTITY_BINDING_ID = :binding_id
+    ]], {binding_id = binding_id, source_expression = source_expression,
+          binding_kind = binding_kind})
+else
+    query([[
+        INSERT INTO SYS_SEMANTIC.IDENTITY_BINDINGS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, IDENTITY_ID, REPRESENTATION_ID,
+          SOURCE_EXPRESSION, BINDING_KIND, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, :identity_id, :representation_id,
+          :source_expression, :binding_kind, 'ACTIVE'
+        )
+    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+          identity_id = identity_id, representation_id = representation_id,
+          source_expression = source_expression, binding_kind = binding_kind})
+    local ids = query("SELECT MAX(IDENTITY_BINDING_ID) FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE IDENTITY_ID = :identity_id",
+        {identity_id = identity_id})
+    binding_id = ids[1][1]
+end
+if binding_kind == "DIRECT" then
+    query("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS WHERE IDENTITY_BINDING_ID = :binding_id",
+        {binding_id = binding_id})
+end
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+exit({{binding_id, model_name, identity_name, representation_name,
+    source_expression, binding_kind}}, [[
+  IDENTITY_BINDING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  IDENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256),
+  SOURCE_EXPRESSION VARCHAR(2000000), BINDING_KIND VARCHAR(32)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
+  MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME, SOURCE_SCHEMA, SOURCE_OBJECT,
+  SOURCE_LOCAL_COLUMN, SEMANTIC_KEY_COLUMN, CERTIFICATION_STATUS
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local certification = upper(CERTIFICATION_STATUS)
+if trim(MODEL_NAME) == "" or trim(IDENTITY_NAME) == ""
+    or trim(REPRESENTATION_NAME) == "" or trim(SOURCE_SCHEMA) == ""
+    or trim(SOURCE_OBJECT) == "" or trim(SOURCE_LOCAL_COLUMN) == ""
+    or trim(SEMANTIC_KEY_COLUMN) == "" then
+    error("SEMANTIC_ADMIN_001: model, identity, representation, mapping source, and mapping columns are required")
+end
+if certification ~= "CERTIFIED" then
+    error("SEMANTIC_ADMIN_003: runtime identity mappings must be CERTIFIED")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, ib.IDENTITY_BINDING_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+      ON si.MODEL_ID = m.MODEL_ID AND si.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(si.IDENTITY_NAME) = UPPER(:identity_name) AND si.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = si.ENTITY_ID AND er.VERSION_ID = si.VERSION_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.IDENTITY_BINDINGS ib
+      ON ib.IDENTITY_ID = si.IDENTITY_ID AND ib.REPRESENTATION_ID = er.REPRESENTATION_ID
+     AND ib.BINDING_KIND = 'MAPPED' AND ib.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = trim(MODEL_NAME), identity_name = trim(IDENTITY_NAME),
+      representation_name = trim(REPRESENTATION_NAME)})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_050: active MAPPED identity binding not found")
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local binding_id = row_value(rows[1], "IDENTITY_BINDING_ID", 3)
+query("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS WHERE IDENTITY_BINDING_ID = :binding_id",
+    {binding_id = binding_id})
+query([[
+    INSERT INTO SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS (
+      MODEL_ID, VERSION_ID, IDENTITY_BINDING_ID, SOURCE_SCHEMA, SOURCE_OBJECT,
+      SOURCE_LOCAL_COLUMN, SEMANTIC_KEY_COLUMN, CERTIFICATION_STATUS, STATUS
+    ) VALUES (
+      :model_id, :version_id, :binding_id, :source_schema, :source_object,
+      :source_local_column, :semantic_key_column, :certification, 'ACTIVE'
+    )
+]], {model_id = model_id, version_id = version_id, binding_id = binding_id,
+      source_schema = trim(SOURCE_SCHEMA), source_object = trim(SOURCE_OBJECT),
+      source_local_column = trim(SOURCE_LOCAL_COLUMN),
+      semantic_key_column = trim(SEMANTIC_KEY_COLUMN), certification = certification})
+local ids = query("SELECT MAX(IDENTITY_MAPPING_ID) FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS WHERE IDENTITY_BINDING_ID = :binding_id",
+    {binding_id = binding_id})
+local mapping_id = ids[1][1]
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+exit({{mapping_id, trim(MODEL_NAME), trim(IDENTITY_NAME),
+    trim(REPRESENTATION_NAME), trim(SOURCE_SCHEMA), trim(SOURCE_OBJECT), certification}}, [[
+  IDENTITY_MAPPING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  IDENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256),
+  SOURCE_SCHEMA VARCHAR(256), SOURCE_OBJECT VARCHAR(256),
+  CERTIFICATION_STATUS VARCHAR(32)
 ]])
 /
 
@@ -1185,6 +1445,12 @@ local binding_count = scalar([[
 if tonumber(binding_count or 0) > 0 then
     error("SEMANTIC_ADMIN_048: cannot remove a representation with active attribute bindings; remove the bindings first")
 end
+query([[DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS
+    WHERE IDENTITY_BINDING_ID IN (SELECT IDENTITY_BINDING_ID
+      FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE REPRESENTATION_ID = :representation_id)]],
+    {representation_id = representation_id})
+query("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE REPRESENTATION_ID = :representation_id",
+    {representation_id = representation_id})
 query("DELETE FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES WHERE REPRESENTATION_ID = :representation_id",
     {representation_id = representation_id})
 query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
@@ -5859,6 +6125,67 @@ local function load_catalog(ctx)
         ctx.fusion_policy_by_attribute[attribute_key] = policy
     end
 
+    ctx.semantic_identities = {}
+    ctx.identity_by_id = {}
+    ctx.identities_by_entity = {}
+    local identity_rows = query([[
+        SELECT IDENTITY_ID, ENTITY_ID, IDENTITY_NAME, IDENTITY_KIND, DATA_TYPE
+        FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID, IDENTITY_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(identity_rows or {}) do
+        local identity = {id = row_value(row, "IDENTITY_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "IDENTITY_NAME", 3),
+            kind = row_value(row, "IDENTITY_KIND", 4),
+            data_type = row_value(row, "DATA_TYPE", 5), bindings = {}}
+        ctx.semantic_identities[#ctx.semantic_identities + 1] = identity
+        ctx.identity_by_id[key(identity.id)] = identity
+        ctx.identities_by_entity[key(identity.entity_id)] =
+            ctx.identities_by_entity[key(identity.entity_id)] or {}
+        table.insert(ctx.identities_by_entity[key(identity.entity_id)], identity)
+    end
+    ctx.identity_bindings = {}
+    local identity_binding_rows = query([[
+        SELECT ib.IDENTITY_BINDING_ID, ib.ENTITY_ID, ib.IDENTITY_ID,
+               ib.REPRESENTATION_ID, ib.SOURCE_EXPRESSION, ib.BINDING_KIND,
+               im.IDENTITY_MAPPING_ID, im.SOURCE_SCHEMA, im.SOURCE_OBJECT,
+               im.SOURCE_LOCAL_COLUMN, im.SEMANTIC_KEY_COLUMN,
+               im.CERTIFICATION_STATUS
+        FROM SYS_SEMANTIC.IDENTITY_BINDINGS ib
+        LEFT JOIN SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS im
+          ON im.IDENTITY_BINDING_ID = ib.IDENTITY_BINDING_ID
+         AND im.STATUS = 'ACTIVE'
+        WHERE ib.MODEL_ID = :model_id AND ib.VERSION_ID = :version_id
+          AND ib.STATUS = 'ACTIVE'
+        ORDER BY ib.IDENTITY_ID, ib.IDENTITY_BINDING_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(identity_binding_rows or {}) do
+        local binding = {id = row_value(row, "IDENTITY_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            identity_id = row_value(row, "IDENTITY_ID", 3),
+            representation_id = row_value(row, "REPRESENTATION_ID", 4),
+            expression = row_value(row, "SOURCE_EXPRESSION", 5),
+            kind = row_value(row, "BINDING_KIND", 6),
+            mapping = row_value(row, "IDENTITY_MAPPING_ID", 7) and {
+                id = row_value(row, "IDENTITY_MAPPING_ID", 7),
+                source_schema = row_value(row, "SOURCE_SCHEMA", 8),
+                source_object = row_value(row, "SOURCE_OBJECT", 9),
+                local_column = row_value(row, "SOURCE_LOCAL_COLUMN", 10),
+                semantic_column = row_value(row, "SEMANTIC_KEY_COLUMN", 11),
+                certification = row_value(row, "CERTIFICATION_STATUS", 12),
+            } or nil}
+        ctx.identity_bindings[#ctx.identity_bindings + 1] = binding
+        local identity = ctx.identity_by_id[key(binding.identity_id)]
+        if identity ~= nil then
+            identity.bindings[#identity.bindings + 1] = binding
+            identity.binding_by_representation = identity.binding_by_representation or {}
+            identity.binding_by_representation[key(binding.representation_id)] = binding
+        end
+    end
+
     ctx.metrics = {}
     ctx.metric_by_id = {}
     ctx.metric_by_name = {}
@@ -6285,13 +6612,45 @@ local function missing_representation_columns(ctx, entity, column_name)
     return names
 end
 
+local function complete_semantic_identity(ctx, entity)
+    local representations = representations_for_entity(ctx, entity)
+    for _, identity in ipairs((ctx.identities_by_entity or {})[key(entity.id)] or {}) do
+        local complete = #representations > 0
+        for _, representation in ipairs(representations) do
+            local binding = identity.binding_by_representation
+                and identity.binding_by_representation[key(representation.id)] or nil
+            if binding == nil or (upper(binding.kind) == "MAPPED"
+                and (binding.mapping == nil
+                    or upper(binding.mapping.certification) ~= "CERTIFIED")) then
+                complete = false
+                break
+            end
+        end
+        if complete then return identity end
+    end
+    return nil
+end
+
+local function missing_unique_key_columns(ctx, entity, column_name)
+    local identity = complete_semantic_identity(ctx, entity)
+    if identity == nil then
+        return missing_representation_columns(ctx, entity, column_name)
+    end
+    local primary = entity.primary_representation
+    if primary ~= nil and not source_column_exists(primary.source_schema,
+        primary.source_object, column_name) then
+        return {tostring(primary.name)}
+    end
+    return {}
+end
+
 local function representation_suffix(names)
     if names == nil or #names == 0 then return "" end
     return " in representation(s): " .. table.concat(names, ", ")
 end
 
 local function identity_binding_remedy()
-    return " F2 attribute bindings do not remap identity or joins; expose the canonical key and join column names in a source view before registering this representation. Representation-specific identity bindings require Fusion Phase F5."
+    return " F2 attribute bindings do not remap identity or joins. Use a certified F5 semantic identity for representation-local entity keys; relationship join columns still require canonical source views."
 end
 
 local function validate_structural_rules(ctx)
@@ -6375,7 +6734,7 @@ local function validate_structural_rules(ctx)
             end
             for _, ref in ipairs(column_refs_in_expression(entity.primary_key_expr)) do
                 local missing_representations =
-                    missing_representation_columns(ctx, entity, ref.column_name)
+                    missing_unique_key_columns(ctx, entity, ref.column_name)
                 if ref.alias == owning_alias and #missing_representations > 0 then
                     add_issue(ctx, "ERROR", "ENTITY", entity.name,
                         "SEMANTIC_MODEL_036", "Legacy primary-key expression references unknown source column: "
@@ -6560,7 +6919,7 @@ local function validate_unique_key_expression(ctx, unique_key, column, entity, o
             "Unique key expression uses unsupported function: " .. fn .. ".")
     end
     for _, ref in ipairs(column_refs_in_expression(column.expression)) do
-        local missing_representations = missing_representation_columns(ctx, entity, ref.column_name)
+        local missing_representations = missing_unique_key_columns(ctx, entity, ref.column_name)
         if ref.alias == owning_alias and #missing_representations > 0 then
             add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
             "Unique key expression references unknown source column: " .. ref.alias .. "."
@@ -6612,7 +6971,7 @@ local function validate_unique_keys(ctx)
                         "Unique key column must not define both COLUMN_NAME and EXPRESSION.")
                 elseif not missing(column_name) then
                     local missing_representations =
-                        missing_representation_columns(ctx, entity, column_name)
+                        missing_unique_key_columns(ctx, entity, column_name)
                     if #missing_representations > 0 then
                         add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", column_object_name, "SEMANTIC_MODEL_029",
                             "Unique key column references unknown source column: "
@@ -6677,6 +7036,254 @@ local function probe_count(sql_text)
     return tonumber(row_value(rows[1], "PROBE_COUNT", 1) or 0), nil
 end
 
+local function validate_semantic_identities(ctx)
+    local representation_by_id = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        representation_by_id[key(representation.id)] = representation
+    end
+    local names = {}
+    local identity_counts = {}
+    for _, identity in ipairs(ctx.semantic_identities or {}) do
+        local entity = ctx.entity_by_id[key(identity.entity_id)]
+        local object_name = (entity and entity.name or tostring(identity.entity_id))
+            .. "." .. tostring(identity.name)
+        local name_key = upper(identity.name)
+        if names[name_key] then
+            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                "SEMANTIC_MODEL_047", "Semantic identity names must be unique within a model.")
+        end
+        names[name_key] = true
+        identity_counts[key(identity.entity_id)] = (identity_counts[key(identity.entity_id)] or 0) + 1
+        if identity_counts[key(identity.entity_id)] > 1 then
+            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                "SEMANTIC_MODEL_047", "An entity may have only one active semantic identity.")
+        end
+        if entity == nil then
+            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                "SEMANTIC_MODEL_047", "Semantic identity references an unknown entity.")
+        end
+        local kind = upper(identity.kind)
+        if kind ~= "BUSINESS" and kind ~= "GLOBAL" then
+            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                "SEMANTIC_MODEL_047", "Identity kind must be BUSINESS or GLOBAL.")
+        end
+        if missing(identity.data_type) then
+            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                "SEMANTIC_MODEL_047", "Semantic identity data type is required.")
+        end
+        if entity ~= nil then
+            for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+                if not missing(representation.coverage_predicate)
+                    or representation.valid_from ~= nil
+                    or representation.valid_to ~= nil then
+                    add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                        "SEMANTIC_MODEL_047", "F5 semantic identity cannot be combined with F3 representation coverage on the same entity.")
+                    break
+                end
+            end
+        end
+        local seen_representations = {}
+        for _, binding in ipairs(identity.bindings or {}) do
+            local representation = representation_by_id[key(binding.representation_id)]
+            local binding_name = object_name .. "@"
+                .. tostring(representation and representation.name or binding.representation_id)
+            if missing(binding.expression) then
+                add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                    "SEMANTIC_MODEL_047", "Source-local identity expression is required.")
+            end
+            if seen_representations[key(binding.representation_id)] then
+                add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                    "SEMANTIC_MODEL_047", "Duplicate identity binding for representation.")
+            end
+            seen_representations[key(binding.representation_id)] = true
+            if representation == nil or key(representation.entity_id) ~= key(identity.entity_id)
+                or key(binding.entity_id) ~= key(identity.entity_id) then
+                add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                    "SEMANTIC_MODEL_047", "Identity binding representation or entity is inconsistent.")
+            else
+                for fn, _ in pairs(unsupported_functions(binding.expression)) do
+                    add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                        "SEMANTIC_MODEL_047", "Unsupported function in source-local identity expression: "
+                            .. fn .. ".")
+                end
+                for alias, _ in pairs(aliases_in_expression(binding.expression)) do
+                    if alias ~= upper(representation.alias) then
+                        add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                            "SEMANTIC_MODEL_047", "Source-local identity expression references alias outside its representation: " .. alias .. ".")
+                    end
+                end
+                for _, ref in ipairs(column_refs_in_expression(binding.expression)) do
+                    if ref.alias == upper(representation.alias)
+                        and not source_column_exists(representation.source_schema,
+                            representation.source_object, ref.column_name) then
+                        add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                            "SEMANTIC_MODEL_047", "Source-local identity expression references unknown column: " .. ref.column_name .. ".")
+                    end
+                end
+            end
+            local binding_kind = upper(binding.kind)
+            if binding_kind ~= "DIRECT" and binding_kind ~= "MAPPED" then
+                add_issue(ctx, "ERROR", "IDENTITY_BINDING", binding_name,
+                    "SEMANTIC_MODEL_047", "Identity binding kind must be DIRECT or MAPPED.")
+            elseif binding_kind == "DIRECT" and binding.mapping ~= nil then
+                add_issue(ctx, "ERROR", "IDENTITY_MAPPING", binding_name,
+                    "SEMANTIC_MODEL_048", "DIRECT identity binding must not have a mapping relation.")
+            elseif binding_kind == "MAPPED" then
+                local mapping = binding.mapping
+                if mapping == nil or upper(mapping.certification) ~= "CERTIFIED" then
+                    add_issue(ctx, "ERROR", "IDENTITY_MAPPING", binding_name,
+                        "SEMANTIC_MODEL_048", "MAPPED identity binding requires one CERTIFIED mapping relation.")
+                elseif not source_object_exists(mapping.source_schema, mapping.source_object)
+                    or not source_column_exists(mapping.source_schema,
+                        mapping.source_object, mapping.local_column)
+                    or not source_column_exists(mapping.source_schema,
+                        mapping.source_object, mapping.semantic_column) then
+                    add_issue(ctx, "ERROR", "IDENTITY_MAPPING", binding_name,
+                        "SEMANTIC_MODEL_048", "Certified mapping relation or key columns are not visible.")
+                end
+            end
+        end
+        if entity ~= nil and #representations_for_entity(ctx, entity) > 1 then
+            for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+                if not seen_representations[key(representation.id)] then
+                    add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
+                        "SEMANTIC_MODEL_047", "Semantic identity has no binding for active representation: "
+                            .. tostring(representation.name) .. ".")
+                end
+            end
+        end
+    end
+end
+
+local function identity_grouped_key_query(representation, binding)
+    local semantic_expression
+    local from_sql = quote_qualified(representation.source_schema,
+        representation.source_object) .. " " .. tostring(representation.alias)
+    if upper(binding.kind) == "DIRECT" then
+        semantic_expression = tostring(binding.expression)
+    else
+        local mapping = binding.mapping
+        local map_alias = "f5_map_" .. tostring(binding.id)
+        semantic_expression = map_alias .. "." .. quote_ident(mapping.semantic_column)
+        from_sql = from_sql .. " JOIN "
+            .. quote_qualified(mapping.source_schema, mapping.source_object)
+            .. " " .. map_alias .. " ON " .. tostring(binding.expression)
+            .. " = " .. map_alias .. "." .. quote_ident(mapping.local_column)
+    end
+    return "SELECT " .. semantic_expression .. " FROM " .. from_sql
+        .. " WHERE " .. semantic_expression .. " IS NOT NULL GROUP BY "
+        .. semantic_expression
+end
+
+local function validate_semantic_identity_data(ctx)
+    if (ctx.error_count or 0) > 0 then return end
+    for _, identity in ipairs(ctx.semantic_identities or {}) do
+        local entity = ctx.entity_by_id[key(identity.entity_id)]
+        if entity ~= nil and complete_semantic_identity(ctx, entity) == identity then
+            local grouped = {}
+            local primary_query = nil
+            for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+                local binding = identity.binding_by_representation[key(representation.id)]
+                local object_name = tostring(entity.name) .. "." .. tostring(identity.name)
+                    .. "@" .. tostring(representation.name)
+                local total, total_error = probe_count("SELECT COUNT(*) AS PROBE_COUNT FROM "
+                    .. quote_qualified(representation.source_schema,
+                        representation.source_object))
+                local local_distinct, local_error = probe_count(
+                    "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
+                    .. tostring(binding.expression) .. " FROM "
+                    .. quote_qualified(representation.source_schema,
+                        representation.source_object) .. " " .. tostring(representation.alias)
+                    .. " WHERE " .. tostring(binding.expression) .. " IS NOT NULL GROUP BY "
+                    .. tostring(binding.expression) .. ") f5_local_keys")
+                if total_error ~= nil or local_error ~= nil then
+                    add_issue(ctx, "ERROR", "IDENTITY_BINDING", object_name,
+                        "SEMANTIC_MODEL_049", "Could not prove source-local identity uniqueness: "
+                            .. tostring(total_error or local_error) .. ".")
+                elseif total ~= local_distinct then
+                    add_issue(ctx, "ERROR", "IDENTITY_BINDING", object_name,
+                        "SEMANTIC_MODEL_049", "Source-local identity is null or non-unique: row_count="
+                            .. tostring(total) .. ", distinct_key_count=" .. tostring(local_distinct) .. ".")
+                end
+                if upper(binding.kind) == "MAPPED" then
+                    local mapping = binding.mapping
+                    local map_source = quote_qualified(mapping.source_schema, mapping.source_object)
+                    local map_total, map_total_error = probe_count(
+                        "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
+                    local map_local, map_local_error = probe_count(
+                        "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
+                        .. quote_ident(mapping.local_column) .. " FROM " .. map_source
+                        .. " WHERE " .. quote_ident(mapping.local_column) .. " IS NOT NULL"
+                        .. " AND " .. quote_ident(mapping.semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. quote_ident(mapping.local_column) .. ") f5_map_local")
+                    local map_semantic, map_semantic_error = probe_count(
+                        "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
+                        .. quote_ident(mapping.semantic_column) .. " FROM " .. map_source
+                        .. " WHERE " .. quote_ident(mapping.local_column) .. " IS NOT NULL"
+                        .. " AND " .. quote_ident(mapping.semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. quote_ident(mapping.semantic_column) .. ") f5_map_semantic")
+                    local mapped_local, mapped_local_error = probe_count(
+                        "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
+                        .. tostring(binding.expression) .. " FROM "
+                        .. quote_qualified(representation.source_schema,
+                            representation.source_object) .. " " .. tostring(representation.alias)
+                        .. " JOIN " .. map_source .. " f5_total_map ON "
+                        .. tostring(binding.expression) .. " = f5_total_map."
+                        .. quote_ident(mapping.local_column) .. " GROUP BY "
+                        .. tostring(binding.expression) .. ") f5_mapped_local_keys")
+                    if map_total_error ~= nil or map_local_error ~= nil
+                        or map_semantic_error ~= nil or mapped_local_error ~= nil then
+                        add_issue(ctx, "ERROR", "IDENTITY_MAPPING", object_name,
+                            "SEMANTIC_MODEL_049", "Could not probe certified identity mapping: "
+                                .. tostring(map_total_error or map_local_error
+                                    or map_semantic_error or mapped_local_error) .. ".")
+                    elseif map_total ~= map_local or map_total ~= map_semantic then
+                        add_issue(ctx, "ERROR", "IDENTITY_MAPPING", object_name,
+                            "SEMANTIC_MODEL_049", "Certified identity mapping must be one-to-one: rows="
+                                .. tostring(map_total) .. ", local_keys=" .. tostring(map_local)
+                                .. ", semantic_keys=" .. tostring(map_semantic) .. ".")
+                    elseif mapped_local ~= total then
+                        add_issue(ctx, "ERROR", "IDENTITY_MAPPING", object_name,
+                            "SEMANTIC_MODEL_049", "Certified identity mapping is not total for the representation: source_keys="
+                                .. tostring(total) .. ", mapped_source_keys="
+                                .. tostring(mapped_local) .. ".")
+                    end
+                end
+                local grouped_query = identity_grouped_key_query(representation, binding)
+                grouped[key(representation.id)] = grouped_query
+                if upper(representation.role) == "PRIMARY" then
+                    primary_query = grouped_query
+                end
+            end
+            if primary_query ~= nil then
+                for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+                    if upper(representation.role) ~= "PRIMARY" then
+                        local alternate_query = grouped[key(representation.id)]
+                        local forward, forward_error = probe_count(
+                            "SELECT COUNT(*) AS PROBE_COUNT FROM (" .. primary_query
+                                .. " MINUS " .. alternate_query .. ") f5_key_difference")
+                        local reverse, reverse_error = probe_count(
+                            "SELECT COUNT(*) AS PROBE_COUNT FROM (" .. alternate_query
+                                .. " MINUS " .. primary_query .. ") f5_key_difference")
+                        if forward_error ~= nil or reverse_error ~= nil then
+                            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY",
+                                tostring(entity.name) .. "." .. tostring(identity.name),
+                                "SEMANTIC_MODEL_049", "Could not compare canonical semantic key sets: "
+                                    .. tostring(forward_error or reverse_error) .. ".")
+                        elseif forward ~= 0 or reverse ~= 0 then
+                            add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY",
+                                tostring(entity.name) .. "." .. tostring(identity.name),
+                                "SEMANTIC_MODEL_049", "Canonical semantic key set differs for representation "
+                                    .. tostring(representation.name) .. ": missing_in_alternate="
+                                    .. tostring(forward) .. ", missing_in_primary=" .. tostring(reverse) .. ".")
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 local MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS = 60
 
 local function validate_representation_probe_timeout(ctx)
@@ -6716,7 +7323,7 @@ local function validate_representation_data_equivalence(ctx)
     if (ctx.error_count or 0) > 0 then return end
     for _, entity in ipairs(ctx.entities or {}) do
         local representations = representations_for_entity(ctx, entity)
-        if #representations > 1 then
+        if #representations > 1 and complete_semantic_identity(ctx, entity) == nil then
             local unique_keys = ctx.unique_keys_by_entity[key(entity.id)] or {}
             if #unique_keys == 0 then
                 add_issue(ctx, "ERROR", "ENTITY", entity.name,
@@ -7299,10 +7906,11 @@ local function validate_fusion_policies(ctx)
                     "SEMANTIC_MODEL_044", strategy
                         .. " requires active bindings on at least two representations.")
             end
-            if physical_fusion_key(ctx, attribute.entity_id) == nil then
+            if physical_fusion_key(ctx, attribute.entity_id) == nil
+                and (entity == nil or complete_semantic_identity(ctx, entity) == nil) then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
                     "SEMANTIC_MODEL_044", strategy
-                        .. " requires a declared unique key containing physical columns only.")
+                        .. " requires a complete certified semantic identity or a declared unique key containing physical columns only.")
             end
             if entity ~= nil and entity_uses_partition_fusion(ctx, entity) then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
@@ -7318,31 +7926,69 @@ local function validate_fusion_policies(ctx)
     end
 end
 
+local function identity_conflict_source(representation, identity_binding, alias)
+    if upper(identity_binding.kind) == "DIRECT" then
+        return quote_qualified(representation.source_schema,
+            representation.source_object),
+            replace_qualified_alias(identity_binding.expression,
+                representation.alias, alias)
+    end
+    local source_alias = "f5_conflict_src_" .. tostring(representation.id)
+    local map_alias = "f5_conflict_map_" .. tostring(identity_binding.id)
+    local mapping = identity_binding.mapping
+    local local_expression = replace_qualified_alias(identity_binding.expression,
+        representation.alias, source_alias)
+    local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
+        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
+        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. " " .. source_alias .. " JOIN "
+        .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
+        .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
+        .. quote_ident(mapping.local_column) .. ")"
+    return source_sql, alias .. "." .. quote_ident("F5_SEMANTIC_KEY")
+end
+
 local function fusion_conflict_query(left_representation, left_binding,
-        right_representation, right_binding, unique_key)
+        right_representation, right_binding, unique_key, semantic_identity)
     local left_alias = "f4_left"
     local right_alias = "f4_right"
     local predicates = {}
-    for _, column in ipairs(unique_key.columns or {}) do
-        local left_column, left_error = resolved_source_column_name(
-            left_representation, column.column_name)
-        local right_column, right_error = resolved_source_column_name(
-            right_representation, column.column_name)
-        if left_column == nil or right_column == nil then
-            return nil, left_error or right_error
+    local left_source = quote_qualified(left_representation.source_schema,
+        left_representation.source_object)
+    local right_source = quote_qualified(right_representation.source_schema,
+        right_representation.source_object)
+    if semantic_identity ~= nil then
+        local left_identity = semantic_identity.binding_by_representation[
+            key(left_representation.id)]
+        local right_identity = semantic_identity.binding_by_representation[
+            key(right_representation.id)]
+        local left_key, right_key
+        left_source, left_key = identity_conflict_source(left_representation,
+            left_identity, left_alias)
+        right_source, right_key = identity_conflict_source(right_representation,
+            right_identity, right_alias)
+        predicates[#predicates + 1] = left_key .. " = " .. right_key
+    else
+        for _, column in ipairs(unique_key.columns or {}) do
+            local left_column, left_error = resolved_source_column_name(
+                left_representation, column.column_name)
+            local right_column, right_error = resolved_source_column_name(
+                right_representation, column.column_name)
+            if left_column == nil or right_column == nil then
+                return nil, left_error or right_error
+            end
+            predicates[#predicates + 1] = left_alias .. "." .. quote_ident(left_column)
+                .. " = " .. right_alias .. "." .. quote_ident(right_column)
         end
-        predicates[#predicates + 1] = left_alias .. "." .. quote_ident(left_column)
-            .. " = " .. right_alias .. "." .. quote_ident(right_column)
     end
     local left_expression = replace_qualified_alias(left_binding.expression,
         left_representation.alias, left_alias)
     local right_expression = replace_qualified_alias(right_binding.expression,
         right_representation.alias, right_alias)
     return "SELECT COUNT(*) AS PROBE_COUNT FROM "
-        .. quote_qualified(left_representation.source_schema,
-            left_representation.source_object) .. " " .. left_alias
-        .. " JOIN " .. quote_qualified(right_representation.source_schema,
-            right_representation.source_object) .. " " .. right_alias
+        .. left_source .. " " .. left_alias
+        .. " JOIN " .. right_source .. " " .. right_alias
         .. " ON " .. table.concat(predicates, " AND ")
         .. " WHERE (" .. left_expression .. ") IS NOT NULL"
         .. " AND (" .. right_expression .. ") IS NOT NULL"
@@ -7362,6 +8008,8 @@ local function validate_fusion_conflicts(ctx)
             local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
             local bindings = ctx.bindings_by_attribute[attribute_key] or {}
             local unique_key = attribute and physical_fusion_key(ctx, attribute.entity_id) or nil
+            local entity = attribute and ctx.entity_by_id[key(attribute.entity_id)] or nil
+            local semantic_identity = entity and complete_semantic_identity(ctx, entity) or nil
             local conflict_count = 0
             local probe_error = nil
             for left_index = 1, #bindings - 1 do
@@ -7374,7 +8022,7 @@ local function validate_fusion_conflicts(ctx)
                         and key(left_representation.id) ~= key(right_representation.id) then
                         local sql_text, build_error = fusion_conflict_query(
                             left_representation, left_binding, right_representation,
-                            right_binding, unique_key)
+                            right_binding, unique_key, semantic_identity)
                         if sql_text == nil then
                             probe_error = build_error
                         else
@@ -7827,6 +8475,7 @@ function M.validate_model(model_name_arg)
         load_catalog(ctx)
         validate_structural_rules(ctx)
         validate_custom_extensions(ctx)
+        validate_semantic_identities(ctx)
         validate_unique_keys(ctx)
         validate_relationship_key_mappings(ctx)
         local safe_edges, all_edges = relationship_edges(ctx)
@@ -7841,6 +8490,7 @@ function M.validate_model(model_name_arg)
         -- for a model that is already invalid on local catalog metadata.
         if ctx.error_count == 0 and validate_representation_probe_timeout(ctx) then
             validate_representation_data_equivalence(ctx)
+            validate_semantic_identity_data(ctx)
             validate_fusion_conflicts(ctx)
         end
         -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
@@ -7882,6 +8532,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_unique_keys = validate_unique_keys,
         validate_representation_probe_timeout = validate_representation_probe_timeout,
         validate_representation_data_equivalence = validate_representation_data_equivalence,
+        validate_semantic_identities = validate_semantic_identities,
+        validate_semantic_identity_data = validate_semantic_identity_data,
         validate_fusion_policies = validate_fusion_policies,
         validate_fusion_conflicts = validate_fusion_conflicts,
         validate_relationship_key_mappings = validate_relationship_key_mappings,
@@ -11593,6 +12245,11 @@ local function load_catalog(model, object_name)
         bindings_by_attribute = {},
         attribute_fusion_policies = {},
         fusion_policy_by_attribute = {},
+        semantic_identities = {},
+        identity_by_id = {},
+        identities_by_entity = {},
+        identity_bindings = {},
+        identity_binding_by_id = {},
         relationships = {},
         relationship_by_id = {},
         unique_keys = {},
@@ -11963,6 +12620,70 @@ local function load_catalog(model, object_name)
         local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
         ctx.attribute_fusion_policies[#ctx.attribute_fusion_policies + 1] = policy
         ctx.fusion_policy_by_attribute[attribute_key] = policy
+    end
+
+    local identity_rows = query([[
+        SELECT IDENTITY_ID, ENTITY_ID, IDENTITY_NAME, IDENTITY_KIND, DATA_TYPE
+        FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID, IDENTITY_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(identity_rows or {}) do
+        local identity = {
+            id = row_value(row, "IDENTITY_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "IDENTITY_NAME", 3),
+            kind = row_value(row, "IDENTITY_KIND", 4),
+            data_type = row_value(row, "DATA_TYPE", 5),
+            bindings = {},
+        }
+        ctx.semantic_identities[#ctx.semantic_identities + 1] = identity
+        ctx.identity_by_id[key(identity.id)] = identity
+        ctx.identities_by_entity[key(identity.entity_id)] =
+            ctx.identities_by_entity[key(identity.entity_id)] or {}
+        ctx.identities_by_entity[key(identity.entity_id)]
+            [#ctx.identities_by_entity[key(identity.entity_id)] + 1] = identity
+    end
+    local identity_binding_rows = query([[
+        SELECT ib.IDENTITY_BINDING_ID, ib.ENTITY_ID, ib.IDENTITY_ID,
+               ib.REPRESENTATION_ID, ib.SOURCE_EXPRESSION, ib.BINDING_KIND,
+               im.IDENTITY_MAPPING_ID, im.SOURCE_SCHEMA, im.SOURCE_OBJECT,
+               im.SOURCE_LOCAL_COLUMN, im.SEMANTIC_KEY_COLUMN,
+               im.CERTIFICATION_STATUS
+        FROM SYS_SEMANTIC.IDENTITY_BINDINGS ib
+        LEFT JOIN SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS im
+          ON im.IDENTITY_BINDING_ID = ib.IDENTITY_BINDING_ID
+         AND im.STATUS = 'ACTIVE'
+        WHERE ib.MODEL_ID = :model_id AND ib.VERSION_ID = :version_id
+          AND ib.STATUS = 'ACTIVE'
+        ORDER BY ib.IDENTITY_ID, ib.IDENTITY_BINDING_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(identity_binding_rows or {}) do
+        local binding = {
+            id = row_value(row, "IDENTITY_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            identity_id = row_value(row, "IDENTITY_ID", 3),
+            representation_id = row_value(row, "REPRESENTATION_ID", 4),
+            expression = row_value(row, "SOURCE_EXPRESSION", 5),
+            kind = row_value(row, "BINDING_KIND", 6),
+            mapping = row_value(row, "IDENTITY_MAPPING_ID", 7) and {
+                id = row_value(row, "IDENTITY_MAPPING_ID", 7),
+                source_schema = row_value(row, "SOURCE_SCHEMA", 8),
+                source_object = row_value(row, "SOURCE_OBJECT", 9),
+                local_column = row_value(row, "SOURCE_LOCAL_COLUMN", 10),
+                semantic_column = row_value(row, "SEMANTIC_KEY_COLUMN", 11),
+                certification = row_value(row, "CERTIFICATION_STATUS", 12),
+            } or nil,
+        }
+        ctx.identity_bindings[#ctx.identity_bindings + 1] = binding
+        ctx.identity_binding_by_id[key(binding.id)] = binding
+        local identity = ctx.identity_by_id[key(binding.identity_id)]
+        if identity ~= nil then
+            identity.bindings[#identity.bindings + 1] = binding
+            identity.binding_by_representation = identity.binding_by_representation or {}
+            identity.binding_by_representation[key(binding.representation_id)] = binding
+        end
     end
 
     local relationship_rows = query([[
@@ -12352,6 +13073,70 @@ local function physical_unique_key(ctx, entity_id)
     return nil
 end
 
+local function complete_semantic_identity(ctx, entity)
+    local representations = ctx.representations_by_entity[key(entity.id)] or {}
+    for _, identity in ipairs((ctx.identities_by_entity or {})[key(entity.id)] or {}) do
+        local complete = #representations > 0
+        for _, representation in ipairs(representations) do
+            local binding = identity.binding_by_representation
+                and identity.binding_by_representation[key(representation.id)] or nil
+            if binding == nil or (upper(binding.kind) == "MAPPED"
+                and (binding.mapping == nil
+                    or upper(binding.mapping.certification) ~= "CERTIFIED")) then
+                complete = false
+                break
+            end
+        end
+        if complete then return identity end
+    end
+    return nil
+end
+
+local function base_semantic_key_expression(entity, representation, identity_binding)
+    if upper(identity_binding.kind) == "DIRECT" then
+        return tostring(identity_binding.expression)
+    end
+    local mapping = identity_binding.mapping
+    local map_alias = "f5_base_map_" .. tostring(identity_binding.id)
+    entity.fusion_joins = entity.fusion_joins or {}
+    entity.fusion_join_by_representation = entity.fusion_join_by_representation or {}
+    local join_key = "MAP:" .. key(identity_binding.id)
+    if not entity.fusion_join_by_representation[join_key] then
+        entity.fusion_joins[#entity.fusion_joins + 1] = {
+            source_sql = quote_qualified(mapping.source_schema, mapping.source_object),
+            alias = map_alias,
+            predicates = {tostring(identity_binding.expression) .. " = "
+                .. map_alias .. "." .. quote_ident(mapping.local_column)},
+            identity_mapping = true,
+        }
+        entity.fusion_join_by_representation[join_key] = true
+    end
+    return map_alias .. "." .. quote_ident(mapping.semantic_column)
+end
+
+local function alternate_identity_source(representation, identity_binding, lookup_alias)
+    if upper(identity_binding.kind) == "DIRECT" then
+        return quote_qualified(representation.source_schema,
+            representation.source_object),
+            replace_qualified_alias(identity_binding.expression,
+                representation.alias, lookup_alias), nil
+    end
+    local mapping = identity_binding.mapping
+    local source_alias = "f5_src_" .. tostring(representation.id)
+    local map_alias = "f5_map_" .. tostring(identity_binding.id)
+    local local_expression = replace_qualified_alias(identity_binding.expression,
+        representation.alias, source_alias)
+    local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
+        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
+        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. " " .. source_alias .. " JOIN "
+        .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
+        .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
+        .. quote_ident(mapping.local_column) .. ")"
+    return source_sql, lookup_alias .. "." .. quote_ident("F5_SEMANTIC_KEY"), mapping
+end
+
 local function representation_by_id(ctx, representation_id)
     for _, representation in ipairs(ctx.representations or {}) do
         if key(representation.id) == key(representation_id) then return representation end
@@ -12387,10 +13172,16 @@ end
 local function fused_attribute_expression(ctx, entity, base_representation,
         attribute_key, strategy)
     local unique_key = physical_unique_key(ctx, entity.id)
-    if unique_key == nil then
+    local semantic_identity = complete_semantic_identity(ctx, entity)
+    if unique_key == nil and semantic_identity == nil then
         return nil, nil, "Attribute fusion on entity '" .. tostring(entity.name)
-            .. "' requires a declared unique key containing physical columns only."
+            .. "' requires either a complete certified semantic identity or a declared unique key containing physical columns only."
     end
+    local base_identity_binding = semantic_identity
+        and semantic_identity.binding_by_representation[key(base_representation.id)] or nil
+    local base_identity_expression = base_identity_binding
+        and base_semantic_key_expression(entity, base_representation,
+            base_identity_binding) or nil
     local bindings = sorted_fusion_bindings(ctx,
         ctx.bindings_by_attribute[attribute_key] or {})
     if #bindings < 2 then
@@ -12409,9 +13200,23 @@ local function fused_attribute_expression(ctx, entity, base_representation,
             else
                 local lookup_alias = "f4_rep_" .. tostring(representation.id)
                 local predicates = {}
-                for _, column in ipairs(unique_key.columns) do
-                    predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
-                        .. " = " .. quote_column(base_representation.alias, column.column_name)
+                local source_sql = quote_qualified(representation.source_schema,
+                    representation.source_object)
+                local identity_mapping = nil
+                if semantic_identity ~= nil then
+                    local identity_binding = semantic_identity.binding_by_representation[
+                        key(representation.id)]
+                    local alternate_identity
+                    source_sql, alternate_identity, identity_mapping =
+                        alternate_identity_source(representation, identity_binding,
+                            lookup_alias)
+                    predicates[#predicates + 1] = alternate_identity
+                        .. " = " .. base_identity_expression
+                else
+                    for _, column in ipairs(unique_key.columns) do
+                        predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
+                            .. " = " .. quote_column(base_representation.alias, column.column_name)
+                    end
                 end
                 entity.fusion_joins = entity.fusion_joins or {}
                 entity.fusion_join_by_representation =
@@ -12419,8 +13224,10 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                 if not entity.fusion_join_by_representation[key(representation.id)] then
                     entity.fusion_joins[#entity.fusion_joins + 1] = {
                         representation = representation,
+                        source_sql = source_sql,
                         alias = lookup_alias,
                         predicates = predicates,
+                        identity_mapping = identity_mapping,
                     }
                     entity.fusion_join_by_representation[key(representation.id)] = true
                 end
@@ -12434,6 +13241,13 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                 authority_role = upper(representation.authority_role or "PREFER"),
                 attribute_binding_id = binding.id,
                 source_expression = binding.expression,
+                semantic_identity_id = semantic_identity and semantic_identity.id or nil,
+                semantic_identity_name = semantic_identity and semantic_identity.name or nil,
+                identity_binding_id = semantic_identity and
+                    semantic_identity.binding_by_representation[key(representation.id)].id or nil,
+                identity_mapping_id = semantic_identity and
+                    semantic_identity.binding_by_representation[key(representation.id)].mapping
+                    and semantic_identity.binding_by_representation[key(representation.id)].mapping.id or nil,
             }
         end
     end
@@ -12892,8 +13706,8 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
         for _, fusion_join in ipairs(entity.fusion_joins or {}) do
             local representation = fusion_join.representation
             join_sql[#join_sql + 1] = "LEFT JOIN "
-                .. quote_qualified(representation.source_schema,
-                    representation.source_object)
+                .. (fusion_join.source_sql or quote_qualified(
+                    representation.source_schema, representation.source_object))
                 .. " " .. fusion_join.alias
                 .. " ON " .. table.concat(fusion_join.predicates, " AND ")
         end
@@ -13077,6 +13891,23 @@ local function latest_successful_validation(model)
         LIMIT 1
     ]], {model_id = model.model_id, version_id = model.version_id})
     if rows == nil or #rows == 0 then
+        local latest_rows = query([[
+            SELECT STATUS, ERROR_COUNT
+            FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE MODEL_ID = :model_id
+              AND VERSION_ID = :version_id
+            ORDER BY VALIDATION_RUN_ID DESC
+            LIMIT 1
+        ]], {model_id = model.model_id, version_id = model.version_id})
+        if latest_rows ~= nil and #latest_rows > 0 then
+            local status = tostring(row_value(latest_rows[1], "STATUS", 1) or "UNKNOWN")
+            if status == "STALE" then
+                return nil, "The active catalog version changed after its last successful validation. This release edits the published version in place, so its published surface is unavailable until VALIDATE_MODEL succeeds."
+            end
+            return nil, "The latest validation status is " .. status
+                .. " with " .. tostring(row_value(latest_rows[1], "ERROR_COUNT", 2) or 0)
+                .. " error(s)."
+        end
         return nil, "No validation run exists for this model version."
     end
     return row_value(rows[1], "VALIDATION_RUN_ID", 1), nil

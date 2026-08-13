@@ -376,10 +376,12 @@ previous to succeed.
 10. Optional SET_REPRESENTATION_COVERAGE (every active hot/cold partition)
 11. Optional SET_REPRESENTATION_AUTHORITY, then SET_ATTRIBUTE_FUSION_POLICY
     (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
-12. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
+12. Optional ADD_SEMANTIC_IDENTITY, ADD_IDENTITY_BINDING for every representation,
+    then ADD_IDENTITY_MAPPING_RELATION for each MAPPED binding
+13. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED)
-13. VALIDATE_MODEL
-14. PUBLISH_MODEL
+14. VALIDATE_MODEL
+15. PUBLISH_MODEL
 ```
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
@@ -390,6 +392,16 @@ script syntax.
 Do not rerun the bootstrap sequence against an existing model: `CREATE_MODEL`
 and structural `ADD_*` calls reject duplicate names. Inspect the current model
 first and choose one path:
+
+**Published models have no isolated draft in this release.** Every admin change
+targets the same active version used by published semantic views and marks its
+validation stale. From the first mutating call until a clean `VALIDATE_MODEL`,
+consumers receive `SEMANTIC_QUERY_010`. Do not perform exploratory or multi-step
+authoring on a published model while continuous availability is required.
+Schedule a maintenance window, prepare and smoke-test all statements first,
+apply them consecutively, then validate immediately. Never work around the
+outage by retaining an older validation row: it did not certify the changed
+catalog.
 
 - For incremental maintenance, export or inspect the model, apply supported
   add/replace operations, validate, and republish.
@@ -470,14 +482,14 @@ key probe; it deliberately does not trust `SOURCE_KIND` or try to classify views
 that may hide Virtual Schema dependencies. The setting must precede `EXECUTE
 SCRIPT` because an Exasol script cannot change its own active timeout.
 
-F2 does not bind identity or relationship SQL. Before registration, require the
+Without an F5 semantic identity, require the
 alternate to expose the same case-sensitive physical names used by the entity
 primary-key expression, every `UNIQUE_KEY_COLUMN`, relationship key mapping,
 relationship join condition, and representation-blind metric filter. A quoted
 lowercase `"customer_id"` is not the same physical column as `CUSTOMER_ID`. If
 any differ, do not register the raw source: create a relation or Virtual Schema
-view that aliases them to the canonical names, smoke-test it, and register that
-view. Representation-specific identity mapping is Phase F5, not F2.
+view that aliases them to the canonical names, or use F5 for a scalar entity
+key. F5 does not remap relationship joins or filter columns.
 
 For different physical dimension or fact expressions, add
 `ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark
@@ -529,7 +541,7 @@ and aggregate, `_074` names the unsupported partitioned joined dimension or
 filter, and `_080` names the attribute and partition requiring
 `ADD_ATTRIBUTE_BINDING`. Do not work around these refusals by removing coverage.
 
-For overlapping Customer 360 sources with the same proven key set, use F4
+For overlapping Customer 360 sources with the same proven canonical key set, use F4
 attribute fusion. Declare at most one representation `AUTHORITATIVE`; use
 `PREFER` or `SUPPLEMENTAL` for the others. Set an attribute policy to
 `COALESCE` only when overlapping non-null values must agree. Validation blocks
@@ -537,14 +549,43 @@ conflicts with `SEMANTIC_MODEL_045`. Use `RECONCILE` when the authoritative
 source is allowed to win; conflicts are surfaced as `SEMANTIC_MODEL_046`
 warnings and must be reviewed before publication.
 
-F4 requires bindings on two representations and a physical-column unique key. It does not
-support expression keys, different identity column names, or F3 coverage on the
-same entity. Keep `QUERY_TIMEOUT` bounded because validation compares values
-across the sources. Inspect each selected binding's `fusion_strategy` and
-`fusion_contributors`; confirm the authoritative source is first and every
-source expression is expected.
+F4 requires bindings on two representations and either a shared physical-column
+unique key or a complete F5 semantic identity. It does not support F3 coverage
+on the same entity. Keep `QUERY_TIMEOUT` bounded because validation compares
+values across the sources. Inspect each selected binding's `fusion_strategy`
+and `fusion_contributors`; confirm authority, source expressions, and F5
+identity provenance.
 Do not expect F4 to use aggregate materializations or multi-fact plans; those
 paths fail or bypass substitution rather than silently dropping reconciliation.
+
+For F5, declare one semantic identity per entity and bind every active
+representation. Use `DIRECT` when its expression already returns the semantic
+key. Use `MAPPED` only with a certified two-column relation from the source-local
+key to the semantic key:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(
+  '<model>', '<entity>', '<identity>', 'GLOBAL', '<data_type>', '<description>'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  '<model>', '<identity>', '<primary_representation>', '<alias>.<key>', 'DIRECT'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  '<model>', '<identity>', '<alternate_representation>', '<alias>.<local_key>', 'MAPPED'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
+  '<model>', '<identity>', '<alternate_representation>',
+  '<mapping_schema>', '<mapping_relation>', '<local_key_column>',
+  '<semantic_key_column>', 'CERTIFIED'
+);
+```
+
+Smoke-test local expressions and mapping joins first. Then set
+`QUERY_TIMEOUT=60` and validate. Do not publish unless `_049` proves each local
+key non-null and unique, every mapping total and one-to-one, and every canonical
+key set equal to the primary. Never infer or fuzzy-match identities at runtime.
+Composite identities, uncertified mappings, relationship remapping, and F3 plus
+F5 on one entity are unsupported; use a governed canonical view instead.
 
 Register relationships with `ADD_RELATIONSHIP`:
 

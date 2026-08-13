@@ -189,6 +189,16 @@ for source, threshold in pairs(thresholds.lines) do
     local percentage = active == 0 and 0 or (hit * 100 / active)
     io.write(string.format("  %-62s %4d/%-4d %6.2f%% (minimum %.2f%%)\n",
         source, hit, active, percentage, threshold))
+    if os.getenv("ESV_COVERAGE_DETAILS") == "1" then
+        local missed = {}
+        for line, _ in pairs(possible[source] or {}) do
+            if not (executed[source] and executed[source][line]) then
+                missed[#missed + 1] = line
+            end
+        end
+        table.sort(missed)
+        io.write("    missed: ", table.concat(missed, ","), "\n")
+    end
     if percentage + 0.0001 < threshold then coverage_failures = coverage_failures + 1 end
 end
 

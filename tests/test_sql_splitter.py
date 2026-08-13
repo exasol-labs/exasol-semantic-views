@@ -65,7 +65,7 @@ SELECT 1;
         for name, splitter in SPLITTERS.items():
             with self.subTest(splitter=name):
                 statements = splitter(sql)
-                self.assertEqual(43, len(statements))
+                self.assertEqual(46, len(statements))
                 self.assertFalse(
                     any(
                         "CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.ATTRIBUTE_BINDINGS" in item

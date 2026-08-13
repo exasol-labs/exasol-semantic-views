@@ -79,10 +79,13 @@ remedy. `_080` names the first missing attribute and partition and points to
 F4 attribute policies run after complete F2 representation selection. `PREFER`
 keeps the selected binding unchanged. `COALESCE` and `RECONCILE` emit
 key-preserving joins to alternate representations and combine them in declared
-authority order. Exact F1 key identity and uniqueness keep each join key-preserving;
-validation rejects unsupported identity shapes before compilation. The plan's
-selected-binding entries include `fusion_strategy` and ordered
-`fusion_contributors`, so source precedence remains explainable.
+authority order. A shared physical F1 key or complete F5 semantic identity
+keeps each join key-preserving; validation rejects unsupported identity shapes
+before compilation. For `MAPPED` F5 bindings, the compiler first resolves the
+source-local expression through its certified two-column mapping relation and
+joins on the resulting semantic key. The plan's selected-binding entries
+include `fusion_strategy`, ordered `fusion_contributors`, and identity/binding/
+mapping IDs, so source precedence and identity resolution remain explainable.
 F4 bypasses aggregate materialization substitution and currently fails closed
 for multi-fact branch plans rather than dropping reconciliation semantics.
 
@@ -274,6 +277,23 @@ That lane:
 5. Fails closed if validation is missing or stale.
 6. Uses the same materialization decision path as explicit agent and SQL
    compilation.
+
+### Published Authoring Availability
+
+The current catalog has one mutable `ACTIVE_VERSION_ID` per model. Although
+`MODEL_VERSIONS` and publish history record version metadata, publication does
+not create an immutable catalog snapshot or a separate draft. Admin authoring
+therefore edits the same version used by the published preprocessor surface.
+Any operation that marks validation stale makes that surface return
+`SEMANTIC_QUERY_010` until the active version validates successfully again.
+
+This fail-closed behavior is intentional: reusing an earlier successful
+validation would certify newly mutated catalog rows that were never validated.
+It is not draft isolation. Perform multi-step F2/F3/F4/F5 changes in a maintenance
+window, validate immediately after the final step, and do not promise continuous
+published availability while editing. True zero-downtime authoring requires
+copy-on-write draft versions plus an atomic publish pointer switch; version
+metadata alone is insufficient.
 
 Compilation accepts the latest completed validation run with zero errors.
 Warnings, including legacy relationships that do not yet have structured key

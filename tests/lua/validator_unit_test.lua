@@ -632,10 +632,9 @@ test("F2 identity mismatches prescribe canonical views and Phase F5", function()
     local mapping_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_032")
     assert_true(key_issue ~= nil)
     assert_true(mapping_issue ~= nil)
-    assert_contains(key_issue.message, "canonical key and join column names")
-    assert_contains(key_issue.message, "Phase F5")
+    assert_contains(key_issue.message, "certified F5 semantic identity")
     assert_contains(mapping_issue.message, "source view")
-    assert_contains(mapping_issue.message, "Phase F5")
+    assert_contains(mapping_issue.message, "certified F5 semantic identity")
 end)
 
 test("validator proves F1 representation grain and key-set equivalence", function()
@@ -1014,6 +1013,187 @@ test("F4 validator rejects COALESCE conflicts and reports RECONCILE decisions", 
     assert_equal(clean.error_count, 0)
 end)
 
+local function f5_identity_context()
+    local entity = {id = 1, name = "customer", alias = "c"}
+    local primary = {id = 10, entity_id = 1, name = "mdm", alias = "c",
+        role = "PRIMARY", source_schema = "MDM", source_object = "CUSTOMERS"}
+    local alternate = {id = 11, entity_id = 1, name = "crm", alias = "c",
+        role = "ALTERNATE", source_schema = "CRM", source_object = "ACCOUNTS"}
+    entity.primary_representation = primary
+    local identity = {id = 20, entity_id = 1, name = "customer_identity",
+        kind = "GLOBAL", data_type = "DECIMAL(18,0)", bindings = {}}
+    local direct = {id = 30, entity_id = 1, identity_id = 20,
+        representation_id = 10, expression = "c.customer_id", kind = "DIRECT"}
+    local mapped = {id = 31, entity_id = 1, identity_id = 20,
+        representation_id = 11, expression = "c.account_id", kind = "MAPPED",
+        mapping = {id = 40, source_schema = "IDENTITY_MAP",
+            source_object = "CUSTOMER_XREF", local_column = "ACCOUNT_ID",
+            semantic_column = "CUSTOMER_ID", certification = "CERTIFIED"}}
+    identity.bindings = {direct, mapped}
+    identity.binding_by_representation = {["10"] = direct, ["11"] = mapped}
+    return validation_context({
+        entities = {entity}, entity_by_id = {["1"] = entity},
+        entity_name_by_id = {["1"] = "customer"},
+        representations = {primary, alternate},
+        representations_by_entity = {["1"] = {primary, alternate}},
+        semantic_identities = {identity}, identity_by_id = {["20"] = identity},
+        identities_by_entity = {["1"] = {identity}},
+        identity_bindings = {direct, mapped},
+    })
+end
+
+test("F5 validator accepts complete certified representation identity metadata", function()
+    local ctx = f5_identity_context()
+    with_query(function(sql)
+        if contains(sql, "SELECT COUNT(*)") then return {{1}} end
+        error("unexpected F5 structural SQL: " .. tostring(sql))
+    end, function()
+        api.validate_semantic_identities(ctx)
+    end)
+    assert_equal(ctx.error_count, 0)
+
+    local invalid = f5_identity_context()
+    invalid.semantic_identities[1].kind = "FUZZY"
+    invalid.semantic_identities[1].bindings[1].kind = "MAPPED"
+    invalid.semantic_identities[1].bindings[1].mapping = nil
+    invalid.semantic_identities[1].bindings[2].mapping.certification = "PROPOSED"
+    invalid.semantic_identities[1].bindings[#invalid.semantic_identities[1].bindings + 1] =
+        invalid.semantic_identities[1].bindings[2]
+    with_query(function() return {{1}} end, function()
+        api.validate_semantic_identities(invalid)
+    end)
+    assert_true(has_rule(invalid, "SEMANTIC_MODEL_047"))
+    assert_true(has_rule(invalid, "SEMANTIC_MODEL_048"))
+    assert_true(invalid.error_count >= 4)
+
+    local malformed = f5_identity_context()
+    local direct = malformed.semantic_identities[1].bindings[1]
+    direct.mapping = {certification = "CERTIFIED"}
+    direct.expression = "MEDIAN(other.customer_id)"
+    malformed.semantic_identities[1].bindings[2].expression = "c.missing_account_id"
+    malformed.semantic_identities[1].bindings[#malformed.semantic_identities[1].bindings + 1] = {
+        id = 32, entity_id = 1, identity_id = 20, representation_id = 999,
+        expression = "", kind = "DIRECT"}
+    malformed.representations[1].coverage_predicate = "c.customer_id < 10"
+    malformed.semantic_identities[#malformed.semantic_identities + 1] = {
+        id = 21, entity_id = 999, name = "orphan", kind = "BUSINESS",
+        data_type = nil, bindings = {}}
+    malformed.semantic_identities[#malformed.semantic_identities + 1] = {
+        id = 22, entity_id = 1, name = "customer_identity", kind = "GLOBAL",
+        data_type = "DECIMAL(18,0)", bindings = {}}
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            return {{params.column_name == "missing_account_id" and 0 or 1}}
+        end
+        return {{1}}
+    end, function()
+        api.validate_semantic_identities(malformed)
+    end)
+    assert_true(malformed.error_count >= 4)
+    assert_true(has_rule(malformed, "SEMANTIC_MODEL_047"))
+    assert_true(has_rule(malformed, "SEMANTIC_MODEL_048"))
+end)
+
+test("F5 validator proves local grain mapping bijection and canonical key sets", function()
+    local function run(mapping_semantic_count, key_difference)
+        local ctx = f5_identity_context()
+        with_query(function(sql)
+            if contains(sql, "f5_map_semantic") then return {{mapping_semantic_count}} end
+            if contains(sql, " MINUS ") then return {{key_difference}} end
+            return {{3}}
+        end, function()
+            api.validate_semantic_identity_data(ctx)
+        end)
+        return ctx
+    end
+
+    local valid = run(3, 0)
+    assert_equal(valid.error_count, 0)
+
+    local non_bijective = run(2, 0)
+    assert_true(has_rule(non_bijective, "SEMANTIC_MODEL_049"))
+    assert_contains(issue_for_rule(non_bijective, "SEMANTIC_MODEL_049").message,
+        "one-to-one")
+
+    local divergent = run(3, 1)
+    assert_true(has_rule(divergent, "SEMANTIC_MODEL_049"))
+    local found_key_set = false
+    for _, issue in ipairs(divergent.issues) do
+        if issue.rule_code == "SEMANTIC_MODEL_049"
+            and contains(issue.message, "Canonical semantic key set differs") then
+            found_key_set = true
+        end
+    end
+    assert_true(found_key_set)
+
+    local duplicate_local = f5_identity_context()
+    local probe_index = 0
+    with_query(function(sql)
+        if contains(sql, "f5_local_keys") then
+            probe_index = probe_index + 1
+            return {{probe_index == 1 and 2 or 3}}
+        end
+        if contains(sql, " MINUS ") then return {{0}} end
+        return {{3}}
+    end, function()
+        api.validate_semantic_identity_data(duplicate_local)
+    end)
+    assert_true(has_rule(duplicate_local, "SEMANTIC_MODEL_049"))
+    assert_contains(issue_for_rule(duplicate_local, "SEMANTIC_MODEL_049").message,
+        "null or non-unique")
+
+    local incomplete_mapping = f5_identity_context()
+    with_query(function(sql)
+        if contains(sql, "f5_mapped_local_keys") then return {{2}} end
+        if contains(sql, " MINUS ") then return {{0}} end
+        return {{3}}
+    end, function()
+        api.validate_semantic_identity_data(incomplete_mapping)
+    end)
+    assert_true(has_rule(incomplete_mapping, "SEMANTIC_MODEL_049"))
+    assert_contains(issue_for_rule(incomplete_mapping, "SEMANTIC_MODEL_049").message,
+        "not total")
+
+    local probe_failure = f5_identity_context()
+    with_query(function(sql)
+        if contains(sql, "MINUS") then error("remote set comparison failed") end
+        if contains(sql, "f5_map_semantic") then error("mapping scan failed") end
+        return {{3}}
+    end, function()
+        api.validate_semantic_identity_data(probe_failure)
+    end)
+    assert_true(probe_failure.error_count >= 2)
+    local saw_probe_failure = false
+    for _, issue in ipairs(probe_failure.issues) do
+        if contains(issue.message, "Could not probe certified identity mapping")
+            or contains(issue.message, "Could not compare canonical semantic key sets") then
+            saw_probe_failure = true
+        end
+    end
+    assert_true(saw_probe_failure)
+end)
+
+test("F5 validator detects fusion conflicts through mapped semantic identity", function()
+    local ctx = fusion_validation_context("COALESCE")
+    local identity_ctx = f5_identity_context()
+    local identity = identity_ctx.semantic_identities[1]
+    ctx.semantic_identities = {identity}
+    ctx.identities_by_entity = {['1'] = {identity}}
+    local conflict_sql
+    with_query(function(sql)
+        conflict_sql = sql
+        return {{1}}
+    end, function()
+        api.validate_fusion_conflicts(ctx)
+    end)
+    assert_contains(conflict_sql, 'FROM "MDM"."CUSTOMERS" f4_left')
+    assert_contains(conflict_sql, 'FROM "CRM"."CUSTOMERS" f5_conflict_src_11')
+    assert_contains(conflict_sql, 'JOIN "IDENTITY_MAP"."CUSTOMER_XREF" f5_conflict_map_31')
+    assert_contains(conflict_sql, 'AS "F5_SEMANTIC_KEY"')
+    assert_contains(conflict_sql, 'f4_left.customer_id = f4_right."F5_SEMANTIC_KEY"')
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_045"))
+end)
+
 test("validator bounds views over virtual schemas without dependency classification", function()
     local entity = {id = 1, name = "customers"}
     local primary = {id = 1, entity_id = 1, name = "primary",
@@ -1353,6 +1533,16 @@ test("validator public entry point loads and validates a coherent catalog", func
             }
         elseif contains(sql, "FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES") then
             return {}
+        elseif contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES") then
+            return {{301, 1, "order_identity", "GLOBAL", "DECIMAL(18,0)"}}
+        elseif contains(sql, "FROM SYS_SEMANTIC.IDENTITY_BINDINGS") then
+            return {
+                {311, 1, 301, 100, "o.order_id", "DIRECT",
+                    nil, nil, nil, nil, nil, nil},
+                {312, 1, 301, 101, "o.order_id", "MAPPED",
+                    321, "MART", "ORDER_IDENTITY_MAP", "ARCHIVE_ORDER_ID",
+                    "ORDER_ID", "CERTIFIED"},
+            }
         elseif contains(sql, "SELECT METRIC_ID, METRIC_NAME") and not contains(sql, "metric_col") then
             return {{30, "total_revenue", 1, "SUM(net_revenue)", nil, "ADDITIVE",
                 "DECIMAL(18,2)", "Total revenue", "USD", "currency", false, true}}

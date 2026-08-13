@@ -824,6 +824,11 @@ local function load_catalog(model, object_name)
         bindings_by_attribute = {},
         attribute_fusion_policies = {},
         fusion_policy_by_attribute = {},
+        semantic_identities = {},
+        identity_by_id = {},
+        identities_by_entity = {},
+        identity_bindings = {},
+        identity_binding_by_id = {},
         relationships = {},
         relationship_by_id = {},
         unique_keys = {},
@@ -1194,6 +1199,70 @@ local function load_catalog(model, object_name)
         local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
         ctx.attribute_fusion_policies[#ctx.attribute_fusion_policies + 1] = policy
         ctx.fusion_policy_by_attribute[attribute_key] = policy
+    end
+
+    local identity_rows = query([[
+        SELECT IDENTITY_ID, ENTITY_ID, IDENTITY_NAME, IDENTITY_KIND, DATA_TYPE
+        FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE'
+        ORDER BY ENTITY_ID, IDENTITY_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(identity_rows or {}) do
+        local identity = {
+            id = row_value(row, "IDENTITY_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            name = row_value(row, "IDENTITY_NAME", 3),
+            kind = row_value(row, "IDENTITY_KIND", 4),
+            data_type = row_value(row, "DATA_TYPE", 5),
+            bindings = {},
+        }
+        ctx.semantic_identities[#ctx.semantic_identities + 1] = identity
+        ctx.identity_by_id[key(identity.id)] = identity
+        ctx.identities_by_entity[key(identity.entity_id)] =
+            ctx.identities_by_entity[key(identity.entity_id)] or {}
+        ctx.identities_by_entity[key(identity.entity_id)]
+            [#ctx.identities_by_entity[key(identity.entity_id)] + 1] = identity
+    end
+    local identity_binding_rows = query([[
+        SELECT ib.IDENTITY_BINDING_ID, ib.ENTITY_ID, ib.IDENTITY_ID,
+               ib.REPRESENTATION_ID, ib.SOURCE_EXPRESSION, ib.BINDING_KIND,
+               im.IDENTITY_MAPPING_ID, im.SOURCE_SCHEMA, im.SOURCE_OBJECT,
+               im.SOURCE_LOCAL_COLUMN, im.SEMANTIC_KEY_COLUMN,
+               im.CERTIFICATION_STATUS
+        FROM SYS_SEMANTIC.IDENTITY_BINDINGS ib
+        LEFT JOIN SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS im
+          ON im.IDENTITY_BINDING_ID = ib.IDENTITY_BINDING_ID
+         AND im.STATUS = 'ACTIVE'
+        WHERE ib.MODEL_ID = :model_id AND ib.VERSION_ID = :version_id
+          AND ib.STATUS = 'ACTIVE'
+        ORDER BY ib.IDENTITY_ID, ib.IDENTITY_BINDING_ID
+    ]], {model_id = model.model_id, version_id = model.version_id})
+    for _, row in ipairs(identity_binding_rows or {}) do
+        local binding = {
+            id = row_value(row, "IDENTITY_BINDING_ID", 1),
+            entity_id = row_value(row, "ENTITY_ID", 2),
+            identity_id = row_value(row, "IDENTITY_ID", 3),
+            representation_id = row_value(row, "REPRESENTATION_ID", 4),
+            expression = row_value(row, "SOURCE_EXPRESSION", 5),
+            kind = row_value(row, "BINDING_KIND", 6),
+            mapping = row_value(row, "IDENTITY_MAPPING_ID", 7) and {
+                id = row_value(row, "IDENTITY_MAPPING_ID", 7),
+                source_schema = row_value(row, "SOURCE_SCHEMA", 8),
+                source_object = row_value(row, "SOURCE_OBJECT", 9),
+                local_column = row_value(row, "SOURCE_LOCAL_COLUMN", 10),
+                semantic_column = row_value(row, "SEMANTIC_KEY_COLUMN", 11),
+                certification = row_value(row, "CERTIFICATION_STATUS", 12),
+            } or nil,
+        }
+        ctx.identity_bindings[#ctx.identity_bindings + 1] = binding
+        ctx.identity_binding_by_id[key(binding.id)] = binding
+        local identity = ctx.identity_by_id[key(binding.identity_id)]
+        if identity ~= nil then
+            identity.bindings[#identity.bindings + 1] = binding
+            identity.binding_by_representation = identity.binding_by_representation or {}
+            identity.binding_by_representation[key(binding.representation_id)] = binding
+        end
     end
 
     local relationship_rows = query([[
@@ -1583,6 +1652,70 @@ local function physical_unique_key(ctx, entity_id)
     return nil
 end
 
+local function complete_semantic_identity(ctx, entity)
+    local representations = ctx.representations_by_entity[key(entity.id)] or {}
+    for _, identity in ipairs((ctx.identities_by_entity or {})[key(entity.id)] or {}) do
+        local complete = #representations > 0
+        for _, representation in ipairs(representations) do
+            local binding = identity.binding_by_representation
+                and identity.binding_by_representation[key(representation.id)] or nil
+            if binding == nil or (upper(binding.kind) == "MAPPED"
+                and (binding.mapping == nil
+                    or upper(binding.mapping.certification) ~= "CERTIFIED")) then
+                complete = false
+                break
+            end
+        end
+        if complete then return identity end
+    end
+    return nil
+end
+
+local function base_semantic_key_expression(entity, representation, identity_binding)
+    if upper(identity_binding.kind) == "DIRECT" then
+        return tostring(identity_binding.expression)
+    end
+    local mapping = identity_binding.mapping
+    local map_alias = "f5_base_map_" .. tostring(identity_binding.id)
+    entity.fusion_joins = entity.fusion_joins or {}
+    entity.fusion_join_by_representation = entity.fusion_join_by_representation or {}
+    local join_key = "MAP:" .. key(identity_binding.id)
+    if not entity.fusion_join_by_representation[join_key] then
+        entity.fusion_joins[#entity.fusion_joins + 1] = {
+            source_sql = quote_qualified(mapping.source_schema, mapping.source_object),
+            alias = map_alias,
+            predicates = {tostring(identity_binding.expression) .. " = "
+                .. map_alias .. "." .. quote_ident(mapping.local_column)},
+            identity_mapping = true,
+        }
+        entity.fusion_join_by_representation[join_key] = true
+    end
+    return map_alias .. "." .. quote_ident(mapping.semantic_column)
+end
+
+local function alternate_identity_source(representation, identity_binding, lookup_alias)
+    if upper(identity_binding.kind) == "DIRECT" then
+        return quote_qualified(representation.source_schema,
+            representation.source_object),
+            replace_qualified_alias(identity_binding.expression,
+                representation.alias, lookup_alias), nil
+    end
+    local mapping = identity_binding.mapping
+    local source_alias = "f5_src_" .. tostring(representation.id)
+    local map_alias = "f5_map_" .. tostring(identity_binding.id)
+    local local_expression = replace_qualified_alias(identity_binding.expression,
+        representation.alias, source_alias)
+    local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
+        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
+        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. " " .. source_alias .. " JOIN "
+        .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
+        .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
+        .. quote_ident(mapping.local_column) .. ")"
+    return source_sql, lookup_alias .. "." .. quote_ident("F5_SEMANTIC_KEY"), mapping
+end
+
 local function representation_by_id(ctx, representation_id)
     for _, representation in ipairs(ctx.representations or {}) do
         if key(representation.id) == key(representation_id) then return representation end
@@ -1618,10 +1751,16 @@ end
 local function fused_attribute_expression(ctx, entity, base_representation,
         attribute_key, strategy)
     local unique_key = physical_unique_key(ctx, entity.id)
-    if unique_key == nil then
+    local semantic_identity = complete_semantic_identity(ctx, entity)
+    if unique_key == nil and semantic_identity == nil then
         return nil, nil, "Attribute fusion on entity '" .. tostring(entity.name)
-            .. "' requires a declared unique key containing physical columns only."
+            .. "' requires either a complete certified semantic identity or a declared unique key containing physical columns only."
     end
+    local base_identity_binding = semantic_identity
+        and semantic_identity.binding_by_representation[key(base_representation.id)] or nil
+    local base_identity_expression = base_identity_binding
+        and base_semantic_key_expression(entity, base_representation,
+            base_identity_binding) or nil
     local bindings = sorted_fusion_bindings(ctx,
         ctx.bindings_by_attribute[attribute_key] or {})
     if #bindings < 2 then
@@ -1640,9 +1779,23 @@ local function fused_attribute_expression(ctx, entity, base_representation,
             else
                 local lookup_alias = "f4_rep_" .. tostring(representation.id)
                 local predicates = {}
-                for _, column in ipairs(unique_key.columns) do
-                    predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
-                        .. " = " .. quote_column(base_representation.alias, column.column_name)
+                local source_sql = quote_qualified(representation.source_schema,
+                    representation.source_object)
+                local identity_mapping = nil
+                if semantic_identity ~= nil then
+                    local identity_binding = semantic_identity.binding_by_representation[
+                        key(representation.id)]
+                    local alternate_identity
+                    source_sql, alternate_identity, identity_mapping =
+                        alternate_identity_source(representation, identity_binding,
+                            lookup_alias)
+                    predicates[#predicates + 1] = alternate_identity
+                        .. " = " .. base_identity_expression
+                else
+                    for _, column in ipairs(unique_key.columns) do
+                        predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
+                            .. " = " .. quote_column(base_representation.alias, column.column_name)
+                    end
                 end
                 entity.fusion_joins = entity.fusion_joins or {}
                 entity.fusion_join_by_representation =
@@ -1650,8 +1803,10 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                 if not entity.fusion_join_by_representation[key(representation.id)] then
                     entity.fusion_joins[#entity.fusion_joins + 1] = {
                         representation = representation,
+                        source_sql = source_sql,
                         alias = lookup_alias,
                         predicates = predicates,
+                        identity_mapping = identity_mapping,
                     }
                     entity.fusion_join_by_representation[key(representation.id)] = true
                 end
@@ -1665,6 +1820,13 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                 authority_role = upper(representation.authority_role or "PREFER"),
                 attribute_binding_id = binding.id,
                 source_expression = binding.expression,
+                semantic_identity_id = semantic_identity and semantic_identity.id or nil,
+                semantic_identity_name = semantic_identity and semantic_identity.name or nil,
+                identity_binding_id = semantic_identity and
+                    semantic_identity.binding_by_representation[key(representation.id)].id or nil,
+                identity_mapping_id = semantic_identity and
+                    semantic_identity.binding_by_representation[key(representation.id)].mapping
+                    and semantic_identity.binding_by_representation[key(representation.id)].mapping.id or nil,
             }
         end
     end
@@ -2123,8 +2285,8 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
         for _, fusion_join in ipairs(entity.fusion_joins or {}) do
             local representation = fusion_join.representation
             join_sql[#join_sql + 1] = "LEFT JOIN "
-                .. quote_qualified(representation.source_schema,
-                    representation.source_object)
+                .. (fusion_join.source_sql or quote_qualified(
+                    representation.source_schema, representation.source_object))
                 .. " " .. fusion_join.alias
                 .. " ON " .. table.concat(fusion_join.predicates, " AND ")
         end
@@ -2308,6 +2470,23 @@ local function latest_successful_validation(model)
         LIMIT 1
     ]], {model_id = model.model_id, version_id = model.version_id})
     if rows == nil or #rows == 0 then
+        local latest_rows = query([[
+            SELECT STATUS, ERROR_COUNT
+            FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE MODEL_ID = :model_id
+              AND VERSION_ID = :version_id
+            ORDER BY VALIDATION_RUN_ID DESC
+            LIMIT 1
+        ]], {model_id = model.model_id, version_id = model.version_id})
+        if latest_rows ~= nil and #latest_rows > 0 then
+            local status = tostring(row_value(latest_rows[1], "STATUS", 1) or "UNKNOWN")
+            if status == "STALE" then
+                return nil, "The active catalog version changed after its last successful validation. This release edits the published version in place, so its published surface is unavailable until VALIDATE_MODEL succeeds."
+            end
+            return nil, "The latest validation status is " .. status
+                .. " with " .. tostring(row_value(latest_rows[1], "ERROR_COUNT", 2) or 0)
+                .. " error(s)."
+        end
         return nil, "No validation run exists for this model version."
     end
     return row_value(rows[1], "VALIDATION_RUN_ID", 1), nil
