@@ -451,13 +451,13 @@ remove temporal coverage to force single-source compilation.
 ### Published Model Maintenance Boundary
 
 Publication does not fork an immutable draft. Admin scripts mutate the active
-version that the published preprocessor compiles, and successful validation
-runs can be marked `STALE` after a mutation. Published coverage changes are the
-fail-safe exception: `SET_REPRESENTATION_COVERAGE` validates the candidate and,
-on error, restores the prior predicate, bounds, and clean validation before
-returning `SEMANTIC_ADMIN_059`. The published surface remains queryable. This
-does not create a general draft, and publish history is audit metadata rather
-than a queryable catalog snapshot.
+version that the published preprocessor compiles. Representation additions,
+attribute-binding removals, unique-key mutations, and coverage changes validate
+prospectively on published models. On error they restore the prior catalog and
+clean validation before returning `SEMANTIC_ADMIN_094` (`SEMANTIC_ADMIN_059`
+for coverage), leaving the published surface queryable. This does not create a
+general draft, and publish history is audit metadata rather than a queryable
+catalog snapshot.
 
 For an existing published model, assemble and smoke-test the full change set
 before the maintenance window. Apply sequential representation, binding,
@@ -527,6 +527,20 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN(
   'sales', 'customer', 'customer_pk', 'customer_id', NULL, 1
 );
 ```
+
+Remove a mistaken declaration in reverse dependency order:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_COLUMN(
+  'sales', 'customer', 'customer_pk', 1
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY(
+  'sales', 'customer', 'customer_pk'
+);
+```
+
+`REMOVE_UNIQUE_KEY` refuses while columns remain. On published models, either
+call is restored automatically if the candidate breaks validation.
 
 ## Register Semantic Object
 

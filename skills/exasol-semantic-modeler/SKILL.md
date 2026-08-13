@@ -247,6 +247,11 @@ continuing. If uniqueness cannot be proven, do not invent a key or mapping;
 retain `SEMANTIC_MODEL_031` for legacy single-branch compilation and surface it
 for review.
 
+To withdraw an incorrect declaration, call `REMOVE_UNIQUE_KEY_COLUMN` for each
+component before `REMOVE_UNIQUE_KEY`. Do not edit `SYS_SEMANTIC` directly.
+Published removals that would invalidate relationship grain proofs are rejected
+and restored with `SEMANTIC_ADMIN_094`.
+
 ### Step 4 — Derive facts from numeric columns
 
 A fact is a row-level expression that can be meaningfully aggregated. For each
@@ -394,14 +399,13 @@ and structural `ADD_*` calls reject duplicate names. Inspect the current model
 first and choose one path:
 
 **Published models have no general isolated draft in this release.** Admin
-changes target the same active version used by published semantic views and can
-mark validation stale. `SET_REPRESENTATION_COVERAGE` is protected specially:
-on a published model it validates the candidate, restores the previous coverage
-and certification on error, and returns `SEMANTIC_ADMIN_059`, so a rejected
-coverage experiment does not produce `SEMANTIC_QUERY_010`. Because a partial
-published F3 transition is invalid, assemble new multi-representation coverage
-on an unpublished model or use an external cutover. Do not assume other
-multi-step authoring has draft isolation.
+changes target the same active version used by published semantic views.
+Representation additions, attribute-binding removals, unique-key mutations,
+and coverage changes validate prospectively on published models. Invalid
+candidates restore the prior catalog and certification before returning
+`SEMANTIC_ADMIN_094` (`SEMANTIC_ADMIN_059` for coverage), so these experiments
+do not produce `SEMANTIC_QUERY_010`. A partial multi-step transition can still
+be invalid; assemble it on an unpublished model or use an external cutover.
 Schedule a maintenance window, prepare and smoke-test all other statements first,
 apply them consecutively, then validate immediately. Never work around the
 outage by retaining an older validation row: it did not certify the changed

@@ -142,6 +142,57 @@ class InstallerResetTest(unittest.TestCase):
             coverage.index("published coverage change rejected and restored"),
         )
 
+    def test_published_structural_mutations_are_prospective_and_reversible(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        scripts = {
+            name: next(
+                sql
+                for sql in statements
+                if f"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.{name}(" in sql
+            )
+            for name in (
+                "ADD_ENTITY_REPRESENTATION",
+                "ADD_UNIQUE_KEY",
+                "ADD_UNIQUE_KEY_COLUMN",
+                "REMOVE_ATTRIBUTE_BINDING",
+                "REMOVE_UNIQUE_KEY_COLUMN",
+                "REMOVE_UNIQUE_KEY",
+            )
+        }
+        for name, script in scripts.items():
+            status_guard = (
+                'tostring(model.status) == "PUBLISHED"'
+                if name in ("ADD_UNIQUE_KEY", "ADD_UNIQUE_KEY_COLUMN")
+                else 'tostring(model_status) == "PUBLISHED"'
+            )
+            self.assertIn(status_guard, script)
+            self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", script)
+            self.assertIn("SEMANTIC_ADMIN_094", script)
+        self.assertIn(
+            "DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS",
+            scripts["ADD_ENTITY_REPRESENTATION"],
+        )
+        self.assertIn(
+            "SET COLUMN_NAME = :column_name, EXPRESSION = :expression",
+            scripts["ADD_UNIQUE_KEY_COLUMN"],
+        )
+        self.assertIn(
+            "SET STATUS = 'ACTIVE'",
+            scripts["REMOVE_ATTRIBUTE_BINDING"],
+        )
+        self.assertIn(
+            "INSERT INTO SYS_SEMANTIC.UNIQUE_KEY_COLUMNS",
+            scripts["REMOVE_UNIQUE_KEY_COLUMN"],
+        )
+        self.assertIn(
+            "remove its unique-key columns first",
+            scripts["REMOVE_UNIQUE_KEY"],
+        )
+
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:

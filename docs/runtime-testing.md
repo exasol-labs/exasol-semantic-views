@@ -72,6 +72,7 @@ python3 tools/verify_fusion_f51.py
 python3 tools/verify_fusion_f7.py
 python3 tools/verify_bug24_promotion_gate.py
 python3 tools/verify_bug20_published_authoring_isolation.py
+python3 tools/verify_bug25_published_mutation_protection.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -88,6 +89,10 @@ cleanup.
 The F5.1 verifier selects an alternate customer representation whose local key
 needs a deterministic `DIRECT` cast, executes a relationship join with the
 rewritten endpoint, and checks relationship-side provenance in the plan.
+The BUG-25 verifier rejects invalid published representation, unique-key, and
+attribute-binding mutations, checks restoration after each attempt, and proves
+that the published query remains available. It also exercises unique-key
+removal in dependency order.
 The F7 verifier proves proposal idempotency, human certification/rejection,
 review auditability, and the absence of automatic catalog mutation.
 The BUG-24 verifier rejects missing-column and expression-bound prospective

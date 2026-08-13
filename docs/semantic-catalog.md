@@ -418,6 +418,8 @@ SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
 SEMANTIC_ADMIN.DROP_MODEL
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
+SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_COLUMN
+SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
 SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA
 ```
@@ -438,6 +440,12 @@ Every key or relationship-mapping mutation deletes the affected model
 version's compile-cache entries and marks its earlier successful validation
 runs `STALE`. Run `SEMANTIC_ADMIN.VALIDATE_MODEL` after completing a related
 set of changes.
+
+Remove a key in dependency order: call `REMOVE_UNIQUE_KEY_COLUMN` for every
+component, then `REMOVE_UNIQUE_KEY`. The latter refuses keys that still have
+columns. On a published model, key additions, updates, and removals are
+prospective: a candidate that introduces a validation error is restored and
+re-certified before returning `SEMANTIC_ADMIN_094`.
 
 `SUGGEST_GRAIN_METADATA(model_name)` is dry-run only. It proposes a one-column
 primary key when a legacy `PRIMARY_KEY_EXPR` is exactly `alias.column`, and a
