@@ -21,8 +21,8 @@ preprocessor tools by default. Follow
 adapters should expose dedicated semantic tools only when callers need the
 richer script contracts and their plans or durable handles.
 
-Milestone 4 adds a second deterministic surface for SQL clients:
-`SEMANTIC_ADMIN.COMPILE_SQL`. Autonomous agents should still prefer structured
+`SEMANTIC_ADMIN.COMPILE_SQL` is the deterministic surface for SQL clients.
+Autonomous agents should still prefer structured
 requests, but adapters that accept SQL should compile SQL explicitly and execute
 the returned generated SQL. They should not depend on a session preprocessor
 being active unless they are intentionally emulating a BI session.
@@ -47,6 +47,7 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`
+- `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`
 
 These views expose both canonical semantic names and published SQL surface names
 where relevant, so adapters do not need to infer Exasol identifier casing rules.
@@ -71,6 +72,8 @@ compatibility alias `REQUEST_TIME`.
 - `SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY`
 - `SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL`
 - `SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK`
+- `SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION`
+- `SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION`
 
 Common signatures:
 
@@ -278,6 +281,13 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK(
   '{"metric":"completed_revenue"}'
 );
 ```
+
+Feedback can be promoted into a typed model-evolution proposal with
+`PROPOSE_MODEL_EVOLUTION`. Proposals are idempotent by proposal key and remain
+non-mutating until a human records a decision with `REVIEW_MODEL_EVOLUTION`.
+Agents discover pending work through `MODEL_EVOLUTION_REVIEW_QUEUE`; acceptance
+certifies the proposal for a later authoring workflow, it does not execute
+arbitrary catalog DDL automatically.
 
 Glossary output must be mode-specific. Structured request mode should not
 instruct agents to write `GROUP BY`, joins, or aggregate formulas. Semantic SQL

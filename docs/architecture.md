@@ -397,7 +397,7 @@ Validation covers:
 
 - Catalog structure, names, references, and model lifecycle invariants.
 - Source object and source column existence.
-- SQL expression syntax and supported function policy.
+- SQL expression scope, source-column references, and supported function policy.
 - Entity unique-key declarations and data-level uniqueness.
 - Relationship mappings, declared cardinality, and grain compatibility.
 - Metric inputs, dependency cycles, aggregate semantics, and filter scopes.
@@ -670,6 +670,11 @@ Important fail-closed boundaries include:
 - A non-mergeable aggregate cannot cross multi-fact or partition branches.
 - A partial materialization cannot replace a complete semantic branch.
 - A published facade cannot execute without semantic rewriting.
+
+The validator does not submit every dimension, fact, binding, and metric
+expression to Exasol's full SQL parser. Authoring workflows must therefore smoke
+test physical expressions against their source relations before registration;
+the static expression checks are a guardrail, not a SQL dialect compiler.
 
 Stable error codes are part of this contract. They let agents distinguish a
 request that needs clarification from a model defect, unsupported feature, source

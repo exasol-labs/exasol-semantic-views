@@ -6,12 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A database-native semantic layer for Exasol. All runtime logic runs inside the database as Lua scripts and SQL — no external services, no Python/Java containers. The layer turns business metric definitions into governed SQL that agents, BI tools, and SQL authors can query uniformly.
 
-The installed system creates five schemas in Exasol:
+The installed system creates four managed schemas plus one schema per published
+model:
 - `SYS_SEMANTIC` — authoritative catalog tables (never write directly; use admin scripts)
 - `SEMANTIC_ADMIN` — Lua admin, validation, compile, and agent scripts
 - `SEMANTIC_CATALOG` — read-only views for human/tool introspection
 - `SEMANTIC_AGENT` — role-scoped discovery views for autonomous agents
-- `SEMANTIC_SALES` — published BI-compatible guarded views (one per model)
+- `SEMANTIC_<MODEL>` — published BI-compatible guarded views
 
 ## Essential Commands
 
@@ -40,7 +41,7 @@ sh tools/run_lua_tests.sh
 python3 tools/verify_runtime_performance.py
 ```
 
-**Run a single milestone verification:**
+**Run a focused verification:**
 ```sh
 python3 tools/verify_milestone3.py   # structured request compiler
 python3 tools/verify_milestone6.py   # materialization selection
@@ -64,12 +65,18 @@ Nano uses a self-signed TLS cert; all tools disable cert verification by default
 
 ### The Lua Source → Install SQL Pipeline
 
-The core runtime lives in four Lua source files:
+The runtime is split into focused Lua modules:
 
 | Source file | Packaged into | Installed as |
 |---|---|---|
 | `lua/semantic_layer/compiler/request_json.lua` | `003_create_semantic_admin_scripts.sql` | `SEMANTIC_ADMIN.COMPILER_RUNTIME` |
+| `lua/semantic_layer/compiler/query_spec.lua` | same | imported compiler module |
+| `lua/semantic_layer/compiler/catalog_snapshot.lua` | same | imported compiler module |
+| `lua/semantic_layer/compiler/metric_plan.lua` | same | imported compiler module |
+| `lua/semantic_layer/compiler/physical_plan.lua` | same | imported compiler module |
+| `lua/semantic_layer/compiler/grain_sql.lua` | same | imported compiler module |
 | `lua/semantic_layer/compiler/materializations.lua` | same | `SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME` |
+| `lua/semantic_layer/shared/grain_graph.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/admin/semantic_definition.lua` | same | `SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME` |
 | `lua/semantic_layer/agent/runtime.lua` | `006_create_semantic_agent_views.sql` | `SEMANTIC_ADMIN.AGENT_RUNTIME` |
 | `lua/semantic_layer/admin/validator.lua` | `003_create_semantic_admin_scripts.sql` | inline in `VALIDATE_MODEL` |
@@ -78,36 +85,43 @@ The core runtime lives in four Lua source files:
 
 ### The Compiler Pipeline
 
-`request_json.lua` is the entire compiler core (~2400 lines). It handles both paths:
+`request_json.lua` orchestrates both public input paths:
 
 ```
-COMPILE_REQUEST_JSON(json)
-  -> compile_internal -> parse_json -> compile_request_table
-  -> log_request -> AGENT_REQUEST_LOG
-
-COMPILE_SQL(sql)  /  SQL preprocessor
-  -> compile_sql_internal -> parse_semantic_sql -> compile_request_table
+JSON / Semantic SQL
+  -> QuerySpec
+  -> model-versioned CatalogSnapshot
+  -> typed MetricPlan with grain proofs
+  -> PhysicalPlan with representations, fusion, and materializations
+  -> decision-free SQL rendering
+  -> response envelope, cache, and optional logging
 ```
 
-`compile_request_table` is the shared core: bind semantic names → validate metric/dimension pairs via `METRIC_DIMENSION_MATRIX` → plan join paths → expand metrics (facts → aggregates → derived formulas) → select materialization → emit physical Exasol SQL + PLAN_JSON.
+Both paths share the same canonical request and planner. Do not add semantic
+decisions to the SQL renderer or implement a feature in only one input lane.
 
 Key functions to know when modifying the compiler:
-- `load_catalog` — loads all model metadata from `SYS_SEMANTIC` into a `ctx` table
-- `find_path` — graph search for entity join paths (same logic must match `validator.lua:find_path`)
-- `expand_metric` — recursive metric dependency resolution
-- `build_sql` / `build_materialized_sql` — final SQL generation
-- `parse_semantic_sql` — tokenizes and parses the SQL subset for the preprocessor path
-- `parse_where_filters` / `parse_having_filters` — WHERE/HAVING clause parsing
+- `query_spec.lua` — closed request schema and normalization
+- `catalog_snapshot.lua` — detached planner catalog and private dependencies
+- `metric_plan.lua` — metric DAG, branch requirements, and strict grain proofs
+- `physical_plan.lua` — aggregate states, representation partitions, and fusion
+- `grain_sql.lua` — rendering after decisions are complete
+- `materializations.lua` — complete-source matching and rejection provenance
+- `request_json.lua` — parsing, orchestration, caching, logging, and envelopes
 
 ### The Validator
 
-`validator.lua` (~1250 lines) runs `VALIDATE_MODEL`. It writes to `SYS_SEMANTIC.VALIDATION_RUNS`, `SYS_SEMANTIC.VALIDATION_RESULTS`, `SYS_SEMANTIC.METRIC_DEPENDENCIES`, and `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX`. The compiler reads `METRIC_DIMENSION_MATRIX` as its compatibility gate.
+`validator.lua` runs `VALIDATE_MODEL`. It writes to `SYS_SEMANTIC.VALIDATION_RUNS`, `SYS_SEMANTIC.VALIDATION_RESULTS`, `SYS_SEMANTIC.METRIC_DEPENDENCIES`, and `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX`. The compiler reads the latest successful run and compatibility metadata instead of validating during compilation.
 
-**Critical invariant:** `validator.lua:find_path` and `compiler:find_path` must use identical join-path logic. If they diverge, `VALID_COMBINATIONS_FOR_AGENT` will report IS_VALID=True for combinations that the compiler rejects at runtime (BUG-003 in `docs/known-issues.md`).
+**Critical invariant:** validator and compiler relationship proofs must delegate
+to `lua/semantic_layer/shared/grain_graph.lua`. Do not reimplement path safety,
+key matching, ambiguity, or identity remapping in one runtime only.
 
-Every active entity has exactly one active `PRIMARY` representation. F1
-alternates must expose the same alias and semantic/key columns. Compilation
-always binds the static primary and records it in plan provenance.
+Every active entity has exactly one active `PRIMARY` representation. Alternates
+must satisfy validation contracts for keys, bindings, coverage, fusion, and
+identity. Compilation may choose an alternate through explicit binding policy,
+temporal partitioning, or reconciliation; every choice is recorded in plan
+provenance.
 
 ### Call SEMANTIC_ADMIN Scripts with EXECUTE SCRIPT
 
@@ -142,18 +156,23 @@ result = {"status": row[0], "error_code": row[1], "error_message": row[2],
 ```
 `EXECUTE SCRIPT` does not support pyexasol bind parameters (`?` or `{name}`) — escape manually with `sql_string()`.
 
-### SQL Expression Validation: Static Allowlist, Not SQL Compilation
+### SQL Expression Validation: Static Policy, Not SQL Compilation
 
-Dimension and fact expressions are checked against an explicit function allowlist in `validator.lua:unsupported_functions`. This rejects unknown functions such as `QUARTER()`, but it does not parse or compile complete Exasol expressions. Invalid syntax involving an allowed function can therefore pass validation and fail at execution time. Use documented Exasol SQL and smoke-test each expression against its owning source entity before registering or certifying it.
+Dimension, fact, binding, filter, and identity expressions are checked for alias
+scope, source columns, and unsupported functions. The validator does not parse
+or compile every complete Exasol expression. Invalid dialect syntax can pass
+static validation and fail at execution time. Smoke-test each physical
+expression against its owning source relation before registering or certifying
+it.
 
 ### The Sales Demo Model
 
 The reference model is in `sql/examples/`. Authoring order matters:
-1. `CREATE_MODEL` → `ADD_ENTITY` × N → optional equivalent representations → `ADD_SEMANTIC_OBJECT`
-2. `ADD_RELATIONSHIP` × N
-3. `ADD_DIMENSION` × N
-4. `ADD_FACT` × N → `ADD_METRIC` × N
-5. `VALIDATE_MODEL` → `PUBLISH_MODEL`
+1. `CREATE_MODEL` -> `ADD_ENTITY` x N -> `ADD_SEMANTIC_OBJECT`
+2. `ADD_UNIQUE_KEY_WITH_COLUMNS` -> `ADD_RELATIONSHIP` -> `ADD_RELATIONSHIP_KEY_MAPPING`
+3. `ADD_DIMENSION` -> `ADD_FACT` -> `ADD_METRIC`
+4. Optional representations, bindings, coverage, authority, and identity through complete or compound declarations
+5. `VALIDATE_MODEL` -> `PUBLISH_MODEL`
 
 The preferred authoring surface is SQL-native Semantic DDL via `APPLY_SEMANTIC_DEFINITION`. The positional `ADD_*` scripts are compatibility APIs. See `sql/examples/sales_metrics_semantic_definition.sql` for the DDL syntax.
 
@@ -161,7 +180,8 @@ The preferred authoring surface is SQL-native Semantic DDL via `APPLY_SEMANTIC_D
 
 | File | Purpose |
 |---|---|
-| `lua/semantic_layer/compiler/request_json.lua` | Entire compiler + preprocessor Lua runtime |
+| `lua/semantic_layer/compiler/` | Request, catalog, logical plan, physical plan, materialization, and SQL-rendering modules |
+| `lua/semantic_layer/shared/grain_graph.lua` | Shared relationship, key, and identity proof logic |
 | `lua/semantic_layer/admin/validator.lua` | Model validation, dependency extraction, compatibility matrix |
 | `lua/semantic_layer/admin/semantic_definition.lua` | Semantic DDL parser and admin operations |
 | `lua/semantic_layer/agent/runtime.lua` | Agent search, glossary, feedback, explain scripts |
@@ -179,7 +199,7 @@ The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) an
 
 Known issues and their current status are tracked in the checked-in `docs/known-issues.md`. As of the last verification against Exasol 2026.1.0, the historical BUG-001/002/003 do **not** reproduce on a clean install — see that doc for details before assuming any of them is still live.
 
-## Plans and Docs
+## Documentation
 
 - `docs/creating-metrics.md` — how to define metrics; mental model for entity → fact → metric
 - `docs/agent-contract.md` — the agent discovery and compilation contract
@@ -188,5 +208,5 @@ Known issues and their current status are tracked in the checked-in `docs/known-
 - `docs/semantic-sql-preprocessor.md` — preprocessor activation and supported SQL subset
 - `docs/known-issues.md` — known issues with verified status per Exasol version
 - `docs/databricks-metric-views.md` — Databricks UCMV import + MEASURE()/GROUP BY ALL SQL compatibility
-
-> Note: `plans/` and `reports/` are git-ignored working directories (see `.gitignore`). They hold local-only scratch artifacts and are not part of a fresh checkout — do not rely on them in checked-in references.
+- `docs/architecture.md` — standalone design rationale and code map
+- `docs/semantic-catalog.md` — catalog and lifecycle surfaces

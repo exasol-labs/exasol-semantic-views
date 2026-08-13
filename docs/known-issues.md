@@ -7,6 +7,10 @@ not part of a fresh checkout), this document is checked in and is the authoritat
 Last full verification: **Exasol 2026.1.0** (`exasol/docker-db:latest-2026.1`), 2026-06-15, against
 a clean `python3 tools/install.py --example --reset` install.
 
+Documentation and implementation-boundary audit: **2026-08-13**. This audit
+checked the current Lua, install SQL, and maintained verifier inventory; it does
+not replace the dated live-runtime verification above.
+
 ## Resolved / documentation fixes
 
 ### `COMPILE_REQUEST_JSON` column layout (fixed)
@@ -53,12 +57,17 @@ Exasol 2026.1.0:
 - **Status on 2026.1.0:** **No mismatch on the clean demo.** All 20 metric × dimension combinations
   report `IS_VALID=True` and the compiler accepts them. The original report was tied to user-study
   artifacts not present in the clean seed.
-- **Invariant to preserve:** `validator.lua:find_path` and the compiler's `find_path` must stay in
-  sync, or this class of bug can return for multi-entity models.
+- **Current safeguard:** validator and compiler path decisions delegate to the
+  packaged `lua/semantic_layer/shared/grain_graph.lua`. Keep proof behavior in
+  that shared module rather than adding planner-specific path rules.
 
 ## Deferred / not yet implemented (by design)
 
-- Phase 3 semantic SQL: subqueries / CTEs, `CAST` in `SELECT`.
-- Virtual schema adapter.
-- `DISTINCT`, `SEMI_ADDITIVE`, `WINDOW` metric types (catalog accepts them; compiler implements
-  `ADDITIVE`, `FILTERED`, `DERIVED`, `RATIO`).
+- Semantic SQL subqueries / CTEs and arbitrary `CAST` expressions in `SELECT`.
+- A project-owned Virtual Schema adapter. Existing Virtual Schema relations can
+  already be registered as entity representations.
+- General `SEMI_ADDITIVE` and `WINDOW` metric execution. The catalog can
+  represent them, but the typed planner has no state/finalization contract.
+- Cross-branch exact distinct aggregation. Ordinary single-branch
+  `COUNT(DISTINCT ...)` can use the legacy renderer; scalar partial distinct
+  counts are not mergeable.

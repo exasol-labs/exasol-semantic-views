@@ -7,9 +7,8 @@ Catalog schemas:
 - `SEMANTIC_AGENT`: role-scoped machine-readable context views for agents.
 - `SEMANTIC_ADMIN`: Lua admin and compiler scripts.
 
-Milestones 1 through the SQL-native metric definition work include
-Exasol-compatible DDL for the catalog tables,
-initial catalog views, validation run storage, validation issue storage, the
+The installed catalog includes Exasol-compatible DDL for catalog tables,
+read-only catalog views, validation run storage, validation issue storage, the
 metric/dimension validity matrix, structured compiler scripts, SQL compiler
 wrapper, guarded published views, SQL preprocessor, agent context views, agent
 feedback tables, the manual materialization registry, SQL-native metric
@@ -43,14 +42,14 @@ Semantic uniqueness and allowed values are enforced by Lua admin scripts.
 
 ## Entity Representations
 
-Phase F0 separated semantic entities from their physical source bindings through
+Semantic entities are separated from their physical source bindings through
 `SYS_SEMANTIC.ENTITY_REPRESENTATIONS`. `ADD_ENTITY` creates one active
 `PRIMARY` representation automatically, and installation backfills one for
 every existing entity. `VALIDATE_MODEL` rejects active entities that do not
 have exactly one active primary representation.
 
-Phase F1 allows additional active `ALTERNATE` representations for the same
-entity. Without F2 bindings, selection remains manual and static:
+Additional active `ALTERNATE` representations may serve the same entity.
+Without explicit attribute bindings, selection remains manual and static:
 `SET_PRIMARY_REPRESENTATION` chooses the single source used by every compile.
 The grain-metadata assistant and semantic-definition export resolve source
 schema, object, and alias through the primary representation.
@@ -69,7 +68,7 @@ SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
 SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 ```
 
-F1 supports `RELATION` and `VIRTUAL_SCHEMA` sources. All active representations
+Representations support `RELATION` and `VIRTUAL_SCHEMA` sources. All active representations
 must expose the same semantic alias and every column used by attributes that
 have only a compatibility-default binding, filters, unique keys, and
 relationship mappings. Adding, promoting, or removing
@@ -111,19 +110,21 @@ the session timeout is unlimited or greater than 60 seconds. Exasol applies
 `QUERY_TIMEOUT` to the complete `EXECUTE SCRIPT`, including nested federated
 statements; a script cannot lower its own active timeout.
 
-Without an F5 semantic identity, identity and relationship metadata remains
+Without a semantic identity, identity and relationship metadata remains
 representation-invariant. Primary-key expressions, unique-key columns,
 relationship key mappings, join conditions, and representation-blind metric
 filters must resolve against the same case-sensitive physical column names in
-every representation. F2 attribute bindings cannot repair those differences.
-F5 can map one scalar source-local entity key per representation; it does not
-rewrite relationship SQL or arbitrary filter columns.
+every representation. Attribute bindings cannot repair those differences.
+A semantic identity can map one scalar source-local entity key per
+representation. Relationship-aware compilation can remap a simple scalar
+endpoint through complete anchored `DIRECT` identity bindings; general `MAPPED`
+relationship remapping and arbitrary filter-column rewriting remain unsupported.
 Relationship key mappings store raw physical column names and support names
 that require SQL quoting, including spaces, reserved words, and JSON Tables
 markers such as `profile|object`. Rendered join conditions remain responsible
 for SQL quoting; do not include surrounding double quotes in mapping values.
 
-Phase F2 separates semantic dimensions and facts from their source expressions
+Attribute bindings separate semantic dimensions and facts from their source expressions
 through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`
 automatically create a `PREFER` binding on the current primary representation;
 installation backfills the same binding for existing attributes. Additional
@@ -439,7 +440,7 @@ from the latest validation run only.
 
 ## Apache Ossie / OSI Import/Export Metadata
 
-Milestone 1 adds catalog tables used by future Ossie/OSI import/export tooling:
+The catalog stores metadata used by the implemented Ossie/OSI import/export tooling:
 
 - `CUSTOM_EXTENSIONS`: raw vendor extension payloads keyed by model version,
   scope type, scope id, vendor name, extension name, and source format.
@@ -558,8 +559,8 @@ or external files:
   `MEASURE`, `NUMERATOR`, and `DENOMINATOR`.
 - `METRIC_FILTERS`: semantic filters, resolved SQL filters, and required filter
   dimensions.
-- `CALCULATION_GROUPS` and `CALCULATION_ITEMS`: future calculation item
-  metadata, using `DISPLAY_ORDER` for deterministic ordering.
+- `CALCULATION_GROUPS` and `CALCULATION_ITEMS`: reserved calculation-item
+  metadata. They are persisted but are not currently consumed by compilation.
 
 Human-oriented views:
 
@@ -573,7 +574,7 @@ Human-oriented views:
 
 ## Governed Model Evolution
 
-F7 keeps agent inference outside the deterministic query path. Agents can
+Governed model evolution keeps agent inference outside the deterministic query path. Agents can
 propose `NEW_CONCEPT`, `NEW_IDENTITY`, `REPRESENTATION_EQUIVALENCE`,
 `AUTHORITY_CHANGE`, or `DRIFT_REPAIR` changes:
 
@@ -628,7 +629,7 @@ never split across sources.
 
 ## Agent Views
 
-Milestone 5 adds role-aware context views in `SEMANTIC_AGENT`. These are the
+Role-aware context views in `SEMANTIC_AGENT` are the
 preferred discovery surface for agents and thin MCP/REST adapters.
 
 Important views:
@@ -644,6 +645,7 @@ Important views:
 - `VALIDATION_ERRORS_FOR_AGENT`
 - `COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `REQUEST_HISTORY_FOR_AGENT`
+- `MODEL_EVOLUTION_REVIEW_QUEUE`
 
 `FIELDS_FOR_AGENT` includes `FIELD_KIND` and the compatibility alias
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions when a metric

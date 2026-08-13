@@ -86,7 +86,7 @@ qualified references are emitted verbatim with a `DBX_IMPORT_310` warning.
 - View-level `filter:` — not auto-applied (`DBX_IMPORT_500`); add it to the
   relevant metrics if needed.
 - `materialization:` — ignored (`DBX_IMPORT_510`); use this project's own
-  materialization selection (see `docs/semantic-compiler.md`).
+  materialization selection (see [Semantic Compiler](semantic-compiler.md)).
 - `USING` joins — skipped (`DBX_IMPORT_240`); provide an `on:` condition.
 
 **Unsupported:** inline-query `source` (`DBX_IMPORT_210`).
@@ -139,7 +139,8 @@ Details:
   dimensions); an explicit `GROUP BY` list is still accepted.
 - The generated physical SQL is unchanged — only the accepted input surface is
   wider. Metric compatibility, joins, and materialization selection behave
-  exactly as for native semantic SQL (`docs/semantic-sql-preprocessor.md`).
+  exactly as for native semantic SQL
+  ([Semantic SQL Preprocessor](semantic-sql-preprocessor.md)).
 
 ## Verifying
 

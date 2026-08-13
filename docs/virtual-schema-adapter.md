@@ -1,11 +1,23 @@
-# Virtual Schema Adapter
+# Virtual Schema Sources
 
-The Lua Virtual Schema adapter is optional and belongs after the core
-view-plus-preprocessor path is working.
+This repository does not implement a general-purpose Virtual Schema adapter.
+It can, however, model a relation already exposed by an installed Virtual
+Schema adapter as an entity representation with `SOURCE_KIND =
+'VIRTUAL_SCHEMA'`.
 
-Use it only when it adds value beyond generated metadata views and SQL
-preprocessing, such as dynamic metadata, compact `adapterNotes`, or pushdown
-participation for already-valid SQL shapes.
+The semantic compiler generates ordinary Exasol SQL over that relation. Source
+connectivity, remote dialect conversion, and pushdown remain responsibilities
+of the underlying adapter. Validation treats local and Virtual Schema
+representations uniformly and requires a bounded session `QUERY_TIMEOUT` before
+multi-representation key and identity probes, including views that indirectly
+depend on Virtual Schemas.
 
-It must not replace the preprocessor for metric-column SQL that is invalid
-before rewrite.
+A future adapter specific to this project would only be justified for dynamic
+metadata or pushdown that cannot be expressed through existing relation
+representations. It must not replace the SQL preprocessor: metric-column SQL
+must be rewritten before normal SQL validation, while a Virtual Schema adapter
+receives already valid SQL shapes.
+
+See [Semantic Catalog](semantic-catalog.md#entity-representations) for source
+registration and [Architecture](architecture.md#semantic-fusion-path) for the
+fusion model.

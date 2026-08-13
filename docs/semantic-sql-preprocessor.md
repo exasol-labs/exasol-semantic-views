@@ -1,6 +1,6 @@
 # Semantic SQL Preprocessor
 
-Milestone 4 installs a Lua SQL preprocessor in
+The installed Lua SQL preprocessor is
 `SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR`.
 
 Purpose:
@@ -65,7 +65,7 @@ Published views include comments that point users and tools to
 
 ## Supported SQL
 
-The Milestone 4 parser supports the BI-oriented subset:
+The parser supports this BI-oriented subset:
 
 ```sql
 SELECT customer_region, total_revenue
@@ -140,4 +140,5 @@ EXPORT SEMANTIC MODEL sales;
 The preprocessor lane does not call `VALIDATE_MODEL` and does not write request
 logs. It uses the latest successful validation run for the model version and
 fails if no valid snapshot exists. Explicit agent calls through
-`COMPILE_REQUEST_JSON` still validate and log.
+`COMPILE_REQUEST_JSON` use the same validation gate and additionally write an
+agent request log; they do not rerun validation during compilation.

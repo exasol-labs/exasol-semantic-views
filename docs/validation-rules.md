@@ -1,6 +1,6 @@
 # Validation Rules
 
-Milestone 2 adds database-resident validation through:
+Database-resident validation runs through:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales');
@@ -16,7 +16,8 @@ RULE_CODE
 MESSAGE
 ```
 
-If the model is valid, the result set is empty. Every run is also recorded in
+If the model has no issues, the result set is empty. A model can remain valid
+with warning rows; only `ERROR` issues block certification. Every run is also recorded in
 `SYS_SEMANTIC.VALIDATION_RUNS` and `SYS_SEMANTIC.VALIDATION_RESULTS`, exposed
 through `SEMANTIC_CATALOG.VALIDATION_RUNS` and
 `SEMANTIC_CATALOG.VALIDATION_RESULTS`.
@@ -65,11 +66,12 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_026` | error | Custom extension scope type is unsupported or points to a missing object. |
 | `SEMANTIC_MODEL_027` | error | Custom extension metadata is incomplete or `DATA_JSON` is not valid JSON. |
 | `SEMANTIC_MODEL_028` | error | Unique key metadata is invalid, references a missing entity, has an unsupported key kind, or has no columns. |
-| `SEMANTIC_MODEL_029` | error | Unique key column metadata is invalid or references an unresolvable source column/expression. F2 cannot remap representation identity; normalize differing key names in a source view. |
+| `SEMANTIC_MODEL_029` | error | Unique key column metadata is invalid or references an unresolvable source column/expression. Representation-specific attribute bindings do not redefine entity keys. |
 | `SEMANTIC_MODEL_030` | error | Visible metric/dimension pair is invalid. |
-| `SEMANTIC_MODEL_031` | warning | Relationship has no structured endpoint mapping; legacy compilation remains available but grain proofs cannot use it. |
-| `SEMANTIC_MODEL_032` | error | Relationship endpoint mapping is malformed, non-contiguous, out of scope, or references an unknown source column. F2 cannot remap representation joins; normalize differing endpoint names in a source view. |
+| `SEMANTIC_MODEL_031` | warning | Relationship has no structured endpoint mapping; legacy compilation remains available but grain proofs cannot use it. Declare the endpoint unique key first, then ordered relationship mappings. |
+| `SEMANTIC_MODEL_032` | error | Relationship endpoint mapping is malformed, non-contiguous, out of scope, or references an unknown source column. General expression or mapped-identity endpoint rewriting is not supported. |
 | `SEMANTIC_MODEL_033` | error | Relationship endpoint mappings do not match the unique key required by the declared cardinality. |
+| `SEMANTIC_MODEL_034` | error | An entity source alias is an Exasol reserved word and cannot be rendered safely. |
 | `SEMANTIC_MODEL_035` | error | An active entity does not have exactly one active `PRIMARY` representation. |
 | `SEMANTIC_MODEL_036` | error | An active representation has invalid F1 metadata, a duplicate name, a missing entity, an unstable alias, or unsupported temporal coverage. |
 | `SEMANTIC_MODEL_037` | error | F1 equivalence cannot be proven: no key is declared, a key probe failed, or a representation violates a declared key's grain. |
@@ -88,6 +90,27 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_050` | warning | A relationship remains usable, but one or more endpoint representations lack the physical key and an anchored scalar `DIRECT` F5.1 remap, so joined requests exclude those candidates. |
 | `SEMANTIC_MODEL_051` | error | A simple relationship equality joins incompatible physical type families. The diagnostic names the relationship, endpoints, and resolved representation types. |
 
+## Expression Validation Boundary
+
+Expression validation checks alias scope, referenced source columns, and a
+static unsupported-function policy. It does not ask Exasol to parse every
+complete dimension, fact, metric, filter, identity, or binding expression.
+Dialect-specific syntax can therefore pass static validation and still fail
+when rendered.
+
+Before registration, smoke test each physical expression against the exact
+source relation and alias, for example:
+
+```sql
+SELECT YEAR(src.order_date)
+FROM MART.ORDERS src
+LIMIT 1;
+```
+
+SQL-native definition dry-run validates the simulated catalog state but does
+not strengthen this expression boundary. Imported Databricks expressions need
+the same Exasol-specific smoke testing.
+
 ## Metric/Dimension Matrix
 
 Validation rebuilds `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX` for the active model
@@ -104,7 +127,7 @@ The matrix records:
 - `REASON_CODE`
 - `RELATIONSHIP_PATH`
 
-The MVP accepts same-entity pairs and non-fanout relationship paths. It rejects
+Validation accepts same-entity pairs and non-fanout relationship paths. It rejects
 paths that require many-to-many traversal without fanout policy.
 
 For rejected connected pairs, `RELATIONSHIP_PATH` contains the attempted path

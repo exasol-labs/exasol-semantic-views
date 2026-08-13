@@ -1,6 +1,6 @@
 # ADR 001: Grain-Aware Result Semantics
 
-Status: accepted for implementation
+Status: accepted and implemented
 
 Date: 2026-07-25
 
@@ -12,8 +12,8 @@ rows and change metric values. Choosing a common dimension table as a result
 spine avoids some multiplication but changes the result domain: orphan facts
 can disappear and dimension members without facts can appear.
 
-The compiler therefore needs a semantic contract before it gains a multi-fact
-SQL strategy.
+The compiler therefore uses a semantic contract for every multi-fact SQL
+strategy.
 
 ## Decision
 
@@ -23,7 +23,8 @@ states are combined only after branch-local aggregation. Derived metrics are
 evaluated after that merge.
 
 The default result domain is the union of groups contributed by selected metric
-branches. A dimension spine is a separate, explicit future operation.
+branches. A dimension spine would be a separate, explicit operation and is not
+implemented.
 
 Three grains remain distinct:
 
@@ -59,7 +60,7 @@ shipping customer.
 - Metric-local filters affect only their metric state.
 - Final metric filters (`HAVING`) run after state merge and derived-metric
   finalization.
-- Cross-branch cohort or semi-join filters are unsupported initially.
+- Cross-branch cohort or semi-join filters are unsupported.
 - A missing `COUNT` state finalizes to zero.
 - A missing `SUM` state remains `NULL`.
 - Grand totals use the same state merge without a grouping list.
@@ -69,10 +70,10 @@ shipping customer.
 | Query shape | Initial decision | Reason |
 | --- | --- | --- |
 | One fact branch, existing supported metrics | Supported | Legacy behavior remains compatible. |
-| Multiple branches with `SUM`/`COUNT` states | Supported in Phase C | States are independently mergeable. |
-| Dimension reachable from every branch through safe paths | Supported in Phase C | Attribution is cardinality-preserving and conformed. |
-| No selected dimensions | Supported in Phase C | Each branch produces one state row. |
-| Arithmetic or ratio over finalized branch metrics | Supported in Phase C | Evaluation occurs after state merge. |
+| Multiple branches with `SUM`/`COUNT` states | Supported | States are independently mergeable. |
+| Dimension reachable from every branch through safe paths | Supported | Attribution is cardinality-preserving and conformed. |
+| No selected dimensions | Supported | Each branch produces one state row. |
+| Arithmetic or ratio over finalized branch metrics | Supported | Evaluation occurs after state merge. |
 | Dimension reachable from only some branches | Rejected | It has no common meaning for the result. |
 | Traversal from one side to many side | Rejected | It attributes one fact to multiple dimension rows. |
 | Many-to-many traversal | Rejected | A fanout policy is not an allocation proof. |
@@ -80,17 +81,17 @@ shipping customer.
 | Mapping not backed by required unique key | Rejected | Declared cardinality is not structurally proven. |
 | Multiple safe paths without role binding | Rejected | Path priority cannot resolve semantic role. |
 | Cross-branch cohort filter | Rejected | It changes branch membership rather than row predicates. |
-| Exact distinct across branches | Rejected initially | Scalar partial distinct counts are not mergeable. |
-| Snapshot/semi-additive metric | Rejected initially | It requires time-aware rollup semantics. |
-| Window metric | Rejected initially | It requires an explicit evaluation stage and grain. |
-| Query-input CTE/subquery propagation | Rejected initially | Input grain is not modeled yet. |
+| Exact distinct across branches | Rejected | Scalar partial distinct counts are not mergeable. |
+| Snapshot/semi-additive metric | Rejected | It requires time-aware rollup semantics. |
+| Window metric | Rejected | It requires an explicit evaluation stage and grain. |
+| Query-input CTE/subquery propagation | Rejected | Input grain is not modeled. |
 
 ## Compatibility
 
 Existing models without structured relationship mappings continue to validate
 with `SEMANTIC_MODEL_031` warnings and retain the legacy single-branch compiler
-path. The future grain-aware multi-fact path must require complete proofs and
-must not fall back to raw joined aggregation after a failed proof.
+path. The grain-aware multi-fact path requires complete proofs and does not fall
+back to raw joined aggregation after a failed proof.
 
 Validator and compiler use the same packaged pure-Lua graph implementation.
 Path order is deterministic, while multiple shortest semantic paths are
@@ -98,7 +99,7 @@ reported as ambiguity rather than silently selected.
 
 ## Consequences
 
-The initial feature is intentionally narrower than general multi-fact SQL, but
+The feature is intentionally narrower than general multi-fact SQL, but
 its results are compositional: adding a metric branch cannot change the values
 of existing branches. Later distinct, snapshot, cohort, allocation, and nested
 query features can extend aggregate states and proof types without replacing

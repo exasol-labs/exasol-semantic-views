@@ -17,11 +17,10 @@ lower to the same versioned `QuerySpec`. Planning consumes a detached,
 model-versioned `CatalogSnapshot`, including transitive private metric
 dependencies that are not exposed as query fields.
 
-Phase B introduced the typed single-branch boundary. Phase C1 added
-multi-branch validation, Phase C2 added the typed physical state pipeline, and
-Phase D2 adds complete leaf-source substitution. Fusion Phase F1 adds static
-primary-representation binding and provenance. `PLAN_JSON.plan_version` is
-`8` and
+The compiler separates request normalization, catalog loading, logical metric
+planning, physical source planning, and SQL rendering. The current logical plan
+version is `10`, catalog snapshot version is `4`, and physical plan version is
+`6`. `PLAN_JSON.logical_plan` records:
 `PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
@@ -35,7 +34,8 @@ the cardinality-preserving endpoint, a safe traversal direction, and no
 many-to-many edge. Expression identity returns
 `EXPRESSION_KEY_PROOF_UNSUPPORTED`.
 
-For metrics whose normalized aggregate states span multiple fact entities, C1:
+For metrics whose normalized aggregate states span multiple fact entities, the
+logical and physical planners:
 
 - treats structured metric inputs as authoritative and uses dependency rows
   only as a legacy fallback
@@ -55,13 +55,13 @@ For metrics whose normalized aggregate states span multiple fact entities, C1:
   coverage, and validity provenance
 
 `PLAN_JSON.selected_representations` lists the active representation selected
-for every entity used by the request. Without F2 attribute bindings, F1 selects
+for every entity used by the request. Without explicit attribute bindings, the compiler selects
 the representation marked `PRIMARY` and records
 `selection_reason = STATIC_PRIMARY`. With F2 bindings, binding role and priority
 rank candidates first, then `PRIMARY` breaks otherwise-equal candidates before
 representation priority and ID. Selection does not inspect freshness or cost.
 
-F3 treats an entity as partitioned when every active representation has a
+Temporal fusion treats an entity as partitioned when every active representation has a
 coverage predicate and a certified half-open validity interval. A partitioned
 metric leaf enters the typed aggregate-state path even when it is the request's
 only fact entity. The physical planner creates one branch per complete
@@ -76,7 +76,7 @@ dimension or filter usage from the typed failure and state the supported F3
 remedy. `_080` names the first missing attribute and partition and points to
 `ADD_ATTRIBUTE_BINDING`.
 
-F4 attribute policies run after complete F2 representation selection. `PREFER`
+Attribute fusion policies run after complete representation selection. `PREFER`
 keeps the selected binding unchanged. `COALESCE` and `RECONCILE` emit
 key-preserving joins to alternate representations and combine them in declared
 authority order. A shared physical F1 key or complete F5 semantic identity
@@ -91,7 +91,7 @@ joined and grouped inside every grain-proven multi-fact branch before aggregate
 states are merged. Reconciled facts still fail closed with `_074`; combining a
 measure across source reconciliation and fact branches is not grain-safe.
 
-F5.1 makes single-branch representation selection relationship-aware. Before
+Relationship-aware identity binding makes single-branch representation selection relationship-aware. Before
 ranking candidates, the compiler resolves the safe relationship path and checks
 each endpoint representation. A canonical physical endpoint remains unchanged.
 If it is absent, the candidate is usable only when the endpoint mapping matches
@@ -174,14 +174,10 @@ Normalization rules for the cache key:
 - arrays (`metrics`, `dimensions`, `filters`, `having`, `order_by`) keep
   the caller's order, since that order can affect the generated SQL
 
-Invalidation: cache entries are dropped on any event that can change compile
-output for a model version: `PUBLISH_MODEL`, `VALIDATE_MODEL` (and therefore
-every admin DDL script that re-validates), `REGISTER_MATERIALIZATION`,
-`ADD_MATERIALIZATION_COLUMN`, `SET_MATERIALIZATION_STATUS`,
-`ADD_UNIQUE_KEY`, `ADD_UNIQUE_KEY_COLUMN`, and
-`ADD_RELATIONSHIP_KEY_MAPPING`. Proof-metadata helpers also mark earlier
-successful validation runs `STALE`, so compilation requires a new
-`VALIDATE_MODEL` run after a key or mapping change. Cache writes
+Invalidation: admin mutations that can change compile output delete the model
+version's cache entries. Proof and physical-binding mutations also mark earlier
+successful validation runs `STALE`, so compilation requires a new successful
+validation before the changed state is usable. Cache writes
 on miss are best-effort: a PK collision from a concurrent identical compile
 is swallowed, since the caller already has the correct result. Only
 `STATUS = OK` results are cached - errors and clarifications are never
@@ -221,10 +217,10 @@ The structured compiler supports:
 10. Stable structured errors for malformed JSON, unknown fields, invalid limits,
    invalid metric/dimension pairs, and missing relationship paths.
 
-The typed planner explicitly rejects distinct, non-additive, and window
-aggregate states until their state and finalization contracts are implemented.
-This prevents the legacy expression renderer from accidentally giving an
-advanced metric unsupported semantics.
+The typed multi-branch planner rejects distinct, non-additive, and window
+aggregate states because they do not have merge contracts. The legacy
+single-branch renderer can still execute supported non-mergeable expressions
+without pretending that their scalar results can be merged across branches.
 
 ### Optional hierarchical JSON output
 
@@ -336,8 +332,10 @@ silently.
 
 This fail-closed behavior is intentional: reusing an earlier successful
 validation would certify newly mutated catalog rows that were never validated.
-It is not draft isolation. Perform multi-step F2/F3/F4/F5 changes in a maintenance
-window, validate immediately after the final step, and do not promise continuous
+It is not draft isolation. Use the available compound APIs for multi-row
+representation, coverage, key, identity, and relationship declarations. For
+multi-step changes without a compound API, use a maintenance window, validate
+immediately after the final step, and do not promise continuous
 published availability while editing. True zero-downtime authoring requires
 copy-on-write draft versions plus an atomic publish pointer switch; version
 metadata alone is insufficient.
@@ -349,5 +347,5 @@ mappings, do not block the existing single-branch compiler path.
 `tools/package_lua_scripts.py` embeds the compiler runtime, materialization
 runtime, and wrappers into `sql/install/003_create_semantic_admin_scripts.sql`.
 The embedded compiler runtime includes `query_spec.lua`,
-`catalog_snapshot.lua`, `metric_plan.lua`, and `grain_sql.lua` before the
-entrypoint module.
+`catalog_snapshot.lua`, `metric_plan.lua`, `physical_plan.lua`,
+`materializations.lua`, and `grain_sql.lua` before the entrypoint module.

@@ -54,7 +54,7 @@ materializations, Ossie/OSI, Databricks compatibility, compile caching, and
 concurrent requests against Exasol.
 
 It also runs the host-side OSI and SQL-splitter tests, the maintained SQL smoke
-fixtures, the extended semantic-SQL phase suites, GROUP BY inference, and a
+fixtures, the extended semantic-SQL suites, GROUP BY inference, and a
 non-SYS security-principal test. The security test verifies model role
 grant/revoke behavior, published discovery access, and denial of direct access
 to the bundled physical source table.

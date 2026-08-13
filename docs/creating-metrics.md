@@ -729,7 +729,7 @@ dimensions plus metrics, or query row-level fields separately.
 
 ## Where To Look Next
 
-- [SQL-native metric definitions plan](../plans/sql_native_metric_definitions_plan.md)
+- [Semantic catalog](semantic-catalog.md)
 - [Semantic catalog](semantic-catalog.md)
 - [Semantic compiler](semantic-compiler.md)
 - [Validation rules](validation-rules.md)

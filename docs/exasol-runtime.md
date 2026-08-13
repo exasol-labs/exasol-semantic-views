@@ -1,105 +1,151 @@
 # Exasol Runtime
 
-Installed runtime behavior must be implemented with SQL and Lua.
+The installed runtime is implemented entirely with Exasol SQL and Lua. Host-side
+Python tools package, install, test, and exchange model definitions, but they are
+not dependencies of an installed semantic model.
 
-Allowed database runtime surfaces:
+## Runtime Boundary
 
-- Exasol SQL DDL and DML.
-- Lua `CREATE SCRIPT` admin programs.
-- Lua SQL preprocessor script.
-- Lua scalar helper scripts for guarded metadata views.
-- Optional Lua Virtual Schema adapter in a later milestone.
+Installed database objects use:
 
-Disallowed core runtime surfaces:
+- Exasol SQL DDL, DML, views, and session settings.
+- Lua `CREATE SCRIPT` programs for administration, validation, compilation,
+  publication, import helpers, and agent workflows.
+- A Lua SQL preprocessor for published-view and Semantic SQL rewriting.
+- A Lua scalar guard used by published metadata views.
 
-- Python script containers.
-- Java script containers.
-- R script containers.
-- External parser runtimes required by installed database objects.
+The runtime does not require Python, Java, R, an external parser service, or an
+LLM. Generated SQL is executed by Exasol under the caller's normal privileges.
 
-Host-side development tooling may use other languages if useful, but those tools
-must not become required database runtime dependencies.
+Use `EXECUTE SCRIPT`, not `CALL` or `SELECT`, for `SEMANTIC_ADMIN` APIs.
 
-## Milestone 1 Runtime Objects
+## Installed Schemas
 
-Milestone 1 installs:
+| Schema | Responsibility |
+| --- | --- |
+| `SYS_SEMANTIC` | Authoritative internal catalog and operational state |
+| `SEMANTIC_CATALOG` | Read-only administrative metadata views |
+| `SEMANTIC_ADMIN` | Lua administration, validation, compiler, publication, and agent scripts |
+| `SEMANTIC_AGENT` | Role-scoped discovery and review views |
+| `SEMANTIC_<MODEL>` | Guarded relational metadata surface for each published model |
 
-- SQL schemas and catalog tables.
-- Read-only metadata views in `SEMANTIC_CATALOG`.
-- Lua `CREATE SCRIPT` admin programs in `SEMANTIC_ADMIN`.
-- Sales example physical tables in `MART`.
+The installer applies seven files in dependency order:
 
-Use `EXECUTE SCRIPT`, not `CALL`, for admin APIs.
+```text
+sql/install/000_create_schemas.sql
+sql/install/001_create_semantic_catalog.sql
+sql/install/002_create_semantic_catalog_views.sql
+sql/install/003_create_semantic_admin_scripts.sql
+sql/install/004_create_semantic_preprocessor.sql
+sql/install/005_create_semantic_surface_helpers.sql
+sql/install/006_create_semantic_agent_views.sql
+```
 
-## Milestone 2 Runtime Objects
+Canonical Lua source lives under `lua/semantic_layer`. The installer runs
+`tools/package_lua_scripts.py` unless `--skip-package` is supplied, so the
+packaged SQL scripts and source modules remain synchronized.
 
-Milestone 2 adds:
+## Runtime Components
 
-- `SEMANTIC_ADMIN.VALIDATOR_RUNTIME`.
-- `SEMANTIC_ADMIN.VALIDATE_MODEL`.
-- Validation result tables and the metric/dimension matrix.
+### Catalog and authoring
 
-## Milestone 3 Runtime Objects
+Catalog scripts create and evolve models, entities, representations, semantic
+objects, relationships, keys, dimensions, facts, metrics, materializations,
+fusion declarations, semantic identities, instructions, and verified queries.
 
-Milestone 3 adds:
+Single-row helpers remain useful for bootstrap and compatibility. Compound
+helpers such as `ADD_UNIQUE_KEY_WITH_COLUMNS`,
+`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE`, and
+`ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` stage declarations that would
+otherwise expose an invalid intermediate state on a published model.
 
-- `SEMANTIC_ADMIN.COMPILER_RUNTIME`.
-- `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON`.
-- Pure-Lua JSON parsing and SQL generation inside the database.
+`APPLY_SEMANTIC_DEFINITION` provides SQL-native metric authoring, dry-run
+validation, atomic apply, metric rename/drop, Databricks translation support,
+and export/introspection. `APPLY_NORMALIZED_OSI_IMPORT` applies a host-normalized
+Ossie/OSI plan without making YAML or schema-version logic part of the database
+runtime.
 
-## Milestone 4 Runtime Objects
+### Validation and certification
 
-Milestone 4 adds:
+`VALIDATOR_RUNTIME` and `VALIDATE_MODEL` validate catalog structure, source
+metadata, grain proofs, metric dependencies, representation equivalence,
+coverage, reconciliation, and semantic identity. Validation writes durable run
+and issue records plus the metric/dimension matrix consumed by compilation.
 
-- `SEMANTIC_ADMIN.COMPILE_SQL`.
-- `SEMANTIC_ADMIN.COMPILE_SQL_DEBUG`.
-- `SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR`.
-- `SEMANTIC_ADMIN.SEMANTIC_GUARD`.
-- `SEMANTIC_ADMIN.PUBLISH_MODEL`.
-- `SEMANTIC_ADMIN.REFRESH_SEMANTIC_SURFACE`.
-- `SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL`.
-- `SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL`.
-- Published guarded views such as `SEMANTIC_SALES.SALES`.
+Multi-representation data probes require a bounded session `QUERY_TIMEOUT`.
+Compilation reuses the latest successful validation for the active model version;
+it does not rerun validation or remote probes per business query.
 
-## Milestone 5 Runtime Objects
+### Compiler and SQL generation
 
-Milestone 5 adds:
+`COMPILER_RUNTIME` exposes:
 
-- `SEMANTIC_AGENT.MODELS_FOR_AGENT`.
-- `SEMANTIC_AGENT.OBJECTS_FOR_AGENT`.
-- `SEMANTIC_AGENT.FIELDS_FOR_AGENT`.
-- `SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT`.
-- `SEMANTIC_AGENT.MEASURE_GROUPS_FOR_AGENT`.
-- `SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT`.
-- `SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT`.
-- `SEMANTIC_AGENT.BUSINESS_GLOSSARY_FOR_AGENT`.
-- `SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT`.
-- `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`.
-- `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`.
-- `SEMANTIC_ADMIN.AGENT_RUNTIME`.
-- `SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION`.
-- `SEMANTIC_ADMIN.ADD_VERIFIED_QUERY`.
-- `SEMANTIC_ADMIN.SEARCH_SEMANTIC_OBJECTS`.
-- `SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_OBJECT`.
-- `SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY`.
-- `SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL`.
-- `SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK`.
+- `COMPILE_REQUEST_JSON`
+- `COMPILE_SQL`
+- `COMPILE_SQL_DEBUG`
+- `SUGGEST_GRAIN_METADATA`
 
-## Nano-Validated Script And DDL Notes
+JSON and Semantic SQL lower to the same `QuerySpec`, catalog snapshot, logical
+metric plan, physical plan, and SQL renderer. The compiler handles strict grain
+proofs, multi-fact aggregate-state merging, deterministic representation
+selection, temporal partitions, authority-based reconciliation, semantic
+identity, and safe materialization substitution.
+
+### Publication and preprocessing
+
+`PUBLISH_MODEL` validates a model and creates guarded typed views in its
+published schema. `SEMANTIC_PREPROCESSOR` recognizes supported semantic queries,
+calls the shared compiler, and replaces them with generated Exasol SQL.
+
+Session activation is controlled by `ENABLE_SEMANTIC_SQL` and
+`DISABLE_SEMANTIC_SQL`. `REFRESH_SEMANTIC_SURFACE` regenerates published metadata
+views after a valid catalog change. Direct execution without preprocessing calls
+`SEMANTIC_GUARD` and fails rather than bypassing semantic compilation.
+
+### Agent and governance runtime
+
+`AGENT_RUNTIME` supports semantic search, object descriptions, glossary output,
+plan explanation, feedback, and governed model-evolution proposals and reviews.
+Role-scoped views expose models, objects, fields, valid combinations, verified
+queries, instructions, validation errors, request schema, request history, and
+the evolution review queue.
+
+No agent workflow mutates model semantics automatically. Suggestions are durable
+proposals that require review through `REVIEW_MODEL_EVOLUTION`.
+
+### Materialization runtime
+
+`MATERIALIZATION_RUNTIME` registers aggregate sources and their semantic column
+mappings. Materializations are selected only after logical correctness and grain
+have been proven. An incomplete or unsafe candidate falls back to base-source SQL
+and remains visible in plan rejection provenance.
+
+## Source Connectivity
+
+Entity representations may name ordinary Exasol relations or relations exposed
+through a Virtual Schema. The semantic runtime treats both as queryable Exasol
+relations and does not implement a source-specific adapter or hidden network
+client. Remote pushdown and connectivity remain responsibilities of the
+underlying Virtual Schema adapter.
+
+## Exasol-Specific Implementation Notes
 
 - `CREATE SCRIPT` parameter lists are untyped. Use `SCRIPT_NAME(arg1, arg2)`.
-- Lua script parameters should be checked against the `null` sentinel. Do not
+- Lua script parameters must be checked against Exasol's `null` sentinel; do not
   assume a global `is_null()` helper exists.
-- Catalog DDL should avoid unquoted reserved or parser-sensitive names. The
-  implemented catalog uses `RELATIONSHIP_CARDINALITY` and `SYNONYM_SOURCE`.
-- Column defaults should use the tested order `DEFAULT ... NOT NULL`.
-- Local Nano requires TLS for pyexasol connections; development tools disable
-  certificate verification only for local self-signed Nano.
-- Preprocessor install files should start by clearing
-  `SQL_PREPROCESSOR_SCRIPT`; an active session preprocessor can otherwise see
-  extension DDL.
-- Published guarded views use conventional uppercase Exasol column identifiers
-  so unquoted user SQL such as `select customer_region ...` resolves normally.
-- Lua `query()` results should be copied into plain row arrays before passing
-  them to `exit(...)`; iterating a query result and returning it directly are
-  not equivalent in Nano.
+- Catalog DDL avoids unsupported generic `CHECK` and `UNIQUE` constraints.
+  Allowed values and semantic uniqueness are enforced by admin and validation
+  scripts.
+- Column defaults use the tested order `DEFAULT ... NOT NULL`.
+- Preprocessor install files clear `SQL_PREPROCESSOR_SCRIPT` before replacing
+  preprocessor-related scripts because an active preprocessor also sees extension
+  DDL.
+- Published views use uppercase Exasol identifiers so ordinary unquoted SQL
+  resolves semantic field names normally.
+- Lua `query()` results are copied into plain row arrays before `exit(...)`.
+  Iterating a query result and returning that query object are not equivalent.
+- Local Nano pyexasol connections use TLS with certificate verification disabled
+  only for the local self-signed development instance.
+
+See [Architecture](architecture.md) for component rationale and
+[Runtime Testing](runtime-testing.md) for database-free and Nano verification.
