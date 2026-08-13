@@ -1246,7 +1246,7 @@ local function load_catalog(model, object_name)
             representation_id = row_value(row, "REPRESENTATION_ID", 4),
             expression = row_value(row, "SOURCE_EXPRESSION", 5),
             kind = row_value(row, "BINDING_KIND", 6),
-            mapping = row_value(row, "IDENTITY_MAPPING_ID", 7) and {
+            mapping = not missing(row_value(row, "IDENTITY_MAPPING_ID", 7)) and {
                 id = row_value(row, "IDENTITY_MAPPING_ID", 7),
                 source_schema = row_value(row, "SOURCE_SCHEMA", 8),
                 source_object = row_value(row, "SOURCE_OBJECT", 9),

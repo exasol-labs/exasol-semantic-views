@@ -6169,7 +6169,7 @@ local function load_catalog(ctx)
             representation_id = row_value(row, "REPRESENTATION_ID", 4),
             expression = row_value(row, "SOURCE_EXPRESSION", 5),
             kind = row_value(row, "BINDING_KIND", 6),
-            mapping = row_value(row, "IDENTITY_MAPPING_ID", 7) and {
+            mapping = not missing(row_value(row, "IDENTITY_MAPPING_ID", 7)) and {
                 id = row_value(row, "IDENTITY_MAPPING_ID", 7),
                 source_schema = row_value(row, "SOURCE_SCHEMA", 8),
                 source_object = row_value(row, "SOURCE_OBJECT", 9),
@@ -7074,8 +7074,8 @@ local function validate_semantic_identities(ctx)
         if entity ~= nil then
             for _, representation in ipairs(representations_for_entity(ctx, entity)) do
                 if not missing(representation.coverage_predicate)
-                    or representation.valid_from ~= nil
-                    or representation.valid_to ~= nil then
+                    or not missing(representation.valid_from)
+                    or not missing(representation.valid_to) then
                     add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
                         "SEMANTIC_MODEL_047", "F5 semantic identity cannot be combined with F3 representation coverage on the same entity.")
                     break
@@ -12667,7 +12667,7 @@ local function load_catalog(model, object_name)
             representation_id = row_value(row, "REPRESENTATION_ID", 4),
             expression = row_value(row, "SOURCE_EXPRESSION", 5),
             kind = row_value(row, "BINDING_KIND", 6),
-            mapping = row_value(row, "IDENTITY_MAPPING_ID", 7) and {
+            mapping = not missing(row_value(row, "IDENTITY_MAPPING_ID", 7)) and {
                 id = row_value(row, "IDENTITY_MAPPING_ID", 7),
                 source_schema = row_value(row, "SOURCE_SCHEMA", 8),
                 source_object = row_value(row, "SOURCE_OBJECT", 9),

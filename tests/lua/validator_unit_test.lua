@@ -1516,9 +1516,9 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS") then
             return {
                 {100, 1, "primary", "RELATION", "MART", "ORDERS", "o",
-                    "PRIMARY", 1},
+                    "PRIMARY", 1, null, null, null, null, "PREFER"},
                 {101, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o",
-                    "ALTERNATE", 20},
+                    "ALTERNATE", 20, null, null, null, null, "PREFER"},
             }
         elseif contains(sql, "SELECT DIMENSION_ID, DIMENSION_NAME") then
             return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
@@ -1538,7 +1538,7 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "FROM SYS_SEMANTIC.IDENTITY_BINDINGS") then
             return {
                 {311, 1, 301, 100, "o.order_id", "DIRECT",
-                    nil, nil, nil, nil, nil, nil},
+                    null, null, null, null, null, null},
                 {312, 1, 301, 101, "o.order_id", "MAPPED",
                     321, "MART", "ORDER_IDENTITY_MAP", "ARCHIVE_ORDER_ID",
                     "ORDER_ID", "CERTIFIED"},

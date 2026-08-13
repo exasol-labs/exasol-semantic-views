@@ -601,7 +601,8 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.IDENTITY_BINDINGS", 1, true) then
             if options.f5_identity then
                 return {
-                    {601, 1, 501, 101, "o.order_id", "DIRECT"},
+                    {601, 1, 501, 101, "o.order_id", "DIRECT",
+                        null, null, null, null, null, null},
                     {602, 1, 501, 104, "o.legacy_order_id", "MAPPED",
                         701, "IDENTITY_MAP", "ORDER_XREF", "LEGACY_ORDER_ID",
                         "ORDER_ID", "CERTIFIED"},
@@ -803,6 +804,11 @@ test("F5 compiler reconciles through a certified source-local identity map", fun
     assert_contains(result.plan_json, '"semantic_identity_name":"customer_identity"')
     assert_contains(result.plan_json, '"identity_binding_id":602')
     assert_contains(result.plan_json, '"identity_mapping_id":701')
+    local contributors = api.json_decode(result.plan_json)
+        .selected_representations[1].selected_bindings[1].fusion_contributors
+    local primary = contributors[1]
+    assert_equal(primary.representation_name, "primary")
+    assert_equal(primary.identity_mapping_id, nil)
 end)
 
 test("F3 compiler unions hot and cold aggregate-state partitions", function()
