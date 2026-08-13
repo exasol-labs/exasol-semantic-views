@@ -2,7 +2,7 @@
 
 <h1>Exasol Semantic Views</h1>
 
-<p><em>A database-native semantic layer for Exasol.<br>Governed metrics, deterministic compilation, and a structured agent contract — all in SQL.</em></p>
+<p><em>A database-native semantic layer for Exasol.<br>Governed metrics, deterministic compilation, and semantic fusion across heterogeneous sources — all in SQL.</em></p>
 
 [![Exasol](https://img.shields.io/badge/Exasol-2025.1%2B-003865?logo=databricks&logoColor=white)](https://www.exasol.com)
 [![Runtime](https://img.shields.io/badge/runtime-Lua%20%7C%20SQL-informational)](#installation)
@@ -17,7 +17,9 @@
 
 Exasol Semantic Views is a database-native semantic layer for Exasol. It turns
 business meaning into governed database metadata, then exposes that meaning to
-SQL users, BI tools, and agents through one shared compiler.
+SQL users, BI tools, and agents through one shared compiler. A logical entity
+can be backed by one warehouse table or fused across local, federated, and
+migrating representations without changing its business contract.
 
 The project is built around a simple idea: the semantic layer should live where
 the data runs. Definitions, validation results, agent context, materialization
@@ -34,6 +36,7 @@ agent prompts. Exasol Semantic Views moves that contract into Exasol itself:
 Business model
   -> entities, grain, relationships
   -> dimensions, facts, metrics defined with Semantic SQL
+  -> physical representations, authority, coverage, and identity
   -> validation and compatibility rules
   -> SQL, BI, agent, introspection, and materialization surfaces
   -> ordinary Exasol SQL execution
@@ -59,6 +62,9 @@ business shape of the model and uses that shape when compiling queries:
 - **Facts** are reusable row-level expressions at an entity grain, such as
   `net_revenue = ol.quantity * ol.net_unit_price`.
 - **Metrics** compose facts and other metrics into governed aggregate answers.
+- **Representations and fusion** map one logical entity to heterogeneous
+  physical sources, with explicit bindings, temporal coverage, authority, and
+  semantic identity controlling safe selection or reconciliation.
 - **Validation** records dependency graphs, fanout checks, and the
   metric/dimension compatibility matrix.
 - **Governance and agent context** add visibility, certification, synonyms,
@@ -85,6 +91,11 @@ The compiler uses the same metadata for all access paths: published semantic
 views with the Lua SQL preprocessor, deterministic agent requests through
 `COMPILE_REQUEST_JSON`, SQL tooling through `COMPILE_SQL`, and model review
 through `SHOW`, `DESCRIBE`, `EXPLAIN`, and `EXPORT`.
+
+Fusion is proof-driven rather than best-effort: validation checks keys,
+coverage, bindings, and identity before the compiler can partition or reconcile
+sources. See the [architecture guide](docs/architecture.md#semantic-fusion-path)
+for the supported fusion strategies and safety boundaries.
 
 The installed admin APIs are Exasol Lua scripts, so callers must use
 `EXECUTE SCRIPT SEMANTIC_ADMIN.<script>(...)`. Do not call them as scalar
