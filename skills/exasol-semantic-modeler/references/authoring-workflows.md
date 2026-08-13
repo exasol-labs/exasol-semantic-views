@@ -338,6 +338,30 @@ fusion contributor. F5 does not rewrite relationship endpoint mappings,
 free-form filters, composite identities, partitioned F3 plans, or multi-fact
 reconciliation; normalize those shapes in a governed source view.
 
+To retract an identity experiment or move the entity to F3, unwind F5 in this
+order:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION(
+  'customer_360', 'customer_identity', 'crm'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'crm'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'primary'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY(
+  'customer_360', 'customer', 'customer_identity'
+);
+```
+
+Each API refuses active dependents. `REMOVE_ENTITY_REPRESENTATION` likewise
+refuses active identity bindings rather than deleting them implicitly. Complete
+all removals before validation because intermediate states intentionally fail
+the complete-identity rule. Once the identity is gone, declare F3 coverage and
+validate again with a bounded `QUERY_TIMEOUT`.
+
 When several columns are renamed, add all required bindings one at a time
 before the final `VALIDATE_MODEL`. Intermediate validation errors for the
 remaining unbound attributes are expected. `ADD_ATTRIBUTE_BINDING` treats each

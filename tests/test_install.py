@@ -134,6 +134,9 @@ class InstallerResetTest(unittest.TestCase):
             "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY",
             "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING",
             "SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION",
+            "SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION",
+            "SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING",
+            "SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY",
         }
         for fragment in expected_fragments:
             self.assertTrue(any(fragment in sql for sql in statements), fragment)
@@ -149,6 +152,28 @@ class InstallerResetTest(unittest.TestCase):
         )
         self.assertIn('if binding_kind == "DIRECT"', add_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_binding)
+
+        remove_mapping = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION" in sql
+        )
+        self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", remove_mapping)
+        remove_binding = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING" in sql
+        )
+        self.assertIn("cannot remove an identity binding with an active mapping relation", remove_binding)
+        remove_identity = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY" in sql
+        )
+        self.assertIn("cannot remove a semantic identity with active bindings", remove_identity)
+        remove_representation = next(
+            sql for sql in statements
+            if "SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION" in sql
+        )
+        self.assertIn("cannot remove a representation with active identity bindings", remove_representation)
+        self.assertNotIn("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS", remove_representation)
 
     def test_reset_discovers_non_example_published_schemas(self):
         statements = INSTALL.reset_statements(Connection())

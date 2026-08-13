@@ -587,6 +587,13 @@ key set equal to the primary. Never infer or fuzzy-match identities at runtime.
 Composite identities, uncertified mappings, relationship remapping, and F3 plus
 F5 on one entity are unsupported; use a governed canonical view instead.
 
+To abandon F5 or switch the entity to F3, remove declarations in dependency
+order: `REMOVE_IDENTITY_MAPPING_RELATION` for every mapped binding,
+`REMOVE_IDENTITY_BINDING` for every representation, then
+`REMOVE_SEMANTIC_IDENTITY`. Do not edit catalog tables or remove a
+representation first; representation removal refuses active identity bindings.
+Apply the complete transition in one maintenance window and validate afterward.
+
 Register relationships with `ADD_RELATIONSHIP`:
 
 ```sql

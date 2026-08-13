@@ -36,6 +36,16 @@ def execute(con: Any, sql: str) -> list[tuple[Any, ...]]:
     return [tuple(row) for row in statement.fetchall()]
 
 
+def expect_failure(con: Any, sql: str, error_code: str) -> None:
+    try:
+        execute(con, sql)
+    except Exception as exc:
+        if error_code not in str(exc):
+            raise AssertionError(f"expected {error_code}, got: {exc}") from exc
+        return
+    raise AssertionError(f"expected {error_code}, statement succeeded")
+
+
 def validate(con: Any) -> list[tuple[Any, ...]]:
     return execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f5_verify')")
 
@@ -152,9 +162,39 @@ def main() -> int:
         if not has_rule(non_bijective, "SEMANTIC_MODEL_049"):
             raise AssertionError(f"non-bijective mapping was accepted: {non_bijective}")
 
+        con.execute("UPDATE F5_VERIFY.CUSTOMER_XREF SET CUSTOMER_ID = 2 WHERE ACCOUNT_ID = 'A-2'")
+        expect_failure(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING("
+            "'f5_verify', 'customer_identity', 'crm')",
+            "SEMANTIC_ADMIN_054",
+        )
+        expect_failure(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY("
+            "'f5_verify', 'customer', 'customer_identity')",
+            "SEMANTIC_ADMIN_056",
+        )
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION("
+            "'f5_verify', 'customer_identity', 'crm')")
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING("
+            "'f5_verify', 'customer_identity', 'crm')")
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING("
+            "'f5_verify', 'customer_identity', 'primary')")
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY("
+            "'f5_verify', 'customer', 'customer_identity')")
+        remaining = execute(con, """
+            SELECT COUNT(*)
+            FROM SEMANTIC_CATALOG.SEMANTIC_IDENTITIES
+            WHERE MODEL_NAME = 'f5_verify'
+        """)[0][0]
+        if int(remaining) != 0:
+            raise AssertionError(f"semantic identity removal left {remaining} row(s)")
+
         print("ok F5 identity: direct and mapped source-local keys")
         print("ok F5 validation: total, one-to-one canonical mapping")
         print("ok F5 failures: incomplete and non-bijective mappings rejected")
+        print("ok F5 lifecycle: dependency guards and ordered removal")
         print(f"ok F5 rows: {names}")
         return 0
     finally:

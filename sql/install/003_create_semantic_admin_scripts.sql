@@ -874,6 +874,172 @@ exit({{mapping_id, trim(MODEL_NAME), trim(IDENTITY_NAME),
 ]])
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION(
+  MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local model_name = trim(MODEL_NAME)
+local identity_name = trim(IDENTITY_NAME)
+local representation_name = trim(REPRESENTATION_NAME)
+if model_name == "" or identity_name == "" or representation_name == "" then
+    error("SEMANTIC_ADMIN_001: model, identity, and representation are required")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, im.IDENTITY_MAPPING_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+      ON si.MODEL_ID = m.MODEL_ID AND si.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(si.IDENTITY_NAME) = UPPER(:identity_name) AND si.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = si.ENTITY_ID AND er.VERSION_ID = si.VERSION_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.IDENTITY_BINDINGS ib
+      ON ib.IDENTITY_ID = si.IDENTITY_ID AND ib.REPRESENTATION_ID = er.REPRESENTATION_ID
+     AND ib.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS im
+      ON im.IDENTITY_BINDING_ID = ib.IDENTITY_BINDING_ID AND im.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, identity_name = identity_name,
+      representation_name = representation_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_052: active identity mapping relation not found")
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local mapping_id = row_value(rows[1], "IDENTITY_MAPPING_ID", 3)
+query("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS WHERE IDENTITY_MAPPING_ID = :mapping_id",
+    {mapping_id = mapping_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+exit({{mapping_id, model_name, identity_name, representation_name, "REMOVED"}}, [[
+  IDENTITY_MAPPING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  IDENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256), STATUS VARCHAR(32)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(
+  MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+local model_name = trim(MODEL_NAME)
+local identity_name = trim(IDENTITY_NAME)
+local representation_name = trim(REPRESENTATION_NAME)
+if model_name == "" or identity_name == "" or representation_name == "" then
+    error("SEMANTIC_ADMIN_001: model, identity, and representation are required")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, ib.IDENTITY_BINDING_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+      ON si.MODEL_ID = m.MODEL_ID AND si.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(si.IDENTITY_NAME) = UPPER(:identity_name) AND si.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      ON er.ENTITY_ID = si.ENTITY_ID AND er.VERSION_ID = si.VERSION_ID
+     AND UPPER(er.REPRESENTATION_NAME) = UPPER(:representation_name)
+     AND er.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.IDENTITY_BINDINGS ib
+      ON ib.IDENTITY_ID = si.IDENTITY_ID AND ib.REPRESENTATION_ID = er.REPRESENTATION_ID
+     AND ib.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, identity_name = identity_name,
+      representation_name = representation_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_053: active identity binding not found")
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local binding_id = row_value(rows[1], "IDENTITY_BINDING_ID", 3)
+local mapping_count = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS
+    WHERE IDENTITY_BINDING_ID = :binding_id AND STATUS = 'ACTIVE'
+]], {binding_id = binding_id})
+if tonumber(mapping_count or 0) > 0 then
+    error("SEMANTIC_ADMIN_054: cannot remove an identity binding with an active mapping relation; remove the mapping relation first")
+end
+query("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE IDENTITY_BINDING_ID = :binding_id",
+    {binding_id = binding_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+exit({{binding_id, model_name, identity_name, representation_name, "REMOVED"}}, [[
+  IDENTITY_BINDING_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),
+  IDENTITY_NAME VARCHAR(256), REPRESENTATION_NAME VARCHAR(256), STATUS VARCHAR(32)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY(
+  MODEL_NAME, ENTITY_NAME, IDENTITY_NAME
+)
+RETURNS TABLE AS
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+local model_name = trim(MODEL_NAME)
+local entity_name = trim(ENTITY_NAME)
+local identity_name = trim(IDENTITY_NAME)
+if model_name == "" or entity_name == "" or identity_name == "" then
+    error("SEMANTIC_ADMIN_001: model, entity, and identity are required")
+end
+local rows = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, si.IDENTITY_ID
+    FROM SYS_SEMANTIC.MODELS m
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
+     AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name) AND e.STATUS = 'ACTIVE'
+    JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES si
+      ON si.ENTITY_ID = e.ENTITY_ID AND si.VERSION_ID = e.VERSION_ID
+     AND UPPER(si.IDENTITY_NAME) = UPPER(:identity_name) AND si.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name, entity_name = entity_name,
+      identity_name = identity_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_055: active semantic identity not found")
+end
+local model_id = row_value(rows[1], "MODEL_ID", 1)
+local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
+local identity_id = row_value(rows[1], "IDENTITY_ID", 3)
+local binding_count = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.IDENTITY_BINDINGS
+    WHERE IDENTITY_ID = :identity_id AND STATUS = 'ACTIVE'
+]], {identity_id = identity_id})
+if tonumber(binding_count or 0) > 0 then
+    error("SEMANTIC_ADMIN_056: cannot remove a semantic identity with active bindings; remove the bindings first")
+end
+query("DELETE FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES WHERE IDENTITY_ID = :identity_id",
+    {identity_id = identity_id})
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
+    {model_id = model_id, version_id = version_id})
+exit({{identity_id, model_name, entity_name, identity_name, "REMOVED"}}, [[
+  IDENTITY_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  IDENTITY_NAME VARCHAR(256), STATUS VARCHAR(32)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
   MODEL_NAME,
   ENTITY_NAME,
@@ -1445,12 +1611,13 @@ local binding_count = scalar([[
 if tonumber(binding_count or 0) > 0 then
     error("SEMANTIC_ADMIN_048: cannot remove a representation with active attribute bindings; remove the bindings first")
 end
-query([[DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS
-    WHERE IDENTITY_BINDING_ID IN (SELECT IDENTITY_BINDING_ID
-      FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE REPRESENTATION_ID = :representation_id)]],
-    {representation_id = representation_id})
-query("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE REPRESENTATION_ID = :representation_id",
-    {representation_id = representation_id})
+local identity_binding_count = scalar([[
+    SELECT COUNT(*) FROM SYS_SEMANTIC.IDENTITY_BINDINGS
+    WHERE REPRESENTATION_ID = :representation_id AND STATUS = 'ACTIVE'
+]], {representation_id = representation_id})
+if tonumber(identity_binding_count or 0) > 0 then
+    error("SEMANTIC_ADMIN_057: cannot remove a representation with active identity bindings; remove mapping relations and identity bindings first")
+end
 query("DELETE FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES WHERE REPRESENTATION_ID = :representation_id",
     {representation_id = representation_id})
 query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",

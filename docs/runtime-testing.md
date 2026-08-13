@@ -78,7 +78,9 @@ The F4 verifier proves null fallback with agreeing overlap, rejects conflicting
 provenance.
 The F5 verifier uses different source-local customer keys, proves certified
 mapping totality and bijection, executes mapped F4 reconciliation, and rejects
-missing or many-to-one identity mappings.
+missing or many-to-one identity mappings. It then removes the mapping relation,
+bindings, and semantic identity in dependency order and verifies catalog
+cleanup.
 
 The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently

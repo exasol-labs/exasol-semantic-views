@@ -297,6 +297,32 @@ SEMANTIC_CATALOG.IDENTITY_BINDINGS
 SEMANTIC_CATALOG.IDENTITY_MAPPING_RELATIONS
 ```
 
+F5 declarations are reversible, but removal is dependency ordered. Remove each
+mapped binding's relation first, then every identity binding, and finally the
+semantic identity:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION(
+  'customer_360', 'customer_identity', 'crm'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'crm'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(
+  'customer_360', 'customer_identity', 'primary'
+);
+EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY(
+  'customer_360', 'customer', 'customer_identity'
+);
+```
+
+The APIs refuse out-of-order removal. `REMOVE_ENTITY_REPRESENTATION` also
+refuses a representation with an active identity binding; it never silently
+withdraws identity governance. After the final identity removal, F3 coverage
+may be declared for the entity. Every removal clears compile cache entries and
+marks successful validation runs stale, so validate after the complete
+transition.
+
 ## Validation Tables
 
 - `VALIDATION_RUNS`: one row per `VALIDATE_MODEL` execution.
