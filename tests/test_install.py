@@ -44,6 +44,22 @@ class Connection:
 
 
 class InstallerResetTest(unittest.TestCase):
+    def test_f7_model_evolution_surface_is_installable(self):
+        statements = []
+        for path in INSTALL.INSTALL_FILES:
+            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+        expected_fragments = {
+            "SYS_SEMANTIC.AGENT_SUGGESTION_REVIEWS",
+            "SYS_SEMANTIC.AGENT_SUGGESTION_TARGETS",
+            "SEMANTIC_CATALOG.MODEL_EVOLUTION_SUGGESTIONS",
+            "SEMANTIC_CATALOG.MODEL_EVOLUTION_REVIEWS",
+            "SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE",
+            "SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION",
+            "SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION",
+        }
+        for fragment in expected_fragments:
+            self.assertTrue(any(fragment in sql for sql in statements), fragment)
+
     def test_f2_binding_install_surface_is_split_into_statements(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:

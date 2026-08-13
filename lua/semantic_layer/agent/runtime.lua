@@ -247,6 +247,207 @@ local function latest_verified_query_id()
     return scalar("SELECT MAX(VERIFIED_QUERY_ID) FROM SYS_SEMANTIC.VERIFIED_QUERIES WHERE VERIFIED_BY = CURRENT_USER")
 end
 
+local EVOLUTION_KINDS = {
+    NEW_CONCEPT = true,
+    NEW_IDENTITY = true,
+    REPRESENTATION_EQUIVALENCE = true,
+    AUTHORITY_CHANGE = true,
+    DRIFT_REPAIR = true,
+}
+
+local EXISTING_EVOLUTION_TARGETS = {
+    MODEL = {table_name = "SYS_SEMANTIC.MODELS", id_column = "MODEL_ID",
+        name_column = "MODEL_NAME", versioned = false},
+    SEMANTIC_OBJECT = {table_name = "SYS_SEMANTIC.SEMANTIC_OBJECTS",
+        id_column = "OBJECT_ID", name_column = "OBJECT_NAME"},
+    ENTITY = {table_name = "SYS_SEMANTIC.ENTITIES", id_column = "ENTITY_ID",
+        name_column = "ENTITY_NAME"},
+    RELATIONSHIP = {table_name = "SYS_SEMANTIC.RELATIONSHIPS",
+        id_column = "RELATIONSHIP_ID", name_column = "RELATIONSHIP_NAME"},
+    DIMENSION = {table_name = "SYS_SEMANTIC.DIMENSIONS",
+        id_column = "DIMENSION_ID", name_column = "DIMENSION_NAME"},
+    FACT = {table_name = "SYS_SEMANTIC.FACTS", id_column = "FACT_ID",
+        name_column = "FACT_NAME"},
+    METRIC = {table_name = "SYS_SEMANTIC.METRICS", id_column = "METRIC_ID",
+        name_column = "METRIC_NAME"},
+    SEMANTIC_IDENTITY = {table_name = "SYS_SEMANTIC.SEMANTIC_IDENTITIES",
+        id_column = "SEMANTIC_IDENTITY_ID", name_column = "IDENTITY_NAME"},
+}
+
+local NEW_CONCEPT_TARGETS = {
+    SEMANTIC_OBJECT = true,
+    ENTITY = true,
+    RELATIONSHIP = true,
+    DIMENSION = true,
+    FACT = true,
+    METRIC = true,
+}
+
+local function json_object_text(value, label)
+    if missing(value) then
+        error("SEMANTIC_AGENT_001: " .. label .. " is required")
+    end
+    local text = trim(value)
+    if string.sub(text, 1, 1) ~= "{" or string.sub(text, -1) ~= "}" then
+        error("SEMANTIC_AGENT_040: " .. label .. " must be a JSON object")
+    end
+    return text
+end
+
+local function evolution_target(model, suggestion_kind, object_type_arg,
+        object_name_arg)
+    local object_type = normalize_choice(object_type_arg, "OBJECT_TYPE", {
+        MODEL = true, SEMANTIC_OBJECT = true, ENTITY = true,
+        RELATIONSHIP = true, DIMENSION = true, FACT = true, METRIC = true,
+        SEMANTIC_IDENTITY = true,
+    })
+    if suggestion_kind == "NEW_CONCEPT" then
+        if not NEW_CONCEPT_TARGETS[object_type] then
+            error("SEMANTIC_AGENT_041: NEW_CONCEPT cannot target " .. object_type)
+        end
+        return object_type, null, normalize_name(object_name_arg, "OBJECT_NAME")
+    end
+    if suggestion_kind == "NEW_IDENTITY"
+        or suggestion_kind == "REPRESENTATION_EQUIVALENCE"
+        or suggestion_kind == "AUTHORITY_CHANGE" then
+        if object_type ~= "ENTITY" then
+            error("SEMANTIC_AGENT_041: " .. suggestion_kind
+                .. " must target an existing ENTITY")
+        end
+    end
+    local target = EXISTING_EVOLUTION_TARGETS[object_type]
+    if target == nil then
+        error("SEMANTIC_AGENT_041: unsupported existing target: " .. object_type)
+    end
+    local object_name = object_type == "MODEL" and model.model_name
+        or normalize_name(object_name_arg, "OBJECT_NAME")
+    if object_type == "MODEL" then
+        return object_type, model.model_id, object_name
+    end
+    local sql_text = "SELECT " .. target.id_column .. " FROM " .. target.table_name
+        .. " WHERE MODEL_ID = :model_id"
+        .. " AND VERSION_ID = :version_id"
+        .. " AND UPPER(" .. target.name_column .. ") = UPPER(:object_name)"
+        .. " AND STATUS = 'ACTIVE'"
+    local object_id = scalar(sql_text, {model_id = model.model_id,
+        version_id = model.version_id, object_name = object_name})
+    if object_id == nil then
+        error("SEMANTIC_AGENT_042: evolution target not found: "
+            .. object_type .. " " .. object_name)
+    end
+    return object_type, object_id, object_name
+end
+
+function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
+        object_type_arg, object_name_arg, proposed_change_json_arg, rationale_arg)
+    local model = model_row(normalize_name(model_name_arg, "MODEL_NAME"))
+    local suggestion_kind = normalize_choice(suggestion_kind_arg,
+        "SUGGESTION_KIND", EVOLUTION_KINDS)
+    local object_type, object_id, object_name = evolution_target(model,
+        suggestion_kind, object_type_arg, object_name_arg)
+    local proposed_change_json = json_object_text(proposed_change_json_arg,
+        "PROPOSED_CHANGE_JSON")
+    if missing(rationale_arg) then
+        error("SEMANTIC_AGENT_001: RATIONALE is required")
+    end
+    local duplicate = query([[
+        SELECT SUGGESTION_ID
+        FROM SYS_SEMANTIC.AGENT_SUGGESTIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND SUGGESTION_KIND = :suggestion_kind
+          AND OBJECT_TYPE = :object_type
+          AND (OBJECT_ID = :object_id OR OBJECT_ID IS NULL AND :object_id IS NULL)
+          AND PROPOSED_CHANGE_JSON = :proposed_change_json
+          AND REVIEW_STATUS = 'PENDING'
+        ORDER BY SUGGESTION_ID
+        LIMIT 1
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        suggestion_kind = suggestion_kind, object_type = object_type,
+        object_id = object_id, proposed_change_json = proposed_change_json})
+    if duplicate ~= nil and #duplicate > 0 then
+        return {{row_value(duplicate[1], "SUGGESTION_ID", 1), model.model_name,
+            model.version_id, suggestion_kind, object_type, object_name,
+            "PENDING", true}}
+    end
+    query([[
+        INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTIONS (
+          MODEL_ID, VERSION_ID, SUGGESTION_KIND, OBJECT_TYPE, OBJECT_ID,
+          PROPOSED_CHANGE_JSON, RATIONALE, REVIEW_STATUS
+        ) VALUES (
+          :model_id, :version_id, :suggestion_kind, :object_type, :object_id,
+          :proposed_change_json, :rationale, 'PENDING'
+        )
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        suggestion_kind = suggestion_kind, object_type = object_type,
+        object_id = object_id, proposed_change_json = proposed_change_json,
+        rationale = tostring(rationale_arg)})
+    local suggestion_id = latest_id("SYS_SEMANTIC.AGENT_SUGGESTIONS",
+        "SUGGESTION_ID")
+    query([[
+        INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_TARGETS (
+          SUGGESTION_ID, OBJECT_NAME
+        ) VALUES (:suggestion_id, :object_name)
+    ]], {suggestion_id = suggestion_id, object_name = object_name})
+    return {{suggestion_id,
+        model.model_name, model.version_id, suggestion_kind, object_type,
+        object_name, "PENDING", false}}
+end
+
+function M.review_model_evolution(suggestion_id_arg, decision_arg, review_note_arg)
+    local suggestion_id = tonumber(suggestion_id_arg)
+    if suggestion_id == nil or suggestion_id < 1 then
+        error("SEMANTIC_AGENT_001: SUGGESTION_ID must be a positive number")
+    end
+    local decision = normalize_choice(decision_arg, "DECISION",
+        {CERTIFIED = true, REJECTED = true})
+    if missing(review_note_arg) then
+        error("SEMANTIC_AGENT_001: REVIEW_NOTE is required")
+    end
+    local rows = query([[
+        SELECT s.MODEL_ID, s.VERSION_ID, s.SUGGESTION_KIND, s.OBJECT_TYPE,
+               s.OBJECT_ID, s.REVIEW_STATUS, m.MODEL_NAME, m.ACTIVE_VERSION_ID
+        FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s
+        LEFT JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = s.MODEL_ID
+        WHERE s.SUGGESTION_ID = :suggestion_id
+    ]], {suggestion_id = suggestion_id})
+    if rows == nil or #rows == 0 then
+        error("SEMANTIC_AGENT_043: evolution suggestion not found: "
+            .. tostring(suggestion_id))
+    end
+    local row = rows[1]
+    local review_status = row_value(row, "REVIEW_STATUS", 6)
+    if review_status ~= "PENDING" then
+        error("SEMANTIC_AGENT_043: evolution suggestion is already "
+            .. tostring(review_status))
+    end
+    local version_id = row_value(row, "VERSION_ID", 2)
+    local active_version_id = row_value(row, "ACTIVE_VERSION_ID", 8)
+    if decision == "CERTIFIED" and tostring(version_id) ~= tostring(active_version_id) then
+        error("SEMANTIC_AGENT_044: cannot certify a stale evolution suggestion; "
+            .. "proposed version=" .. tostring(version_id)
+            .. ", active version=" .. tostring(active_version_id))
+    end
+    query([[
+        INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_REVIEWS (
+          SUGGESTION_ID, DECISION, REVIEW_NOTE
+        ) VALUES (:suggestion_id, :decision, :review_note)
+    ]], {suggestion_id = suggestion_id, decision = decision,
+        review_note = tostring(review_note_arg)})
+    query([[
+        UPDATE SYS_SEMANTIC.AGENT_SUGGESTIONS
+        SET REVIEW_STATUS = :decision,
+            REVIEWED_AT = CURRENT_TIMESTAMP,
+            REVIEWED_BY = CURRENT_USER
+        WHERE SUGGESTION_ID = :suggestion_id
+          AND REVIEW_STATUS = 'PENDING'
+    ]], {suggestion_id = suggestion_id, decision = decision})
+    local reviewer = scalar("SELECT CURRENT_USER")
+    return {{suggestion_id, row_value(row, "MODEL_NAME", 7), version_id,
+        row_value(row, "SUGGESTION_KIND", 3), decision, reviewer,
+        decision == "CERTIFIED" and "NO_CATALOG_MUTATION" or "NOT_APPLICABLE"}}
+end
+
 local STOP_WORDS = {
     A = true,
     AN = true,
@@ -884,6 +1085,8 @@ describe_semantic_object = M.describe_semantic_object
 get_business_glossary = M.get_business_glossary
 explain_compiled_sql = M.explain_compiled_sql
 record_agent_feedback = M.record_agent_feedback
+propose_model_evolution = M.propose_model_evolution
+review_model_evolution = M.review_model_evolution
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_AGENT_TEST_API = {

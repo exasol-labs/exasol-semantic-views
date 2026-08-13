@@ -56,6 +56,7 @@ end)
 
 test("agent instruction creation is idempotent and resolves metric scope", function()
     local inserted = nil
+    local target_insert = nil
     local duplicate = true
     local function mock(sql, params)
         if contains(sql, "FROM SYS_SEMANTIC.MODELS") then
@@ -295,6 +296,150 @@ test("agent feedback links the correct handle and optional suggestion", function
 
         local without = record_agent_feedback("query_log", 89, "helpful", nil, nil)
         assert_branch("agent.feedback.suggestion", without[1][2] ~= null, false)
+    end)
+end)
+
+test("F7 evolution proposals are typed versioned and idempotent", function()
+    local inserted = nil
+    local duplicate = false
+    local function mock(sql, params)
+        if contains(sql, "FROM SYS_SEMANTIC.MODELS") then
+            return {{MODEL_ID = 1, MODEL_NAME = "sales", VERSION_ID = 2,
+                PUBLISHED_SCHEMA = "SEMANTIC_SALES"}}
+        elseif contains(sql, "SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES") then
+            return {{20}}
+        elseif contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS")
+            and contains(sql, "REVIEW_STATUS = 'PENDING'") then
+            return duplicate and {{SUGGESTION_ID = 701}} or {}
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTIONS") then
+            inserted = params
+            return {}
+        elseif contains(sql, "SELECT MAX(SUGGESTION_ID)") then
+            return {{701}}
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_TARGETS") then
+            target_insert = params
+            return {}
+        end
+        error("unexpected evolution proposal SQL: " .. tostring(sql))
+    end
+    with_query(mock, function()
+        local created = propose_model_evolution("sales", "new_identity", "entity",
+            "customer", '{"identity":"global_customer_id"}',
+            "Queries join customer records across sources")
+        assert_equal(created[1][1], 701)
+        assert_equal(created[1][4], "NEW_IDENTITY")
+        assert_equal(created[1][5], "ENTITY")
+        assert_equal(created[1][7], "PENDING")
+        assert_true(created[1][8] == false)
+        assert_equal(inserted.object_id, 20)
+        assert_equal(inserted.version_id, 2)
+        assert_equal(target_insert.object_name, "customer")
+
+        duplicate = true
+        local existing = propose_model_evolution("sales", "NEW_IDENTITY", "ENTITY",
+            "customer", '{"identity":"global_customer_id"}', "Same evidence")
+        assert_equal(existing[1][1], 701)
+        assert_true(existing[1][8] == true)
+
+        duplicate = false
+        local concept = propose_model_evolution("sales", "NEW_CONCEPT", "METRIC",
+            "retention_rate", '{"metric":"retention_rate"}',
+            "Repeated historical retention queries")
+        assert_equal(concept[1][5], "METRIC")
+        assert_equal(concept[1][6], "retention_rate")
+        assert_equal(inserted.object_id, null)
+        assert_equal(target_insert.object_name, "retention_rate")
+    end)
+end)
+
+test("F7 evolution proposal contracts fail closed", function()
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.MODELS") then
+            return {{1, "sales", 2, "SEMANTIC_SALES"}}
+        end
+        return {}
+    end, function()
+        assert_error(function()
+            propose_model_evolution("sales", "AUTHORITY_CHANGE", "METRIC",
+                "revenue", '{}', "Wrong target")
+        end, "must target an existing ENTITY")
+        assert_error(function()
+            propose_model_evolution("sales", "NEW_CONCEPT", "METRIC",
+                "revenue", '[1]', "Malformed payload")
+        end, "must be a JSON object")
+        assert_error(function()
+            propose_model_evolution("sales", "UNKNOWN", "ENTITY",
+                "customer", '{}', "Unknown kind")
+        end, "invalid SUGGESTION_KIND")
+        assert_error(function()
+            propose_model_evolution("sales", "DRIFT_REPAIR", "ENTITY",
+                "missing_entity", '{}', "Source drift")
+        end, "evolution target not found")
+    end)
+end)
+
+test("F7 human review certifies without catalog activation", function()
+    local review_insert = nil
+    local suggestion_update = nil
+    local function mock(sql, params)
+        if contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s") then
+            return {{MODEL_ID = 1, VERSION_ID = 2, SUGGESTION_KIND = "DRIFT_REPAIR",
+                OBJECT_TYPE = "ENTITY", OBJECT_ID = 20, REVIEW_STATUS = "PENDING",
+                MODEL_NAME = "sales", ACTIVE_VERSION_ID = 2}}
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_REVIEWS") then
+            review_insert = params
+            return {}
+        elseif contains(sql, "UPDATE SYS_SEMANTIC.AGENT_SUGGESTIONS") then
+            suggestion_update = params
+            return {}
+        elseif contains(sql, "SELECT CURRENT_USER") then
+            return {{"HUMAN_REVIEWER"}}
+        end
+        error("unexpected evolution review SQL: " .. tostring(sql))
+    end
+    with_query(mock, function()
+        local certified = review_model_evolution(701, "certified",
+            "Evidence and smoke tests reviewed")
+        assert_equal(certified[1][5], "CERTIFIED")
+        assert_equal(certified[1][6], "HUMAN_REVIEWER")
+        assert_equal(certified[1][7], "NO_CATALOG_MUTATION")
+        assert_equal(review_insert.decision, "CERTIFIED")
+        assert_equal(suggestion_update.decision, "CERTIFIED")
+
+        local rejected = review_model_evolution(702, "REJECTED",
+            "Evidence is insufficient")
+        assert_equal(rejected[1][5], "REJECTED")
+        assert_equal(rejected[1][7], "NOT_APPLICABLE")
+    end)
+end)
+
+test("F7 review rejects stale certification and repeated decisions", function()
+    with_query(function() return {} end, function()
+        assert_error(function()
+            review_model_evolution(404, "REJECTED", "Not found")
+        end, "evolution suggestion not found")
+    end)
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s") then
+            return {{1, 2, "NEW_CONCEPT", "METRIC", null, "PENDING",
+                "sales", 3}}
+        end
+        return {}
+    end, function()
+        assert_error(function()
+            review_model_evolution(701, "CERTIFIED", "Looks good")
+        end, "cannot certify a stale evolution suggestion")
+    end)
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s") then
+            return {{1, 2, "NEW_CONCEPT", "METRIC", null, "REJECTED",
+                "sales", 2}}
+        end
+        return {}
+    end, function()
+        assert_error(function()
+            review_model_evolution(701, "REJECTED", "Again")
+        end, "already REJECTED")
     end)
 end)
 

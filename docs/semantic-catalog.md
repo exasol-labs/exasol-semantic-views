@@ -451,6 +451,39 @@ Human-oriented views:
 - `SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS`
 - `SEMANTIC_CATALOG.METRIC_FILTER_OVERVIEW`
 - `SEMANTIC_CATALOG.SEMANTIC_DEFINITION_SOURCE`
+- `SEMANTIC_CATALOG.MODEL_EVOLUTION_SUGGESTIONS`
+- `SEMANTIC_CATALOG.MODEL_EVOLUTION_REVIEWS`
+
+## Governed Model Evolution
+
+F7 keeps agent inference outside the deterministic query path. Agents can
+propose `NEW_CONCEPT`, `NEW_IDENTITY`, `REPRESENTATION_EQUIVALENCE`,
+`AUTHORITY_CHANGE`, or `DRIFT_REPAIR` changes:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION(
+  'sales', 'DRIFT_REPAIR', 'ENTITY', 'orders',
+  '{"source_column":"ORDER_STATUS","observed_type":"VARCHAR(40)"}',
+  'Source metadata differs from the last reviewed model.'
+);
+```
+
+Proposals are pinned to the model's active version and duplicate pending
+payloads are idempotent. They do not change model metadata. A human reviewer
+records the decision separately:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION(
+  <suggestion_id>, 'CERTIFIED', 'Source owner confirmed the change.'
+);
+```
+
+The other terminal decision is `REJECTED`. A decision is one-way, review notes
+are retained in `MODEL_EVOLUTION_REVIEWS`, and stale proposals cannot be
+certified after the active version changes. `CERTIFIED` means the proposal may
+be implemented; it does not activate it. Apply the reviewed change through the
+normal admin DDL, then validate and publish. The compiler does not read either
+evolution table.
 
 ## Materialization Registry
 

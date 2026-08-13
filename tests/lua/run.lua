@@ -77,7 +77,8 @@ end)
 load_runtime("lua/semantic_layer/agent/runtime.lua", function()
     return {add_agent_instruction, add_verified_query, search_semantic_objects,
         describe_semantic_object, get_business_glossary, explain_compiled_sql,
-        record_agent_feedback, ESV_AGENT_TEST_API}
+        record_agent_feedback, propose_model_evolution, review_model_evolution,
+        ESV_AGENT_TEST_API}
 end)
 
 local seen_functions = {}

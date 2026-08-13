@@ -767,6 +767,43 @@ descriptions. Treat changed comments as drift requiring review; update the
 semantic catalog deliberately and republish rather than mutating generated
 view comments directly.
 
+## Propose Model Evolution
+
+Do not apply inferred model changes directly. Record one typed F7 proposal for
+each new concept, identity, representation equivalence, authority change, or
+drift repair:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION(
+  '<model>',
+  '<NEW_CONCEPT|NEW_IDENTITY|REPRESENTATION_EQUIVALENCE|AUTHORITY_CHANGE|DRIFT_REPAIR>',
+  '<object_type>',
+  '<object_name>',
+  '<proposed_change_json>',
+  '<evidence_and_rationale>'
+);
+```
+
+Use an existing `ENTITY` target for identity, representation-equivalence, and
+authority proposals. `NEW_CONCEPT` may target a proposed `SEMANTIC_OBJECT`,
+`ENTITY`, `RELATIONSHIP`, `DIMENSION`, `FACT`, or `METRIC`. Put executable DDL,
+source evidence, expected validation effects, and rollback notes in the JSON;
+never put ambiguous runtime matching instructions there.
+
+Review pending work through
+`SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`. Only a human reviewer certifies:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION(
+  <suggestion_id>, '<CERTIFIED|REJECTED>', '<review_note>'
+);
+```
+
+Certification returns `NO_CATALOG_MUTATION`. After certification, apply the
+reviewed change with the existing admin scripts, smoke-test expressions,
+validate, and publish. Re-propose if the suggestion is stale; do not bypass the
+version guard or edit `SYS_SEMANTIC` directly.
+
 ## Governance Metadata
 
 Add agent instructions after publication:

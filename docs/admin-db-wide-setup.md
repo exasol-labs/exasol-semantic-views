@@ -64,7 +64,9 @@ Neither route exposes the complete structured agent contract:
   query Exasol metadata.
 - SELECT-only MCP tools still cannot execute semantic admin scripts such as
   `COMPILE_REQUEST_JSON`, `COMPILE_SQL`, `EXPLAIN_COMPILED_SQL`, or
-  `RECORD_AGENT_FEEDBACK`.
+  `RECORD_AGENT_FEEDBACK`. F7 governance also requires script access for
+  `PROPOSE_MODEL_EVOLUTION` and `REVIEW_MODEL_EVOLUTION`; the pending queue is
+  readable through `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`.
 
 For structured compilation, plans, durable handles, explanations, and feedback,
 use a semantic MCP adapter that maps tools to the database-resident scripts.

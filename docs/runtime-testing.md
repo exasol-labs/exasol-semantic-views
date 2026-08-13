@@ -69,6 +69,7 @@ python3 tools/verify_fusion_f3.py
 python3 tools/verify_fusion_f4.py
 python3 tools/verify_fusion_f5.py
 python3 tools/verify_fusion_f51.py
+python3 tools/verify_fusion_f7.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -85,6 +86,8 @@ cleanup.
 The F5.1 verifier selects an alternate customer representation whose local key
 needs a deterministic `DIRECT` cast, executes a relationship join with the
 rewritten endpoint, and checks relationship-side provenance in the plan.
+The F7 verifier proves proposal idempotency, human certification/rejection,
+review auditability, and the absence of automatic catalog mutation.
 
 The maintained D1/D2 verifier uses an isolated `grain_d1` model with three fact
 branches. It compares JSON and Semantic SQL results with independently
