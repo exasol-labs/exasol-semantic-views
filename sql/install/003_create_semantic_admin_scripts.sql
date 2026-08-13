@@ -2342,6 +2342,27 @@ local representation_id = scalar([[
     WHERE ENTITY_ID = :entity_id
       AND UPPER(REPRESENTATION_NAME) = UPPER(:representation_name)
 ]], {entity_id = entity_id, representation_name = representation_name})
+-- Keep the compound identity path symmetric with representation-plus-coverage.
+-- Explicit bindings make the complete candidate visible to one validation run.
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+      BINDING_PRIORITY, IS_DEFAULT, STATUS
+    )
+    SELECT d.MODEL_ID, d.VERSION_ID, d.ENTITY_ID, 'DIMENSION', d.DIMENSION_ID,
+           :representation_id, d.EXPRESSION, 'PREFER', 1, FALSE, 'ACTIVE'
+    FROM SYS_SEMANTIC.DIMENSIONS d
+    WHERE d.MODEL_ID = :model_id AND d.VERSION_ID = :version_id
+      AND d.ENTITY_ID = :entity_id AND d.STATUS = 'ACTIVE'
+    UNION ALL
+    SELECT f.MODEL_ID, f.VERSION_ID, f.ENTITY_ID, 'FACT', f.FACT_ID,
+           :representation_id, f.EXPRESSION, 'PREFER', 1, FALSE, 'ACTIVE'
+    FROM SYS_SEMANTIC.FACTS f
+    WHERE f.MODEL_ID = :model_id AND f.VERSION_ID = :version_id
+      AND f.ENTITY_ID = :entity_id AND f.STATUS = 'ACTIVE'
+]], {representation_id = representation_id, model_id = model_id,
+      version_id = version_id, entity_id = entity_id})
 query([[
     INSERT INTO SYS_SEMANTIC.IDENTITY_BINDINGS (
       MODEL_ID, VERSION_ID, ENTITY_ID, IDENTITY_ID, REPRESENTATION_ID,
@@ -2390,24 +2411,36 @@ if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
+    local validation_errors = {}
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
                 or "model validation failed"
-            query("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS WHERE IDENTITY_BINDING_ID = :binding_id",
-                {binding_id = binding_id})
-            query("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE IDENTITY_BINDING_ID = :binding_id",
-                {binding_id = binding_id})
-            query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
-                {representation_id = representation_id})
-            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
-                {model_name = model_name})
-            error("SEMANTIC_ADMIN_094: published representation-with-identity candidate rejected and restored; "
-                .. "candidate introduced validation error: "
-                .. tostring(rule_code) .. " " .. tostring(message))
+            local object_type = row_value(validation_row, "OBJECT_TYPE", 2)
+                or "MODEL"
+            local object_name = row_value(validation_row, "OBJECT_NAME", 3)
+                or model_name
+            validation_errors[#validation_errors + 1] = tostring(rule_code)
+                .. " [" .. tostring(object_type) .. " " .. tostring(object_name)
+                .. "] " .. tostring(message)
         end
+    end
+    if #validation_errors > 0 then
+        query("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS WHERE IDENTITY_BINDING_ID = :binding_id",
+            {binding_id = binding_id})
+        query("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS WHERE IDENTITY_BINDING_ID = :binding_id",
+            {binding_id = binding_id})
+        query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE REPRESENTATION_ID = :representation_id",
+            {representation_id = representation_id})
+        query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
+            {representation_id = representation_id})
+        query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+            {model_name = model_name})
+        error("SEMANTIC_ADMIN_094: published representation-with-identity candidate rejected and restored; "
+            .. "candidate introduced " .. tostring(#validation_errors)
+            .. " validation error(s): " .. table.concat(validation_errors, "; "))
     end
 end
 exit({{representation_id, binding_id, mapping_id, model_name, entity_name,

@@ -31,12 +31,14 @@ def execute(con: Any, sql: str) -> list[tuple[Any, ...]]:
     return [tuple(row) for row in statement.fetchall()]
 
 
-def expect_error(con: Any, sql: str, code: str) -> None:
+def expect_error(con: Any, sql: str, code: str) -> str:
     try:
         execute(con, sql)
     except Exception as exc:
-        if code not in str(exc):
+        message = str(exc)
+        if code not in message:
             raise AssertionError(f"expected {code}, got: {exc}") from exc
+        return message
     else:
         raise AssertionError("invalid published representation candidate was accepted")
 
@@ -64,19 +66,29 @@ def main() -> int:
         con.execute("CREATE SCHEMA BUG31_VERIFY")
         con.execute(
             "CREATE TABLE BUG31_VERIFY.CUSTOMERS_PRIMARY ("
-            "CUSTOMER_ID DECIMAL(18,0), CUSTOMER_NAME VARCHAR(100))"
+            "CUSTOMER_ID DECIMAL(18,0), CUSTOMER_NAME VARCHAR(100), "
+            "CUSTOMER_TIER VARCHAR(20), CUSTOMER_COUNTRY VARCHAR(2))"
         )
         con.execute(
             'CREATE TABLE BUG31_VERIFY.CUSTOMERS_EXTERNAL ('
-            '"external_id" DECIMAL(10,0), CUSTOMER_NAME VARCHAR(100))'
+            '"external_id" DECIMAL(10,0), CUSTOMER_NAME VARCHAR(100), '
+            "CUSTOMER_TIER VARCHAR(20), CUSTOMER_COUNTRY VARCHAR(2))"
+        )
+        con.execute(
+            'CREATE TABLE BUG31_VERIFY.CUSTOMERS_INCOMPLETE ('
+            '"external_id" DECIMAL(10,0))'
         )
         con.execute(
             "INSERT INTO BUG31_VERIFY.CUSTOMERS_PRIMARY VALUES "
-            "(1, 'Alice'), (2, 'Bob')"
+            "(1, 'Alice', 'GOLD', 'DK'), (2, 'Bob', 'SILVER', 'SE')"
         )
         con.execute(
-            'INSERT INTO BUG31_VERIFY.CUSTOMERS_EXTERNAL ("external_id", CUSTOMER_NAME) '
-            "VALUES (1, 'Alice'), (2, 'Bob')"
+            "INSERT INTO BUG31_VERIFY.CUSTOMERS_EXTERNAL VALUES "
+            "(1, 'Alice', 'GOLD', 'DK'), (2, 'Bob', 'SILVER', 'SE')"
+        )
+        con.execute(
+            'INSERT INTO BUG31_VERIFY.CUSTOMERS_INCOMPLETE ("external_id") '
+            "VALUES (1), (2)"
         )
 
         setup = [
@@ -94,6 +106,12 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('bug31_verify', 'CUSTOMERS', "
             "'customer', 'customer_name', 'c.customer_name', 'VARCHAR(100)', "
             "'Customer Name', 'Customer name', NULL, TRUE)",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('bug31_verify', 'CUSTOMERS', "
+            "'customer', 'customer_tier', 'c.customer_tier', 'VARCHAR(20)', "
+            "'Customer Tier', 'Customer tier', NULL, TRUE)",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('bug31_verify', 'CUSTOMERS', "
+            "'customer', 'customer_country', 'c.customer_country', 'VARCHAR(2)', "
+            "'Customer Country', 'Customer country', NULL, TRUE)",
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY('bug31_verify', "
             "'customer', 'customer_identity', 'GLOBAL', 'DECIMAL(18,0)', "
             "'Certified customer identity')",
@@ -129,13 +147,37 @@ def main() -> int:
         )
         if len(rows) != 1 or str(rows[0][7]) != "DIRECT":
             raise AssertionError(f"unexpected compound result: {rows}")
+        binding_count = execute(
+            con,
+            "SELECT COUNT(*) FROM SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS "
+            "WHERE MODEL_NAME = 'bug31_verify' "
+            "AND REPRESENTATION_NAME = 'external'",
+        )[0][0]
+        if int(binding_count) != 3:
+            raise AssertionError(
+                f"compound representation generated {binding_count} attribute binding(s)"
+            )
         if surface(con) != expected:
             raise AssertionError("compound representation changed the surface")
+
+        incomplete = (
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING("
+            "'bug31_verify', 'customer', 'incomplete', 'RELATION', "
+            "'BUG31_VERIFY', 'CUSTOMERS_INCOMPLETE', 30, 'MANUAL', "
+            "'customer_identity', 'CAST(c.\"external_id\" AS DECIMAL(18,0))', "
+            "'DIRECT', NULL)"
+        )
+        incomplete_error = expect_error(con, incomplete, "SEMANTIC_ADMIN_094")
+        for dimension in ("customer_name", "customer_tier", "customer_country"):
+            if dimension not in incomplete_error:
+                raise AssertionError(
+                    f"compound rejection did not name {dimension}: {incomplete_error}"
+                )
 
         invalid = (
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING("
             "'bug31_verify', 'customer', 'external_bad', 'RELATION', "
-            "'BUG31_VERIFY', 'CUSTOMERS_EXTERNAL', 30, 'MANUAL', "
+            "'BUG31_VERIFY', 'CUSTOMERS_EXTERNAL', 40, 'MANUAL', "
             "'customer_identity', 'c.missing_id', 'DIRECT', NULL)"
         )
         expect_error(con, invalid, "SEMANTIC_ADMIN_094")
@@ -152,6 +194,8 @@ def main() -> int:
 
         print("ok BUG-31 control: heterogeneous ordinary registration was rejected safely")
         print("ok BUG-31 compound: representation and DIRECT identity binding were accepted")
+        print("ok BUG-35 bindings: governed attribute bindings were generated atomically")
+        print("ok BUG-35 diagnostics: every incompatible attribute was reported")
         print("ok BUG-31 rollback: invalid complete candidate left no catalog rows")
         print("ok BUG-31 availability: published surface remained certified")
         return 0

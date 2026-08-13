@@ -354,8 +354,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING(
 
 For `MAPPED`, pass `MAPPING_JSON` with `source_schema`, `source_object`,
 `source_local_column`, `semantic_key_column`, and `certification_status`.
-Smoke-test any renamed attribute bindings separately before this call; the
-compound operation covers representation identity, not F2 attribute remapping.
+The compound call seeds explicit dimension and fact bindings from the governed
+expressions. Smoke-test those expressions against the new source first. The
+call normalizes representation identity but does not accept custom F2 attribute
+remapping: if canonical attributes are renamed, nested, or split across child
+relations, expose them through a canonicalizing view before registration.
 
 The mapping relation must be queryable by the validating user and contain one
 non-null semantic key for every source-local key, with no duplicate local or

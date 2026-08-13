@@ -412,8 +412,11 @@ class InstallerResetTest(unittest.TestCase):
         )
         self.assertIn("MAPPED binding requires MAPPING_JSON", add_representation_binding)
         self.assertIn("published representation-with-identity candidate rejected", add_representation_binding)
+        self.assertIn("INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS", add_representation_binding)
+        self.assertIn("table.concat(validation_errors", add_representation_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_representation_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS", add_representation_binding)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", add_representation_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", add_representation_binding)
 
         remove_mapping = next(

@@ -76,6 +76,7 @@ python3 tools/verify_bug25_published_mutation_protection.py
 python3 tools/verify_bug26_published_f3_batch.py
 python3 tools/verify_bug27_published_multistep_declarations.py
 python3 tools/verify_bug28_composite_removal_and_recertification.py
+python3 tools/verify_bug31_representation_with_identity.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -109,8 +110,9 @@ The BUG-30 verifier proves that a complete identity and all representation
 bindings can be added atomically to a published multi-representation entity,
 while incomplete candidates leave no catalog or surface impact.
 The BUG-31 verifier adds a representation whose physical key differs from the
-published entity key together with its F5 binding, and proves candidate rollback
-and continuous surface certification.
+published entity key together with its F5 binding, verifies that governed
+attribute bindings are generated, and proves complete incompatible-attribute
+diagnostics, candidate rollback, and continuous surface certification.
 The BUG-32 verifier rejects a numeric-to-string relationship with endpoint type
 diagnostics, then removes a valid mapping and relationship in dependency order
 without interrupting the published surface.

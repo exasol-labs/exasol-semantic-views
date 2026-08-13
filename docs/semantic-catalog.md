@@ -339,8 +339,16 @@ When a published entity already has an F5 identity, use
 `ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` to register a heterogeneous
 source together with its `DIRECT` or `MAPPED` binding. `MAPPED` registration
 takes the same certified relation fields in `MAPPING_JSON`. The complete
-candidate is validated once and removes the mapping, binding, and representation
-if validation fails.
+candidate also seeds explicit dimension and fact bindings from the governed
+expressions, then validates once. If validation fails, the error lists every
+failing object and the operation removes the generated attribute bindings,
+identity mapping, identity binding, and representation before recertifying the
+published surface.
+
+Identity mapping normalizes key names and types; it does not flatten a source
+or join nested child relations. Generated attribute bindings require the new
+representation to expose the governed canonical columns. Use a canonicalizing
+view when the alternate has a different physical shape.
 
 F4 compilation joins contributors on the semantic key. Mapped contributors are
 joined through the certified relation, and the plan records semantic identity,

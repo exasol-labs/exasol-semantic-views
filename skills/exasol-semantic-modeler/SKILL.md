@@ -261,7 +261,11 @@ F5 setup on an already published multi-representation entity; the standalone
 identity call is rejected because the required bindings do not exist yet.
 When an existing published F5 entity gains a heterogeneous representation, use
 `ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING`; ordinary representation
-registration validates before its required binding can be added.
+registration validates before its required binding can be added. The compound
+call seeds dimension and fact bindings from the governed expressions. It can
+normalize a differently named or typed identity key, but the alternate must
+still expose canonical attribute columns; use a canonicalizing view for nested
+or otherwise different source shapes.
 
 ### Step 4 — Derive facts from numeric columns
 

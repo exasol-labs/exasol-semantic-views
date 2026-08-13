@@ -312,8 +312,10 @@ physical representation and its compatibility bindings, while
 `ADD_UNIQUE_KEY_WITH_COLUMNS` validates a complete key instead of exposing an
 empty key between calls.
 `ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` similarly adds a heterogeneous
-representation and its F5 binding as one candidate, so legacy key validation
-never observes the unbound representation.
+representation, governed attribute bindings, and its F5 binding as one
+candidate, so validation never observes an incomplete representation. Generated
+attribute bindings reuse the governed expressions; F5 normalizes identity names
+and types, not nested or otherwise incompatible physical shapes.
 Relationship additions and removals use the same prospective boundary.
 `SEMANTIC_MODEL_051` blocks simple equality joins whose resolved endpoint type
 families differ before the relationship can affect a published query.
