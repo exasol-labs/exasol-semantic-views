@@ -121,6 +121,14 @@ FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT
 ORDER BY CONTRACT_SECTION, NAME;
 ```
 
+**Expression functions accepted by static validation:**
+
+```sql
+SELECT FUNCTION_NAME, FUNCTION_CATEGORY
+FROM SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT
+ORDER BY FUNCTION_NAME;
+```
+
 **Current blocking errors (stop if any exist for the target model):**
 
 ```sql

@@ -664,6 +664,7 @@ Important views:
 - `INSTRUCTIONS_FOR_AGENT`
 - `BUSINESS_GLOSSARY_FOR_AGENT`
 - `VALIDATION_ERRORS_FOR_AGENT`
+- `EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `REQUEST_HISTORY_FOR_AGENT`
 - `MODEL_EVOLUTION_REVIEW_QUEUE`
@@ -672,6 +673,8 @@ Important views:
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions when a metric
 has a filter. `VALIDATION_ERRORS_FOR_AGENT` contains the latest blocking
 validation errors and session preconditions for visible models.
+`EXPRESSION_FUNCTIONS_FOR_AGENT` enumerates the built-in functions accepted by
+static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` contains the accepted structured-request
 keys, filter aliases, operators, order-by fields, handle types, and enum values.
 `REQUEST_HISTORY_FOR_AGENT` includes `STARTED_AT` and the compatibility alias

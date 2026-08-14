@@ -584,6 +584,61 @@ test("validator accepts valid F2 bindings and rejects dangling ownership", funct
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_040"))
 end)
 
+test("validator accepts canonical string functions in F2 bindings", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "ARCHIVE", source_object = "ORDERS"}
+    local dimension = {id = 10, name = "status", entity_id = 1,
+        expression = "o.status"}
+    local ctx = validation_context({
+        entity_by_id = {["1"] = entity}, entity_name_by_id = {["1"] = "orders"},
+        entity_alias_by_id = {["1"] = "O"}, representations = {representation},
+        dimensions = {dimension}, dimension_by_id = {["10"] = dimension},
+        facts = {}, fact_by_id = {}, metrics = {},
+        bindings_by_attribute = {['DIMENSION:10'] = {{id = 1}}},
+        attribute_bindings = {
+            {id = 1, entity_id = 1, attribute_type = "DIMENSION", attribute_id = 10,
+                representation_id = 2,
+                expression = "REPLACE(SUBSTR(TRIM(LTRIM(RTRIM(UPPER(LOWER(o.status))))), 1, 3), '_', '-')",
+                role = "PREFER", priority = 1},
+        },
+    })
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        return {}
+    end, function() api.validate_expressions(ctx, {}) end)
+    assert_true(not has_rule(ctx, "SEMANTIC_MODEL_040"))
+end)
+
+test("SEMANTIC_MODEL_040 names the permitted function set", function()
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "ARCHIVE", source_object = "ORDERS"}
+    local dimension = {id = 10, name = "status", entity_id = 1,
+        expression = "o.status"}
+    local ctx = validation_context({
+        entity_by_id = {["1"] = entity}, entity_name_by_id = {["1"] = "orders"},
+        entity_alias_by_id = {["1"] = "O"}, representations = {representation},
+        dimensions = {dimension}, dimension_by_id = {["10"] = dimension},
+        facts = {}, fact_by_id = {}, metrics = {},
+        bindings_by_attribute = {['DIMENSION:10'] = {{id = 1}}},
+        attribute_bindings = {
+            {id = 1, entity_id = 1, attribute_type = "DIMENSION", attribute_id = 10,
+                representation_id = 2, expression = "QUARTER(o.status)",
+                role = "PREFER", priority = 1},
+        },
+    })
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        return {}
+    end, function() api.validate_expressions(ctx, {}) end)
+    local message = issue_for_rule(ctx, "SEMANTIC_MODEL_040").message
+    assert_contains(message, "Unsupported function in binding expression: QUARTER")
+    assert_contains(message, "Permitted functions: ABS")
+    assert_contains(message, "TRIM")
+    assert_contains(message, "UPPER")
+end)
+
 test("F2 bindings monotonically repair renamed representation columns", function()
     local entity = {id = 1, name = "customer", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

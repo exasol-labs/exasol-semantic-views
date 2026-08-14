@@ -79,7 +79,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_037` | error | F1 equivalence cannot be proven: no key is declared, a key probe failed, or a representation violates a declared key's grain. |
 | `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. |
 | `SEMANTIC_MODEL_039` | error | An attribute binding has invalid ownership, role, priority, representation, or duplicate active membership. |
-| `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses an unsupported function, or references a column absent from its target representation. |
+| `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses a function outside the permitted set below, or references a column absent from its target representation. The unsupported-function diagnostic names the permitted set. |
 | `SEMANTIC_MODEL_041` | precondition | A multi-representation F1/F3 key probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds. This is a blocking session precondition, not a defect in the model. The guard applies regardless of declared source kind or view dependencies. |
 | `SEMANTIC_MODEL_042` | error | F3 `UNION` coverage is partial, gapped, overlapping, not open-ended, or its canonical predicate does not exactly encode the declared half-open interval. |
 | `SEMANTIC_MODEL_043` | error | Once a model has active metrics, coverage partitions an entity that is the base of none of them and therefore can only use the unsupported partitioned joined-dimension path. |
@@ -94,6 +94,23 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_052` | error | A dimension or fact on an F3-partitioned entity lacks an active binding on one or more partitions. Each missing attribute/partition pair is reported. |
 
 ## Expression Validation Boundary
+
+The static expression-function allow-list is:
+
+`ABS`, `AVG`, `CAST`, `CEIL`, `COALESCE`, `CONCAT`, `COUNT`, `DATE_TRUNC`,
+`DAY`, `EXTRACT`, `FLOOR`, `LOWER`, `LPAD`, `LTRIM`, `MAX`, `MIN`, `MONTH`,
+`NULLIF`, `REPLACE`, `ROUND`, `RTRIM`, `SUBSTR`, `SUM`, `TO_CHAR`, `TO_DATE`,
+`TRIM`, `TRUNC`, `UPPER`, and `YEAR`.
+
+This is the validator's static safety boundary, not a guarantee that every
+function is meaningful in every expression context. Agents and adapters can
+discover the same set without trial and error:
+
+```sql
+SELECT FUNCTION_NAME, FUNCTION_CATEGORY
+FROM SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT
+ORDER BY FUNCTION_NAME;
+```
 
 Expression validation checks alias scope, referenced source columns, and a
 static unsupported-function policy. It does not ask Exasol to parse every

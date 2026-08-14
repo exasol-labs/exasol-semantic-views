@@ -45,6 +45,7 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.BUSINESS_GLOSSARY_FOR_AGENT`
 - `SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT`
+- `SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`
 - `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`
@@ -55,6 +56,8 @@ where relevant, so adapters do not need to infer Exasol identifier casing rules.
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions for filtered
 metrics. `VALIDATION_ERRORS_FOR_AGENT` exposes the latest role-visible blocking
 validation errors and session preconditions.
+`EXPRESSION_FUNCTIONS_FOR_AGENT` enumerates the built-in functions accepted by
+static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted request keys, filter
 aliases, operators, order fields, handle types, and enum values as rows.
 `REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the compatibility

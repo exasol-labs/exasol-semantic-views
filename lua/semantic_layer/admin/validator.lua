@@ -125,17 +125,32 @@ local ALLOWED_FUNCTIONS = {
     EXTRACT = true,
     FLOOR = true,
     LPAD = true,
+    LOWER = true,
+    LTRIM = true,
     MAX = true,
     MIN = true,
     MONTH = true,
     NULLIF = true,
+    REPLACE = true,
     ROUND = true,
+    RTRIM = true,
+    SUBSTR = true,
     SUM = true,
     TO_CHAR = true,
     TO_DATE = true,
+    TRIM = true,
     TRUNC = true,
+    UPPER = true,
     YEAR = true,
 }
+
+local allowed_function_names = {}
+for function_name, _ in pairs(ALLOWED_FUNCTIONS) do
+    SQL_WORDS[function_name] = true
+    table.insert(allowed_function_names, function_name)
+end
+table.sort(allowed_function_names)
+local ALLOWED_FUNCTION_NAMES = table.concat(allowed_function_names, ", ")
 
 local CAST_TARGET_TYPES = {
     BIGINT = true,
@@ -2859,7 +2874,8 @@ local function validate_expressions(ctx, safe_edges)
             for fn, _ in pairs(unsupported_functions(binding.expression)) do
                 add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
                     "SEMANTIC_MODEL_040", "Unsupported function in binding expression: "
-                        .. tostring(fn) .. ".")
+                        .. tostring(fn) .. ". Permitted functions: "
+                        .. ALLOWED_FUNCTION_NAMES .. ".")
             end
             for _, ref in ipairs(column_refs_in_expression(binding.expression)) do
                 if ref.alias == owning_alias and not source_column_exists(

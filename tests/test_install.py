@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -44,6 +45,35 @@ class Connection:
 
 
 class InstallerResetTest(unittest.TestCase):
+    def test_expression_function_discovery_matches_validator_allow_list(self):
+        validator = (
+            ROOT / "lua/semantic_layer/admin/validator.lua"
+        ).read_text(encoding="utf-8")
+        allow_list = validator.split("local ALLOWED_FUNCTIONS = {", 1)[1].split(
+            "}", 1
+        )[0]
+        allowed = set(re.findall(r"^\s+([A-Z_]+) = true,$", allow_list, re.MULTILINE))
+
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/006_create_semantic_agent_views.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        discovery = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT AS" in sql
+        )
+        exposed = set(
+            re.findall(r"(?:SELECT|UNION ALL SELECT) '([A-Z_]+)'", discovery)
+        )
+
+        self.assertEqual(allowed, exposed)
+        self.assertTrue(
+            {"UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM", "SUBSTR", "REPLACE"}
+            <= allowed
+        )
+
     def test_admin_validation_gates_block_session_preconditions(self):
         admin_sql = (
             ROOT / "sql/install/003_create_semantic_admin_scripts.sql"
