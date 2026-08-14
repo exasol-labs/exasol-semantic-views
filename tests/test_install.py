@@ -166,6 +166,34 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("SET_REPRESENTATION_COVERAGE_BATCH", representation_batch)
         self.assertIn("representation-plus-coverage candidate rejected", representation_batch)
 
+    def test_f3_attribute_creation_seeds_every_partition(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        scripts = {
+            name: next(
+                sql for sql in statements if f"SEMANTIC_ADMIN.{name}(" in sql
+            )
+            for name in ("ADD_DIMENSION", "ADD_FACT", "ADD_OR_REPLACE_DIMENSION")
+        }
+        for script_name in ("ADD_DIMENSION", "ADD_FACT"):
+            script = scripts[script_name]
+            self.assertIn("uncovered_er.COVERAGE_PREDICATE IS NULL", script)
+            self.assertIn("er.REPRESENTATION_ROLE = 'PRIMARY' OR", script)
+            self.assertIn("er.REPRESENTATION_ID, :expression", script)
+
+        replace_dimension = scripts["ADD_OR_REPLACE_DIMENSION"]
+        self.assertIn("existing_binding.ATTRIBUTE_TYPE = 'DIMENSION'", replace_dimension)
+        self.assertIn("er.REPRESENTATION_ROLE <> 'PRIMARY'", replace_dimension)
+
+        semantic_source = (
+            ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
+        ).read_text(encoding="utf-8")
+        self.assertIn("existing_binding.ATTRIBUTE_TYPE = 'FACT'", semantic_source)
+        self.assertIn("uncovered_er.COVERAGE_PREDICATE IS NULL", semantic_source)
+
     def test_relationship_mappings_accept_quoted_physical_columns(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(

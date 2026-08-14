@@ -126,8 +126,10 @@ for SQL quoting; do not include surrounding double quotes in mapping values.
 
 Attribute bindings separate semantic dimensions and facts from their source expressions
 through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`
-automatically create a `PREFER` binding on the current primary representation;
-installation backfills the same binding for existing attributes. Additional
+automatically create a `PREFER` binding on the current primary representation.
+When the entity already has complete F3 coverage, they seed the governed
+expression on every active partition in the same validated operation.
+Installation backfills the primary binding for existing attributes. Additional
 bindings are managed with:
 
 ```text
@@ -237,7 +239,8 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH(
 Validation still proves unique-key grain independently on every partition, but
 does not require key-set equality because temporal partitions are expected to
 contain different identities. Compilation requires every requested dimension
-and transitive metric fact to have a binding on every partition. It supports
+and transitive metric fact to have a binding on every partition; validation
+reports every missing pair as `SEMANTIC_MODEL_052`. It supports
 mergeable `SUM` and `COUNT` aggregate states and records all partitions under
 `selected_representations[].partitions` and `physical_plan.fusion_plan`.
 Partitioned joined dimensions and materialization substitution are not supported

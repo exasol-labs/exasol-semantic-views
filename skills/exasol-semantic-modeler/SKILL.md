@@ -569,6 +569,12 @@ must exactly match the metadata; free-form coverage SQL is rejected. Set
 `QUERY_TIMEOUT=60` before validating any partitioned entity, regardless of the
 declared source kinds or whether a local view wraps a Virtual Schema.
 
+After complete F3 coverage exists, `ADD_DIMENSION`, `ADD_FACT`, dimension
+upsert, and Semantic DDL `REPLACE FACTS` seed the governed expression on every
+active partition before validation. `SEMANTIC_MODEL_052` blocks certification
+and lists every missing attribute/partition binding left by older or direct
+catalog state.
+
 To leave F3 when only one alternate remains, call
 `REMOVE_ENTITY_REPRESENTATION` for that alternate. It removes the
 representation-local attribute bindings and clears coverage on the surviving

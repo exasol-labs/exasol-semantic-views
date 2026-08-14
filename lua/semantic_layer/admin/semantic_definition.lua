@@ -1106,6 +1106,36 @@ local function upsert_fact(model, object_id_value, fact)
         ]], {entity_id = entity, representation_id = primary_representation_id,
             expression = fact.expression, binding_id = default_binding_id})
     end
+    -- REPLACE FACTS is atomic, so seed missing F3 partitions before its single
+    -- validation pass. Existing representation-specific expressions win.
+    query([[
+        INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+          BINDING_PRIORITY, IS_DEFAULT, STATUS
+        )
+        SELECT :model_id, :version_id, :entity_id, 'FACT', :fact_id,
+               er.REPRESENTATION_ID, :expression, 'PREFER', 1, FALSE, 'ACTIVE'
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+        WHERE er.ENTITY_ID = :entity_id AND er.STATUS = 'ACTIVE'
+          AND er.REPRESENTATION_ROLE <> 'PRIMARY'
+          AND (SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS active_er
+               WHERE active_er.ENTITY_ID = :entity_id AND active_er.STATUS = 'ACTIVE') > 1
+          AND NOT EXISTS (
+            SELECT 1 FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS uncovered_er
+            WHERE uncovered_er.ENTITY_ID = :entity_id
+              AND uncovered_er.STATUS = 'ACTIVE'
+              AND uncovered_er.COVERAGE_PREDICATE IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS existing_binding
+            WHERE existing_binding.ATTRIBUTE_TYPE = 'FACT'
+              AND existing_binding.ATTRIBUTE_ID = :fact_id
+              AND existing_binding.REPRESENTATION_ID = er.REPRESENTATION_ID
+              AND existing_binding.STATUS = 'ACTIVE'
+          )
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_id = entity, fact_id = existing_id, expression = fact.expression})
     add_object_column(object_id_value, "FACT", existing_id, fact.name, false)
     return existing_id
 end

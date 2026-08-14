@@ -781,6 +781,37 @@ test("validator accepts contiguous F3 coverage and rejects boundary gaps", funct
     cold.valid_to = "2026-01-01 00:00:00"
 end)
 
+test("validator enumerates missing dimension and fact bindings on F3 partitions", function()
+    local entity = {id = 1, name = "shipment", alias = "s"}
+    local cold = {id = 1, entity_id = 1, name = "cold", alias = "s",
+        coverage_predicate = "s.ship_date < TIMESTAMP '2026-07-01 00:00:00'"}
+    local hot = {id = 2, entity_id = 1, name = "hot", alias = "s",
+        coverage_predicate = "s.ship_date >= TIMESTAMP '2026-07-01 00:00:00'"}
+    local ship_date = {id = 10, name = "ship_date", entity_id = 1,
+        expression = "s.ship_date"}
+    local ship_cost = {id = 20, name = "ship_cost", entity_id = 1,
+        expression = "s.cost_usd"}
+    local date_binding = {representation_id = 1}
+    local cost_binding = {representation_id = 2}
+    local ctx = validation_context({
+        entities = {entity}, entity_by_id = {["1"] = entity},
+        representations_by_entity = {["1"] = {cold, hot}},
+        dimensions = {ship_date}, facts = {ship_cost},
+        bindings_by_attribute = {
+            ["DIMENSION:10"] = {date_binding},
+            ["FACT:20"] = {cost_binding},
+        },
+    })
+
+    api.validate_partition_attribute_bindings(ctx)
+
+    assert_equal(ctx.error_count, 2)
+    assert_equal(ctx.issues[1].rule_code, "SEMANTIC_MODEL_052")
+    assert_contains(ctx.issues[1].object_name, "ship_date@hot")
+    assert_contains(ctx.issues[1].message, "ADD_ATTRIBUTE_BINDING")
+    assert_contains(ctx.issues[2].object_name, "ship_cost@cold")
+end)
+
 test("validator rejects F3 predicates that disagree with declared intervals", function()
     local entity = {id = 1, name = "web_session", alias = "w"}
     local cold = {id = 1, entity_id = 1, name = "cold", alias = "w",

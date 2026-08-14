@@ -3851,27 +3851,32 @@ local dimension_id = scalar([[
       AND VERSION_ID = :version_id
       AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
 ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
-local primary_representation_id = scalar([[
-    SELECT REPRESENTATION_ID
-    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
-    WHERE ENTITY_ID = :entity_id
-      AND REPRESENTATION_ROLE = 'PRIMARY'
-      AND STATUS = 'ACTIVE'
-]], {entity_id = entity_id_value})
 query([[
     INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
       MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
       REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY, IS_DEFAULT, STATUS
-    ) VALUES (
-      :model_id, :version_id, :entity_id, 'DIMENSION', :attribute_id,
-      :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
     )
+    SELECT :model_id, :version_id, :entity_id, 'DIMENSION', :attribute_id,
+           er.REPRESENTATION_ID, :expression, 'PREFER', 1,
+           CASE WHEN er.REPRESENTATION_ROLE = 'PRIMARY' THEN TRUE ELSE FALSE END,
+           'ACTIVE'
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    WHERE er.ENTITY_ID = :entity_id AND er.STATUS = 'ACTIVE'
+      AND (er.REPRESENTATION_ROLE = 'PRIMARY' OR (
+        (SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS active_er
+         WHERE active_er.ENTITY_ID = :entity_id AND active_er.STATUS = 'ACTIVE') > 1
+        AND NOT EXISTS (
+          SELECT 1 FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS uncovered_er
+          WHERE uncovered_er.ENTITY_ID = :entity_id
+            AND uncovered_er.STATUS = 'ACTIVE'
+            AND uncovered_er.COVERAGE_PREDICATE IS NULL
+        )
+      ))
 ]], {
     model_id = model.model_id,
     version_id = model.version_id,
     entity_id = entity_id_value,
     attribute_id = dimension_id,
-    representation_id = primary_representation_id,
     expression = tostring(EXPRESSION),
 })
 add_object_column(object_id_value, "DIMENSION", dimension_id, dimension_name)
@@ -4140,6 +4145,39 @@ else
     ]], {entity_id = entity_id_value, representation_id = primary_representation_id,
         expression = tostring(EXPRESSION), binding_id = default_binding_id})
 end
+
+-- A partitioned entity requires every attribute on every partition. Preserve
+-- source-specific bindings and seed only missing partitions from the governed
+-- dimension expression.
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+      BINDING_PRIORITY, IS_DEFAULT, STATUS
+    )
+    SELECT :model_id, :version_id, :entity_id, 'DIMENSION', :dimension_id,
+           er.REPRESENTATION_ID, :expression, 'PREFER', 1, FALSE, 'ACTIVE'
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    WHERE er.ENTITY_ID = :entity_id AND er.STATUS = 'ACTIVE'
+      AND er.REPRESENTATION_ROLE <> 'PRIMARY'
+      AND (SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS active_er
+           WHERE active_er.ENTITY_ID = :entity_id AND active_er.STATUS = 'ACTIVE') > 1
+      AND NOT EXISTS (
+        SELECT 1 FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS uncovered_er
+        WHERE uncovered_er.ENTITY_ID = :entity_id
+          AND uncovered_er.STATUS = 'ACTIVE'
+          AND uncovered_er.COVERAGE_PREDICATE IS NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS existing_binding
+        WHERE existing_binding.ATTRIBUTE_TYPE = 'DIMENSION'
+          AND existing_binding.ATTRIBUTE_ID = :dimension_id
+          AND existing_binding.REPRESENTATION_ID = er.REPRESENTATION_ID
+          AND existing_binding.STATUS = 'ACTIVE'
+      )
+]], {model_id = model.model_id, version_id = model.version_id,
+    entity_id = entity_id_value, dimension_id = dimension_id,
+    expression = tostring(EXPRESSION)})
 
 local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
 local validation_error = validation_error_summary(validation_rows)
@@ -4464,27 +4502,32 @@ local fact_id = scalar([[
       AND VERSION_ID = :version_id
       AND UPPER(FACT_NAME) = UPPER(:fact_name)
 ]], {model_id = model.model_id, version_id = model.version_id, fact_name = fact_name})
-local primary_representation_id = scalar([[
-    SELECT REPRESENTATION_ID
-    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
-    WHERE ENTITY_ID = :entity_id
-      AND REPRESENTATION_ROLE = 'PRIMARY'
-      AND STATUS = 'ACTIVE'
-]], {entity_id = entity_id_value})
 query([[
     INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
       MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
       REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY, IS_DEFAULT, STATUS
-    ) VALUES (
-      :model_id, :version_id, :entity_id, 'FACT', :attribute_id,
-      :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
     )
+    SELECT :model_id, :version_id, :entity_id, 'FACT', :attribute_id,
+           er.REPRESENTATION_ID, :expression, 'PREFER', 1,
+           CASE WHEN er.REPRESENTATION_ROLE = 'PRIMARY' THEN TRUE ELSE FALSE END,
+           'ACTIVE'
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    WHERE er.ENTITY_ID = :entity_id AND er.STATUS = 'ACTIVE'
+      AND (er.REPRESENTATION_ROLE = 'PRIMARY' OR (
+        (SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS active_er
+         WHERE active_er.ENTITY_ID = :entity_id AND active_er.STATUS = 'ACTIVE') > 1
+        AND NOT EXISTS (
+          SELECT 1 FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS uncovered_er
+          WHERE uncovered_er.ENTITY_ID = :entity_id
+            AND uncovered_er.STATUS = 'ACTIVE'
+            AND uncovered_er.COVERAGE_PREDICATE IS NULL
+        )
+      ))
 ]], {
     model_id = model.model_id,
     version_id = model.version_id,
     entity_id = entity_id_value,
     attribute_id = fact_id,
-    representation_id = primary_representation_id,
     expression = tostring(EXPRESSION),
 })
 local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
@@ -9041,6 +9084,36 @@ local function missing_representation_columns(ctx, entity, column_name)
     return names
 end
 
+local function validate_partition_attribute_bindings(ctx)
+    local function validate_attribute(attribute_type, attribute)
+        local entity = ctx.entity_by_id[key(attribute.entity_id)]
+        if entity == nil or not entity_uses_partition_fusion(ctx, entity) then return end
+        local bindings = (ctx.bindings_by_attribute or {})[
+            attribute_type .. ":" .. key(attribute.id)] or {}
+        local bound_representations = {}
+        for _, binding in ipairs(bindings) do
+            bound_representations[key(binding.representation_id)] = true
+        end
+        for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+            if not bound_representations[key(representation.id)] then
+                local object_name = tostring(attribute.name) .. "@" .. tostring(representation.name)
+                add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING", object_name,
+                    "SEMANTIC_MODEL_052", "Attribute '" .. tostring(attribute.name)
+                        .. "' has no binding on partition '" .. tostring(representation.name)
+                        .. "' of entity '" .. tostring(entity.name)
+                        .. "'. Add it with ADD_ATTRIBUTE_BINDING.")
+            end
+        end
+    end
+
+    for _, dimension in ipairs(ctx.dimensions or {}) do
+        validate_attribute("DIMENSION", dimension)
+    end
+    for _, fact in ipairs(ctx.facts or {}) do
+        validate_attribute("FACT", fact)
+    end
+end
+
 local function complete_semantic_identity(ctx, entity)
     local representations = representations_for_entity(ctx, entity)
     for _, identity in ipairs((ctx.identities_by_entity or {})[key(entity.id)] or {}) do
@@ -10172,6 +10245,7 @@ local function reachable_aliases(ctx, base_entity_id, safe_edges)
 end
 
 local function validate_expressions(ctx, safe_edges)
+    validate_partition_attribute_bindings(ctx)
     for _, dimension in ipairs(ctx.dimensions) do
         if ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
             add_issue(ctx, "ERROR", "DIMENSION", dimension.name, "SEMANTIC_MODEL_004",
@@ -11057,6 +11131,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
         parse_partition_predicate = parse_partition_predicate,
+        validate_partition_attribute_bindings = validate_partition_attribute_bindings,
         entity_has_base_metric = entity_has_base_metric,
         validate_custom_extensions = validate_custom_extensions,
         validate_unique_keys = validate_unique_keys,
@@ -19665,6 +19740,36 @@ local function upsert_fact(model, object_id_value, fact)
         ]], {entity_id = entity, representation_id = primary_representation_id,
             expression = fact.expression, binding_id = default_binding_id})
     end
+    -- REPLACE FACTS is atomic, so seed missing F3 partitions before its single
+    -- validation pass. Existing representation-specific expressions win.
+    query([[
+        INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+          BINDING_PRIORITY, IS_DEFAULT, STATUS
+        )
+        SELECT :model_id, :version_id, :entity_id, 'FACT', :fact_id,
+               er.REPRESENTATION_ID, :expression, 'PREFER', 1, FALSE, 'ACTIVE'
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+        WHERE er.ENTITY_ID = :entity_id AND er.STATUS = 'ACTIVE'
+          AND er.REPRESENTATION_ROLE <> 'PRIMARY'
+          AND (SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS active_er
+               WHERE active_er.ENTITY_ID = :entity_id AND active_er.STATUS = 'ACTIVE') > 1
+          AND NOT EXISTS (
+            SELECT 1 FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS uncovered_er
+            WHERE uncovered_er.ENTITY_ID = :entity_id
+              AND uncovered_er.STATUS = 'ACTIVE'
+              AND uncovered_er.COVERAGE_PREDICATE IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS existing_binding
+            WHERE existing_binding.ATTRIBUTE_TYPE = 'FACT'
+              AND existing_binding.ATTRIBUTE_ID = :fact_id
+              AND existing_binding.REPRESENTATION_ID = er.REPRESENTATION_ID
+              AND existing_binding.STATUS = 'ACTIVE'
+          )
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_id = entity, fact_id = existing_id, expression = fact.expression})
     add_object_column(object_id_value, "FACT", existing_id, fact.name, false)
     return existing_id
 end

@@ -255,8 +255,11 @@ that cannot prospectively anchor canonical unique and relationship keys.
 ### Bind Dimensions and Facts Per Representation
 
 `ADD_DIMENSION` and `ADD_FACT` create a preferred binding on `primary`
-automatically. When an equivalent representation uses different physical
-columns, add explicit bindings after creating the semantic attribute:
+automatically. On an entity with complete F3 coverage, they also seed the same
+governed expression on every active partition before validation. Missing
+partition bindings block certification with `SEMANTIC_MODEL_052`. When an
+equivalent non-partitioned representation uses different physical columns, add
+explicit bindings after creating the semantic attribute:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(

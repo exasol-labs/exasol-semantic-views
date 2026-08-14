@@ -89,6 +89,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_049` | error | F5 data probes could not prove local uniqueness, mapping totality and bijection, or exact canonical semantic-key equivalence. |
 | `SEMANTIC_MODEL_050` | warning | A relationship remains usable, but one or more endpoint representations lack the physical key and an anchored scalar `DIRECT` F5.1 remap, so joined requests exclude those candidates. |
 | `SEMANTIC_MODEL_051` | error | A simple relationship equality joins incompatible physical type families. The diagnostic names the relationship, endpoints, and resolved representation types. |
+| `SEMANTIC_MODEL_052` | error | A dimension or fact on an F3-partitioned entity lacks an active binding on one or more partitions. Each missing attribute/partition pair is reported. |
 
 ## Expression Validation Boundary
 
