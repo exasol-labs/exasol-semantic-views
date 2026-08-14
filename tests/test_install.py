@@ -44,6 +44,34 @@ class Connection:
 
 
 class InstallerResetTest(unittest.TestCase):
+    def test_agent_readiness_always_exposes_published_session_instructions(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/006_create_semantic_agent_views.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        models = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_AGENT.MODELS_FOR_AGENT AS" in sql
+        )
+        self.assertIn("SESSION_SETUP_REQUIRED", models)
+        self.assertIn("SESSION_SETUP_SQL", models)
+        self.assertIn("SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL", models)
+        self.assertIn("m.STATUS <> 'PUBLISHED' THEN 'NOT_PUBLISHED'", models)
+
+        instructions = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT AS" in sql
+        )
+        self.assertIn("m.MODEL_STATUS = 'PUBLISHED'", instructions)
+        self.assertIn("m.SESSION_SETUP_SQL", instructions)
+        self.assertIn("m.PREPROCESSOR_QUALIFIED_NAME", instructions)
+        self.assertIn("STRUCTURED_REQUEST does not require session setup", instructions)
+        self.assertIn("ALTER SESSION SET QUERY_TIMEOUT=60", instructions)
+        self.assertIn("FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS ai", instructions)
+
     def test_f7_model_evolution_surface_is_installable(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:

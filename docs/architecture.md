@@ -139,7 +139,10 @@ views such as:
 
 This is not merely a renamed catalog. It deliberately hides inaccessible objects
 and shapes records for discovery and tool use. Request history is restricted to
-the current user or privileged administrators.
+the current user or privileged administrators. Published models always expose
+system session-setup and query-mode instructions, and `MODELS_FOR_AGENT`
+provides executable setup SQL so an autonomous client does not need to infer
+preprocessor activation from a failed query.
 
 ### `SEMANTIC_ADMIN`
 

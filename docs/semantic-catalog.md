@@ -676,6 +676,10 @@ contains the accepted structured-request keys, filter aliases, operators,
 order-by fields, handle types, and enum values. `REQUEST_HISTORY_FOR_AGENT`
 includes `STARTED_AT` and the compatibility alias `REQUEST_TIME`. Use the
 aliases when integrating with generic agent protocols that expect those names.
+`MODELS_FOR_AGENT` also exposes `SESSION_SETUP_REQUIRED` and executable
+`SESSION_SETUP_SQL`. Every published model contributes system session-safety
+and query-mode rows to `INSTRUCTIONS_FOR_AGENT`, so valid readiness cannot have
+an empty instruction surface merely because no manual guidance was authored.
 
 Use `SEMANTIC_AGENT` and `SEMANTIC_CATALOG` for integrations and docs examples.
 Direct `SYS_SEMANTIC` reads are for internal maintenance; those tables are

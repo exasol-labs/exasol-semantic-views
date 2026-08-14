@@ -102,8 +102,11 @@ calls the shared compiler, and replaces them with generated Exasol SQL.
 
 Session activation is controlled by `ENABLE_SEMANTIC_SQL` and
 `DISABLE_SEMANTIC_SQL`. `REFRESH_SEMANTIC_SURFACE` regenerates published metadata
-views after a valid catalog change. Direct execution without preprocessing calls
-`SEMANTIC_GUARD` and fails rather than bypassing semantic compilation.
+views after a valid catalog change. Direct execution without preprocessing
+fails rather than bypassing semantic compilation. Depending on query shape,
+Exasol may reject aggregate binding before `SEMANTIC_GUARD` can emit its directed
+error, so clients must apply the setup exposed by `MODELS_FOR_AGENT` and
+`INSTRUCTIONS_FOR_AGENT` proactively.
 
 ### Agent and governance runtime
 

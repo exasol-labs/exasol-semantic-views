@@ -59,6 +59,22 @@ request keys, filter aliases, operators, order fields, handle types, and enum
 values as rows. `REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the
 compatibility alias `REQUEST_TIME`.
 
+Every published model contributes system `SAFETY` and `GENERAL` rows to
+`INSTRUCTIONS_FOR_AGENT`, even when no manual instructions were authored.
+Read these before choosing a query mode. `MODELS_FOR_AGENT` exposes
+`SESSION_SETUP_REQUIRED`, `SESSION_SETUP_SQL`, and
+`PREPROCESSOR_QUALIFIED_NAME`: execute `SESSION_SETUP_SQL` in the same session
+before issuing `SEMANTIC_SQL`, and repeat it after reconnecting. A
+`STRUCTURED_REQUEST` compiled through `COMPILE_REQUEST_JSON` does not require
+session activation.
+
+Without session activation, Exasol can reject aggregate semantic SQL during
+binding before the published guard expression runs. That engine error cannot
+be redirected by the semantic layer, so agents must treat session setup as a
+precondition rather than use parser errors for recovery.
+Non-published models report `AGENT_READINESS = 'NOT_PUBLISHED'`; validation
+success alone is not sufficient for agent-ready SQL execution.
+
 ## Scripts
 
 - `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON`

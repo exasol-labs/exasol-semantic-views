@@ -35,11 +35,26 @@ does not return the structured compiler's `PLAN_JSON` or durable handles.
 ## Check Model Readiness
 
 ```sql
-SELECT MODEL_NAME, PUBLISHED_SCHEMA, AGENT_READINESS
+SELECT MODEL_NAME, PUBLISHED_SCHEMA, AGENT_READINESS,
+       SESSION_SETUP_REQUIRED, SESSION_SETUP_SQL
 FROM SEMANTIC_AGENT.MODELS_FOR_AGENT
 WHERE AGENT_READINESS = 'VALID'
 ORDER BY MODEL_NAME;
 ```
+
+Read the mandatory model instructions and apply session setup before semantic
+SQL:
+
+```sql
+SELECT INSTRUCTION_KIND, INSTRUCTION_TEXT, PRIORITY
+FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT
+WHERE MODEL_NAME = '<model>'
+ORDER BY PRIORITY, INSTRUCTION_ID;
+```
+
+Execute `SESSION_SETUP_SQL` in the same connection before `SEMANTIC_SQL` and
+again after reconnecting. Skip it only when using `STRUCTURED_REQUEST` through
+`COMPILE_REQUEST_JSON`.
 
 Stop if `AGENT_READINESS` is not `VALID`. Check blocking errors:
 
