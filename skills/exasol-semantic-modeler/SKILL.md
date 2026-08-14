@@ -527,8 +527,9 @@ Do not include the primary or F3 partitions in the JSON. Mark authoritative
 expressions `PREFER` and ordered substitutes `FALLBACK`. Use an explicit
 `source_expression` of `NULL` when an alternate genuinely lacks the concept.
 Do not use create-then-bind on a published model: validation correctly rejects
-that incomplete intermediate state. `ADD_ATTRIBUTE_BINDING` remains available
-to repair existing draft attributes.
+that incomplete intermediate state. Use `REPLACE_ATTRIBUTE_BINDING` when a
+generated binding already exists; `ADD_ATTRIBUTE_BINDING` is only for an
+unbound representation.
 By default, the compiler chooses one representation that covers every required
 attribute for the entity. It ranks binding role, binding priority, current
 `PRIMARY` role, representation priority, then ID. Verify the choice and each expression in

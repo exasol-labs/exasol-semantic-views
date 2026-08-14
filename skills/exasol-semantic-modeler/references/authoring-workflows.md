@@ -371,6 +371,22 @@ call normalizes representation identity but does not accept custom F2 attribute
 remapping: if canonical attributes are renamed, nested, or split across child
 relations, expose them through a canonicalizing view before registration.
 
+On a draft, inspect the returned `GENERATED_BINDING_ISSUE_COUNT` and
+`GENERATED_BINDING_ISSUES`. Replace each generated expression that cannot
+resolve before continuing:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING(
+  'customer_360', 'DIMENSION', 'customer_plan', 'mongo',
+  'NULL', 'FALLBACK', 2
+);
+```
+
+Replacement is prospective: it can remove existing draft errors, while a
+candidate that introduces a new error is restored automatically. Do not call
+`ADD_ATTRIBUTE_BINDING` for a generated row; `_024` directs duplicate callers
+to replacement or explicit removal.
+
 The mapping relation must be queryable by the validating user and contain one
 non-null semantic key for every source-local key, with no duplicate local or
 semantic key. Set `QUERY_TIMEOUT=60`; `VALIDATE_MODEL` proves local uniqueness,

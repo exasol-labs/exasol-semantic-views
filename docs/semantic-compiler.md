@@ -311,7 +311,10 @@ empty key between calls.
 representation, governed attribute bindings, and its F5 binding as one
 candidate, so validation never observes an incomplete representation. Generated
 attribute bindings reuse the governed expressions; F5 normalizes identity names
-and types, not nested or otherwise incompatible physical shapes.
+and types, not nested or otherwise incompatible physical shapes. Draft calls
+return generated-binding issue details so a modeller can repair those rows with
+`REPLACE_ATTRIBUTE_BINDING`; published calls remain fail-closed and restore the
+entire candidate.
 Relationship additions and removals use the same prospective boundary.
 `SEMANTIC_MODEL_051` blocks simple equality joins whose resolved endpoint type
 families differ before the relationship can affect a published query.

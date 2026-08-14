@@ -142,10 +142,18 @@ bindings are managed with:
 
 ```text
 SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING
+SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING
 SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING
 SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS
 SEMANTIC_ADMIN.ADD_FACT_WITH_BINDINGS
 ```
+
+`REPLACE_ATTRIBUTE_BINDING` updates an existing binding through a prospective
+validation gate. It accepts a repair that removes an existing draft error, but
+restores the previous expression, role, and priority if the candidate
+introduces a new error. `ADD_ATTRIBUTE_BINDING` reports
+`SEMANTIC_ADMIN_024` with this replacement remedy when the target already
+exists.
 
 Compatibility defaults have `IS_DEFAULT = TRUE`. Promoting a representation
 moves a default only when the incoming representation has no explicit binding

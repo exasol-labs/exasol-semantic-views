@@ -68,6 +68,7 @@ class InstallerResetTest(unittest.TestCase):
             "SYS_SEMANTIC.ATTRIBUTE_BINDINGS",
             "SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS",
             "SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING",
+            "SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING",
             "SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING",
         }
         for fragment in expected_fragments:
@@ -83,6 +84,19 @@ class InstallerResetTest(unittest.TestCase):
             add_binding.index("INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS"),
         )
         self.assertIn("if not baseline_errors[signature]", add_binding)
+
+        replace_binding = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING" in sql
+        )
+        self.assertLess(
+            replace_binding.index("baseline_validation_rows"),
+            replace_binding.index("UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS"),
+        )
+        self.assertIn("previous_expression", replace_binding)
+        self.assertIn("replacement rejected and restored", replace_binding)
+        self.assertIn("if not baseline_errors[signature]", replace_binding)
 
     def test_representation_promotion_preserves_explicit_binding_precedence(self):
         statements = INSTALL.split_exasol_sql(
@@ -526,6 +540,12 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_BINDINGS", add_representation_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", add_representation_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", add_representation_binding)
+        self.assertIn("generated_binding_issues", add_representation_binding)
+        self.assertIn("GENERATED_BINDING_ISSUE_COUNT", add_representation_binding)
+        self.assertLess(
+            add_representation_binding.index("candidate_validation"),
+            add_representation_binding.index('if tostring(model_status) == "PUBLISHED"'),
+        )
 
         remove_mapping = next(
             sql for sql in statements

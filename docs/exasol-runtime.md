@@ -58,6 +58,9 @@ helpers such as `ADD_UNIQUE_KEY_WITH_COLUMNS`,
 `ADD_ENTITY_REPRESENTATION_WITH_COVERAGE`, and
 `ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` stage declarations that would
 otherwise expose an invalid intermediate state on a published model.
+Draft heterogeneous registration returns generated-binding diagnostics, and
+`REPLACE_ATTRIBUTE_BINDING` repairs an existing generated row prospectively
+without a remove/add gap.
 
 `APPLY_SEMANTIC_DEFINITION` provides SQL-native metric authoring, dry-run
 validation, atomic apply, metric rename/drop, Databricks translation support,
