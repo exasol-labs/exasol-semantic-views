@@ -98,7 +98,8 @@ IS_CERTIFIED
 
 If active alternate representations use different expressions, call
 `ADD_DIMENSION_WITH_BINDINGS` instead. Its final `BINDINGS_JSON` argument must
-bind every alternate so creation and validation remain atomic.
+bind every non-partitioned alternate so creation and validation remain atomic.
+F3 partitions inherit the top-level expression automatically.
 
 ## Recommended: SQL-Native Metric Definitions
 
@@ -324,8 +325,9 @@ IS_CERTIFIED
 
 If active alternate representations use different fact expressions, call
 `ADD_FACT_WITH_BINDINGS` instead. Its final `BINDINGS_JSON` argument must bind
-every alternate; use the literal expression `NULL` only when that source
-genuinely lacks the fact.
+every non-partitioned alternate; F3 partitions inherit the top-level
+expression. Use the literal expression `NULL` only when an alternate genuinely
+lacks the fact.
 
 Important choices:
 

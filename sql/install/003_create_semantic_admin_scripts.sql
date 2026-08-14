@@ -4690,24 +4690,33 @@ if attribute_type == "DIMENSION" then
 end
 
 local representation_rows = query([[
-    SELECT REPRESENTATION_ID, REPRESENTATION_NAME, REPRESENTATION_ROLE
+    SELECT REPRESENTATION_ID, REPRESENTATION_NAME, REPRESENTATION_ROLE,
+           COVERAGE_PREDICATE
     FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND ENTITY_ID = :entity_id AND STATUS = 'ACTIVE'
 ]], {model_id = model_id, version_id = version_id, entity_id = entity_id})
 local primary = nil
 local alternates = {}
+local partitions = {}
+local partitions_by_name = {}
 for _, representation_row in ipairs(representation_rows or {}) do
     local representation = {
         id = row_value(representation_row, "REPRESENTATION_ID", 1),
         name = row_value(representation_row, "REPRESENTATION_NAME", 2),
         role = row_value(representation_row, "REPRESENTATION_ROLE", 3),
+        coverage_predicate = row_value(representation_row, "COVERAGE_PREDICATE", 4),
     }
     if tostring(representation.role) == "PRIMARY" then
         if primary ~= nil then
             error("SEMANTIC_ADMIN_213: entity has more than one active primary representation")
         end
         primary = representation
+    elseif representation.coverage_predicate ~= nil
+            and representation.coverage_predicate ~= null
+            and trim(representation.coverage_predicate) ~= "" then
+        partitions[#partitions + 1] = representation
+        partitions_by_name[upper(representation.name)] = representation
     else
         alternates[upper(representation.name)] = representation
     end
@@ -4717,6 +4726,14 @@ if primary == nil then
 end
 
 local prepared = {}
+for _, partition in ipairs(partitions) do
+    prepared[#prepared + 1] = {
+        representation = partition,
+        source_expression = expression,
+        binding_role = "PREFER",
+        binding_priority = 1,
+    }
+end
 local seen = {}
 for index, item in ipairs(binding_specs) do
     if type(item) ~= "table" then
@@ -4726,6 +4743,10 @@ for index, item in ipairs(binding_specs) do
         item, "representation_name", "binding representation_name")
     if upper(representation_name) == upper(primary.name) then
         error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind the primary representation; "
+            .. "EXPRESSION supplies it: " .. representation_name)
+    end
+    if partitions_by_name[upper(representation_name)] ~= nil then
+        error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind an F3 partition; "
             .. "EXPRESSION supplies it: " .. representation_name)
     end
     local representation = alternates[upper(representation_name)]
@@ -4883,7 +4904,7 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(
   DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, IS_CERTIFIED, BINDINGS_JSON
 )
 RETURNS TABLE AS
-local rows = query([[
+query([[
     EXECUTE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
       'DIMENSION', :model_name, :object_name, :entity_name, :attribute_name,
       :expression, :data_type, NULL, :display_name, :description, :format_hint,
@@ -4893,7 +4914,27 @@ local rows = query([[
       attribute_name = DIMENSION_NAME, expression = EXPRESSION, data_type = DATA_TYPE,
       display_name = DISPLAY_NAME, description = DESCRIPTION, format_hint = FORMAT_HINT,
       is_certified = IS_CERTIFIED, bindings_json = BINDINGS_JSON})
-exit(rows, [[
+local rows = query([[
+    SELECT d.DIMENSION_ID, m.MODEL_NAME, e.ENTITY_NAME, 'DIMENSION',
+           d.DIMENSION_NAME, COUNT(ab.ATTRIBUTE_BINDING_ID)
+    FROM SYS_SEMANTIC.DIMENSIONS d
+    JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = d.MODEL_ID
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.ENTITY_ID = d.ENTITY_ID AND e.VERSION_ID = d.VERSION_ID
+    LEFT JOIN SYS_SEMANTIC.ATTRIBUTE_BINDINGS ab
+      ON ab.ATTRIBUTE_TYPE = 'DIMENSION' AND ab.ATTRIBUTE_ID = d.DIMENSION_ID
+     AND ab.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+      AND d.VERSION_ID = m.ACTIVE_VERSION_ID
+      AND UPPER(d.DIMENSION_NAME) = UPPER(:attribute_name)
+      AND d.STATUS = 'ACTIVE'
+    GROUP BY d.DIMENSION_ID, m.MODEL_NAME, e.ENTITY_NAME, d.DIMENSION_NAME
+]], {model_name = MODEL_NAME, attribute_name = DIMENSION_NAME})
+local result = {}
+for _, row in ipairs(rows or {}) do
+    result[#result + 1] = {row[1], row[2], row[3], row[4], row[5], row[6]}
+end
+exit(result, [[
   ATTRIBUTE_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
   BINDING_COUNT DECIMAL(18,0)
@@ -4905,7 +4946,7 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_FACT_WITH_BINDINGS(
   DISPLAY_NAME, DESCRIPTION, IS_PRIVATE, IS_CERTIFIED, BINDINGS_JSON
 )
 RETURNS TABLE AS
-local rows = query([[
+query([[
     EXECUTE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
       'FACT', :model_name, NULL, :entity_name, :attribute_name,
       :expression, :data_type, :additive_policy, :display_name, :description, NULL,
@@ -4916,7 +4957,27 @@ local rows = query([[
       additive_policy = ADDITIVE_POLICY, display_name = DISPLAY_NAME,
       description = DESCRIPTION, is_private = IS_PRIVATE, is_certified = IS_CERTIFIED,
       bindings_json = BINDINGS_JSON})
-exit(rows, [[
+local rows = query([[
+    SELECT f.FACT_ID, m.MODEL_NAME, e.ENTITY_NAME, 'FACT',
+           f.FACT_NAME, COUNT(ab.ATTRIBUTE_BINDING_ID)
+    FROM SYS_SEMANTIC.FACTS f
+    JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = f.MODEL_ID
+    JOIN SYS_SEMANTIC.ENTITIES e
+      ON e.ENTITY_ID = f.ENTITY_ID AND e.VERSION_ID = f.VERSION_ID
+    LEFT JOIN SYS_SEMANTIC.ATTRIBUTE_BINDINGS ab
+      ON ab.ATTRIBUTE_TYPE = 'FACT' AND ab.ATTRIBUTE_ID = f.FACT_ID
+     AND ab.STATUS = 'ACTIVE'
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+      AND f.VERSION_ID = m.ACTIVE_VERSION_ID
+      AND UPPER(f.FACT_NAME) = UPPER(:attribute_name)
+      AND f.STATUS = 'ACTIVE'
+    GROUP BY f.FACT_ID, m.MODEL_NAME, e.ENTITY_NAME, f.FACT_NAME
+]], {model_name = MODEL_NAME, attribute_name = FACT_NAME})
+local result = {}
+for _, row in ipairs(rows or {}) do
+    result[#result + 1] = {row[1], row[2], row[3], row[4], row[5], row[6]}
+end
+exit(result, [[
   ATTRIBUTE_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
   BINDING_COUNT DECIMAL(18,0)

@@ -210,6 +210,9 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn('string.sub(trim(BINDINGS_JSON), 1, 1) ~= "["', runtime)
         self.assertIn("no binding supplied for active alternate", runtime)
         self.assertIn("BINDINGS_JSON must not bind the primary representation", runtime)
+        self.assertIn("BINDINGS_JSON must not bind an F3 partition", runtime)
+        self.assertIn("coverage_predicate", runtime)
+        self.assertIn("for _, partition in ipairs(partitions) do", runtime)
         self.assertIn("source_expression", runtime)
         self.assertIn("binding_role", runtime)
         self.assertIn("binding_priority", runtime)
@@ -233,6 +236,15 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("'FACT'", fact)
         self.assertIn("SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS", dimension)
         self.assertIn("SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS", fact)
+        for wrapper in (dimension, fact):
+            self.assertEqual(wrapper.count("local rows = query"), 1)
+            self.assertLess(
+                wrapper.index("SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS"),
+                wrapper.index("local rows = query"),
+            )
+            self.assertIn("COUNT(ab.ATTRIBUTE_BINDING_ID)", wrapper)
+            self.assertIn("result[#result + 1]", wrapper)
+            self.assertIn("exit(result, [[", wrapper)
 
     def test_relationship_mappings_accept_quoted_physical_columns(self):
         statements = INSTALL.split_exasol_sql(
@@ -404,7 +416,7 @@ class InstallerResetTest(unittest.TestCase):
                     f"{add_name} needs {inverse} or an explicit permanence reason",
                 )
 
-        published_reachability = {
+        published_compound_reachability = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE":
                 "tools/verify_bug27_published_multistep_declarations.py",
             "ADD_UNIQUE_KEY_WITH_COLUMNS":
@@ -413,13 +425,23 @@ class InstallerResetTest(unittest.TestCase):
                 "tools/verify_bug30_published_identity_setup.py",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING":
                 "tools/verify_bug31_representation_with_identity.py",
-            "ADD_RELATIONSHIP":
-                "tools/verify_bug32_relationship_types_and_removal.py",
+            "ADD_DIMENSION_WITH_BINDINGS":
+                "tools/verify_bug37_attribute_with_bindings.py",
+            "ADD_FACT_WITH_BINDINGS":
+                "tools/verify_bug37_attribute_with_bindings.py",
         }
-        for operation, relative_path in published_reachability.items():
+        compound_scripts = {name for name in add_scripts if "_WITH_" in name}
+        self.assertEqual(compound_scripts, set(published_compound_reachability))
+        for operation, relative_path in published_compound_reachability.items():
             verifier = (ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(f"SEMANTIC_ADMIN.{operation}", verifier)
             self.assertIn("SEMANTIC_ADMIN.PUBLISH_MODEL", verifier)
+
+        relationship_verifier = (
+            ROOT / "tools/verify_bug32_relationship_types_and_removal.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SEMANTIC_ADMIN.ADD_RELATIONSHIP", relationship_verifier)
+        self.assertIn("SEMANTIC_ADMIN.PUBLISH_MODEL", relationship_verifier)
 
         add_relationship = scripts["ADD_RELATIONSHIP"]
         self.assertIn("published relationship change rejected", add_relationship)

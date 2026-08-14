@@ -178,6 +178,30 @@ def main() -> int:
         if surface(con) != expected:
             raise AssertionError("compound F3 declaration changed published results")
 
+        partition_dimension = execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS("
+            "'bug27_verify', 'SALES', 'orders', 'order_month', "
+            "'TO_CHAR(o.order_ts, ''YYYY-MM'')', 'VARCHAR(7)', 'Order Month', "
+            f"'Order month', NULL, TRUE, {literal('[]')})",
+        )
+        if len(partition_dimension) != 1 or int(partition_dimension[0][5]) != 2:
+            raise AssertionError(
+                f"F3 compound dimension returned unexpected rows: {partition_dimension}"
+            )
+        partition_bindings = execute(
+            con,
+            "SELECT REPRESENTATION_NAME FROM SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS "
+            "WHERE MODEL_NAME = 'bug27_verify' AND ATTRIBUTE_NAME = 'order_month' "
+            "ORDER BY REPRESENTATION_NAME",
+        )
+        if partition_bindings != [("hot",), ("primary",)]:
+            raise AssertionError(
+                f"F3 compound dimension did not auto-seed partitions: {partition_bindings}"
+            )
+        if surface(con) != expected:
+            raise AssertionError("F3 compound dimension changed published results")
+
         ordinary_key = (
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY("
             "'bug27_verify', 'orders', 'status_order_key', 'ALTERNATE', "
@@ -227,6 +251,7 @@ def main() -> int:
             raise AssertionError("invalid compound key was not fully restored")
 
         print("ok BUG-27 F3: genuine hot partition registered with complete coverage")
+        print("ok BUG-38 F3: compound attribute auto-seeded covered partitions")
         print("ok BUG-27 key: complete composite key added to published model")
         print("ok BUG-27 rollback: invalid compound declarations left no catalog residue")
         print("ok BUG-27 availability: published result remained stable")

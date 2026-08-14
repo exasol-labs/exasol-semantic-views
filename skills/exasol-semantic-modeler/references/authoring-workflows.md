@@ -260,8 +260,9 @@ governed expression on every active partition before validation. Missing
 partition bindings block certification with `SEMANTIC_MODEL_052`. When an
 equivalent representation uses different physical columns, create the
 attribute and all representation bindings atomically. `BINDINGS_JSON` must
-contain exactly one entry for every active alternate; do not include the
-primary because the top-level expression supplies it:
+contain exactly one entry for every active non-partitioned alternate. Do not
+include the primary or F3 partitions because the top-level expression supplies
+all of them:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(

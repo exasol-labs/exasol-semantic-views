@@ -521,13 +521,14 @@ without surrounding double quotes.
 
 For different physical dimension or fact expressions, create the attribute
 atomically with `ADD_DIMENSION_WITH_BINDINGS` or `ADD_FACT_WITH_BINDINGS`.
-Supply exactly one JSON binding for every active alternate; the top-level
-expression binds the primary. Mark authoritative expressions `PREFER` and
-ordered substitutes `FALLBACK`. Use an explicit `source_expression` of `NULL`
-when an alternate genuinely lacks the concept. Do not use create-then-bind on
-a published model: validation correctly rejects that incomplete intermediate
-state. `ADD_ATTRIBUTE_BINDING` remains available to repair existing draft
-attributes.
+Supply exactly one JSON binding for every active non-partitioned alternate; the
+top-level expression binds the primary and every F3 partition automatically.
+Do not include the primary or F3 partitions in the JSON. Mark authoritative
+expressions `PREFER` and ordered substitutes `FALLBACK`. Use an explicit
+`source_expression` of `NULL` when an alternate genuinely lacks the concept.
+Do not use create-then-bind on a published model: validation correctly rejects
+that incomplete intermediate state. `ADD_ATTRIBUTE_BINDING` remains available
+to repair existing draft attributes.
 By default, the compiler chooses one representation that covers every required
 attribute for the entity. It ranks binding role, binding priority, current
 `PRIMARY` role, representation priority, then ID. Verify the choice and each expression in

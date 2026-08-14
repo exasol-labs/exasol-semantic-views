@@ -134,7 +134,9 @@ For heterogeneous representations, `ADD_DIMENSION_WITH_BINDINGS` and
 explicit binding for every active alternate before validating once. The JSON
 must cover every alternate and must not include the primary; the top-level
 `EXPRESSION` supplies the primary binding. A source that genuinely lacks the
-concept can declare `"source_expression":"NULL"` explicitly.
+concept can declare `"source_expression":"NULL"` explicitly. Non-primary F3
+partitions with coverage predicates are seeded from `EXPRESSION` automatically
+and must not appear in the JSON.
 Installation backfills the primary binding for existing attributes. Additional
 bindings are managed with:
 
