@@ -194,6 +194,46 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("existing_binding.ATTRIBUTE_TYPE = 'FACT'", semantic_source)
         self.assertIn("uncovered_er.COVERAGE_PREDICATE IS NULL", semantic_source)
 
+    def test_heterogeneous_attributes_can_be_created_with_all_bindings_atomically(self):
+        statements = INSTALL.split_exasol_sql(
+            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+                encoding="utf-8"
+            )
+        )
+        scripts = {
+            sql.split("SEMANTIC_ADMIN.", 1)[1].split("(", 1)[0]: sql
+            for sql in statements
+            if sql.startswith("CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.")
+        }
+        runtime = scripts["ATTRIBUTE_WITH_BINDINGS"]
+        self.assertIn("semantic_definition.decode_json", runtime)
+        self.assertIn('string.sub(trim(BINDINGS_JSON), 1, 1) ~= "["', runtime)
+        self.assertIn("no binding supplied for active alternate", runtime)
+        self.assertIn("BINDINGS_JSON must not bind the primary representation", runtime)
+        self.assertIn("source_expression", runtime)
+        self.assertIn("binding_role", runtime)
+        self.assertIn("binding_priority", runtime)
+        self.assertIn("FALSE, 'ACTIVE'", runtime)
+        self.assertIn("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", runtime)
+        self.assertIn("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", runtime)
+        self.assertLess(
+            runtime.index(
+                "for _, item in ipairs(prepared) do",
+                runtime.index("INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS"),
+            ),
+            runtime.index("local validation_rows"),
+        )
+        self.assertGreater(
+            runtime.count("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL"), 1
+        )
+
+        dimension = scripts["ADD_DIMENSION_WITH_BINDINGS"]
+        fact = scripts["ADD_FACT_WITH_BINDINGS"]
+        self.assertIn("'DIMENSION'", dimension)
+        self.assertIn("'FACT'", fact)
+        self.assertIn("SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS", dimension)
+        self.assertIn("SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS", fact)
+
     def test_relationship_mappings_accept_quoted_physical_columns(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
@@ -312,6 +352,7 @@ class InstallerResetTest(unittest.TestCase):
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_OR_REPLACE_DIMENSION": "REMOVE_DIMENSION",
+            "ADD_DIMENSION_WITH_BINDINGS": "REMOVE_DIMENSION",
             # Metrics use governed Semantic SQL rather than a standalone admin script.
             "ADD_METRIC": "DDL:DROP METRIC",
         }
@@ -321,6 +362,8 @@ class InstallerResetTest(unittest.TestCase):
             "ADD_ENTITY":
                 "Entities own dependent model structure and are removed only with DROP_MODEL.",
             "ADD_FACT":
+                "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
+            "ADD_FACT_WITH_BINDINGS":
                 "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
             "ADD_MATERIALIZATION_COLUMN":
                 "Column removal is unsupported; deactivate the owning materialization instead.",

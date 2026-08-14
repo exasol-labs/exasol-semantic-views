@@ -258,20 +258,27 @@ that cannot prospectively anchor canonical unique and relationship keys.
 automatically. On an entity with complete F3 coverage, they also seed the same
 governed expression on every active partition before validation. Missing
 partition bindings block certification with `SEMANTIC_MODEL_052`. When an
-equivalent non-partitioned representation uses different physical columns, add
-explicit bindings after creating the semantic attribute:
+equivalent representation uses different physical columns, create the
+attribute and all representation bindings atomically. `BINDINGS_JSON` must
+contain exactly one entry for every active alternate; do not include the
+primary because the top-level expression supplies it:
 
 ```sql
-EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
-  'sales', 'DIMENSION', 'customer_name', 'mdm',
-  'c.canonical_name', 'PREFER', 1
-);
-
-EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
-  'sales', 'DIMENSION', 'customer_name', 'salesforce',
-  'c.account_name', 'FALLBACK', 1
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(
+  'sales', 'customers', 'customer', 'customer_name',
+  'c.customer_name', 'VARCHAR(200)', 'Customer name', NULL, NULL, TRUE,
+  '[
+    {"representation_name":"mdm","source_expression":"c.canonical_name","binding_role":"PREFER","binding_priority":1},
+    {"representation_name":"salesforce","source_expression":"c.account_name","binding_role":"FALLBACK","binding_priority":1}
+  ]'
 );
 ```
+
+Use `ADD_FACT_WITH_BINDINGS` with the same JSON shape for facts. An alternate
+that genuinely lacks the concept must declare
+`"source_expression":"NULL"`; never synthesize that fallback silently.
+`ADD_ATTRIBUTE_BINDING` remains a repair operation for an existing attribute,
+not the initial heterogeneous-attribute workflow.
 
 Smoke-test each expression against its target representation before adding the
 binding. A compiled request uses one representation per entity; that source

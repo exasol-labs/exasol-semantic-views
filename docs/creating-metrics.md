@@ -96,6 +96,10 @@ FORMAT_HINT
 IS_CERTIFIED
 ```
 
+If active alternate representations use different expressions, call
+`ADD_DIMENSION_WITH_BINDINGS` instead. Its final `BINDINGS_JSON` argument must
+bind every alternate so creation and validation remain atomic.
+
 ## Recommended: SQL-Native Metric Definitions
 
 For bootstrap or full object regeneration, define facts and metrics in one
@@ -317,6 +321,11 @@ DESCRIPTION
 IS_PRIVATE
 IS_CERTIFIED
 ```
+
+If active alternate representations use different fact expressions, call
+`ADD_FACT_WITH_BINDINGS` instead. Its final `BINDINGS_JSON` argument must bind
+every alternate; use the literal expression `NULL` only when that source
+genuinely lacks the fact.
 
 Important choices:
 

@@ -129,12 +129,20 @@ through `SYS_SEMANTIC.ATTRIBUTE_BINDINGS`. `ADD_DIMENSION` and `ADD_FACT`
 automatically create a `PREFER` binding on the current primary representation.
 When the entity already has complete F3 coverage, they seed the governed
 expression on every active partition in the same validated operation.
+For heterogeneous representations, `ADD_DIMENSION_WITH_BINDINGS` and
+`ADD_FACT_WITH_BINDINGS` create the attribute, its primary binding, and one
+explicit binding for every active alternate before validating once. The JSON
+must cover every alternate and must not include the primary; the top-level
+`EXPRESSION` supplies the primary binding. A source that genuinely lacks the
+concept can declare `"source_expression":"NULL"` explicitly.
 Installation backfills the primary binding for existing attributes. Additional
 bindings are managed with:
 
 ```text
 SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING
 SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING
+SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS
+SEMANTIC_ADMIN.ADD_FACT_WITH_BINDINGS
 ```
 
 Compatibility defaults have `IS_DEFAULT = TRUE`. Promoting a representation

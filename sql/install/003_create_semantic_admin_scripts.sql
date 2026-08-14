@@ -4547,6 +4547,382 @@ exit({{fact_id, model_name, entity_name, fact_name, false, bool_value(IS_PRIVATE
 ]])
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
+  ATTRIBUTE_TYPE, MODEL_NAME, OBJECT_NAME, ENTITY_NAME, ATTRIBUTE_NAME,
+  EXPRESSION, DATA_TYPE, ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION,
+  FORMAT_HINT, IS_PRIVATE, IS_CERTIFIED, BINDINGS_JSON
+)
+RETURNS TABLE AS
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+local function missing(value)
+    return value == nil or value == null or string.match(tostring(value), "^%s*$") ~= nil
+end
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function normalized(value, label)
+    if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
+    local result = trim(value)
+    if not string.match(result, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. result)
+    end
+    return result
+end
+local function optional_text(value)
+    if missing(value) then return null end
+    return tostring(value)
+end
+local function bool_value(value, default_value)
+    if missing(value) then return default_value end
+    local text = string.lower(tostring(value))
+    return value == true or text == "true" or text == "1"
+end
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then return nil end
+    return rows[1][1]
+end
+local function required_json(item, field, label)
+    local value = item[field]
+    if type(value) == "table" or missing(value) then
+        error("SEMANTIC_ADMIN_213: " .. label .. " is required")
+    end
+    return trim(value)
+end
+local function validation_error_summary(rows)
+    for _, row in ipairs(rows or {}) do
+        if tostring(row_value(row, "SEVERITY", 1)) == "ERROR" then
+            return tostring(row_value(row, "OBJECT_TYPE", 2) or "OBJECT") .. " "
+                .. tostring(row_value(row, "OBJECT_NAME", 3) or "unknown") .. " "
+                .. tostring(row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR")
+                .. ": " .. tostring(row_value(row, "MESSAGE", 5) or "model validation failed")
+        end
+    end
+    return nil
+end
+
+local attribute_type = upper(ATTRIBUTE_TYPE)
+if attribute_type ~= "DIMENSION" and attribute_type ~= "FACT" then
+    error("SEMANTIC_ADMIN_001: ATTRIBUTE_TYPE must be DIMENSION or FACT")
+end
+local model_name = normalized(MODEL_NAME, "MODEL_NAME")
+local entity_name = normalized(ENTITY_NAME, "ENTITY_NAME")
+local attribute_name = normalized(ATTRIBUTE_NAME, "ATTRIBUTE_NAME")
+if missing(EXPRESSION) or missing(DATA_TYPE) then
+    error("SEMANTIC_ADMIN_001: EXPRESSION and DATA_TYPE are required")
+end
+local expression = trim(EXPRESSION)
+local data_type = trim(DATA_TYPE)
+local object_name = nil
+if attribute_type == "DIMENSION" then
+    object_name = normalized(OBJECT_NAME, "OBJECT_NAME")
+end
+local additive_policy = nil
+if attribute_type == "FACT" then
+    additive_policy = upper(ADDITIVE_POLICY)
+    if additive_policy ~= "ADDITIVE" and additive_policy ~= "SEMI_ADDITIVE"
+            and additive_policy ~= "NON_ADDITIVE" then
+        error("SEMANTIC_ADMIN_003: invalid ADDITIVE_POLICY: " .. tostring(ADDITIVE_POLICY))
+    end
+end
+if missing(BINDINGS_JSON) or string.sub(trim(BINDINGS_JSON), 1, 1) ~= "[" then
+    error("SEMANTIC_ADMIN_213: BINDINGS_JSON must be a JSON array")
+end
+local decoded, binding_specs = pcall(
+    semantic_definition.decode_json, trim(BINDINGS_JSON))
+if not decoded or type(binding_specs) ~= "table" then
+    error("SEMANTIC_ADMIN_213: BINDINGS_JSON must be a JSON array: "
+        .. tostring(binding_specs))
+end
+
+local model_rows = query([[
+    SELECT MODEL_ID, ACTIVE_VERSION_ID
+    FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if model_rows == nil or #model_rows == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+local model_id = row_value(model_rows[1], "MODEL_ID", 1)
+local version_id = row_value(model_rows[1], "ACTIVE_VERSION_ID", 2)
+local entity_id = scalar([[
+    SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND UPPER(ENTITY_NAME) = UPPER(:entity_name) AND STATUS = 'ACTIVE'
+]], {model_id = model_id, version_id = version_id, entity_name = entity_name})
+if entity_id == nil then
+    error("SEMANTIC_ADMIN_014: entity not found: " .. entity_name)
+end
+local object_id = nil
+if attribute_type == "DIMENSION" then
+    object_id = scalar([[
+        SELECT OBJECT_ID FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND UPPER(OBJECT_NAME) = UPPER(:object_name) AND STATUS = 'ACTIVE'
+    ]], {model_id = model_id, version_id = version_id, object_name = object_name})
+    if object_id == nil then
+        error("SEMANTIC_ADMIN_017: semantic object not found: " .. object_name)
+    end
+end
+
+local table_name = attribute_type == "DIMENSION" and "DIMENSIONS" or "FACTS"
+local id_column = attribute_type == "DIMENSION" and "DIMENSION_ID" or "FACT_ID"
+local name_column = attribute_type == "DIMENSION" and "DIMENSION_NAME" or "FACT_NAME"
+local duplicate = scalar(
+    "SELECT COUNT(*) FROM SYS_SEMANTIC." .. table_name
+      .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id"
+      .. " AND UPPER(" .. name_column .. ") = UPPER(:attribute_name)",
+    {model_id = model_id, version_id = version_id, attribute_name = attribute_name})
+if tonumber(duplicate or 0) > 0 then
+    local code = attribute_type == "DIMENSION" and "SEMANTIC_ADMIN_019" or "SEMANTIC_ADMIN_020"
+    error(code .. ": duplicate " .. string.lower(attribute_type) .. ": " .. attribute_name)
+end
+if attribute_type == "DIMENSION" then
+    local duplicate_column = scalar([[
+        SELECT COUNT(*) FROM SYS_SEMANTIC.OBJECT_COLUMNS
+        WHERE OBJECT_ID = :object_id AND UPPER(COLUMN_NAME) = UPPER(:attribute_name)
+    ]], {object_id = object_id, attribute_name = attribute_name})
+    if tonumber(duplicate_column or 0) > 0 then
+        error("SEMANTIC_ADMIN_018: duplicate object column: " .. attribute_name)
+    end
+end
+
+local representation_rows = query([[
+    SELECT REPRESENTATION_ID, REPRESENTATION_NAME, REPRESENTATION_ROLE
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+      AND ENTITY_ID = :entity_id AND STATUS = 'ACTIVE'
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id})
+local primary = nil
+local alternates = {}
+for _, representation_row in ipairs(representation_rows or {}) do
+    local representation = {
+        id = row_value(representation_row, "REPRESENTATION_ID", 1),
+        name = row_value(representation_row, "REPRESENTATION_NAME", 2),
+        role = row_value(representation_row, "REPRESENTATION_ROLE", 3),
+    }
+    if tostring(representation.role) == "PRIMARY" then
+        if primary ~= nil then
+            error("SEMANTIC_ADMIN_213: entity has more than one active primary representation")
+        end
+        primary = representation
+    else
+        alternates[upper(representation.name)] = representation
+    end
+end
+if primary == nil then
+    error("SEMANTIC_ADMIN_213: entity has no active primary representation")
+end
+
+local prepared = {}
+local seen = {}
+for index, item in ipairs(binding_specs) do
+    if type(item) ~= "table" then
+        error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " must be an object")
+    end
+    local representation_name = required_json(
+        item, "representation_name", "binding representation_name")
+    if upper(representation_name) == upper(primary.name) then
+        error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind the primary representation; "
+            .. "EXPRESSION supplies it: " .. representation_name)
+    end
+    local representation = alternates[upper(representation_name)]
+    if representation == nil then
+        error("SEMANTIC_ADMIN_213: binding references an inactive or unknown alternate: "
+            .. representation_name)
+    end
+    if seen[upper(representation_name)] then
+        error("SEMANTIC_ADMIN_213: duplicate binding for representation: "
+            .. representation_name)
+    end
+    seen[upper(representation_name)] = true
+    local binding_role = upper(required_json(item, "binding_role", "binding_role"))
+    if binding_role ~= "PREFER" and binding_role ~= "FALLBACK" then
+        error("SEMANTIC_ADMIN_213: binding_role must be PREFER or FALLBACK")
+    end
+    local priority_value = item.binding_priority
+    if type(priority_value) == "table" or priority_value == nil or priority_value == null then
+        error("SEMANTIC_ADMIN_213: binding_priority is required")
+    end
+    local priority = tonumber(priority_value)
+    if priority == nil or priority < 1 or priority % 1 ~= 0 then
+        error("SEMANTIC_ADMIN_213: binding_priority must be a positive integer")
+    end
+    prepared[#prepared + 1] = {
+        representation = representation,
+        source_expression = required_json(item, "source_expression", "source_expression"),
+        binding_role = binding_role,
+        binding_priority = priority,
+    }
+end
+for representation_key, representation in pairs(alternates) do
+    if not seen[representation_key] then
+        error("SEMANTIC_ADMIN_213: no binding supplied for active alternate: "
+            .. tostring(representation.name))
+    end
+end
+
+if attribute_type == "DIMENSION" then
+    query([[
+        INSERT INTO SYS_SEMANTIC.DIMENSIONS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION, DATA_TYPE,
+          DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, IS_HIDDEN, IS_CERTIFIED, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, :attribute_name, :expression, :data_type,
+          :display_name, :description, :format_hint, FALSE, :is_certified, 'ACTIVE'
+        )
+    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+          attribute_name = attribute_name, expression = expression, data_type = data_type,
+          display_name = optional_text(DISPLAY_NAME), description = optional_text(DESCRIPTION),
+          format_hint = optional_text(FORMAT_HINT),
+          is_certified = bool_value(IS_CERTIFIED, false)})
+else
+    query([[
+        INSERT INTO SYS_SEMANTIC.FACTS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
+          ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, IS_PRIVATE, IS_CERTIFIED, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, :attribute_name, :expression, :data_type,
+          :additive_policy, :display_name, :description, :is_private, :is_certified, 'ACTIVE'
+        )
+    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+          attribute_name = attribute_name, expression = expression, data_type = data_type,
+          additive_policy = additive_policy, display_name = optional_text(DISPLAY_NAME),
+          description = optional_text(DESCRIPTION), is_private = bool_value(IS_PRIVATE, false),
+          is_certified = bool_value(IS_CERTIFIED, false)})
+end
+local attribute_id = scalar(
+    "SELECT " .. id_column .. " FROM SYS_SEMANTIC." .. table_name
+      .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id"
+      .. " AND UPPER(" .. name_column .. ") = UPPER(:attribute_name)",
+    {model_id = model_id, version_id = version_id, attribute_name = attribute_name})
+if attribute_type == "DIMENSION" then
+    local ordinal = scalar([[
+        SELECT COALESCE(MAX(ORDINAL_POSITION), 0) + 1
+        FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE OBJECT_ID = :object_id
+    ]], {object_id = object_id})
+    query([[
+        INSERT INTO SYS_SEMANTIC.OBJECT_COLUMNS (
+          OBJECT_ID, COLUMN_KIND, OBJECT_REF_ID, COLUMN_NAME, ORDINAL_POSITION, IS_VISIBLE
+        ) VALUES (
+          :object_id, 'DIMENSION', :attribute_id, :attribute_name, :ordinal, TRUE
+        )
+    ]], {object_id = object_id, attribute_id = attribute_id,
+          attribute_name = attribute_name, ordinal = ordinal})
+end
+query([[
+    INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+      MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+      REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
+      IS_DEFAULT, STATUS
+    ) VALUES (
+      :model_id, :version_id, :entity_id, :attribute_type, :attribute_id,
+      :representation_id, :source_expression, 'PREFER', 1, TRUE, 'ACTIVE'
+    )
+]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+      attribute_type = attribute_type, attribute_id = attribute_id,
+      representation_id = primary.id, source_expression = expression})
+for _, item in ipairs(prepared) do
+    query([[
+        INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
+          IS_DEFAULT, STATUS
+        ) VALUES (
+          :model_id, :version_id, :entity_id, :attribute_type, :attribute_id,
+          :representation_id, :source_expression, :binding_role, :binding_priority,
+          FALSE, 'ACTIVE'
+        )
+    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+          attribute_type = attribute_type, attribute_id = attribute_id,
+          representation_id = item.representation.id,
+          source_expression = item.source_expression, binding_role = item.binding_role,
+          binding_priority = item.binding_priority})
+end
+
+local validation_rows = query(
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    {model_name = model_name})
+local validation_error = validation_error_summary(validation_rows)
+if validation_error ~= nil then
+    if attribute_type == "DIMENSION" then
+        query([[
+            DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
+            WHERE OBJECT_ID = :object_id AND COLUMN_KIND = 'DIMENSION'
+              AND OBJECT_REF_ID = :attribute_id
+        ]], {object_id = object_id, attribute_id = attribute_id})
+    end
+    query([[
+        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
+    ]], {attribute_type = attribute_type, attribute_id = attribute_id})
+    query(
+        "DELETE FROM SYS_SEMANTIC." .. table_name .. " WHERE " .. id_column
+          .. " = :attribute_id",
+        {attribute_id = attribute_id})
+    query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    local code = attribute_type == "DIMENSION" and "SEMANTIC_ADMIN_091" or "SEMANTIC_ADMIN_092"
+    error(code .. ": " .. string.lower(attribute_type)
+        .. " with bindings rejected; validation failed: " .. validation_error)
+end
+query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+    {version_id = version_id})
+exit({{attribute_id, model_name, entity_name, attribute_type, attribute_name,
+    #prepared + 1}}, [[
+  ATTRIBUTE_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
+  BINDING_COUNT DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(
+  MODEL_NAME, OBJECT_NAME, ENTITY_NAME, DIMENSION_NAME, EXPRESSION, DATA_TYPE,
+  DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, IS_CERTIFIED, BINDINGS_JSON
+)
+RETURNS TABLE AS
+local rows = query([[
+    EXECUTE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
+      'DIMENSION', :model_name, :object_name, :entity_name, :attribute_name,
+      :expression, :data_type, NULL, :display_name, :description, :format_hint,
+      FALSE, :is_certified, :bindings_json
+    )
+]], {model_name = MODEL_NAME, object_name = OBJECT_NAME, entity_name = ENTITY_NAME,
+      attribute_name = DIMENSION_NAME, expression = EXPRESSION, data_type = DATA_TYPE,
+      display_name = DISPLAY_NAME, description = DESCRIPTION, format_hint = FORMAT_HINT,
+      is_certified = IS_CERTIFIED, bindings_json = BINDINGS_JSON})
+exit(rows, [[
+  ATTRIBUTE_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
+  BINDING_COUNT DECIMAL(18,0)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_FACT_WITH_BINDINGS(
+  MODEL_NAME, ENTITY_NAME, FACT_NAME, EXPRESSION, DATA_TYPE, ADDITIVE_POLICY,
+  DISPLAY_NAME, DESCRIPTION, IS_PRIVATE, IS_CERTIFIED, BINDINGS_JSON
+)
+RETURNS TABLE AS
+local rows = query([[
+    EXECUTE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
+      'FACT', :model_name, NULL, :entity_name, :attribute_name,
+      :expression, :data_type, :additive_policy, :display_name, :description, NULL,
+      :is_private, :is_certified, :bindings_json
+    )
+]], {model_name = MODEL_NAME, entity_name = ENTITY_NAME,
+      attribute_name = FACT_NAME, expression = EXPRESSION, data_type = DATA_TYPE,
+      additive_policy = ADDITIVE_POLICY, display_name = DISPLAY_NAME,
+      description = DESCRIPTION, is_private = IS_PRIVATE, is_certified = IS_CERTIFIED,
+      bindings_json = BINDINGS_JSON})
+exit(rows, [[
+  ATTRIBUTE_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
+  ATTRIBUTE_TYPE VARCHAR(32), ATTRIBUTE_NAME VARCHAR(256),
+  BINDING_COUNT DECIMAL(18,0)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(
   MODEL_NAME,
   ATTRIBUTE_TYPE,

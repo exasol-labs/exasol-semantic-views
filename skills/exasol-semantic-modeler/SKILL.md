@@ -390,9 +390,9 @@ previous to succeed.
 4. Optional ADD_ENTITY_REPRESENTATION (equivalent or F3 temporal partitions)
 5. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
 6. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
-7. ADD_FACT (per row-level expression — entities must exist)
-8. ADD_DIMENSION (per dimension — entity and semantic object must exist)
-9. Optional ADD_ATTRIBUTE_BINDING (per representation-specific dimension/fact expression)
+7. ADD_FACT or ADD_FACT_WITH_BINDINGS (per row-level expression)
+8. ADD_DIMENSION or ADD_DIMENSION_WITH_BINDINGS (per dimension)
+9. Optional ADD_ATTRIBUTE_BINDING (repair an existing draft attribute)
 10. Optional SET_REPRESENTATION_COVERAGE_BATCH (every active hot/cold partition)
 11. Optional SET_REPRESENTATION_AUTHORITY, then SET_ATTRIBUTE_FUSION_POLICY
     (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
@@ -519,9 +519,15 @@ Structured relationship mappings accept physical names that require SQL
 quoting, such as `_parent` and `profile|object`; pass the raw catalog name
 without surrounding double quotes.
 
-For different physical dimension or fact expressions, add
-`ADD_ATTRIBUTE_BINDING` entries after creating the semantic attribute. Mark
-the authoritative expression `PREFER` and ordered substitutes `FALLBACK`.
+For different physical dimension or fact expressions, create the attribute
+atomically with `ADD_DIMENSION_WITH_BINDINGS` or `ADD_FACT_WITH_BINDINGS`.
+Supply exactly one JSON binding for every active alternate; the top-level
+expression binds the primary. Mark authoritative expressions `PREFER` and
+ordered substitutes `FALLBACK`. Use an explicit `source_expression` of `NULL`
+when an alternate genuinely lacks the concept. Do not use create-then-bind on
+a published model: validation correctly rejects that incomplete intermediate
+state. `ADD_ATTRIBUTE_BINDING` remains available to repair existing draft
+attributes.
 By default, the compiler chooses one representation that covers every required
 attribute for the entity. It ranks binding role, binding priority, current
 `PRIMARY` role, representation priority, then ID. Verify the choice and each expression in
@@ -529,10 +535,11 @@ attribute for the entity. It ranks binding role, binding priority, current
 exists, compilation returns `SEMANTIC_REQUEST_080`; do not invent a cross-source
 join or silently revert to a partial representation.
 
-For a representation with several renamed columns, add every required binding
-sequentially. Intermediate errors for attributes not yet bound do not reject a
-repairing binding, but the model cannot be published until the final validation
-is clean. A candidate that introduces a new validation error is rolled back.
+For an existing draft attribute, bindings may still be repaired sequentially.
+Intermediate errors for attributes not yet bound do not reject a repairing
+binding, but the model cannot be published until validation is clean. On a
+published model, use the compound creation APIs so readers never observe an
+invalid intermediate state.
 
 Before `SET_PRIMARY_REPRESENTATION`, validate that every differing attribute
 has an explicit binding on the target. Promotion preserves those explicit
