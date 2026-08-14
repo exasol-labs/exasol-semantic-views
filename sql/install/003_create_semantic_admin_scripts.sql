@@ -499,8 +499,8 @@ if tostring(model_status) == "PUBLISHED" then
     for _, validation_row in ipairs(validation_rows or {}) do
         local severity = validation_row.SEVERITY or validation_row.severity
             or validation_row[1]
-        if tostring(severity) == "ERROR" then
-            validation_status = "ERROR"
+        if tostring(severity) == "ERROR" or tostring(severity) == "PRECONDITION" then
+            validation_status = tostring(severity)
             break
         elseif tostring(severity) == "WARNING" and validation_status == "OK" then
             validation_status = "WARNING"
@@ -647,7 +647,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -784,7 +785,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(validation_rows or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -1037,7 +1039,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -1673,7 +1676,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -1996,7 +2000,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -2414,7 +2419,8 @@ local validation_errors = {}
 local generated_binding_issues = {}
 local binding_suffix = "@" .. upper(representation_name)
 for _, validation_row in ipairs(candidate_validation or {}) do
-    if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
         local rule_code = row_value(validation_row, "RULE_CODE", 4)
             or "SEMANTIC_MODEL_ERROR"
         local message = row_value(validation_row, "MESSAGE", 5)
@@ -2778,7 +2784,8 @@ if changed then
             "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
             {model_name = model_name})
         for _, validation_row in ipairs(repair_validation or {}) do
-            if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
                 error("SEMANTIC_ADMIN_048: stale default bindings were repaired, but model validation still fails: "
                     .. tostring(row_value(validation_row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR")
                     .. " " .. tostring(row_value(validation_row, "MESSAGE", 5) or "validation failed"))
@@ -2980,7 +2987,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -3310,7 +3318,8 @@ if tostring(model.status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -3530,7 +3539,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -3613,7 +3623,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -3780,7 +3791,8 @@ end
 
 local function validation_error_summary(validation_rows)
     for _, row in ipairs(validation_rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
             local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
             local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
@@ -4013,7 +4025,8 @@ end
 
 local function validation_error_summary(validation_rows)
     for _, row in ipairs(validation_rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
             local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
             local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
@@ -4434,7 +4447,8 @@ end
 
 local function validation_error_summary(validation_rows)
     for _, row in ipairs(validation_rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
             local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
             local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
@@ -4605,7 +4619,8 @@ local function required_json(item, field, label)
 end
 local function validation_error_summary(rows)
     for _, row in ipairs(rows or {}) do
-        if tostring(row_value(row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(row, "SEVERITY", 1)) == "PRECONDITION" then
             return tostring(row_value(row, "OBJECT_TYPE", 2) or "OBJECT") .. " "
                 .. tostring(row_value(row, "OBJECT_NAME", 3) or "unknown") .. " "
                 .. tostring(row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR")
@@ -5031,7 +5046,8 @@ end
 local function validation_error_signatures(rows)
     local signatures = {}
     for _, validation_row in ipairs(rows or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local signature = table.concat({
                 tostring(row_value(validation_row, "OBJECT_TYPE", 2) or ""),
                 tostring(row_value(validation_row, "OBJECT_NAME", 3) or ""),
@@ -5131,7 +5147,7 @@ local validation_rows = query(
     {model_name = model_name})
 for _, validation_row in ipairs(validation_rows or {}) do
     local severity = row_value(validation_row, "SEVERITY", 1)
-    if tostring(severity) == "ERROR" then
+    if tostring(severity) == "ERROR" or tostring(severity) == "PRECONDITION" then
         local signature = table.concat({
             tostring(row_value(validation_row, "OBJECT_TYPE", 2) or ""),
             tostring(row_value(validation_row, "OBJECT_NAME", 3) or ""),
@@ -5193,7 +5209,8 @@ end
 local function validation_error_signatures(rows)
     local signatures = {}
     for _, validation_row in ipairs(rows or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local signature = table.concat({
                 tostring(row_value(validation_row, "OBJECT_TYPE", 2) or ""),
                 tostring(row_value(validation_row, "OBJECT_NAME", 3) or ""),
@@ -5277,7 +5294,8 @@ local validation_rows = query(
     "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
     {model_name = model_name})
 for _, validation_row in ipairs(validation_rows or {}) do
-    if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
         local signature = table.concat({
             tostring(row_value(validation_row, "OBJECT_TYPE", 2) or ""),
             tostring(row_value(validation_row, "OBJECT_NAME", 3) or ""),
@@ -5372,7 +5390,7 @@ if tostring(model_status) == "PUBLISHED" then
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         local severity = validation_row.SEVERITY or validation_row.severity or validation_row[1]
-        if tostring(severity) == "ERROR" then
+        if tostring(severity) == "ERROR" or tostring(severity) == "PRECONDITION" then
             local rule_code = validation_row.RULE_CODE or validation_row.rule_code
                 or validation_row[4] or "SEMANTIC_MODEL_ERROR"
             local message = validation_row.MESSAGE or validation_row.message
@@ -5558,7 +5576,8 @@ end
 
 local function validation_error_summary(validation_rows)
     for _, row in ipairs(validation_rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
             local message = row_value(row, "MESSAGE", 5) or "model validation failed"
             return tostring(rule_code) .. ": " .. tostring(message)
@@ -6379,7 +6398,8 @@ if tostring(model.status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -6564,7 +6584,8 @@ if tostring(model.status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -6757,7 +6778,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -6849,7 +6871,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -6933,7 +6956,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -7015,7 +7039,8 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then
+        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
+            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
             local rule_code = row_value(validation_row, "RULE_CODE", 4)
                 or "SEMANTIC_MODEL_ERROR"
             local message = row_value(validation_row, "MESSAGE", 5)
@@ -8147,6 +8172,7 @@ local VALID_AGENT_INSTRUCTION_KINDS = {
     DEFINITION = true,
     GENERAL = true,
     POLICY = true,
+    PRECONDITION = true,
     PREFERENCE = true,
     SAFETY = true,
     STYLE = true,
@@ -8568,6 +8594,8 @@ local function add_issue(ctx, severity, object_type, object_name, rule_code, mes
 
     if severity == "ERROR" then
         ctx.error_count = ctx.error_count + 1
+    elseif severity == "PRECONDITION" then
+        ctx.precondition_count = ctx.precondition_count + 1
     elseif severity == "WARNING" then
         ctx.warning_count = ctx.warning_count + 1
     end
@@ -8601,6 +8629,8 @@ local function finish_validation_run(ctx)
     local status = "OK"
     if ctx.error_count > 0 then
         status = "ERROR"
+    elseif ctx.precondition_count > 0 then
+        status = "PRECONDITION"
     elseif ctx.warning_count > 0 then
         status = "WARNING"
     end
@@ -10439,7 +10469,7 @@ local function validate_representation_probe_timeout(ctx)
         and tonumber(row_value(rows[1], "SESSION_VALUE", 1)) or nil
     if timeout == nil or timeout < 1
         or timeout > MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS then
-        add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
+        add_issue(ctx, "PRECONDITION", "MODEL", ctx.model_name,
             "SEMANTIC_MODEL_041",
             "Multi-representation key probes require session QUERY_TIMEOUT between 1 and "
                 .. tostring(MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS)
@@ -11674,6 +11704,7 @@ function M.validate_model(model_name_arg)
         issues = {},
         issue_seen = {},
         error_count = 0,
+        precondition_count = 0,
         warning_count = 0,
     }
 
@@ -15449,7 +15480,8 @@ local function validate_model(model)
     ]], {model_name = model.model_name})
     local errors = {}
     for _, row in ipairs(rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             errors[#errors + 1] = {
                 code = row_value(row, "RULE_CODE", 4),
                 object_type = row_value(row, "OBJECT_TYPE", 2),
@@ -20924,7 +20956,8 @@ end
 local function validation_error_message(validation_rows)
     local details = {}
     for _, row in ipairs(validation_rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
             local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
             local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
@@ -20972,7 +21005,7 @@ local function validate_definition_model(model, model_name)
     local warning_count = 0
     for _, row in ipairs(validation_rows) do
         local severity = row_value(row, "SEVERITY", 1)
-        if severity == "ERROR" then
+        if severity == "ERROR" or severity == "PRECONDITION" then
             error_count = error_count + 1
         elseif severity == "WARNING" then
             warning_count = warning_count + 1
@@ -21711,7 +21744,7 @@ local function validation_summary(plan, warnings, warnings_as_errors)
         ]], {model_id = model.model_id, version_id = model.version_id}) or validation_run_id
         for _, row in ipairs(rows) do
             local severity = row_value(row, "SEVERITY", 1)
-            if severity == "ERROR" or severity == "WARNING" then
+            if severity == "ERROR" or severity == "PRECONDITION" or severity == "WARNING" then
                 warnings[#warnings + 1] = {
                     code = "OSI_APPLY_030",
                     severity = severity,
@@ -21719,7 +21752,7 @@ local function validation_summary(plan, warnings, warnings_as_errors)
                     message = tostring(row_value(row, "RULE_CODE", 4) or "") .. ": " .. tostring(row_value(row, "MESSAGE", 5) or ""),
                 }
             end
-            if severity == "ERROR" then
+            if severity == "ERROR" or severity == "PRECONDITION" then
                 error_count = error_count + 1
             elseif severity == "WARNING" then
                 warning_count = warning_count + 1

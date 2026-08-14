@@ -56,7 +56,8 @@ Execute `SESSION_SETUP_SQL` in the same connection before `SEMANTIC_SQL` and
 again after reconnecting. Skip it only when using `STRUCTURED_REQUEST` through
 `COMPILE_REQUEST_JSON`.
 
-Stop if `AGENT_READINESS` is not `VALID`. Check blocking errors:
+Stop if `AGENT_READINESS` is not `VALID`. Check blocking errors and session
+preconditions; satisfy a `PRECONDITION` instruction and rerun validation:
 
 ```sql
 SELECT OBJECT_TYPE, OBJECT_NAME, RULE_CODE, MESSAGE

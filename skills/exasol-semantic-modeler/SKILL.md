@@ -506,6 +506,9 @@ QUERY_TIMEOUT=60`. Validation requires the bound for every multi-representation
 key probe; it deliberately does not trust `SOURCE_KIND` or try to classify views
 that may hide Virtual Schema dependencies. The setting must precede `EXECUTE
 SCRIPT` because an Exasol script cannot change its own active timeout.
+If the setting is absent or outside 1 to 60 seconds, `_041` returns blocking
+severity `PRECONDITION`, which identifies the session rather than the model as
+the problem. Apply the instruction and rerun validation.
 
 Without an F5 semantic identity, require the
 alternate to expose the same case-sensitive physical names used by the entity
@@ -887,7 +890,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION(
   '<model>',
   '<scope_type>',   -- MODEL | SEMANTIC_OBJECT | METRIC | DIMENSION | ENTITY | FACT
   '<scope_name>',
-  '<kind>',         -- GENERAL | DEFINITION | AMBIGUITY | POLICY | PREFERENCE | SAFETY | STYLE
+  '<kind>',         -- GENERAL | DEFINITION | AMBIGUITY | POLICY | PRECONDITION | PREFERENCE | SAFETY | STYLE
   '<instruction_text>',
   '<applies_to_role>',  -- NULL for all roles
   <priority>

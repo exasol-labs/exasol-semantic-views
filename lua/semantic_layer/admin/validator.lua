@@ -27,6 +27,7 @@ local VALID_AGENT_INSTRUCTION_KINDS = {
     DEFINITION = true,
     GENERAL = true,
     POLICY = true,
+    PRECONDITION = true,
     PREFERENCE = true,
     SAFETY = true,
     STYLE = true,
@@ -448,6 +449,8 @@ local function add_issue(ctx, severity, object_type, object_name, rule_code, mes
 
     if severity == "ERROR" then
         ctx.error_count = ctx.error_count + 1
+    elseif severity == "PRECONDITION" then
+        ctx.precondition_count = ctx.precondition_count + 1
     elseif severity == "WARNING" then
         ctx.warning_count = ctx.warning_count + 1
     end
@@ -481,6 +484,8 @@ local function finish_validation_run(ctx)
     local status = "OK"
     if ctx.error_count > 0 then
         status = "ERROR"
+    elseif ctx.precondition_count > 0 then
+        status = "PRECONDITION"
     elseif ctx.warning_count > 0 then
         status = "WARNING"
     end
@@ -2319,7 +2324,7 @@ local function validate_representation_probe_timeout(ctx)
         and tonumber(row_value(rows[1], "SESSION_VALUE", 1)) or nil
     if timeout == nil or timeout < 1
         or timeout > MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS then
-        add_issue(ctx, "ERROR", "MODEL", ctx.model_name,
+        add_issue(ctx, "PRECONDITION", "MODEL", ctx.model_name,
             "SEMANTIC_MODEL_041",
             "Multi-representation key probes require session QUERY_TIMEOUT between 1 and "
                 .. tostring(MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS)
@@ -3554,6 +3559,7 @@ function M.validate_model(model_name_arg)
         issues = {},
         issue_seen = {},
         error_count = 0,
+        precondition_count = 0,
         warning_count = 0,
     }
 

@@ -17,7 +17,9 @@ MESSAGE
 ```
 
 If the model has no issues, the result set is empty. A model can remain valid
-with warning rows; only `ERROR` issues block certification. Every run is also recorded in
+with warning rows. `ERROR` and `PRECONDITION` issues block certification; the
+latter identifies a caller-session requirement rather than invalid model
+metadata. Every run is also recorded in
 `SYS_SEMANTIC.VALIDATION_RUNS` and `SYS_SEMANTIC.VALIDATION_RESULTS`, exposed
 through `SEMANTIC_CATALOG.VALIDATION_RUNS` and
 `SEMANTIC_CATALOG.VALIDATION_RESULTS`.
@@ -78,7 +80,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. |
 | `SEMANTIC_MODEL_039` | error | An attribute binding has invalid ownership, role, priority, representation, or duplicate active membership. |
 | `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses an unsupported function, or references a column absent from its target representation. |
-| `SEMANTIC_MODEL_041` | error | A multi-representation F1/F3 key probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds. The guard applies regardless of declared source kind or view dependencies. |
+| `SEMANTIC_MODEL_041` | precondition | A multi-representation F1/F3 key probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds. This is a blocking session precondition, not a defect in the model. The guard applies regardless of declared source kind or view dependencies. |
 | `SEMANTIC_MODEL_042` | error | F3 `UNION` coverage is partial, gapped, overlapping, not open-ended, or its canonical predicate does not exactly encode the declared half-open interval. |
 | `SEMANTIC_MODEL_043` | error | Once a model has active metrics, coverage partitions an entity that is the base of none of them and therefore can only use the unsupported partitioned joined-dimension path. |
 | `SEMANTIC_MODEL_044` | error | F4 authority or attribute-fusion metadata is malformed, lacks two contributors or a physical unique key/complete semantic identity, has no single authority for `RECONCILE`, or conflicts with F3 partition fusion. |

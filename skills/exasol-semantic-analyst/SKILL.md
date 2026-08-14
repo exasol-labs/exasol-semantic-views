@@ -74,6 +74,7 @@ views. Query only what you need — do not load all views on every request.
 
 ```sql
 SELECT MODEL_NAME, PUBLISHED_SCHEMA, AGENT_READINESS,
+       VALIDATION_PRECONDITION_COUNT,
        SESSION_SETUP_REQUIRED, SESSION_SETUP_SQL
 FROM SEMANTIC_AGENT.MODELS_FOR_AGENT
 WHERE AGENT_READINESS = 'VALID'
@@ -83,6 +84,8 @@ ORDER BY MODEL_NAME;
 Before using `SEMANTIC_SQL`, execute the returned `SESSION_SETUP_SQL` in the
 same session and read the model rows in `INSTRUCTIONS_FOR_AGENT`. Repeat setup
 after reconnecting. `STRUCTURED_REQUEST` does not require the preprocessor.
+If readiness is `PRECONDITION`, execute the reported session requirement, such
+as `ALTER SESSION SET QUERY_TIMEOUT=60`, and rerun `VALIDATE_MODEL`.
 
 **Available objects in a model:**
 

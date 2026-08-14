@@ -671,14 +671,15 @@ Important views:
 `FIELDS_FOR_AGENT` includes `FIELD_KIND` and the compatibility alias
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions when a metric
 has a filter. `VALIDATION_ERRORS_FOR_AGENT` contains the latest blocking
-validation issues for visible models. `COMPILE_REQUEST_SCHEMA_FOR_AGENT`
-contains the accepted structured-request keys, filter aliases, operators,
-order-by fields, handle types, and enum values. `REQUEST_HISTORY_FOR_AGENT`
-includes `STARTED_AT` and the compatibility alias `REQUEST_TIME`. Use the
-aliases when integrating with generic agent protocols that expect those names.
+validation errors and session preconditions for visible models.
+`COMPILE_REQUEST_SCHEMA_FOR_AGENT` contains the accepted structured-request
+keys, filter aliases, operators, order-by fields, handle types, and enum values.
+`REQUEST_HISTORY_FOR_AGENT` includes `STARTED_AT` and the compatibility alias
+`REQUEST_TIME`. Use the aliases when integrating with generic agent protocols
+that expect those names.
 `MODELS_FOR_AGENT` also exposes `SESSION_SETUP_REQUIRED` and executable
 `SESSION_SETUP_SQL`. Every published model contributes system session-safety
-and query-mode rows to `INSTRUCTIONS_FOR_AGENT`, so valid readiness cannot have
+and precondition rows to `INSTRUCTIONS_FOR_AGENT`, so valid readiness cannot have
 an empty instruction surface merely because no manual guidance was authored.
 
 Use `SEMANTIC_AGENT` and `SEMANTIC_CATALOG` for integrations and docs examples.

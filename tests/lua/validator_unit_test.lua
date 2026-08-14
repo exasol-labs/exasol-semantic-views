@@ -71,6 +71,7 @@ local function validation_context(overrides)
         issues = {},
         issue_seen = {},
         error_count = 0,
+        precondition_count = 0,
         warning_count = 0,
         semantic_object_by_id = {},
         entity_by_id = {},
@@ -1010,6 +1011,10 @@ test("validator requires a bounded session timeout for every multi-representatio
         assert_true(not api.validate_representation_probe_timeout(unlimited))
     end)
     assert_true(has_rule(unlimited, "SEMANTIC_MODEL_041"))
+    assert_equal(issue_for_rule(unlimited, "SEMANTIC_MODEL_041").severity,
+        "PRECONDITION")
+    assert_equal(unlimited.error_count, 0)
+    assert_equal(unlimited.precondition_count, 1)
     assert_contains(issue_for_rule(unlimited, "SEMANTIC_MODEL_041").message,
         "ALTER SESSION SET QUERY_TIMEOUT=60")
 

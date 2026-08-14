@@ -142,7 +142,8 @@ local validation_rows = query([[
     EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)
 ]], {model_name = model.name})
 for _, issue in ipairs(validation_rows or {}) do
-    if row_value(issue, "SEVERITY", 1) == "ERROR" then
+    local severity = row_value(issue, "SEVERITY", 1)
+    if severity == "ERROR" or severity == "PRECONDITION" then
         error("SEMANTIC_SURFACE_013: model validation failed: "
             .. tostring(row_value(issue, "RULE_CODE", 4)) .. " "
             .. tostring(row_value(issue, "MESSAGE", 5)))

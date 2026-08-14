@@ -54,12 +54,13 @@ where relevant, so adapters do not need to infer Exasol identifier casing rules.
 `FIELDS_FOR_AGENT` exposes both `FIELD_KIND` and the compatibility alias
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions for filtered
 metrics. `VALIDATION_ERRORS_FOR_AGENT` exposes the latest role-visible blocking
-validation errors. `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted
-request keys, filter aliases, operators, order fields, handle types, and enum
-values as rows. `REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the
-compatibility alias `REQUEST_TIME`.
+validation errors and session preconditions.
+`COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted request keys, filter
+aliases, operators, order fields, handle types, and enum values as rows.
+`REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the compatibility
+alias `REQUEST_TIME`.
 
-Every published model contributes system `SAFETY` and `GENERAL` rows to
+Every published model contributes system `SAFETY` and `PRECONDITION` rows to
 `INSTRUCTIONS_FOR_AGENT`, even when no manual instructions were authored.
 Read these before choosing a query mode. `MODELS_FOR_AGENT` exposes
 `SESSION_SETUP_REQUIRED`, `SESSION_SETUP_SQL`, and
@@ -74,6 +75,10 @@ be redirected by the semantic layer, so agents must treat session setup as a
 precondition rather than use parser errors for recovery.
 Non-published models report `AGENT_READINESS = 'NOT_PUBLISHED'`; validation
 success alone is not sufficient for agent-ready SQL execution.
+`AGENT_READINESS = 'PRECONDITION'` means the model has not been disproved, but
+the validation session did not satisfy a required execution bound. Read
+`VALIDATION_ERRORS_FOR_AGENT` and `INSTRUCTIONS_FOR_AGENT`, satisfy the session
+requirement, and validate again.
 
 ## Scripts
 

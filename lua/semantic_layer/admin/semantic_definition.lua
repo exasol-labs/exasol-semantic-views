@@ -1687,7 +1687,8 @@ end
 local function validation_error_message(validation_rows)
     local details = {}
     for _, row in ipairs(validation_rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             local rule_code = row_value(row, "RULE_CODE", 4) or "SEMANTIC_MODEL_ERROR"
             local object_type = row_value(row, "OBJECT_TYPE", 2) or "OBJECT"
             local object_name = row_value(row, "OBJECT_NAME", 3) or "unknown"
@@ -1735,7 +1736,7 @@ local function validate_definition_model(model, model_name)
     local warning_count = 0
     for _, row in ipairs(validation_rows) do
         local severity = row_value(row, "SEVERITY", 1)
-        if severity == "ERROR" then
+        if severity == "ERROR" or severity == "PRECONDITION" then
             error_count = error_count + 1
         elseif severity == "WARNING" then
             warning_count = warning_count + 1
@@ -2474,7 +2475,7 @@ local function validation_summary(plan, warnings, warnings_as_errors)
         ]], {model_id = model.model_id, version_id = model.version_id}) or validation_run_id
         for _, row in ipairs(rows) do
             local severity = row_value(row, "SEVERITY", 1)
-            if severity == "ERROR" or severity == "WARNING" then
+            if severity == "ERROR" or severity == "PRECONDITION" or severity == "WARNING" then
                 warnings[#warnings + 1] = {
                     code = "OSI_APPLY_030",
                     severity = severity,
@@ -2482,7 +2483,7 @@ local function validation_summary(plan, warnings, warnings_as_errors)
                     message = tostring(row_value(row, "RULE_CODE", 4) or "") .. ": " .. tostring(row_value(row, "MESSAGE", 5) or ""),
                 }
             end
-            if severity == "ERROR" then
+            if severity == "ERROR" or severity == "PRECONDITION" then
                 error_count = error_count + 1
             elseif severity == "WARNING" then
                 warning_count = warning_count + 1

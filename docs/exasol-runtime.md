@@ -76,6 +76,9 @@ coverage, reconciliation, and semantic identity. Validation writes durable run
 and issue records plus the metric/dimension matrix consumed by compilation.
 
 Multi-representation data probes require a bounded session `QUERY_TIMEOUT`.
+An absent or out-of-range value is persisted as blocking severity
+`PRECONDITION`, distinct from model validation errors, and is advertised through
+the agent discovery views.
 Compilation reuses the latest successful validation for the active model version;
 it does not rerun validation or remote probes per business query.
 

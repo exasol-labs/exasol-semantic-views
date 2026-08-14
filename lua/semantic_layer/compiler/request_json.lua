@@ -712,7 +712,8 @@ local function validate_model(model)
     ]], {model_name = model.model_name})
     local errors = {}
     for _, row in ipairs(rows or {}) do
-        if row_value(row, "SEVERITY", 1) == "ERROR" then
+        local severity = row_value(row, "SEVERITY", 1)
+        if severity == "ERROR" or severity == "PRECONDITION" then
             errors[#errors + 1] = {
                 code = row_value(row, "RULE_CODE", 4),
                 object_type = row_value(row, "OBJECT_TYPE", 2),

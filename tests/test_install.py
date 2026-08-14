@@ -44,6 +44,22 @@ class Connection:
 
 
 class InstallerResetTest(unittest.TestCase):
+    def test_admin_validation_gates_block_session_preconditions(self):
+        admin_sql = (
+            ROOT / "sql/install/003_create_semantic_admin_scripts.sql"
+        ).read_text(encoding="utf-8")
+        hand_authored = admin_sql.split("-- BEGIN GENERATED VALIDATOR_RUNTIME", 1)[0]
+        error_only_checks = (
+            'if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then',
+            'if tostring(row_value(row, "SEVERITY", 1)) == "ERROR" then',
+            'if row_value(row, "SEVERITY", 1) == "ERROR" then',
+            'if tostring(severity) == "ERROR" then',
+        )
+        for check in error_only_checks:
+            self.assertNotIn(check, hand_authored)
+        self.assertIn('or tostring(severity) == "PRECONDITION"', hand_authored)
+        self.assertIn('validation_status = tostring(severity)', hand_authored)
+
     def test_agent_readiness_always_exposes_published_session_instructions(self):
         statements = INSTALL.split_exasol_sql(
             (ROOT / "sql/install/006_create_semantic_agent_views.sql").read_text(
@@ -59,6 +75,8 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("SESSION_SETUP_SQL", models)
         self.assertIn("SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL", models)
         self.assertIn("m.STATUS <> 'PUBLISHED' THEN 'NOT_PUBLISHED'", models)
+        self.assertIn("VALIDATION_PRECONDITION_COUNT", models)
+        self.assertIn("THEN 'PRECONDITION'", models)
 
         instructions = next(
             sql
@@ -70,7 +88,15 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("m.PREPROCESSOR_QUALIFIED_NAME", instructions)
         self.assertIn("STRUCTURED_REQUEST does not require session setup", instructions)
         self.assertIn("ALTER SESSION SET QUERY_TIMEOUT=60", instructions)
+        self.assertIn("'PRECONDITION' AS INSTRUCTION_KIND", instructions)
         self.assertIn("FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS ai", instructions)
+
+        validation_issues = next(
+            sql
+            for sql in statements
+            if "SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT AS" in sql
+        )
+        self.assertIn("('ERROR', 'PRECONDITION')", validation_issues)
 
     def test_f7_model_evolution_surface_is_installable(self):
         statements = []
