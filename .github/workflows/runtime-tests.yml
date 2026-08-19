@@ -31,6 +31,7 @@ jobs:
         run: |
           python tests/test_osi_tool.py
           python tests/test_install.py
+          python tests/test_release_notes.py
           python tests/test_sql_splitter.py
       - name: Verify generated install scripts
         run: |

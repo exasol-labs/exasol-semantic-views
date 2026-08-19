@@ -30,6 +30,7 @@ jobs:
         run: |
           mkdir -p dist
           bundle="exasol-semantic-views-${GITHUB_REF_NAME}.zip"
+          python tools/release_notes.py "${GITHUB_REF_NAME#v}" > release-notes.md
           git archive \
             --format=zip \
             --prefix="exasol-semantic-views-${GITHUB_REF_NAME}/" \
@@ -42,9 +43,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           bundle="exasol-semantic-views-${GITHUB_REF_NAME}.zip"
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/${bundle}" \
-            "dist/${bundle}.sha256" \
-            --verify-tag \
-            --title "Exasol Semantic Views ${GITHUB_REF_NAME}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" \
+              --title "Exasol Semantic Views ${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md
+            gh release upload "${GITHUB_REF_NAME}" \
+              "dist/${bundle}" \
+              "dist/${bundle}.sha256" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              "dist/${bundle}" \
+              "dist/${bundle}.sha256" \
+              --verify-tag \
+              --title "Exasol Semantic Views ${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md
+          fi
