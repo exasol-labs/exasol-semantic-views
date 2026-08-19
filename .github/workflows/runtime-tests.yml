@@ -1,6 +1,7 @@
 name: Runtime tests
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main]
@@ -29,6 +30,7 @@ jobs:
       - name: Run host-side regression tests
         run: |
           python tests/test_osi_tool.py
+          python tests/test_install.py
           python tests/test_sql_splitter.py
       - name: Verify generated install scripts
         run: |
