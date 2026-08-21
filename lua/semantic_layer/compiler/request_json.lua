@@ -1684,9 +1684,9 @@ local function compiler_source_column_exists(ctx, representation, column_name)
     local rows = query([[
         SELECT COUNT(*) AS COLUMN_COUNT
         FROM SYS.EXA_ALL_COLUMNS
-        WHERE COLUMN_SCHEMA = :schema_name
-          AND COLUMN_TABLE = :object_name
-          AND COLUMN_NAME = :column_name
+        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
+          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
+          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
     ]], {schema_name = representation.source_schema,
           object_name = representation.source_object,
           column_name = column_name})
