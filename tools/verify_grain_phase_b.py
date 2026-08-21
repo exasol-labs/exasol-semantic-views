@@ -99,9 +99,6 @@ def main() -> int:
             "'sales', 'order_line_to_order', 'order_id', NULL, "
             "'order_id', NULL, 1)"
         )
-        stale = compile_request(con, request)
-        assert_equal("metadata mutation makes validation stale", stale[1], "SEMANTIC_REQUEST_010")
-
         cache_rows = con.execute(
             "SELECT COUNT(*) FROM SYS_SEMANTIC.COMPILE_CACHE c "
             "JOIN SYS_SEMANTIC.MODELS m ON m.ACTIVE_VERSION_ID = c.MODEL_VERSION_ID "
@@ -109,9 +106,17 @@ def main() -> int:
         ).fetchall()
         assert_equal("metadata mutation clears compile cache", int(cache_rows[0][0]), 0)
 
+        after_mutation = compile_request(con, request)
+        assert_equal(
+            "compile after mutation still OK via auto-recertification",
+            after_mutation[0], "OK")
+        assert_true(
+            "mutation triggers a fresh validation run",
+            after_mutation[7] is not None and after_mutation[7] != legacy[7])
+
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')").fetchall()
         restored = compile_request(con, request)
-        assert_equal("compile after revalidation", restored[0], "OK")
+        assert_equal("compile after manual revalidation still OK", restored[0], "OK")
     finally:
         con.close()
     return 0
