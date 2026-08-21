@@ -123,7 +123,7 @@ REPLACE METRICS (
 
 COMPOUND_AGGREGATE_METRIC = """ALTER SEMANTIC VIEW sales.SALES
 ADD OR REPLACE METRIC avg_order_value_probe
-  AS SUM(net_revenue) / NULLIF(COUNT(DISTINCT order_id), 0)
+  AS SUM(net_revenue) / NULLIF(COUNT(DISTINCT ol.order_id), 0)
   ON ENTITY order_line
   RETURNS DECIMAL(18,2)
   ADDITIVE PUBLIC"""
@@ -393,7 +393,7 @@ REPLACE METRICS (
 )"""
         metric_count_before_dry_run = scalar(
             con,
-            "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS WHERE MODEL_NAME = 'sales'",
+            "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'",
         )
         invalid_dry_run = apply_definition(con, invalid_definition, True)
         assert_equal("invalid dry run status", invalid_dry_run["status"], "ERROR")
@@ -405,7 +405,7 @@ REPLACE METRICS (
         )
         assert_equal(
             "invalid dry run restored catalog",
-            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS WHERE MODEL_NAME = 'sales'"),
+            scalar(con, "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'"),
             metric_count_before_dry_run,
         )
 
@@ -695,6 +695,23 @@ REPLACE METRICS (
             "RENAME METRIC gross_merchandise_value TO total_revenue"
         )
         assert_equal("rename metric back", apply_definition(con, rename_back, False)["status"], "OK")
+
+        # Each RENAME METRIC keeps the previous name as a synonym; the round-trip above
+        # therefore accumulates 'gross_merchandise_value' on total_revenue. Reset the
+        # synonym list to the canonical seed values so later smoke tests see clean state.
+        reset_synonyms = (
+            "ALTER SEMANTIC VIEW sales.SALES "
+            "ADD OR REPLACE METRIC total_revenue "
+            "  AS SUM(net_revenue) "
+            "  ON ENTITY order_line "
+            "  RETURNS DECIMAL(18,2) "
+            "  FORMAT 'currency' "
+            "  DISPLAY 'Total Revenue' "
+            "  COMMENT 'Net recognized revenue excluding tax' "
+            "  SYNONYMS ('revenue', 'sales') "
+            "  ADDITIVE PUBLIC CERTIFIED"
+        )
+        assert_status_ok("reset total_revenue synonyms", apply_definition(con, reset_synonyms, False))
 
         drop_dependency = apply_definition(
             con,

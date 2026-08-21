@@ -96,3 +96,38 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # Databricks UCMV import: translate a metric-view YAML over the demo MART
 # tables into native semantic DDL, apply it, and query the imported model.
 "$PYTHON_BIN" tools/verify_databricks_import.py
+
+# Extended coverage: verify scripts previously invoked only manually. All exit
+# with 0 against the accumulated post-smoke state; adding them here surfaces
+# drift that used to sit unnoticed between releases.
+"$PYTHON_BIN" tools/verify_grain_phase_b.py
+"$PYTHON_BIN" tools/verify_json_table_relationship_mapping.py
+
+# Fusion feature suite (F3/F4/F5/F5.1/F7).
+"$PYTHON_BIN" tools/verify_fusion_f3.py
+"$PYTHON_BIN" tools/verify_fusion_f4.py
+"$PYTHON_BIN" tools/verify_fusion_f5.py
+"$PYTHON_BIN" tools/verify_fusion_f51.py
+"$PYTHON_BIN" tools/verify_fusion_f7.py
+
+# Feedback-driven behavior tests.
+"$PYTHON_BIN" tools/verify_fb015_replace_attribute_binding.py
+"$PYTHON_BIN" tools/verify_fb018_agent_session_instructions.py
+"$PYTHON_BIN" tools/verify_fb019_query_timeout_precondition.py
+
+# Historical bug regressions: each script isolates a specific past failure and
+# reasserts the fixed behavior. Running them here is cheap insurance.
+"$PYTHON_BIN" tools/verify_bug20_published_authoring_isolation.py
+"$PYTHON_BIN" tools/verify_bug24_promotion_gate.py
+"$PYTHON_BIN" tools/verify_bug25_published_mutation_protection.py
+"$PYTHON_BIN" tools/verify_bug26_published_f3_batch.py
+"$PYTHON_BIN" tools/verify_bug27_published_multistep_declarations.py
+"$PYTHON_BIN" tools/verify_bug28_composite_removal_and_recertification.py
+"$PYTHON_BIN" tools/verify_bug30_published_identity_setup.py
+"$PYTHON_BIN" tools/verify_bug31_representation_with_identity.py
+"$PYTHON_BIN" tools/verify_bug32_relationship_types_and_removal.py
+"$PYTHON_BIN" tools/verify_bug37_attribute_with_bindings.py
+
+# Claude study bug-reproduction classifier. Reports on historical study
+# findings and is safe to run last (uses zz_repro_* namespaces).
+"$PYTHON_BIN" tools/verify_claude_study_issues.py

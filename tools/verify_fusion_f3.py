@@ -75,8 +75,8 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT('f3_verify', 'SALES', 'orders', 'Partitioned sales')",
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('f3_verify', 'SALES', 'orders', 'order_status', 'o.order_status', 'VARCHAR(20)', 'Order Status', 'Order status', NULL, TRUE)",
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT('f3_verify', 'orders', 'amount', 'o.amount', 'DECIMAL(18,2)', 'ADDITIVE', 'Amount', 'Order amount', FALSE, TRUE)",
-            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING('f3_verify', 'DIMENSION', 'order_status', 'cold', 'o.order_status', 'PREFER', 1)",
-            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING('f3_verify', 'FACT', 'amount', 'cold', 'o.amount', 'PREFER', 1)",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING('f3_verify', 'DIMENSION', 'order_status', 'cold', 'o.order_status', 'PREFER', 1)",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING('f3_verify', 'FACT', 'amount', 'cold', 'o.amount', 'PREFER', 1)",
             "EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION('ALTER SEMANTIC VIEW f3_verify.SALES REPLACE METRICS (METRIC total_amount AS SUM(amount) ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC CERTIFIED)', FALSE)",
         ]
         for statement in statements:

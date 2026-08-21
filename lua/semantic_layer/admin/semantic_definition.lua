@@ -2896,7 +2896,7 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
              AND er.STATUS = 'ACTIVE'
             WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
               AND e.STATUS = 'ACTIVE'
-            ORDER BY ENTITY_ID
+            ORDER BY e.ENTITY_ID
         ]], {model_name = model_name}) or {}) do
             local name = row_value(row, "ENTITY_NAME", 1)
             add_export("ENTITY", model_name .. "." .. name, canonical_entity_sql(model_name, row))
