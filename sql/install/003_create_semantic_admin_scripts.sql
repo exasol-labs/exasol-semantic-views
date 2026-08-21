@@ -2589,9 +2589,9 @@ if changed then
         local column_count = scalar([[
             SELECT COUNT(*)
             FROM SYS.EXA_ALL_COLUMNS
-            WHERE COLUMN_SCHEMA = :source_schema
-              AND COLUMN_TABLE = :source_object
-              AND COLUMN_NAME = :column_name
+            WHERE (COLUMN_SCHEMA = :source_schema OR COLUMN_SCHEMA = UPPER(:source_schema))
+              AND (COLUMN_TABLE = :source_object OR COLUMN_TABLE = UPPER(:source_object))
+              AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
         ]], {source_schema = source_schema, source_object = source_object,
             column_name = key_column})
         if tonumber(column_count or 0) == 0 then
@@ -2655,9 +2655,9 @@ if changed then
         local column_count = scalar([[
             SELECT COUNT(*)
             FROM SYS.EXA_ALL_COLUMNS
-            WHERE COLUMN_SCHEMA = :source_schema
-              AND COLUMN_TABLE = :source_object
-              AND COLUMN_NAME = :column_name
+            WHERE (COLUMN_SCHEMA = :source_schema OR COLUMN_SCHEMA = UPPER(:source_schema))
+              AND (COLUMN_TABLE = :source_object OR COLUMN_TABLE = UPPER(:source_object))
+              AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
         ]], {source_schema = previous_source_schema,
             source_object = previous_source_object, column_name = key_column})
         if tonumber(column_count or 0) == 0 then
