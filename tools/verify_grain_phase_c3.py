@@ -619,8 +619,8 @@ def main() -> int:
 
         plan = json.loads(compiled[5])
         physical = plan["logical_plan"]["physical_plan"]
-        assert_equal("plan version", plan["plan_version"], 7)
-        assert_equal("physical plan version", physical["physical_plan_version"], 4)
+        assert_equal("plan version", plan["plan_version"], 10)
+        assert_equal("physical plan version", physical["physical_plan_version"], 6)
         assert_equal("branch count", physical["safeguards"]["branch_count"], 3)
         assert_equal("conservative branch limit", physical["safeguards"]["branch_limit"], 8)
         assert_equal(
