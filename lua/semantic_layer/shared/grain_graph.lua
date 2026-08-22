@@ -56,10 +56,12 @@ local function add_edge(target, from_id, to_id, relationship, safe, reason)
 end
 
 -- Build both the cardinality-preserving graph and the complete relationship
--- graph. Many-to-many edges are present in the complete graph for diagnostics
--- but are never safe: a declared FANOUT_POLICY records intent, it is not an
--- allocation proof, and traversing the edge attributes one fact row to several
--- dimension rows. See
+-- graph. Fanning edges are present in the complete graph for diagnostics but
+-- are never safe, and no declaration changes that: traversing one is what
+-- attributes one fact row to several dimension rows. FANOUT_POLICY records
+-- modeler intent for a many-to-many relationship; it is not an allocation
+-- proof. Reason codes therefore name the cardinality that blocks the walk, not
+-- a remedy. See
 -- plans/architecture-decisions/001-grain-aware-result-semantics.md.
 function M.build_edges(relationships)
     local safe_edges = {}
@@ -79,12 +81,15 @@ function M.build_edges(relationships)
             add(relationship.to_entity_id, relationship.from_entity_id, true, "OK")
         elseif cardinality == "MANY_TO_ONE" then
             add(relationship.from_entity_id, relationship.to_entity_id, true, "OK")
+            -- Walking back to the many-side attributes one row to several. No
+            -- declaration makes that safe, so the reason must not name one: the
+            -- strict lane already reports this direction the same way.
             add(relationship.to_entity_id, relationship.from_entity_id, false,
-                "FANOUT_REQUIRES_POLICY")
+                "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
         elseif cardinality == "ONE_TO_MANY" then
             add(relationship.to_entity_id, relationship.from_entity_id, true, "OK")
             add(relationship.from_entity_id, relationship.to_entity_id, false,
-                "FANOUT_REQUIRES_POLICY")
+                "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
         elseif cardinality == "MANY_TO_MANY" then
             add(relationship.from_entity_id, relationship.to_entity_id, false,
                 "MANY_TO_MANY_UNSUPPORTED")

@@ -273,7 +273,8 @@ REPLACE METRICS (
 -- it in the SALES object would make it groupable by product_category, and the
 -- only join path from `order` to `product` runs backwards through
 -- order_line_to_order -- one order row fanned out across its lines. Validation
--- refuses that combination (SEMANTIC_MODEL_030 / FANOUT_REQUIRES_POLICY), so
+-- refuses that combination (SEMANTIC_MODEL_030 /
+-- ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED), so
 -- the order-grain metric gets its own object rooted at `order`, where every
 -- exposed dimension is reachable without fan-out.
 --

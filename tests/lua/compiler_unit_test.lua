@@ -851,7 +851,7 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX", 1, true) then
             if options.missing_matrix then return {} end
             if options.invalid_matrix then
-                return {{false, "FANOUT_REQUIRES_POLICY", nil}}
+                return {{false, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED", nil}}
             end
             return {{true, "OK", "SELF"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS", 1, true) then

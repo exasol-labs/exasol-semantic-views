@@ -15,7 +15,7 @@ test("shared grain graph builds cardinality-preserving directions", function()
     assert_equal(safe["1"][1].to_id, 2)
     assert_equal(safe["2"][1].name, "many_one")
     assert_equal(safe["4"][1].name, "one_many")
-    assert_equal(all["3"][1].reason, "FANOUT_REQUIRES_POLICY")
+    assert_equal(all["3"][1].reason, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
 
     -- A declared fanout policy is not an allocation proof: the bridge edge is
     -- visible in the complete graph for diagnostics and absent from the safe
@@ -38,7 +38,7 @@ test("shared path proof handles self blocked missing and absent paths", function
         ["1"] = {
             {from_id = 1, to_id = 2, name = "safe", safe = true},
             {from_id = 1, to_id = 3, name = "blocked", safe = false,
-                reason = "FANOUT_REQUIRES_POLICY"},
+                reason = "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED"},
         },
     }
     local self = graph.prove_path(edges, 1, 1, {require_safe = true})
@@ -47,7 +47,7 @@ test("shared path proof handles self blocked missing and absent paths", function
 
     local blocked = graph.prove_path(edges, 1, 3, {require_safe = true})
     assert_true(not blocked.ok)
-    assert_equal(blocked.reason, "FANOUT_REQUIRES_POLICY")
+    assert_equal(blocked.reason, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
 
     local absent = graph.prove_path(edges, 2, 3, {require_safe = true})
     assert_equal(absent.reason, "NO_RELATIONSHIP_PATH")

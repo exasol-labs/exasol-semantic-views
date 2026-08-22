@@ -153,7 +153,7 @@ test("validator relationship graph distinguishes safe joins and fanout", functio
     local safe, all = api.relationship_edges(ctx)
     assert_equal(safe['1'][1].to_id, 2)
     assert_branch("validator.relationship.safe_edge", safe['1'] ~= nil, true)
-    assert_equal(all['2'][1].reason, "FANOUT_REQUIRES_POLICY")
+    assert_equal(all['2'][1].reason, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_007"))
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_010"))
 end)
@@ -1638,6 +1638,10 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
             {id = 10, name = "revenue", base_entity_id = 1},
             {id = 11, name = "orphan", base_entity_id = 99},
         },
+        metric_by_id = {
+            ['10'] = {id = 10, name = "revenue", base_entity_id = 1},
+            ['11'] = {id = 11, name = "orphan", base_entity_id = 99},
+        },
         dimensions = {
             {id = 20, name = "order_id", entity_id = 1},
             {id = 21, name = "region", entity_id = 2},
@@ -1649,7 +1653,7 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
     local all = {
         ['1'] = {
             {to_id = 2, name = "orders_customer", safe = true, reason = "OK"},
-            {to_id = 3, name = "orders_items", safe = false, reason = "FANOUT_REQUIRES_POLICY"},
+            {to_id = 3, name = "orders_items", safe = false, reason = "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED"},
         },
     }
     with_query(function(sql, params)
@@ -1661,9 +1665,9 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
     assert_equal(#inserted, 8)
     assert_true(ctx.matrix['10']['20'].is_valid)
     assert_equal(ctx.matrix['10']['21'].reason_code, "OK")
-    assert_equal(ctx.matrix['10']['22'].reason_code, "FANOUT_REQUIRES_POLICY")
+    assert_equal(ctx.matrix['10']['22'].reason_code, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
     assert_equal(ctx.matrix['10']['22'].path,
-        "orders_items (rejected: FANOUT_REQUIRES_POLICY)")
+        "orders_items (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED)")
     assert_equal(ctx.matrix['10']['23'].reason_code, "MISSING_DIMENSION_ENTITY")
     assert_equal(ctx.matrix['11']['20'].reason_code, "MISSING_BASE_ENTITY")
     assert_branch("validator.matrix.safe", ctx.matrix['10']['21'].is_valid, true)
@@ -1676,8 +1680,15 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
         return {}
     end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_030"))
-    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_030").message,
-        "orders_items (rejected: FANOUT_REQUIRES_POLICY)")
+    local fanout_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_030")
+    assert_contains(fanout_issue.message,
+        "orders_items (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED)")
+    -- The remedy named must be one that exists. A fanning edge cannot be
+    -- declared safe, so the message points at object membership.
+    assert_contains(fanout_issue.message,
+        "No relationship declaration makes a fanning traversal safe.")
+    assert_contains(fanout_issue.message, "reachable from 'orders' without fan-out")
+    assert_contains(fanout_issue.message, "object 'SALES'")
 end)
 
 test("validator matrix rejects metrics unreachable from published roots", function()
@@ -1697,7 +1708,7 @@ test("validator matrix rejects metrics unreachable from published roots", functi
     local all = {
         ['1'] = safe['1'],
         ['2'] = {{from_id = 2, to_id = 3, name = "shipment_to_order", safe = false,
-            reason = "FANOUT_REQUIRES_POLICY"}},
+            reason = "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED"}},
         ['3'] = safe['3'],
     }
     with_query(function(sql, params)
@@ -1710,7 +1721,7 @@ test("validator matrix rejects metrics unreachable from published roots", functi
     end)
     assert_equal(ctx.matrix['10']['20'].reason_code, "NO_SAFE_JOIN_PATH")
     assert_equal(ctx.matrix['10']['20'].path,
-        "line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)")
+        "line_to_order > shipment_to_order (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED)")
     assert_equal(inserted.relationship_path, ctx.matrix['10']['20'].path)
 
     with_query(function(sql)

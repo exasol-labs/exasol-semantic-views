@@ -13,7 +13,8 @@ That shape makes the product's central safety property observable:
   2. the same metric cannot be placed alongside `product_category`, because the
      only path from `order` to `product` runs backwards through
      order_line_to_order. Validation refuses it at authoring time with
-     SEMANTIC_MODEL_030 / FANOUT_REQUIRES_POLICY and rolls the catalog back;
+     SEMANTIC_MODEL_030 / ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED and rolls the
+     catalog back;
   3. the number that refusal prevents is materially wrong -- this script joins
      the tables by hand to show the inflation.
 
@@ -165,9 +166,14 @@ def main() -> None:
     )
     print(f"   {refusal}")
     assert_contains("refusal names the rule", message, "SEMANTIC_MODEL_030")
-    assert_contains("refusal names the reason", message, "FANOUT_REQUIRES_POLICY")
+    assert_contains("refusal names the reason", message,
+                    "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
     assert_contains("refusal names the offending path", message, "order_line_to_order")
     assert_contains("refusal names the dimension", message, "product_category")
+    # The remedy named must be one that exists: no relationship declaration can
+    # make a fanning traversal safe, so the message points at object membership.
+    assert_contains("refusal names a remedy that exists", message,
+                    "No relationship declaration makes a fanning traversal safe")
 
     after = con.execute(
         "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'"
@@ -192,7 +198,7 @@ def main() -> None:
     assert_equal(
         "matrix publishes the one impossible pair",
         [(r[0], r[1], r[2]) for r in invalid],
-        [("total_freight", "product_category", "FANOUT_REQUIRES_POLICY")],
+        [("total_freight", "product_category", "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")],
     )
     print(f"   path: {invalid[0][3]}")
 

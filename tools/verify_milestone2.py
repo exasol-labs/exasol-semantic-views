@@ -130,7 +130,7 @@ def main() -> int:
                     "ORDER BY METRIC_NAME, DIMENSION_NAME"
                 ).fetchall()
             ],
-            [("total_freight", "product_category", "FANOUT_REQUIRES_POLICY")],
+            [("total_freight", "product_category", "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")],
         )
         assert_equal(
             "sales metric dependencies",

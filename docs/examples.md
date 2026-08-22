@@ -75,8 +75,11 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC(
   'order','DECIMAL(18,2)','Freight (misplaced)','',NULL,FALSE,TRUE);
 -- SEMANTIC_ADMIN_090: metric rejected; validation failed: SEMANTIC_MODEL_030:
 -- Visible metric freight_in_sales cannot be grouped or filtered by dimension
--- product_category: FANOUT_REQUIRES_POLICY via order_line_to_order
--- (rejected: FANOUT_REQUIRES_POLICY) > order_line_to_product.
+-- product_category: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED via order_line_to_order
+-- (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED) > order_line_to_product.
+-- No relationship declaration makes a fanning traversal safe. Expose this
+-- metric only alongside dimensions reachable from 'order' without fan-out, in
+-- this or a separate semantic object, or remove one of the two from 'SALES'.
 ```
 
 `SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX` carries the same verdict for every

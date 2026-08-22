@@ -288,8 +288,11 @@ restores the catalog:
 ```text
 SEMANTIC_ADMIN_090: metric rejected; validation failed: SEMANTIC_MODEL_030:
 Visible metric freight_in_sales cannot be grouped or filtered by dimension
-product_category: FANOUT_REQUIRES_POLICY via order_line_to_order
-(rejected: FANOUT_REQUIRES_POLICY) > order_line_to_product.
+product_category: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED via order_line_to_order
+(rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED) > order_line_to_product. No
+relationship declaration makes a fanning traversal safe. Expose this metric only
+alongside dimensions reachable from 'order' without fan-out, in this or a
+separate semantic object, or remove one of the two from object 'SALES'.
 ```
 
 The refusal is worth a real number: joining orders to lines by hand and summing

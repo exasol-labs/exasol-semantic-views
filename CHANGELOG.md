@@ -8,6 +8,26 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### Fan-out refusals named a remedy that does not exist
+
+- The reverse of a `MANY_TO_ONE` (and the forward direction of a
+  `ONE_TO_MANY`) was reported as `FANOUT_REQUIRES_POLICY`, but
+  `FANOUT_POLICY` was never consulted for those directions: declaring one
+  changed nothing, so the message sent modelers after a remedy that could not
+  work. Verified against a `MANY_TO_ONE` carrying `FANOUT_POLICY = 'ALLOCATE'`,
+  which was still refused with the same "requires policy" reason.
+- Those edges now report `ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED`, the code the
+  strict lane already used for the identical situation, so both lanes share one
+  vocabulary and no reason code names a remedy. With many-to-many traversal
+  also refused, no reason code implies a policy would help — because none
+  would.
+- `SEMANTIC_MODEL_030` now states the remedy that does exist for a fanning
+  pair: expose the metric only alongside dimensions reachable from its base
+  entity without fan-out, or drop one of the two from the object.
+- Callers reading `REASON_CODE` from `METRIC_DIMENSION_MATRIX` or
+  `VALID_COMBINATIONS_FOR_AGENT` see the new value; there is no compatibility
+  alias, since the old one was actively misleading.
+
 #### Many-to-many traversal silently double counted
 
 - A `MANY_TO_MANY` relationship with any non-empty `FANOUT_POLICY` was treated
@@ -46,8 +66,9 @@ All notable changes to Exasol Semantic Views are documented here.
 - `tools/verify_fanout_guardrails.py` walks through and asserts the guarantee:
   safe traversals match hand-written SQL, the same order-grain metric is
   refused in the line-grain `SALES` object with `SEMANTIC_MODEL_030` /
-  `FANOUT_REQUIRES_POLICY` and a rolled-back catalog, and the overstated number
-  the refusal prevents is printed. It runs as part of `tools/run_smoke.sh`.
+  `ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED` and a rolled-back catalog, and the
+  overstated number the refusal prevents is printed. It runs as part of
+  `tools/run_smoke.sh`.
 
 ## [0.1] - 2026-08-19
 

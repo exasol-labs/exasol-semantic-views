@@ -149,16 +149,20 @@ The matrix records:
 
 Validation accepts same-entity pairs and non-fanout relationship paths. It
 rejects paths that fan out: traversing from the one-side to the many-side of a
-relationship (`FANOUT_REQUIRES_POLICY`), and any many-to-many traversal
-(`MANY_TO_MANY_UNSUPPORTED`). A declared `FANOUT_POLICY` records modeler intent
-for a many-to-many relationship; it is not an allocation proof and does not make
-the edge traversable in either proof mode.
+relationship (`ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED`), and any many-to-many
+traversal (`MANY_TO_MANY_UNSUPPORTED`). Both reason codes name the cardinality
+that blocks the walk, because neither has a remedy at the relationship level. A
+declared `FANOUT_POLICY` records modeler intent for a many-to-many relationship;
+it is not an allocation proof and does not make the edge traversable in either
+proof mode. The remedy is object membership: expose a metric only alongside
+dimensions reachable from its base entity without fan-out, which is what
+`SEMANTIC_MODEL_030`'s message spells out.
 
 For rejected connected pairs, `RELATIONSHIP_PATH` contains the attempted path
-and annotates unsafe edges with their reason, for example
-`line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)`. The
-compiler refuses the same traversal with `SEMANTIC_REQUEST_042` and the same
-annotated path.
+and annotates unsafe edges with their reason, for example `line_to_order >
+shipment_to_order (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED)`. The compiler
+refuses the same traversal with `SEMANTIC_REQUEST_042` and the same annotated
+path.
 `NO_SAFE_JOIN_PATH` means no semantic-object root can reach the metric base
 without traversing from the one-side to the many-side of a relationship. This
 prevents attributing one fact row to multiple dimension rows; see

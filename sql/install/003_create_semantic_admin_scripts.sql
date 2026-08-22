@@ -7846,10 +7846,12 @@ local function add_edge(target, from_id, to_id, relationship, safe, reason)
 end
 
 -- Build both the cardinality-preserving graph and the complete relationship
--- graph. Many-to-many edges are present in the complete graph for diagnostics
--- but are never safe: a declared FANOUT_POLICY records intent, it is not an
--- allocation proof, and traversing the edge attributes one fact row to several
--- dimension rows. See
+-- graph. Fanning edges are present in the complete graph for diagnostics but
+-- are never safe, and no declaration changes that: traversing one is what
+-- attributes one fact row to several dimension rows. FANOUT_POLICY records
+-- modeler intent for a many-to-many relationship; it is not an allocation
+-- proof. Reason codes therefore name the cardinality that blocks the walk, not
+-- a remedy. See
 -- plans/architecture-decisions/001-grain-aware-result-semantics.md.
 function M.build_edges(relationships)
     local safe_edges = {}
@@ -7869,12 +7871,15 @@ function M.build_edges(relationships)
             add(relationship.to_entity_id, relationship.from_entity_id, true, "OK")
         elseif cardinality == "MANY_TO_ONE" then
             add(relationship.from_entity_id, relationship.to_entity_id, true, "OK")
+            -- Walking back to the many-side attributes one row to several. No
+            -- declaration makes that safe, so the reason must not name one: the
+            -- strict lane already reports this direction the same way.
             add(relationship.to_entity_id, relationship.from_entity_id, false,
-                "FANOUT_REQUIRES_POLICY")
+                "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
         elseif cardinality == "ONE_TO_MANY" then
             add(relationship.to_entity_id, relationship.from_entity_id, true, "OK")
             add(relationship.from_entity_id, relationship.to_entity_id, false,
-                "FANOUT_REQUIRES_POLICY")
+                "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
         elseif cardinality == "MANY_TO_MANY" then
             add(relationship.from_entity_id, relationship.to_entity_id, false,
                 "MANY_TO_MANY_UNSUPPORTED")
@@ -8196,6 +8201,15 @@ local VALID_CARDINALITIES = {
 local VALID_JOIN_TYPES = {
     INNER = true,
     LEFT = true,
+}
+
+-- Reasons emitted by the shared grain graph for an edge that would attribute
+-- one fact row to several dimension rows. Named here so rule SEMANTIC_MODEL_030
+-- can offer the remedy that exists (object membership) rather than one that
+-- does not (a relationship-level declaration).
+local FANOUT_REASONS = {
+    ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED = true,
+    MANY_TO_MANY_UNSUPPORTED = true,
 }
 
 local VALID_AGENT_SCOPE_TYPES = {
@@ -11720,15 +11734,26 @@ local function validate_visible_metric_dimension_pairs(ctx)
             local message = "Visible metric " .. tostring(row_value(row, "METRIC_NAME", 3))
                 .. " cannot be grouped or filtered by dimension " .. tostring(row_value(row, "DIMENSION_NAME", 5))
                 .. ": " .. tostring(matrix_row.reason_code) .. path_detail .. "."
+            -- Name the remedy that exists. A fanning traversal has none at
+            -- the relationship level, whatever FANOUT_POLICY says, so point at
+            -- object membership instead of implying a declaration would help.
+            local metric = ctx.metric_by_id[key(metric_id)]
+            local base_name = metric ~= nil
+                and (ctx.entity_name_by_id[key(metric.base_entity_id)]
+                    or tostring(metric.base_entity_id))
+                or nil
             if matrix_row.reason_code == "NO_SAFE_JOIN_PATH" then
-                local metric = ctx.metric_by_id[key(metric_id)]
-                if metric ~= nil then
-                    local base_name = ctx.entity_name_by_id[key(metric.base_entity_id)]
-                        or tostring(metric.base_entity_id)
+                if base_name ~= nil then
                     message = message .. " Declare a semantic object rooted at '"
                         .. base_name .. "', or remove this metric from object '"
                         .. tostring(object_name) .. "'."
                 end
+            elseif FANOUT_REASONS[tostring(matrix_row.reason_code)] and base_name ~= nil then
+                message = message .. " No relationship declaration makes a fanning"
+                    .. " traversal safe. Expose this metric only alongside dimensions"
+                    .. " reachable from '" .. base_name .. "' without fan-out, in this"
+                    .. " or a separate semantic object, or remove one of the two from"
+                    .. " object '" .. tostring(object_name) .. "'."
             end
             add_issue(ctx, "ERROR", "SEMANTIC_OBJECT", object_name,
                 "SEMANTIC_MODEL_030", message)
@@ -12343,10 +12368,12 @@ local function add_edge(target, from_id, to_id, relationship, safe, reason)
 end
 
 -- Build both the cardinality-preserving graph and the complete relationship
--- graph. Many-to-many edges are present in the complete graph for diagnostics
--- but are never safe: a declared FANOUT_POLICY records intent, it is not an
--- allocation proof, and traversing the edge attributes one fact row to several
--- dimension rows. See
+-- graph. Fanning edges are present in the complete graph for diagnostics but
+-- are never safe, and no declaration changes that: traversing one is what
+-- attributes one fact row to several dimension rows. FANOUT_POLICY records
+-- modeler intent for a many-to-many relationship; it is not an allocation
+-- proof. Reason codes therefore name the cardinality that blocks the walk, not
+-- a remedy. See
 -- plans/architecture-decisions/001-grain-aware-result-semantics.md.
 function M.build_edges(relationships)
     local safe_edges = {}
@@ -12366,12 +12393,15 @@ function M.build_edges(relationships)
             add(relationship.to_entity_id, relationship.from_entity_id, true, "OK")
         elseif cardinality == "MANY_TO_ONE" then
             add(relationship.from_entity_id, relationship.to_entity_id, true, "OK")
+            -- Walking back to the many-side attributes one row to several. No
+            -- declaration makes that safe, so the reason must not name one: the
+            -- strict lane already reports this direction the same way.
             add(relationship.to_entity_id, relationship.from_entity_id, false,
-                "FANOUT_REQUIRES_POLICY")
+                "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
         elseif cardinality == "ONE_TO_MANY" then
             add(relationship.to_entity_id, relationship.from_entity_id, true, "OK")
             add(relationship.from_entity_id, relationship.to_entity_id, false,
-                "FANOUT_REQUIRES_POLICY")
+                "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
         elseif cardinality == "MANY_TO_MANY" then
             add(relationship.from_entity_id, relationship.to_entity_id, false,
                 "MANY_TO_MANY_UNSUPPORTED")
