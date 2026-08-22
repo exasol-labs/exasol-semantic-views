@@ -158,6 +158,57 @@ test("validator relationship graph distinguishes safe joins and fanout", functio
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_010"))
 end)
 
+test("validator flags fanout policy values that carry no meaning", function()
+    -- ADD_RELATIONSHIP rejects unknown values on write, so a row carrying one
+    -- predates that check: warn without failing an otherwise valid model.
+    local legacy = validation_context({
+        entity_name_by_id = {['1'] = "orders", ['2'] = "shipments"},
+        entity_alias_by_id = {['1'] = "O", ['2'] = "S"},
+        relationships = {
+            {name = "orders_shipments", from_entity_id = 1, to_entity_id = 2,
+                cardinality = "MANY_TO_MANY", join_type = "LEFT",
+                fanout_policy = "banana",
+                join_condition = "o.order_id = s.order_id"},
+        },
+    })
+    api.relationship_edges(legacy)
+    assert_true(has_rule(legacy, "SEMANTIC_MODEL_053"))
+    assert_true(not has_rule(legacy, "SEMANTIC_MODEL_010"))
+    assert_contains(issue_for_rule(legacy, "SEMANTIC_MODEL_053").message,
+        "Unrecognized fanout policy: banana")
+    assert_equal(issue_for_rule(legacy, "SEMANTIC_MODEL_053").severity, "WARNING")
+
+    -- A recognized value on a cardinality where it means nothing is the shape
+    -- that made FANOUT_REQUIRES_POLICY read as an available remedy.
+    local misplaced = validation_context({
+        entity_name_by_id = {['1'] = "lines", ['2'] = "orders"},
+        entity_alias_by_id = {['1'] = "L", ['2'] = "O"},
+        relationships = {
+            {name = "line_to_order", from_entity_id = 1, to_entity_id = 2,
+                cardinality = "MANY_TO_ONE", join_type = "LEFT",
+                fanout_policy = "allocate",
+                join_condition = "l.order_id = o.order_id"},
+        },
+    })
+    api.relationship_edges(misplaced)
+    assert_contains(issue_for_rule(misplaced, "SEMANTIC_MODEL_053").message,
+        "declared on a MANY_TO_ONE relationship, where it has no meaning")
+
+    -- A recognized value on a many-to-many relationship is silent.
+    local accepted = validation_context({
+        entity_name_by_id = {['1'] = "orders", ['2'] = "shipments"},
+        entity_alias_by_id = {['1'] = "O", ['2'] = "S"},
+        relationships = {
+            {name = "orders_shipments", from_entity_id = 1, to_entity_id = 2,
+                cardinality = "MANY_TO_MANY", join_type = "LEFT",
+                fanout_policy = "REFERENCE_ONLY",
+                join_condition = "o.order_id = s.order_id"},
+        },
+    })
+    api.relationship_edges(accepted)
+    assert_true(not has_rule(accepted, "SEMANTIC_MODEL_053"))
+end)
+
 test("validator reports invalid relationship contracts", function()
     local ctx = validation_context({
         entity_name_by_id = {['1'] = "orders"},

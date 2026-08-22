@@ -35,10 +35,11 @@ many-to-many edge. Expression identity returns
 `EXPRESSION_KEY_PROOF_UNSUPPORTED`.
 
 Neither mode traverses a many-to-many relationship. A declared `FANOUT_POLICY`
-records intent, not an allocation proof, so a request whose join path needs such
-an edge is refused with `SEMANTIC_REQUEST_042` naming the blocking relationship
-and reason `MANY_TO_MANY_UNSUPPORTED`, rather than compiling to a flat join that
-counts a row once per matching partner.
+records intent, not an allocation proof (see
+[Fanout policy](validation-rules.md#fanout-policy)), so a request whose join
+path needs such an edge is refused with `SEMANTIC_REQUEST_042` naming the
+blocking relationship and reason `MANY_TO_MANY_UNSUPPORTED`, rather than
+compiling to a flat join that counts a row once per matching partner.
 
 For metrics whose normalized aggregate states span multiple fact entities, the
 logical and physical planners:

@@ -731,7 +731,9 @@ shared logic into a fact or helper metric.
 `SEMANTIC_QUERY_003: metric cannot be grouped by invalid dimension`
 
 The metric/dimension pair is not valid according to the persisted compatibility
-matrix. Check the relationship path, entity grain, and fanout policy.
+matrix. Check the relationship path and entity grain: the reason code names the
+edge that blocks the join. No fanout policy makes a fanning traversal valid --
+see [Fanout policy](validation-rules.md#fanout-policy).
 
 `SEMANTIC_QUERY_008: row-level facts cannot be mixed with aggregate metrics`
 

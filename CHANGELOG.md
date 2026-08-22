@@ -8,6 +8,25 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### `FANOUT_POLICY` was undocumented free text
+
+- The column accepted any string (`'banana'` was stored verbatim and validated
+  clean). It is now a closed set — `REFERENCE_ONLY`, `DEDUPLICATE`, `ALLOCATE`
+  — matched case-insensitively and stored upper-case.
+- `ADD_RELATIONSHIP` refuses an unrecognized value on write with
+  `SEMANTIC_ADMIN_003`, the same way it already refused an unrecognized
+  cardinality or join type. Semantic DDL and OSI import write through that
+  script, so they inherit the check; importing a legacy model whose policy is
+  outside the set now fails loudly there.
+- New `SEMANTIC_MODEL_053` (**warning**, not error, so stored models keep
+  validating) fires for a value that predates the write-path check, and for a
+  policy declared on a cardinality where it has no meaning.
+- Documented in `docs/validation-rules.md#fanout-policy`: what the column is,
+  how to set it, what each value means, and that **no value authorizes
+  traversal** — the values record intent for a technique a planner may one day
+  prove. `docs/creating-metrics.md` no longer tells readers to "check the
+  fanout policy" when a metric/dimension pair is rejected.
+
 #### Fan-out refusals named a remedy that does not exist
 
 - The reverse of a `MANY_TO_ONE` (and the forward direction of a

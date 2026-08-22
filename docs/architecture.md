@@ -529,7 +529,8 @@ Two proof modes exist:
 Strict proof additionally rejects expression-based key mappings, and the
 multi-fact planner consumes only strict proofs. Many-to-many traversal is
 rejected in *both* modes: the shared grain graph never marks a many-to-many edge
-safe, whatever `FANOUT_POLICY` says.
+safe, whatever `FANOUT_POLICY` says (see
+[Fanout policy](validation-rules.md#fanout-policy)).
 
 For a request involving several fact grains, the compiler does not create one
 large join and aggregate afterward. It follows an aggregate-state strategy:

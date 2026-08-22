@@ -103,6 +103,17 @@ CASES: list[tuple[str, str, str]] = [
         "SEMANTIC_ADMIN_003",
     ),
 
+    # SEMANTIC_ADMIN_003: FANOUT_POLICY is a closed set, not free text. An
+    # unrecognized value used to be stored verbatim, which read as a safety
+    # override that never existed. See docs/validation-rules.md#fanout-policy.
+    (
+        "admin_003/invalid_fanout_policy",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP("
+        "'sales', 'zz_probe_m2m', 'order', 'product', "
+        "'o.order_id = p.product_id', 'MANY_TO_MANY', 'LEFT', 'banana')",
+        "SEMANTIC_ADMIN_003",
+    ),
+
     # SEMANTIC_ADMIN_010: duplicate model
     (
         "admin_010/duplicate_model",

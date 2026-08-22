@@ -52,7 +52,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_007` | error | Relationship join condition references an invalid alias. |
 | `SEMANTIC_MODEL_008` | error | Relationship cardinality is unsupported. |
 | `SEMANTIC_MODEL_009` | error | Relationship join type is unsupported. |
-| `SEMANTIC_MODEL_010` | error | Many-to-many relationship lacks explicit fanout policy. |
+| `SEMANTIC_MODEL_010` | error | Many-to-many relationship lacks an explicit fanout policy. See [Fanout policy](#fanout-policy). |
 | `SEMANTIC_MODEL_011` | error | Metric expression references an unknown fact or metric. |
 | `SEMANTIC_MODEL_012` | error | Metric dependencies contain a cycle. |
 | `SEMANTIC_MODEL_013` | error | Dimension, fact, or filter expression uses an out-of-scope alias. |
@@ -92,6 +92,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_050` | warning | A relationship remains usable, but one or more endpoint representations lack the physical key and an anchored scalar `DIRECT` F5.1 remap, so joined requests exclude those candidates. |
 | `SEMANTIC_MODEL_051` | error | A simple relationship equality joins incompatible physical type families. The diagnostic names the relationship, endpoints, and resolved representation types. |
 | `SEMANTIC_MODEL_052` | error | A dimension or fact on an F3-partitioned entity lacks an active binding on one or more partitions. Each missing attribute/partition pair is reported. |
+| `SEMANTIC_MODEL_053` | warning | Fanout policy value is unrecognized, or declared on a cardinality where it has no meaning. See [Fanout policy](#fanout-policy). |
 
 ## Expression Validation Boundary
 
@@ -131,6 +132,52 @@ SQL-native definition dry-run validates the simulated catalog state but does
 not strengthen this expression boundary. Imported Databricks expressions need
 the same Exasol-specific smoke testing.
 
+## Fanout Policy
+
+`FANOUT_POLICY` is a column on `SYS_SEMANTIC.RELATIONSHIPS`, set through the
+eighth argument of `SEMANTIC_ADMIN.ADD_RELATIONSHIP`:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
+  'sales', 'order_to_shipment', 'order', 'shipment',
+  'o.order_id = s.order_id', 'MANY_TO_MANY', 'LEFT', 'REFERENCE_ONLY');
+```
+
+It is a closed set, matched case-insensitively and stored upper-case:
+
+| Value | Meaning |
+|---|---|
+| `REFERENCE_ONLY` | The relationship exists for navigation, lineage, and documentation. Metric attribution across it is not intended. |
+| `DEDUPLICATE` | Intent: attribute a measure once per base-entity key, however many partners it matches. Reserved; no planner implements it. |
+| `ALLOCATE` | Intent: split a measure across the partners it matches. Reserved; no planner implements it, and the weights are not modeled. |
+
+**No value authorizes traversal.** The policy records what a modeler intends a
+planner to do if the technique is ever proven; it is not an allocation proof, so
+a many-to-many edge stays unsafe in both proof modes whatever the policy says
+(see [Grain-Aware Result Semantics](architecture-decisions/001-grain-aware-result-semantics.md)).
+A relationship whose declared cardinality is not `MANY_TO_MANY` gains nothing
+from a policy either: traversal against the declared direction is refused as
+`ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED` with or without one.
+
+Enforcement is split so that tightening the set does not break stored models:
+
+- `ADD_RELATIONSHIP` refuses an unrecognized value on write with
+  `SEMANTIC_ADMIN_003`, the same way it refuses an unrecognized cardinality or
+  join type. Semantic DDL and OSI import write through the same script, so they
+  inherit the check.
+- `VALIDATE_MODEL` reports `SEMANTIC_MODEL_053` as a **warning** for a row that
+  predates the check, or for a policy declared on a cardinality where it means
+  nothing. The model stays valid; the value is recorded and carries no meaning.
+- `SEMANTIC_MODEL_010` still requires *some* policy on a many-to-many
+  relationship. The requirement is a declaration of intent, not an
+  authorization: it makes the modeler state what the fanning relationship is
+  for.
+
+The remedy for a rejected pair is never a policy — it is object membership.
+Expose a metric only alongside dimensions reachable from its base entity
+without fan-out, in the same or a separate semantic object. `SEMANTIC_MODEL_030`
+spells this out in its message.
+
 ## Metric/Dimension Matrix
 
 Validation rebuilds `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX` for the active model
@@ -154,9 +201,10 @@ traversal (`MANY_TO_MANY_UNSUPPORTED`). Both reason codes name the cardinality
 that blocks the walk, because neither has a remedy at the relationship level. A
 declared `FANOUT_POLICY` records modeler intent for a many-to-many relationship;
 it is not an allocation proof and does not make the edge traversable in either
-proof mode. The remedy is object membership: expose a metric only alongside
-dimensions reachable from its base entity without fan-out, which is what
-`SEMANTIC_MODEL_030`'s message spells out.
+proof mode (see [Fanout policy](#fanout-policy)). The remedy is object
+membership: expose a metric only alongside dimensions reachable from its base
+entity without fan-out, which is what `SEMANTIC_MODEL_030`'s message spells
+out.
 
 For rejected connected pairs, `RELATIONSHIP_PATH` contains the attempted path
 and annotates unsafe edges with their reason, for example `line_to_order >
@@ -188,7 +236,8 @@ The smoke now verifies:
 - missing source object returns `SEMANTIC_MODEL_001`
 - invalid metric dependency returns `SEMANTIC_MODEL_011`
 - cyclic metric dependency returns `SEMANTIC_MODEL_012`
-- many-to-many without a declared fanout policy returns `SEMANTIC_MODEL_010`
+- many-to-many without a declared fanout policy returns `SEMANTIC_MODEL_010`,
+  and an unrecognized or misplaced policy value warns with `SEMANTIC_MODEL_053`
 - a visible metric/dimension pair that needs a many-to-many edge returns
   `SEMANTIC_MODEL_030` with reason `MANY_TO_MANY_UNSUPPORTED`, and the compiler
   refuses the same request (`tools/verify_many_to_many_refusal.py`)

@@ -22,6 +22,16 @@ local FANOUT_REASONS = {
     MANY_TO_MANY_UNSUPPORTED = true,
 }
 
+-- Closed set of FANOUT_POLICY values. None authorizes traversal of a fanning
+-- edge; each records what the modeler intends a planner to do if the technique
+-- is ever proven. ADD_RELATIONSHIP rejects anything else on write, so a value
+-- outside this set means the row predates that check.
+local VALID_FANOUT_POLICIES = {
+    ALLOCATE = true,
+    DEDUPLICATE = true,
+    REFERENCE_ONLY = true,
+}
+
 local VALID_AGENT_SCOPE_TYPES = {
     MODEL = true,
     SEMANTIC_OBJECT = true,
@@ -2629,6 +2639,24 @@ local function relationship_edges(ctx)
                 "Many-to-many relationship requires an explicit fanout policy. "
                     .. "A policy declares intent and does not make the relationship "
                     .. "traversable for metric attribution.")
+        elseif not missing(relationship.fanout_policy) then
+            local policy = upper(relationship.fanout_policy)
+            if not VALID_FANOUT_POLICIES[policy] then
+                add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
+                    "SEMANTIC_MODEL_053",
+                    "Unrecognized fanout policy: " .. tostring(relationship.fanout_policy)
+                        .. ". Expected ALLOCATE, DEDUPLICATE, or REFERENCE_ONLY. The value"
+                        .. " is recorded but carries no meaning, and no policy authorizes"
+                        .. " traversal of a fanning relationship.")
+            elseif cardinality ~= "MANY_TO_MANY" then
+                add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
+                    "SEMANTIC_MODEL_053",
+                    "Fanout policy " .. policy .. " is declared on a "
+                        .. tostring(cardinality) .. " relationship, where it has no"
+                        .. " meaning. Traversal against the declared direction is"
+                        .. " refused as ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED whether a"
+                        .. " policy is present or not.")
+            end
         end
 
         local allowed_aliases = {}
