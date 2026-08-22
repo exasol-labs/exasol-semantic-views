@@ -403,6 +403,18 @@ ORDER BY total_revenue DESC;
 
 Use `exasol stop` and `exasol start` to suspend and resume the deployment.
 
+Every install records which build it applied, so a deployment can answer
+"what am I running?" without comparing checkouts:
+
+```sql
+SELECT DISPLAY_VERSION, GIT_COMMIT, GIT_STATE, RUNTIME_CHECKSUM, INSTALLED_AT
+FROM SEMANTIC_CATALOG.PRODUCT_VERSION;
+--  0.1+dev  a5b6c64...  DIRTY  365e183d9000...  2026-08-23 09:14:02
+```
+
+See [Which build is installed](docs/semantic-catalog.md#which-build-is-installed)
+for the full column set and the install history view.
+
 ## Testing
 
 Run the fast database-free Lua runtime suite:

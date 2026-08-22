@@ -1,3 +1,38 @@
+-- Which product build is this deployment running? One row, one query. The
+-- display version folds RELEASE_STATE in, so a deployment carrying unreleased
+-- changes on top of a tagged version says so ("0.1+dev") instead of claiming
+-- the tag.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_VERSION AS
+SELECT
+  pi.PRODUCT_VERSION,
+  CASE WHEN pi.RELEASE_STATE = 'DEVELOPMENT'
+       THEN pi.PRODUCT_VERSION || '+dev'
+       ELSE pi.PRODUCT_VERSION END AS DISPLAY_VERSION,
+  pi.RELEASE_STATE,
+  pi.GIT_COMMIT,
+  pi.GIT_STATE,
+  pi.RUNTIME_CHECKSUM,
+  pi.INSTALLED_AT,
+  pi.INSTALLED_BY
+FROM SYS_SEMANTIC.PRODUCT_INSTALLATIONS pi
+WHERE pi.INSTALLATION_ID = (
+  SELECT MAX(INSTALLATION_ID) FROM SYS_SEMANTIC.PRODUCT_INSTALLATIONS
+);
+
+-- Every install recorded against this database, newest last. A re-install that
+-- did not --reset appends, so runtime upgrades are visible after the fact.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_INSTALL_HISTORY AS
+SELECT
+  pi.INSTALLATION_ID,
+  pi.PRODUCT_VERSION,
+  pi.RELEASE_STATE,
+  pi.GIT_COMMIT,
+  pi.GIT_STATE,
+  pi.RUNTIME_CHECKSUM,
+  pi.INSTALLED_AT,
+  pi.INSTALLED_BY
+FROM SYS_SEMANTIC.PRODUCT_INSTALLATIONS pi;
+
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.MODELS AS
 SELECT
   m.MODEL_ID,

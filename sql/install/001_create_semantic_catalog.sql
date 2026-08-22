@@ -116,6 +116,27 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.SEMANTIC_OBJECTS (
   STATUS             VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL
 );
 
+-- Provenance of the installed runtime. Everything else in this catalog
+-- describes the semantic model; this describes the product build serving it.
+-- The runtime lives inside the database, so "which build is this deployment
+-- running?" has to be answerable in SQL: comparing catalog schemas by hand to
+-- discover that one deployment is simply older is not a diagnosis path.
+--
+-- One row per tools/install.py run; IF NOT EXISTS keeps the history across
+-- re-installs that do not --reset. RUNTIME_CHECKSUM covers the install SQL
+-- files as executed, so it distinguishes builds even when git provenance is
+-- unavailable (tarball, vendored copy, uncommitted edits).
+CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.PRODUCT_INSTALLATIONS (
+  INSTALLATION_ID    DECIMAL(18,0) IDENTITY PRIMARY KEY,
+  PRODUCT_VERSION    VARCHAR(64) NOT NULL,
+  RELEASE_STATE      VARCHAR(32) NOT NULL,
+  GIT_COMMIT         VARCHAR(64),
+  GIT_STATE          VARCHAR(16),
+  RUNTIME_CHECKSUM   VARCHAR(64) NOT NULL,
+  INSTALLED_AT       TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+  INSTALLED_BY       VARCHAR(256) DEFAULT CURRENT_USER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.RELATIONSHIPS (
   RELATIONSHIP_ID    DECIMAL(18,0) IDENTITY PRIMARY KEY,
   MODEL_ID           DECIMAL(18,0) NOT NULL,

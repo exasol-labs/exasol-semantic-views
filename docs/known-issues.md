@@ -7,6 +7,17 @@ not part of a fresh checkout), this document is checked in and is the authoritat
 Last full verification: **Exasol 2026.1.0** (`exasol/docker-db:latest-2026.1`), 2026-06-15, against
 a clean `python3 tools/install.py --example --reset` install.
 
+When reporting an issue, include the deployment's build:
+
+```sql
+SELECT DISPLAY_VERSION, GIT_COMMIT, GIT_STATE, RUNTIME_CHECKSUM, INSTALLED_AT
+FROM SEMANTIC_CATALOG.PRODUCT_VERSION;
+```
+
+Behaviour that differs between two deployments with identical catalogs is
+usually a runtime version difference, and that query settles it. See
+[Which build is installed](semantic-catalog.md#which-build-is-installed).
+
 Documentation and implementation-boundary audit: **2026-08-13**. This audit
 checked the current Lua, install SQL, and maintained verifier inventory; it does
 not replace the dated live-runtime verification above.

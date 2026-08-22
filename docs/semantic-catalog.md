@@ -17,6 +17,39 @@ introspection views. Apache Ossie / OSI import/export foundation metadata adds
 generic custom extensions and entity unique-key metadata for lossless round
 trips.
 
+## Which Build Is Installed
+
+The runtime lives inside the database, so the build serving a deployment is a
+property of that deployment, not of your checkout. `tools/install.py` records
+one row per run and the answer is one query:
+
+```sql
+SELECT * FROM SEMANTIC_CATALOG.PRODUCT_VERSION;
+```
+
+| Column | Meaning |
+|---|---|
+| `PRODUCT_VERSION` | Newest released version in `CHANGELOG.md` at install time. |
+| `DISPLAY_VERSION` | `PRODUCT_VERSION`, suffixed `+dev` when the tree carried unreleased changes. |
+| `RELEASE_STATE` | `RELEASED`, `DEVELOPMENT`, or `UNKNOWN`. |
+| `GIT_COMMIT` / `GIT_STATE` | Commit installed from, and whether the tree was `CLEAN`, `DIRTY`, or `UNKNOWN`. |
+| `RUNTIME_CHECKSUM` | SHA-256 over the install SQL files as executed. |
+| `INSTALLED_AT` / `INSTALLED_BY` | When, and by which database user. |
+
+`RUNTIME_CHECKSUM` is the reliable discriminator: git provenance is absent for a
+tarball, a vendored copy, or uncommitted edits, but the checksum always
+identifies the SQL that was actually installed. Two deployments that disagree in
+behaviour while reporting identical catalogs will disagree here.
+
+`SEMANTIC_CATALOG.PRODUCT_INSTALL_HISTORY` keeps every install recorded against
+the database. A re-install without `--reset` appends, so a runtime upgrade
+stays visible afterwards; `--reset` drops the history with the rest of
+`SYS_SEMANTIC`. Installing by running the SQL files directly, rather than
+through `tools/install.py`, records nothing — an empty `PRODUCT_VERSION` means
+exactly that.
+
+Quote both `DISPLAY_VERSION` and `RUNTIME_CHECKSUM` in bug reports.
+
 ## Install Files
 
 Run the installer to apply all catalog files in order:

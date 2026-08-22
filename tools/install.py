@@ -18,9 +18,12 @@ Connection is read from environment variables:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import os
+import re
 import ssl
+import subprocess
 import sys
 import textwrap
 import time
@@ -61,6 +64,98 @@ RESET_SCHEMA_NAMES = {
     "SYS_SEMANTIC",
     "MART",
 }
+
+
+# ── build provenance ──────────────────────────────────────────────────────────
+#
+# The runtime lives inside the database, so a deployment has to be able to say
+# which build it is running. Without it, diagnosing "same catalog, different
+# behaviour" means comparing schemas by hand and guessing from install
+# timestamps. Recorded in SYS_SEMANTIC.PRODUCT_INSTALLATIONS and read back
+# through SEMANTIC_CATALOG.PRODUCT_VERSION.
+
+def latest_release_version(changelog: str) -> tuple[str, str]:
+    """Return (version, release_state) from CHANGELOG.md text.
+
+    The newest `## [x.y]` heading is the version. `DEVELOPMENT` means the tree
+    carries unreleased changes on top of it, which is the common case for a
+    deployment installed from a working checkout.
+    """
+    released = re.search(r"^## \[([^\]]+)\]", changelog, re.MULTILINE)
+    versions = [
+        match.group(1)
+        for match in re.finditer(r"^## \[([^\]]+)\]", changelog, re.MULTILINE)
+        if match.group(1).lower() != "unreleased"
+    ]
+    if not versions:
+        return "UNKNOWN", "UNKNOWN"
+    state = "RELEASED"
+    if released is not None and released.group(1).lower() == "unreleased":
+        unreleased = changelog[released.end():]
+        next_heading = re.search(r"^## ", unreleased, re.MULTILINE)
+        body = unreleased[: next_heading.start() if next_heading else None]
+        if body.strip():
+            state = "DEVELOPMENT"
+    return versions[0], state
+
+
+def runtime_checksum(files: list[Path]) -> str:
+    """Hash the install SQL as executed.
+
+    Git provenance is absent for a tarball, a vendored copy, or uncommitted
+    edits; this is not, so it is the reliable discriminator between two
+    deployments that claim the same version.
+    """
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def git_provenance(root: Path, runner=subprocess.run) -> tuple[str | None, str]:
+    """Return (commit, state) where state is CLEAN, DIRTY, or UNKNOWN."""
+    def run(*args: str) -> str | None:
+        try:
+            result = runner(
+                ["git", "-C", str(root), *args],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except Exception:  # noqa: BLE001 - git may be missing entirely
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    commit = run("rev-parse", "HEAD")
+    if not commit:
+        return None, "UNKNOWN"
+    status = run("status", "--porcelain")
+    if status is None:
+        return commit, "UNKNOWN"
+    return commit, "DIRTY" if status.strip() else "CLEAN"
+
+
+def sql_literal(value: str | None) -> str:
+    if value is None:
+        return "NULL"
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def record_installation(con: object, version: str, state: str,
+                        commit: str | None, git_state: str, checksum: str) -> None:
+    con.execute(  # type: ignore[attr-defined]
+        "INSERT INTO SYS_SEMANTIC.PRODUCT_INSTALLATIONS ("
+        "PRODUCT_VERSION, RELEASE_STATE, GIT_COMMIT, GIT_STATE, RUNTIME_CHECKSUM"
+        f") VALUES ({sql_literal(version)}, {sql_literal(state)}, "
+        f"{sql_literal(commit)}, {sql_literal(git_state)}, {sql_literal(checksum)})"
+    )
+
+
+def display_version(version: str, state: str) -> str:
+    return version + "+dev" if state == "DEVELOPMENT" else version
 
 
 # ── output helpers ────────────────────────────────────────────────────────────
@@ -340,6 +435,16 @@ def main() -> int:
     run_sql_files(con, INSTALL_FILES, "install")
     install_elapsed = time.monotonic() - t_install
 
+    # record which build this deployment is now running, before the example
+    # so the row exists even if the demo load fails.
+    changelog = ROOT / "CHANGELOG.md"
+    version, release_state = latest_release_version(
+        changelog.read_text(encoding="utf-8") if changelog.exists() else ""
+    )
+    commit, git_state = git_provenance(ROOT)
+    checksum = runtime_checksum(INSTALL_FILES)
+    record_installation(con, version, release_state, commit, git_state, checksum)
+
     # optional: example
     if args.example:
         step += 1
@@ -351,8 +456,17 @@ def main() -> int:
     # summary
     print()
     print("─" * 42)
+    provenance = display_version(version, release_state)
+    if commit:
+        provenance += f"  ·  git {commit[:7]}"
+        if git_state != "CLEAN":
+            provenance += f" ({git_state.lower()})"
+    provenance += f"  ·  runtime {checksum[:12]}"
     if args.example:
         print(green("✓") + f" Installation complete  {dim(f'({install_elapsed:.1f}s)')}")
+        print()
+        print("  " + bold(f"Exasol Semantic Views {provenance}"))
+        print(dim("  SELECT * FROM SEMANTIC_CATALOG.PRODUCT_VERSION;"))
         print()
         print("  Sales model published at " + bold("SEMANTIC_SALES.SALES"))
         print()
@@ -364,6 +478,9 @@ def main() -> int:
         print(dim("    ORDER BY total_revenue DESC LIMIT 5;"))
     else:
         print(green("✓") + f" Installation complete  {dim(f'({install_elapsed:.1f}s)')}")
+        print()
+        print("  " + bold(f"Exasol Semantic Views {provenance}"))
+        print(dim("  SELECT * FROM SEMANTIC_CATALOG.PRODUCT_VERSION;"))
         print()
         print("  Next steps:")
         print(f"    Load the sales demo:  {dim('python3 tools/install.py --example')}")

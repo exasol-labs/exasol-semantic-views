@@ -44,6 +44,100 @@ class Connection:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class BuildProvenanceTest(unittest.TestCase):
+    """A deployment must be able to say which build it is running."""
+
+    def test_latest_release_version_reports_development_above_a_tag(self):
+        changelog = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- something\n\n## [0.1] - 2026-08-19\n\n- first\n"
+        self.assertEqual(INSTALL.latest_release_version(changelog), ("0.1", "DEVELOPMENT"))
+
+    def test_latest_release_version_reports_released_on_an_empty_unreleased(self):
+        changelog = "# Changelog\n\n## [Unreleased]\n\n## [0.2] - 2026-09-01\n\n- notes\n\n## [0.1] - 2026-08-19\n"
+        self.assertEqual(INSTALL.latest_release_version(changelog), ("0.2", "RELEASED"))
+
+    def test_latest_release_version_without_a_release_heading(self):
+        self.assertEqual(INSTALL.latest_release_version("# Changelog\n"), ("UNKNOWN", "UNKNOWN"))
+
+    def test_display_version_marks_development_builds(self):
+        self.assertEqual(INSTALL.display_version("0.1", "DEVELOPMENT"), "0.1+dev")
+        self.assertEqual(INSTALL.display_version("0.1", "RELEASED"), "0.1")
+
+    def test_runtime_checksum_tracks_the_installed_sql(self):
+        first = INSTALL.runtime_checksum(INSTALL.INSTALL_FILES)
+        self.assertEqual(first, INSTALL.runtime_checksum(INSTALL.INSTALL_FILES))
+        self.assertEqual(len(first), 64)
+        # A different file set must not collide with the real one.
+        self.assertNotEqual(first, INSTALL.runtime_checksum(INSTALL.INSTALL_FILES[:-1]))
+
+    def test_git_provenance_reports_clean_dirty_and_unknown(self):
+        def runner(argv, **kwargs):
+            if argv[3] == "rev-parse":
+                return _Completed(0, "abc1234def\n")
+            return _Completed(0, "")
+
+        self.assertEqual(INSTALL.git_provenance(ROOT, runner), ("abc1234def", "CLEAN"))
+
+        def dirty_runner(argv, **kwargs):
+            if argv[3] == "rev-parse":
+                return _Completed(0, "abc1234def\n")
+            return _Completed(0, " M tools/install.py\n")
+
+        self.assertEqual(INSTALL.git_provenance(ROOT, dirty_runner), ("abc1234def", "DIRTY"))
+
+        def no_repo(argv, **kwargs):
+            return _Completed(128, "")
+
+        self.assertEqual(INSTALL.git_provenance(ROOT, no_repo), (None, "UNKNOWN"))
+
+        def no_git(argv, **kwargs):
+            raise FileNotFoundError("git")
+
+        self.assertEqual(INSTALL.git_provenance(ROOT, no_git), (None, "UNKNOWN"))
+
+        def status_fails(argv, **kwargs):
+            if argv[3] == "rev-parse":
+                return _Completed(0, "abc1234def\n")
+            return _Completed(1, "")
+
+        self.assertEqual(INSTALL.git_provenance(ROOT, status_fails), ("abc1234def", "UNKNOWN"))
+
+    def test_record_installation_escapes_and_inserts_one_row(self):
+        connection = RecordingConnection()
+        INSTALL.record_installation(connection, "0.1", "DEVELOPMENT", "abc", "DIRTY", "f" * 64)
+        self.assertEqual(len(connection.sql), 1)
+        self.assertIn("INSERT INTO SYS_SEMANTIC.PRODUCT_INSTALLATIONS", connection.sql[0])
+        self.assertIn("'DEVELOPMENT'", connection.sql[0])
+
+        INSTALL.record_installation(connection, "0.1", "RELEASED", None, "UNKNOWN", "f" * 64)
+        self.assertIn("NULL", connection.sql[1])
+        self.assertEqual(INSTALL.sql_literal("O'Reilly"), "'O''Reilly'")
+
+    def test_catalog_publishes_the_recorded_row(self):
+        catalog = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(
+            encoding="utf-8"
+        )
+        views = (ROOT / "sql/install/002_create_semantic_catalog_views.sql").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.PRODUCT_INSTALLATIONS", catalog)
+        self.assertIn("CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_VERSION", views)
+        self.assertIn("CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_INSTALL_HISTORY", views)
+
+
+class _Completed:
+    def __init__(self, returncode, stdout):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+class RecordingConnection:
+    def __init__(self):
+        self.sql = []
+
+    def execute(self, sql):
+        self.sql.append(sql)
+
+
 class InstallerResetTest(unittest.TestCase):
     def test_expression_function_discovery_matches_validator_allow_list(self):
         validator = (

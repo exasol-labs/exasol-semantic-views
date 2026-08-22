@@ -3,10 +3,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import json
 import ssl
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+_INSTALL_SPEC = importlib.util.spec_from_file_location(
+    "semantic_install", ROOT / "tools/install.py"
+)
+INSTALL = importlib.util.module_from_spec(_INSTALL_SPEC)  # type: ignore[arg-type]
+_INSTALL_SPEC.loader.exec_module(INSTALL)  # type: ignore[union-attr]
 
 
 EXPECTED_TABLES = {
@@ -188,6 +197,25 @@ def main() -> int:
             ),
             len(EXPECTED_SCRIPTS),
         )
+
+        # Build provenance: the deployment must be able to say which runtime it
+        # is serving, and the recorded checksum must match the SQL on disk.
+        # Comparing catalog schemas by hand to discover a stale runtime is not
+        # a diagnosis path.
+        product = con.execute(
+            "SELECT DISPLAY_VERSION, RELEASE_STATE, RUNTIME_CHECKSUM "
+            "FROM SEMANTIC_CATALOG.PRODUCT_VERSION"
+        ).fetchall()
+        assert_equal("PRODUCT_VERSION rows", len(product), 1)
+        if not product[0][0]:
+            raise AssertionError("PRODUCT_VERSION.DISPLAY_VERSION is empty")
+        print(f"ok product version recorded: {product[0][0]!r}")
+        if product[0][2] != INSTALL.runtime_checksum(INSTALL.INSTALL_FILES):
+            raise AssertionError(
+                "recorded runtime checksum does not match the install SQL on disk: "
+                f"{product[0][2]!r}"
+            )
+        print("ok recorded runtime checksum matches the install SQL on disk")
 
         assert_at_least(
             "SEMANTIC_CATALOG views",

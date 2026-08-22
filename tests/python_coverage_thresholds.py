@@ -12,14 +12,15 @@ appearing here with 0%.
 
 Baselines captured 2026-08-22 from a fresh run of the four database-free
 test files plus `tests/test_property.py`; treat these as the point-of-truth
-we want to hold in place, not as aspirational targets.
+we want to hold in place, not as aspirational targets. `tools/install.py`
+ratcheted 2026-08-23 with the build-provenance helpers.
 """
 
 from __future__ import annotations
 
 LINE_THRESHOLDS: dict[str, float] = {
     "tools/semantic_client.py": 30.0,
-    "tools/install.py":         40.0,
+    "tools/install.py":         47.7,
     "tools/osi.py":             57.7,
     "tools/run_sql_files.py":   62.3,
     "tools/release_notes.py":   72.0,

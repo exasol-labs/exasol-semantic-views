@@ -8,6 +8,26 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Build provenance in the catalog
+
+- The database recorded nothing about the product build serving it: the only
+  version-ish catalog objects described semantic model versions, and
+  `install.py` never mentioned a version at all. Diagnosing "identical
+  catalogs, different behaviour" meant comparing schemas by hand and guessing
+  from install timestamps.
+- `tools/install.py` now records one row per run in
+  `SYS_SEMANTIC.PRODUCT_INSTALLATIONS`: version from `CHANGELOG.md`, release
+  state (`RELEASED`/`DEVELOPMENT`), git commit and clean/dirty state, a
+  SHA-256 over the install SQL as executed, and who installed it when.
+- `SEMANTIC_CATALOG.PRODUCT_VERSION` answers "which build is this?" in one
+  query, with `DISPLAY_VERSION` folding in the release state (`0.1+dev`).
+  `SEMANTIC_CATALOG.PRODUCT_INSTALL_HISTORY` keeps every install recorded
+  against the database, so a runtime upgrade stays visible afterwards.
+- The installer prints the same line on completion.
+- `RUNTIME_CHECKSUM` is the discriminator that survives a tarball, a vendored
+  copy, or uncommitted edits, where git provenance does not. `verify_milestone1`
+  asserts the recorded checksum matches the install SQL on disk.
+
 #### `SET_RELATIONSHIP`
 
 - Relationships were add-only. Re-adding was refused as a duplicate
