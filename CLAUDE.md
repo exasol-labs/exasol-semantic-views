@@ -237,3 +237,4 @@ Known issues and their current status are tracked in the checked-in `docs/known-
 - `docs/databricks-metric-views.md` — Databricks UCMV import + MEASURE()/GROUP BY ALL SQL compatibility
 - `docs/architecture.md` — standalone design rationale and code map
 - `docs/semantic-catalog.md` — catalog and lifecycle surfaces
+- `docs/data-fusion.md` — data fusion primer, six semantic fusion levels, and anti-patterns
