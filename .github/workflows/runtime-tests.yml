@@ -27,12 +27,12 @@ jobs:
         run: python -m pip install -r tools/requirements-osi.txt
       - name: Run database-free Lua coverage
         run: LUA_BIN=lua5.4 sh tools/run_lua_tests.sh
-      - name: Run host-side regression tests
-        run: |
-          python tests/test_osi_tool.py
-          python tests/test_install.py
-          python tests/test_release_notes.py
-          python tests/test_sql_splitter.py
+      - name: Run database-free Python tests + coverage
+        # Runs test_osi_tool, test_install, test_release_notes,
+        # test_sql_splitter, and the property-based test suite (test_property)
+        # under coverage.py and enforces the per-file thresholds in
+        # tests/python_coverage_thresholds.py.
+        run: PYTHON_BIN=python sh tools/run_python_tests.sh
       - name: Verify generated install scripts
         run: |
           python tools/package_lua_scripts.py

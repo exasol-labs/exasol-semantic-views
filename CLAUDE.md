@@ -31,10 +31,28 @@ python3 tools/install.py --example
 sh tools/run_nano_smoke.sh
 ```
 
+**Run the release gate before major releases** (smoke + wide fuzz campaign, minutes long):
+```sh
+sh tools/run_release_gate.sh
+```
+This is deliberately NOT part of `run_nano_smoke.sh` — a full fuzz campaign is
+too slow to run on every check. The release gate wraps the smoke suite and adds
+`tools/fuzz_semantic_differential.py` under both oracles (`differential` and
+`tlp`) across multiple seeds. Override cadence with `FUZZ_SEEDS` and `FUZZ_CASES`.
+
 **Run database-free Lua runtime tests with coverage:**
 ```sh
 sh tools/run_lua_tests.sh
 ```
+
+**Run database-free Python tests with coverage:**
+```sh
+sh tools/run_python_tests.sh
+```
+Enforces per-file thresholds from `tests/python_coverage_thresholds.py` and
+runs the property-based tests in `tests/test_property.py`. Same ratcheting
+discipline as the Lua coverage gate: raise a threshold whenever coverage
+grows; do not lower one to merge.
 
 **Run the live cold/warm and scale probe** (requires an installed model):
 ```sh

@@ -131,3 +131,8 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # Claude study bug-reproduction classifier. Reports on historical study
 # findings and is safe to run last (uses zz_repro_* namespaces).
 "$PYTHON_BIN" tools/verify_claude_study_issues.py
+
+# NOTE: The compiler fuzzer (tools/fuzz_semantic_differential.py) is NOT part
+# of this per-check gate — a wide campaign is minutes-long and grows with
+# every seed. Run tools/run_release_gate.sh (which invokes this script and
+# then a larger fuzz campaign) before every major release. See docs.
