@@ -143,6 +143,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP(
   'o.order_id = s.order_id', 'MANY_TO_MANY', 'LEFT', 'REFERENCE_ONLY');
 ```
 
+`SEMANTIC_ADMIN.SET_RELATIONSHIP` changes it on an existing relationship, and
+`'NONE'` there clears the column.
+
 It is a closed set, matched case-insensitively and stored upper-case:
 
 | Value | Meaning |

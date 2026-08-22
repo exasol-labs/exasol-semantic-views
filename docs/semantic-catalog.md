@@ -502,6 +502,7 @@ SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY
 SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS
 SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
 SEMANTIC_ADMIN.REMOVE_RELATIONSHIP_KEY_MAPPING
+SEMANTIC_ADMIN.SET_RELATIONSHIP
 SEMANTIC_ADMIN.REMOVE_RELATIONSHIP
 SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA
 ```
@@ -518,10 +519,31 @@ Relationship mappings follow the same rule independently for each endpoint.
 They are optional for legacy single-branch compilation but required for
 grain-aware relationship proofs.
 Simple equality relationships must join compatible physical type families on
-every active representation. Remove a relationship in dependency order:
-remove its key mappings from highest ordinal to lowest, then call
-`REMOVE_RELATIONSHIP`. Published additions and removals validate prospectively
-and restore the prior relationship state on error.
+every active representation.
+
+`SET_RELATIONSHIP` edits one relationship in place:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_RELATIONSHIP(
+  'sales', 'order_to_shipment',
+  NULL,               -- JOIN_CONDITION: NULL keeps the stored value
+  'MANY_TO_ONE',      -- CARDINALITY
+  NULL,               -- JOIN_TYPE
+  'NONE');            -- FANOUT_POLICY: 'NONE' clears it
+```
+
+Any argument left `NULL` keeps its stored value, and key mappings survive the
+edit. Endpoints are deliberately not editable: changing them makes it a
+different relationship whose key mappings no longer describe it, so remove and
+re-add for that. Remove a relationship in dependency order: remove its key
+mappings from highest ordinal to lowest, then call `REMOVE_RELATIONSHIP`.
+
+Published additions, updates, and removals validate prospectively and restore
+the prior relationship state on error (`SEMANTIC_ADMIN_094` for a removal,
+`SEMANTIC_ADMIN_098` for an update). On a draft model the change is applied and
+the model's validation runs are marked stale; compilation is gated on
+validation status, so nothing can query the model until it is revalidated, and
+reverting would block the repair the edit was for.
 
 The installer test enumerates every `ADD_*` admin script and requires a direct,
 compound, or governed-DDL inverse. These intentionally one-way operations are

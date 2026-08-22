@@ -48,6 +48,11 @@ sh tools/run_lua_tests.sh
 # partners. Builds a disposable fanning model and asserts both refusal lanes.
 "$PYTHON_BIN" tools/verify_many_to_many_refusal.py
 
+# SET_RELATIONSHIP: relationships were add-only, so correcting a cardinality or
+# fanout policy meant remove-mappings/remove/add/re-add. Asserts in-place edit,
+# surviving key mappings, the closed policy set, and published rollback.
+"$PYTHON_BIN" tools/verify_set_relationship.py
+
 # Grain-aware D1 baseline: build an isolated three-fact model, compare both
 # compiler input lanes with independently aggregated reference SQL, exercise
 # sparse/orphan/filter/grand-total behavior, and report one/two/three-branch

@@ -6,6 +6,30 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Added
+
+#### `SET_RELATIONSHIP`
+
+- Relationships were add-only. Re-adding was refused as a duplicate
+  (`SEMANTIC_ADMIN_016`) and removing was refused while key mappings existed
+  (`SEMANTIC_ADMIN_066`), so correcting a cardinality or a fanout policy meant
+  a four-step sequence: remove the mappings in descending ordinal order, remove
+  the relationship, add it back, re-add the mappings. That is the operation the
+  fan-out reason codes push modelers toward.
+- `SEMANTIC_ADMIN.SET_RELATIONSHIP(MODEL_NAME, RELATIONSHIP_NAME,
+  JOIN_CONDITION, CARDINALITY, JOIN_TYPE, FANOUT_POLICY)` edits one
+  relationship in place. Any argument left `NULL` keeps its stored value,
+  `FANOUT_POLICY = 'NONE'` clears the column, and key mappings survive the
+  edit.
+- Endpoints are deliberately not editable: changing them makes it a different
+  relationship whose key mappings no longer describe it.
+- On a PUBLISHED model the change validates prospectively and is restored on
+  error (`SEMANTIC_ADMIN_098`), matching `REMOVE_RELATIONSHIP`'s
+  `SEMANTIC_ADMIN_094`. On a draft the change applies and validation runs go
+  stale; compilation is gated on validation status, so nothing can query the
+  model until it is revalidated.
+- Regression: `tools/verify_set_relationship.py`, in the smoke suite.
+
 ### Fixed
 
 #### `FANOUT_POLICY` was undocumented free text
