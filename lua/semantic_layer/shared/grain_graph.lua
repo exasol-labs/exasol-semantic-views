@@ -56,14 +56,12 @@ local function add_edge(target, from_id, to_id, relationship, safe, reason)
 end
 
 -- Build both the cardinality-preserving graph and the complete relationship
--- graph. A declared fanout policy remains compatible with the legacy planner.
--- Phase C can pass allow_many_to_many=false for the stricter multi-fact proof.
-function M.build_edges(relationships, options)
-    options = options or {}
-    local allow_many_to_many = options.allow_many_to_many
-    if allow_many_to_many == nil then
-        allow_many_to_many = true
-    end
+-- graph. Many-to-many edges are present in the complete graph for diagnostics
+-- but are never safe: a declared FANOUT_POLICY records intent, it is not an
+-- allocation proof, and traversing the edge attributes one fact row to several
+-- dimension rows. See
+-- plans/architecture-decisions/001-grain-aware-result-semantics.md.
+function M.build_edges(relationships)
     local safe_edges = {}
     local all_edges = {}
 
@@ -88,10 +86,10 @@ function M.build_edges(relationships, options)
             add(relationship.from_entity_id, relationship.to_entity_id, false,
                 "FANOUT_REQUIRES_POLICY")
         elseif cardinality == "MANY_TO_MANY" then
-            local safe = allow_many_to_many and not missing(relationship.fanout_policy)
-            local reason = safe and "OK" or "MANY_TO_MANY_REQUIRES_FANOUT"
-            add(relationship.from_entity_id, relationship.to_entity_id, safe, reason)
-            add(relationship.to_entity_id, relationship.from_entity_id, safe, reason)
+            add(relationship.from_entity_id, relationship.to_entity_id, false,
+                "MANY_TO_MANY_UNSUPPORTED")
+            add(relationship.to_entity_id, relationship.from_entity_id, false,
+                "MANY_TO_MANY_UNSUPPORTED")
         end
     end
 
@@ -233,6 +231,48 @@ end
 
 function M.path_text(path)
     return path_text(path)
+end
+
+-- Render the path a walk would take if unsafe edges were allowed, annotating
+-- each unsafe edge with the reason it was rejected. Validator provenance and
+-- compiler refusal messages both go through this so a rejected traversal names
+-- the same blocking edge in both runtimes.
+function M.rejected_path_text(edges)
+    local parts = {}
+    local first_reason = nil
+    for _, edge in ipairs(edges or {}) do
+        local name = tostring(edge.name)
+        if edge.safe == false then
+            local reason = tostring(edge.reason or "UNSAFE_RELATIONSHIP_EDGE")
+            first_reason = first_reason or reason
+            name = name .. " (rejected: " .. reason .. ")"
+        end
+        parts[#parts + 1] = name
+    end
+    if #parts == 0 then
+        return nil, first_reason
+    end
+    return table.concat(parts, " > "), first_reason
+end
+
+-- Diagnostic for a failed safe walk: the annotated path over the complete
+-- graph, plus the reason of the first edge that made it unsafe.
+function M.attempted_path(all_edges, from_id, to_id)
+    local proof = M.prove_path(all_edges, from_id, to_id, {
+        require_safe = false,
+        reject_ambiguous = true,
+    })
+    if proof.ok then
+        return M.rejected_path_text(proof.edges)
+    end
+    if proof.ambiguous then
+        local paths = {}
+        for _, candidate in ipairs(proof.candidates or {}) do
+            paths[#paths + 1] = M.rejected_path_text(candidate)
+        end
+        return table.concat(paths, " | "), proof.reason
+    end
+    return nil, proof.reason
 end
 
 function M.canonical_key(unique_key)

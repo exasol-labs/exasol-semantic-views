@@ -526,8 +526,10 @@ Two proof modes exist:
 - `STRICT_GRAIN` requires ordered endpoint mappings, matching unique keys, and a
   cardinality direction that preserves the branch grain.
 
-Strict proof rejects unsupported many-to-many traversal and expression-based key
-mappings. The multi-fact planner consumes only strict proofs.
+Strict proof additionally rejects expression-based key mappings, and the
+multi-fact planner consumes only strict proofs. Many-to-many traversal is
+rejected in *both* modes: the shared grain graph never marks a many-to-many edge
+safe, whatever `FANOUT_POLICY` says.
 
 For a request involving several fact grains, the compiler does not create one
 large join and aggregate afterward. It follows an aggregate-state strategy:

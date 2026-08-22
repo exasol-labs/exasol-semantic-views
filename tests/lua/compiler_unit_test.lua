@@ -354,6 +354,21 @@ test("compiler join planner follows safe cardinality direction", function()
     assert_equal(reverse_err.error_code, "SEMANTIC_REQUEST_042")
 end)
 
+test("compiler join planner refuses many-to-many despite a fanout policy", function()
+    -- A FANOUT_POLICY records intent; it is not an allocation proof. Traversing
+    -- the edge would attribute one fact row to several dimension rows, so the
+    -- planner must refuse rather than emit a silently fanned-out join.
+    local ctx = compiler_context()
+    ctx.relationships = {{id = 101, name = "orders_shipment", from_entity_id = 1,
+        to_entity_id = 2, cardinality = "MANY_TO_MANY", join_type = "LEFT",
+        fanout_policy = "ALLOCATE",
+        join_condition = "o.order_id = c.order_id"}}
+    local joins, _, err = api.plan_joins(ctx, {['2'] = true})
+    assert_equal(joins, nil)
+    assert_equal(err.error_code, "SEMANTIC_REQUEST_042")
+    assert_contains(err.error_message, "MANY_TO_MANY_UNSUPPORTED")
+end)
+
 test("compiler builds filters ordering and physical SQL", function()
     local ctx, region, revenue = compiler_context()
     local needed = {}

@@ -266,6 +266,80 @@ REPLACE METRICS (
   FALSE
 );
 
+-- ---------------------------------------------------------------------------
+-- Second semantic object: order-header grain.
+--
+-- FREIGHT_AMOUNT is charged once per order, not once per order line. Putting
+-- it in the SALES object would make it groupable by product_category, and the
+-- only join path from `order` to `product` runs backwards through
+-- order_line_to_order -- one order row fanned out across its lines. Validation
+-- refuses that combination (SEMANTIC_MODEL_030 / FANOUT_REQUIRES_POLICY), so
+-- the order-grain metric gets its own object rooted at `order`, where every
+-- exposed dimension is reachable without fan-out.
+--
+-- tools/verify_fanout_guardrails.py demonstrates and asserts both halves.
+-- ---------------------------------------------------------------------------
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(
+  'sales',
+  'ORDER_HEADER',
+  'order',
+  'Order-header measures that cannot be split across order lines'
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
+  'sales',
+  'ORDER_HEADER',
+  'order',
+  'ship_mode',
+  'o.ship_mode',
+  'VARCHAR(20)',
+  'Ship Mode',
+  'Shipping service selected for the order',
+  NULL,
+  TRUE
+);
+
+-- Reached through order_to_customer, a MANY_TO_ONE traversal outward from the
+-- object root: safe, so the compiler joins it without complaint.
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
+  'sales',
+  'ORDER_HEADER',
+  'customer',
+  'customer_segment',
+  'c.segment',
+  'VARCHAR(40)',
+  'Customer Segment',
+  'Commercial segment assigned to the customer',
+  NULL,
+  TRUE
+);
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
+  'ALTER SEMANTIC VIEW sales.ORDER_HEADER
+REPLACE FACTS (
+  FACT freight_amount
+    ON ENTITY order
+    AS o.freight_amount
+    RETURNS DECIMAL(18,2)
+    ADDITIVE
+    DISPLAY ''Freight Amount''
+    COMMENT ''Freight charged on the order header''
+    PUBLIC CERTIFIED
+)
+REPLACE METRICS (
+  METRIC total_freight
+    AS SUM(freight_amount)
+    ON ENTITY order
+    RETURNS DECIMAL(18,2)
+    FORMAT ''currency''
+    DISPLAY ''Total Freight''
+    COMMENT ''Freight charged across order headers''
+    ADDITIVE PUBLIC CERTIFIED
+)',
+  FALSE
+);
+
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SYNONYM(
   'sales',
   'DIMENSION',

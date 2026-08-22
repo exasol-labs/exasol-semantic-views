@@ -137,7 +137,14 @@ def main() -> int:
         )
 
         publish_rows = fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")
-        assert_equal("published objects", publish_rows, [("sales", "SEMANTIC_SALES", "SALES", 9, "PUBLISHED")])
+        assert_equal(
+            "published objects",
+            publish_rows,
+            [
+                ("sales", "SEMANTIC_SALES", "ORDER_HEADER", 3, "PUBLISHED"),
+                ("sales", "SEMANTIC_SALES", "SALES", 9, "PUBLISHED"),
+            ],
+        )
         assert_at_least(
             "publish history recorded",
             scalar(
@@ -181,12 +188,20 @@ def main() -> int:
             "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY WHERE ENTRY_NAME = 'MODEL_DESCRIPTION'",
         )[0][0]
         assert_equal("published discovery model description", model_description, "Certified semantic sales model")
-        object_description = fetchall(
-            con,
-            "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY "
-            "WHERE ENTRY_NAME = 'SEMANTIC_OBJECT_DESCRIPTION'",
-        )[0][0]
-        assert_contains("published discovery object description", object_description, "Sales metrics and dimensions")
+        # One row per published object; the model ships SALES and ORDER_HEADER.
+        object_descriptions = "\n".join(
+            row[0] for row in fetchall(
+                con,
+                "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY "
+                "WHERE ENTRY_NAME = 'SEMANTIC_OBJECT_DESCRIPTION' ORDER BY ENTRY_VALUE",
+            )
+        )
+        assert_contains("published discovery object description", object_descriptions, "Sales metrics and dimensions")
+        assert_contains(
+            "published discovery order-header object description",
+            object_descriptions,
+            "Order-header measures that cannot be split across order lines",
+        )
         mcp_guidance = fetchall(
             con,
             "SELECT ENTRY_VALUE FROM SEMANTIC_SALES.SEMANTIC_DISCOVERY WHERE ENTRY_NAME = 'MCP_GUIDANCE'",

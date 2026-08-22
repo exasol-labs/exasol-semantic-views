@@ -147,12 +147,18 @@ The matrix records:
 - `REASON_CODE`
 - `RELATIONSHIP_PATH`
 
-Validation accepts same-entity pairs and non-fanout relationship paths. It rejects
-paths that require many-to-many traversal without fanout policy.
+Validation accepts same-entity pairs and non-fanout relationship paths. It
+rejects paths that fan out: traversing from the one-side to the many-side of a
+relationship (`FANOUT_REQUIRES_POLICY`), and any many-to-many traversal
+(`MANY_TO_MANY_UNSUPPORTED`). A declared `FANOUT_POLICY` records modeler intent
+for a many-to-many relationship; it is not an allocation proof and does not make
+the edge traversable in either proof mode.
 
 For rejected connected pairs, `RELATIONSHIP_PATH` contains the attempted path
 and annotates unsafe edges with their reason, for example
-`line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)`.
+`line_to_order > shipment_to_order (rejected: FANOUT_REQUIRES_POLICY)`. The
+compiler refuses the same traversal with `SEMANTIC_REQUEST_042` and the same
+annotated path.
 `NO_SAFE_JOIN_PATH` means no semantic-object root can reach the metric base
 without traversing from the one-side to the many-side of a relationship. This
 prevents attributing one fact row to multiple dimension rows; see
@@ -171,12 +177,17 @@ PYTHON_BIN=python3 sh tools/run_smoke.sh
 The smoke now verifies:
 
 - valid sales model has no validation errors
-- sales metric/dimension matrix has 20 valid rows
+- sales metric/dimension matrix has 35 valid rows and one deliberately invalid
+  pair: `total_freight` x `product_category`, which no policy can make safe
+  (`tools/verify_fanout_guardrails.py`)
 - metric dependencies are extracted into `METRIC_DEPENDENCIES`
 - missing source object returns `SEMANTIC_MODEL_001`
 - invalid metric dependency returns `SEMANTIC_MODEL_011`
 - cyclic metric dependency returns `SEMANTIC_MODEL_012`
-- many-to-many traversal without fanout returns `SEMANTIC_MODEL_010`
+- many-to-many without a declared fanout policy returns `SEMANTIC_MODEL_010`
+- a visible metric/dimension pair that needs a many-to-many edge returns
+  `SEMANTIC_MODEL_030` with reason `MANY_TO_MANY_UNSUPPORTED`, and the compiler
+  refuses the same request (`tools/verify_many_to_many_refusal.py`)
 - ambiguous certified synonym returns `SEMANTIC_MODEL_021`
 - stale verified query references return `SEMANTIC_MODEL_023`
 - invalid OSI extension scope or JSON returns `SEMANTIC_MODEL_026` or

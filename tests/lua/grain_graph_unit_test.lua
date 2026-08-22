@@ -15,11 +15,22 @@ test("shared grain graph builds cardinality-preserving directions", function()
     assert_equal(safe["1"][1].to_id, 2)
     assert_equal(safe["2"][1].name, "many_one")
     assert_equal(safe["4"][1].name, "one_many")
-    assert_true(safe["5"] ~= nil)
     assert_equal(all["3"][1].reason, "FANOUT_REQUIRES_POLICY")
 
-    local strict = graph.build_edges(relationships, {allow_many_to_many = false})
-    assert_true(strict["5"] == nil)
+    -- A declared fanout policy is not an allocation proof: the bridge edge is
+    -- visible in the complete graph for diagnostics and absent from the safe
+    -- graph in both directions.
+    assert_true(safe["5"] == nil)
+    for _, edge in ipairs(safe["4"] or {}) do
+        assert_true(edge.name ~= "bridge")
+    end
+    assert_equal(all["5"][1].name, "bridge")
+    assert_equal(all["5"][1].reason, "MANY_TO_MANY_UNSUPPORTED")
+    local bridge_reason = nil
+    for _, edge in ipairs(all["4"] or {}) do
+        if edge.name == "bridge" then bridge_reason = edge.reason end
+    end
+    assert_equal(bridge_reason, "MANY_TO_MANY_UNSUPPORTED")
 end)
 
 test("shared path proof handles self blocked missing and absent paths", function()
@@ -152,4 +163,50 @@ test("validator and compiler expose the same canonical path proof", function()
     assert_equal(validator_path, "orders_customer > customer_region")
     assert_equal(compiler_path[1].relationship.name, "orders_customer")
     assert_equal(compiler_path[2].relationship.name, "customer_region")
+end)
+
+test("shared attempted path annotates the edge that blocked a safe walk", function()
+    local relationships = {
+        {id = 1, name = "line_to_order", from_entity_id = 1, to_entity_id = 2,
+            cardinality = "MANY_TO_ONE"},
+        {id = 2, name = "order_to_shipment", from_entity_id = 2, to_entity_id = 3,
+            cardinality = "MANY_TO_MANY", fanout_policy = "ALLOCATE"},
+    }
+    local safe, all = graph.build_edges(relationships)
+
+    -- Safe walk: nothing is annotated and no reason is reported.
+    local path, reason = graph.attempted_path(all, 1, 2)
+    assert_equal(path, "line_to_order")
+    assert_equal(reason, nil)
+    assert_true(graph.prove_path(safe, 1, 2, {require_safe = true}).ok)
+
+    -- Blocked walk: the many-to-many edge is named with its rejection reason.
+    local blocked_path, blocked_reason = graph.attempted_path(all, 1, 3)
+    assert_equal(blocked_path,
+        "line_to_order > order_to_shipment (rejected: MANY_TO_MANY_UNSUPPORTED)")
+    assert_equal(blocked_reason, "MANY_TO_MANY_UNSUPPORTED")
+
+    -- Unreachable target: no path text, and the walk's own reason is returned.
+    local absent_path, absent_reason = graph.attempted_path(all, 3, 99)
+    assert_equal(absent_path, nil)
+    assert_equal(absent_reason, "NO_RELATIONSHIP_PATH")
+    assert_equal(graph.rejected_path_text({}), nil)
+end)
+
+test("shared attempted path reports every candidate when the graph is ambiguous", function()
+    local relationships = {
+        {id = 1, name = "billing", from_entity_id = 1, to_entity_id = 2,
+            cardinality = "MANY_TO_ONE"},
+        {id = 2, name = "shipping", from_entity_id = 1, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE"},
+        {id = 3, name = "billing_customer", from_entity_id = 2, to_entity_id = 4,
+            cardinality = "MANY_TO_MANY", fanout_policy = "ALLOCATE"},
+        {id = 4, name = "shipping_customer", from_entity_id = 3, to_entity_id = 4,
+            cardinality = "MANY_TO_ONE"},
+    }
+    local _, all = graph.build_edges(relationships)
+    local paths, reason = graph.attempted_path(all, 1, 4)
+    assert_equal(reason, "AMBIGUOUS_RELATIONSHIP_PATH")
+    assert_contains(paths, "billing > billing_customer (rejected: MANY_TO_MANY_UNSUPPORTED)")
+    assert_contains(paths, "shipping > shipping_customer")
 end)

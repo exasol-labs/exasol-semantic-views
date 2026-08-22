@@ -622,7 +622,8 @@ REPLACE METRICS (
             exported_dry_run = apply_definition(con, exported[0][2], True)
             assert_equal("exported metric dry run", exported_dry_run["status"], "DRY_RUN")
             assert_equal("export semantic view rows", len(fetchall(con, "EXPORT SEMANTIC VIEW sales.SALES")), 9)
-            assert_equal("export semantic model rows", len(fetchall(con, "EXPORT SEMANTIC MODEL sales")), 19)
+            # 19 for SALES + freight_amount, total_freight, ship_mode, customer_segment.
+            assert_equal("export semantic model rows", len(fetchall(con, "EXPORT SEMANTIC MODEL sales")), 23)
             dimension_filter = fetchall(
                 con,
                 "EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_SEMANTIC_DEFINITION('sales', 'SALES', 'DIMENSION')",

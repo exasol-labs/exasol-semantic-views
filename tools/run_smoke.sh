@@ -36,6 +36,18 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_group_by_inference.py
 "$PYTHON_BIN" tools/run_sql_files.py tests/sql/validation_smoke.sql tests/sql/compile_request_smoke.sql
 
+# Fan-out guardrails on the shipped demo model: order-grain freight groups
+# correctly along safe edges, and the same metric is refused at authoring time
+# in the line-grain SALES object (SEMANTIC_MODEL_030). Doubles as the runnable
+# demonstration of the property the model is built around.
+"$PYTHON_BIN" tools/verify_fanout_guardrails.py
+
+# Many-to-many refusal (found while extending the demo model): a MANY_TO_MANY
+# relationship with any non-empty FANOUT_POLICY used to compile to a flat join
+# with no de-duplication, double counting a measure whose row matched several
+# partners. Builds a disposable fanning model and asserts both refusal lanes.
+"$PYTHON_BIN" tools/verify_many_to_many_refusal.py
+
 # Grain-aware D1 baseline: build an isolated three-fact model, compare both
 # compiler input lanes with independently aggregated reference SQL, exercise
 # sparse/orphan/filter/grand-total behavior, and report one/two/three-branch

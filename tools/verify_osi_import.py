@@ -142,9 +142,9 @@ def main() -> int:
             "SEMANTIC_CATALOG.ENTITIES": 4,
             "SEMANTIC_CATALOG.RELATIONSHIPS": 3,
             "SEMANTIC_CATALOG.RELATIONSHIP_KEY_MAPPINGS": 3,
-            "SEMANTIC_CATALOG.DIMENSIONS": 4,
-            "SEMANTIC_CATALOG.FACTS": 3,
-            "SEMANTIC_CATALOG.METRICS": 5,
+            "SEMANTIC_CATALOG.DIMENSIONS": 6,
+            "SEMANTIC_CATALOG.FACTS": 4,
+            "SEMANTIC_CATALOG.METRICS": 6,
             "SEMANTIC_CATALOG.SYNONYMS": 3,
         }
         for table_name, expected in expected_counts.items():

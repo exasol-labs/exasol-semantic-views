@@ -152,10 +152,11 @@ def main() -> int:
             ),
             [("sales", "SEMANTIC_SALES", "VALID")],
         )
+        # 9 visible fields in SALES + 3 in ORDER_HEADER.
         assert_equal(
             "agent fields count",
             scalar(con, "SELECT COUNT(*) FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT WHERE MODEL_NAME = 'sales'"),
-            9,
+            12,
         )
         assert_equal(
             "agent sql field names",
@@ -174,7 +175,7 @@ def main() -> int:
                 "SELECT COUNT(*) FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT "
                 "WHERE MODEL_NAME = 'sales' AND FIELD_ROLE = FIELD_KIND",
             ),
-            9,
+            12,
         )
         assert_equal(
             "agent valid combinations",
@@ -183,16 +184,16 @@ def main() -> int:
                 "SELECT COUNT(*) FROM SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT "
                 "WHERE MODEL_NAME = 'sales' AND IS_VALID = TRUE",
             ),
-            20,
+            22,
         )
         assert_equal(
             "agent measure group",
             fetchall(
                 con,
                 "SELECT MEASURE_GROUP_NAME, METRIC_COUNT FROM SEMANTIC_AGENT.MEASURE_GROUPS_FOR_AGENT "
-                "WHERE MODEL_NAME = 'sales' AND OBJECT_NAME = 'SALES'",
+                "WHERE MODEL_NAME = 'sales' ORDER BY OBJECT_NAME",
             ),
-            [("default", 5)],
+            [("default", 1), ("default", 5)],
         )
 
         con.execute("UPDATE SYS_SEMANTIC.METRICS SET IS_PRIVATE = TRUE WHERE METRIC_NAME = 'total_cost'")

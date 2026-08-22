@@ -1443,16 +1443,14 @@ local function resolve_field(ctx, field_name, expected_kind)
 end
 
 local function relationship_edges(ctx)
-    local safe_edges = grain_graph.build_edges(ctx.relationships)
-    return safe_edges
+    if ctx._edges == nil then
+        ctx._edges, ctx._all_edges = grain_graph.build_edges(ctx.relationships)
+    end
+    return ctx._edges, ctx._all_edges
 end
 
 local function find_path(ctx, from_id, to_id)
-    local edges = ctx._edges
-    if edges == nil then
-        edges = relationship_edges(ctx)
-        ctx._edges = edges
-    end
+    local edges = relationship_edges(ctx)
     local proof = grain_graph.prove_path(edges, from_id, to_id, {
         require_safe = true,
         reject_ambiguous = true,
@@ -2321,9 +2319,20 @@ local function plan_joins(ctx, needed_entities)
                         .. table.concat(proof.candidate_paths or {}, " | ") .. "."
                 )
             end
+            -- Name the edge that blocked the walk. Without it a many-to-many
+            -- refusal is indistinguishable from a missing relationship, and the
+            -- modeler cannot tell which one to fix. Same phrasing as the
+            -- validator's compatibility matrix.
+            local _, all_edges = relationship_edges(ctx)
+            local blocked_path, blocked_reason = grain_graph.attempted_path(
+                all_edges, root_id, entity_id)
+            local detail = ""
+            if blocked_reason ~= nil and blocked_path ~= nil then
+                detail = ": " .. tostring(blocked_reason) .. " via " .. tostring(blocked_path)
+            end
             return nil, nil, error_result("SEMANTIC_REQUEST_042",
                 "No safe relationship path from semantic object root to entity "
-                    .. tostring(entity and entity.name or entity_id) .. ".")
+                    .. tostring(entity and entity.name or entity_id) .. detail .. ".")
         end
         local path_names = {}
         for _, edge in ipairs(path) do

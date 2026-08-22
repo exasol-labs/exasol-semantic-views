@@ -102,10 +102,13 @@ def main() -> int:
         )
 
         assert_no_errors("sales validation", validate(con))
+        # 6 metrics x 6 dimensions. Every pair is valid except the one the
+        # demo model exists to show: order-grain total_freight cannot be
+        # grouped by the line-grain product_category.
         assert_equal(
             "sales metric/dimension matrix rows",
             scalar(con, "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX WHERE MODEL_NAME = 'sales'"),
-            20,
+            36,
         )
         assert_equal(
             "sales valid metric/dimension matrix rows",
@@ -114,7 +117,20 @@ def main() -> int:
                 "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX "
                 "WHERE MODEL_NAME = 'sales' AND IS_VALID = TRUE",
             ),
-            20,
+            35,
+        )
+        assert_equal(
+            "sales fan-out blocked metric/dimension pair",
+            [
+                tuple(row)
+                for row in con.execute(
+                    "SELECT METRIC_NAME, DIMENSION_NAME, REASON_CODE "
+                    "FROM SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX "
+                    "WHERE MODEL_NAME = 'sales' AND IS_VALID = FALSE "
+                    "ORDER BY METRIC_NAME, DIMENSION_NAME"
+                ).fetchall()
+            ],
+            [("total_freight", "product_category", "FANOUT_REQUIRES_POLICY")],
         )
         assert_equal(
             "sales metric dependencies",
@@ -125,7 +141,7 @@ def main() -> int:
                 "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = mt.MODEL_ID "
                 "WHERE m.MODEL_NAME = 'sales'",
             ),
-            7,
+            8,
         )
 
         model_filter = (

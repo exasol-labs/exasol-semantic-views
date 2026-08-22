@@ -9,13 +9,27 @@ Physical entities:
 - `customer`
 - `product`
 
-Semantic fields:
+The model is multi-grain on purpose, and exposes two semantic objects.
+
+`SALES`, rooted at `order_line`:
 
 - Dimensions: `customer_region`, `order_month`, `order_status`,
   `product_category`
 - Facts: `net_revenue`, `net_cost`, `quantity`
 - Metrics: `total_revenue`, `total_cost`, `gross_margin`,
   `gross_margin_pct`, `completed_revenue`
+
+`ORDER_HEADER`, rooted at `order`:
+
+- Dimensions: `ship_mode`, `customer_segment`
+- Facts: `freight_amount`
+- Metrics: `total_freight`
+
+Freight is charged once per order, so it cannot live in the line-grain `SALES`
+object: `product_category` is only reachable from `order` by running backwards
+through `order_line_to_order`, which fans one order row out across its lines.
+Validation refuses that combination when the metric is defined. See
+[Fan-out guardrails](#fan-out-guardrails) below.
 
 Runnable example files:
 
@@ -24,6 +38,7 @@ Runnable example files:
 - `sql/examples/sales_databricks_metric_view.yaml`
 - `sql/examples/sales_osi.yaml`
 - `sql/examples/sales_semantic_queries.sql`
+- `tools/verify_fanout_guardrails.py`
 
 After installation, publish and query the example through the semantic layer:
 
@@ -39,6 +54,45 @@ ORDER BY total_revenue DESC;
 
 Agents should compile the same request through
 `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON` instead of writing physical joins.
+
+## Fan-out Guardrails
+
+The two-object shape above is what makes the grain guarantee observable on the
+shipped model. Safe traversals answer normally:
+
+```sql
+SELECT ship_mode, total_freight
+FROM SEMANTIC_SALES.ORDER_HEADER
+GROUP BY ship_mode;
+```
+
+Placing the same order-grain metric in `SALES` is refused at authoring time,
+with the offending path named and the catalog restored:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC(
+  'sales','SALES','freight_in_sales','SUM(freight_amount)',NULL,'ADDITIVE',
+  'order','DECIMAL(18,2)','Freight (misplaced)','',NULL,FALSE,TRUE);
+-- SEMANTIC_ADMIN_090: metric rejected; validation failed: SEMANTIC_MODEL_030:
+-- Visible metric freight_in_sales cannot be grouped or filtered by dimension
+-- product_category: FANOUT_REQUIRES_POLICY via order_line_to_order
+-- (rejected: FANOUT_REQUIRES_POLICY) > order_line_to_product.
+```
+
+`SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX` carries the same verdict for every
+pair, so callers can read the boundary instead of discovering it:
+
+```sql
+SELECT METRIC_NAME, DIMENSION_NAME, REASON_CODE, RELATIONSHIP_PATH
+FROM SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX
+WHERE MODEL_NAME = 'sales' AND NOT IS_VALID;
+```
+
+Run the whole walkthrough, including the wrong number the guardrail prevents:
+
+```sh
+python3 tools/verify_fanout_guardrails.py
+```
 
 ## Databricks UCMV Example
 

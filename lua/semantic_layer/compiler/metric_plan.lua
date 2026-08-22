@@ -484,8 +484,7 @@ function M.prove_strict(snapshot, from_id, to_id)
         return rendered
     end
 
-    local _, all_edges = graph.build_edges(snapshot.relationships or {},
-        {allow_many_to_many = false})
+    local _, all_edges = graph.build_edges(snapshot.relationships or {})
     local attempted = graph.prove_path(all_edges, from_id, to_id, {
         require_safe = false,
         reject_ambiguous = true,

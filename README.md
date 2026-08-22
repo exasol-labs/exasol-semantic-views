@@ -9,7 +9,7 @@
 [![Agent-first](https://img.shields.io/badge/agent--first-COMPILE__REQUEST__JSON-blueviolet)](#agent-first-by-design)
 [![Semantic SQL](https://img.shields.io/badge/Semantic%20SQL-preprocessor-success)](#a-concrete-example)
 
-**[Quickstart](#quickstart-with-exasol-personal) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example)**
+**[Quickstart](#quickstart-with-exasol-personal) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example) · [Grain Safety](#grain-safety-you-can-see)**
 
 </div>
 
@@ -258,6 +258,47 @@ reapplied.
 `ALTER SEMANTIC VIEW` supports metric authoring and fact/metric replacement.
 Dimension maintenance uses the `SEMANTIC_ADMIN.ADD_DIMENSION` script; unsupported
 authoring forms fail loudly during preprocessing.
+
+## Grain Safety You Can See
+
+The demo model is deliberately multi-grain, because that is what makes the
+project's central property observable. `net_revenue`, `net_cost`, and
+`quantity` are order-line measures in the `SALES` object. `freight_amount` is
+charged once per order and lives in a second object, `ORDER_HEADER`, rooted at
+`order`.
+
+Order-grain freight groups fine along dimensions reachable without fan-out --
+`ship_mode` on the order itself, `customer_segment` through the `MANY_TO_ONE`
+`order_to_customer` edge:
+
+```sql
+SELECT ship_mode, total_freight
+FROM SEMANTIC_SALES.ORDER_HEADER
+GROUP BY ship_mode;
+--  EXPRESS  58.75
+--  GROUND   46.50
+```
+
+Putting that same metric in `SALES` would make it groupable by
+`product_category`, and the only path from `order` to `product` runs backwards
+through `order_line_to_order` -- one order row fanned out across its lines. The
+model refuses it when the metric is *defined*, not when it is queried, and
+restores the catalog:
+
+```text
+SEMANTIC_ADMIN_090: metric rejected; validation failed: SEMANTIC_MODEL_030:
+Visible metric freight_in_sales cannot be grouped or filtered by dimension
+product_category: FANOUT_REQUIRES_POLICY via order_line_to_order
+(rejected: FANOUT_REQUIRES_POLICY) > order_line_to_product.
+```
+
+The refusal is worth a real number: joining orders to lines by hand and summing
+freight by product category reports 149.00 against 105.25 actually charged.
+
+`SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX` publishes the same verdict for every
+metric/dimension pair, so agents can see the boundary without hitting it. Run
+`python3 tools/verify_fanout_guardrails.py` against an installed model to walk
+through all of it live; it is part of the smoke suite.
 
 ## Agent-First By Design
 

@@ -6,6 +6,49 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+#### Many-to-many traversal silently double counted
+
+- A `MANY_TO_MANY` relationship with any non-empty `FANOUT_POLICY` was treated
+  as a safe edge by the legacy join lane and compiled to a flat join with no
+  de-duplication, so a measure whose row matched several partners was counted
+  once per partner. `plans/architecture-decisions/001-grain-aware-result-semantics.md`
+  had always specified the opposite ("a fanout policy is not an allocation
+  proof"), and `STRICT_GRAIN` already refused it.
+- The shared grain graph now marks many-to-many edges unsafe in both
+  directions with reason `MANY_TO_MANY_UNSUPPORTED`, so validation rejects a
+  visible metric/dimension pair that needs one (`SEMANTIC_MODEL_030`) and the
+  compiler refuses the request (`SEMANTIC_REQUEST_042`).
+- `SEMANTIC_REQUEST_042` now names the blocking relationship and reason instead
+  of only reporting that no safe path exists. Path rejection text moved from
+  the validator into the shared graph so both runtimes phrase it identically.
+- A declared `FANOUT_POLICY` still satisfies `SEMANTIC_MODEL_010`; the rule
+  message now says a policy declares intent and does not authorize traversal.
+- Regression: `tools/verify_many_to_many_refusal.py`, in the smoke suite.
+- **Upgrade note:** a model that relied on many-to-many traversal changes from
+  returning inflated numbers to failing validation on its next `VALIDATE_MODEL`
+  (`SEMANTIC_MODEL_030`), which gates every compile for that model. Remove the
+  offending metric or dimension from the object, or root a separate semantic
+  object on the other side of the bridge.
+
+### Changed
+
+#### The sales demo model is multi-grain, so fan-out protection is demonstrable
+
+- `MART.ORDERS` gained `FREIGHT_AMOUNT` and `SHIP_MODE`; `MART.CUSTOMERS` gained
+  `SEGMENT`.
+- A second semantic object, `ORDER_HEADER` (rooted at `order`), exposes
+  `total_freight` over `ship_mode` and `customer_segment`. Every fact in the
+  previous demo sat at the `order_line` leaf and every relationship pointed
+  outward from it, so fan-out was structurally impossible and the model's
+  central safety property could not be observed from the shipped example.
+- `tools/verify_fanout_guardrails.py` walks through and asserts the guarantee:
+  safe traversals match hand-written SQL, the same order-grain metric is
+  refused in the line-grain `SALES` object with `SEMANTIC_MODEL_030` /
+  `FANOUT_REQUIRES_POLICY` and a rolled-back catalog, and the overstated number
+  the refusal prevents is printed. It runs as part of `tools/run_smoke.sh`.
+
 ## [0.1] - 2026-08-19
 
 ### Added

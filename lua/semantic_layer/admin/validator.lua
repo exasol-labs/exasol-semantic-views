@@ -2611,9 +2611,15 @@ local function relationship_edges(ctx)
                 "Unsupported relationship join type: " .. tostring(relationship.join_type) .. ".")
         end
 
+        -- The policy records modeler intent for a fanning relationship. It does
+        -- not authorize traversal: many-to-many edges stay unsafe for metric
+        -- attribution, so any visible metric/dimension pair that needs one is
+        -- rejected by the compatibility matrix (SEMANTIC_MODEL_030).
         if cardinality == "MANY_TO_MANY" and missing(relationship.fanout_policy) then
             add_issue(ctx, "ERROR", "RELATIONSHIP", relationship.name, "SEMANTIC_MODEL_010",
-                "Many-to-many relationship requires an explicit fanout policy.")
+                "Many-to-many relationship requires an explicit fanout policy. "
+                    .. "A policy declares intent and does not make the relationship "
+                    .. "traversable for metric attribution.")
         end
 
         local allowed_aliases = {}
@@ -3401,35 +3407,10 @@ local function validate_agent_metadata(ctx)
     end
 end
 
-local function rejected_path(edges)
-    local parts = {}
-    local first_reason = nil
-    for _, edge in ipairs(edges or {}) do
-        local name = tostring(edge.name)
-        if edge.safe == false then
-            local reason = tostring(edge.reason or "UNSAFE_RELATIONSHIP_EDGE")
-            first_reason = first_reason or reason
-            name = name .. " (rejected: " .. reason .. ")"
-        end
-        parts[#parts + 1] = name
-    end
-    return #parts == 0 and nil or table.concat(parts, " > "), first_reason
-end
-
+-- Path rendering and unsafe-edge annotation live in the shared graph module so
+-- validator provenance and compiler refusals cannot drift apart.
 local function attempted_path(all_edges, from_id, to_id)
-    local ok, reason, _, proof = find_path(all_edges, from_id, to_id, false)
-    if ok then
-        local path, blocked_reason = rejected_path(proof.edges)
-        return path, blocked_reason
-    end
-    if proof ~= nil and proof.ambiguous then
-        local paths = {}
-        for _, candidate in ipairs(proof.candidates or {}) do
-            paths[#paths + 1] = rejected_path(candidate)
-        end
-        return table.concat(paths, " | "), reason
-    end
-    return nil, reason
+    return grain_graph.attempted_path(all_edges, from_id, to_id)
 end
 
 -- Mirrors the compiler's requirement that an object root can reach a metric
