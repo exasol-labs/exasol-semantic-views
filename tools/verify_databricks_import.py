@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Databricks UCMV import on Exasol Nano (end-to-end).
+"""Verify Databricks UCMV import on Exasol (end-to-end).
 
 Imports sql/examples/sales_databricks_metric_view.yaml into a fresh model over
 the demo MART tables, asserts the translated catalog shape, and confirms the

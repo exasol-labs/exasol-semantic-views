@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# Release gate: run the full Nano smoke suite AND a wide fuzz campaign.
+# Release gate: run the full smoke suite AND a wide fuzz campaign.
 #
 # Intent: this is the pre-release verification, not the per-check gate. The
 # fuzz campaign here is deliberately large enough to cost minutes so that
-# nobody is tempted to add it to run_nano_smoke.sh. Run it before every
+# nobody is tempted to add it to run_smoke.sh. Run it before every
 # major release, after any change to the compiler, planner, or admin scripts
 # whose blast radius is broad.
 #
@@ -27,8 +27,8 @@ fi
 FUZZ_SEEDS="${FUZZ_SEEDS:-0 1 2 7 42 99 123 456}"
 FUZZ_CASES="${FUZZ_CASES:-250}"
 
-echo "==> Nano smoke suite"
-sh tools/run_nano_smoke.sh
+echo "==> smoke suite"
+sh tools/run_smoke.sh
 
 echo
 echo "==> Compiler fuzz campaign (seeds='$FUZZ_SEEDS' cases=$FUZZ_CASES)"

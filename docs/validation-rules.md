@@ -162,10 +162,10 @@ branch grain, or remove the metric from the incompatible object.
 
 ## Test Coverage
 
-Run the Nano smoke:
+Run the smoke suite:
 
 ```sh
-PYTHON_BIN=python3 sh tools/run_nano_smoke.sh
+PYTHON_BIN=python3 sh tools/run_smoke.sh
 ```
 
 The smoke now verifies:

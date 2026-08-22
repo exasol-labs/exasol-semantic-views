@@ -11,7 +11,7 @@ fi
 export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
 
 # Fast database-free runtime tests run first so parser/planner regressions fail
-# before the slower clean install and Nano integration suite.
+# before the slower clean install and live-DB integration suite.
 sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tests/test_osi_tool.py
 "$PYTHON_BIN" tests/test_sql_splitter.py

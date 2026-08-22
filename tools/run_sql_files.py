@@ -81,7 +81,7 @@ def main() -> int:
         "--tls-verify",
         action="store_true",
         default=os.environ.get("EXASOL_TLS_VERIFY", "").lower() in {"1", "true", "yes"},
-        help="Verify the Exasol TLS certificate. Disabled by default for local Nano.",
+        help="Verify the Exasol TLS certificate. Disabled by default for local Exasol.",
     )
     args = parser.parse_args()
 

@@ -99,7 +99,7 @@ python3 tools/osi.py import \
   /tmp/sales_osi_lossless.json
 ```
 
-Connection defaults match the local Nano setup: `localhost:8563`, user `sys`,
+Connection defaults match a local Exasol Personal deployment: `$EXASOL_HOST:$EXASOL_PORT` (default `localhost:8563`), user `sys`,
 password `exasol`, with TLS certificate verification disabled. Override them
 with `--host`, `--port`, `--user`, `--password`, and `--tls-verify`.
 
@@ -335,7 +335,7 @@ Fixtures:
 
 ## Verification
 
-The OSI surface is covered by offline unit/fixture tests and Nano integration
+The OSI surface is covered by offline unit/fixture tests and live-DB integration
 verifiers.
 
 Offline:
@@ -347,7 +347,7 @@ Offline:
   batch warning decoding, lossy export warnings, native key precedence, invalid
   relationship diagnostics, and round-trip normalization helpers.
 
-Live Nano verifiers:
+Live-DB verifiers:
 
 - `tools/verify_osi_export.py` checks live export, schema validation, simple key
   extraction, relationship column ordering, Exasol extensions, YAML output, and
@@ -363,10 +363,10 @@ Live Nano verifiers:
   result equivalence, third-party custom-extension preservation, expected
   script-mode loss diagnostics, and rollback on injected batch failures.
 
-Run the full local Nano smoke suite with:
+Run the full local smoke suite with:
 
 ```sh
-sh tools/run_nano_smoke.sh
+sh tools/run_smoke.sh
 ```
 
 The smoke suite includes the live OSI verifiers.

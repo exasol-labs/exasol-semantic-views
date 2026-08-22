@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify OSI lossless round-trip fidelity on Exasol Nano."""
+"""Verify OSI lossless round-trip fidelity on Exasol."""
 
 from __future__ import annotations
 

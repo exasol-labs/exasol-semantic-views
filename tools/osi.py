@@ -3295,7 +3295,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tls-verify",
         action="store_true",
         default=os.environ.get("EXASOL_TLS_VERIFY", "").lower() in {"1", "true", "yes"},
-        help="verify Exasol TLS certificate; disabled by default for local Nano",
+        help="verify Exasol TLS certificate; disabled by default for local Exasol",
     )
     export_parser.set_defaults(func=command_export)
 
@@ -3326,7 +3326,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tls-verify",
         action="store_true",
         default=os.environ.get("EXASOL_TLS_VERIFY", "").lower() in {"1", "true", "yes"},
-        help="verify Exasol TLS certificate; disabled by default for local Nano",
+        help="verify Exasol TLS certificate; disabled by default for local Exasol",
     )
     import_parser.set_defaults(func=command_import)
     return parser

@@ -131,7 +131,7 @@ python3 tools/osi.py import \
   /tmp/sales_osi_lossless.json
 ```
 
-Run the live round-trip verifier against Nano when you need to confirm the full
+Run the live round-trip verifier against a local Exasol Personal deployment when you need to confirm the full
 lossless path:
 
 ```sh

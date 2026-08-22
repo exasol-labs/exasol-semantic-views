@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Milestone 5 agent context and feedback workflow on Nano."""
+"""Verify Milestone 5 agent context and feedback workflow on Exasol."""
 
 from __future__ import annotations
 

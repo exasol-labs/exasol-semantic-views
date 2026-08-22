@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify normalized OSI batch import support on Exasol Nano."""
+"""Verify normalized OSI batch import support on Exasol."""
 
 from __future__ import annotations
 

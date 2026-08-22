@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Milestone 2 validation behavior on Exasol Nano."""
+"""Verify Milestone 2 validation behavior on Exasol."""
 
 from __future__ import annotations
 

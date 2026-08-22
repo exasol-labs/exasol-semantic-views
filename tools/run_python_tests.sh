@@ -5,7 +5,7 @@
 # thresholds in tests/python_coverage_thresholds.py, and fails if any file
 # regresses. Mirrors tools/run_lua_tests.sh's discipline for Lua.
 #
-# The DB-backed verify_* scripts live in tools/run_nano_smoke.sh; they are
+# The DB-backed verify_* scripts live in tools/run_smoke.sh; they are
 # intentionally excluded from this suite (see OMIT_PATTERNS in the
 # thresholds file).
 

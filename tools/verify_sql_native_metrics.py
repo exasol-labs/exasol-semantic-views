@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify SQL-native metric definition and introspection flows on Exasol Nano."""
+"""Verify SQL-native metric definition and introspection flows on Exasol."""
 
 from __future__ import annotations
 

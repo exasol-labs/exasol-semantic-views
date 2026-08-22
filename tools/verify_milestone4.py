@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Milestone 4 SQL compiler, surface views, and preprocessor on Nano."""
+"""Verify Milestone 4 SQL compiler, surface views, and preprocessor on Exasol."""
 
 from __future__ import annotations
 

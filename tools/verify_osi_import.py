@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify OSI import apply support on Exasol Nano."""
+"""Verify OSI import apply support on Exasol."""
 
 from __future__ import annotations
 

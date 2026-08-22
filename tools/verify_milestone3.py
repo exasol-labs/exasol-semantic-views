@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Milestone 3 structured request compilation on Exasol Nano."""
+"""Verify Milestone 3 structured request compilation on Exasol."""
 
 from __future__ import annotations
 

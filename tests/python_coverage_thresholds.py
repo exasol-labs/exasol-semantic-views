@@ -6,7 +6,7 @@ whenever coverage grows; do not lower one to merge.
 
 Only `tools/*.py` files that are exercised by DB-free unit tests appear here.
 The many `verify_*.py` integration scripts are covered by
-`tools/run_nano_smoke.sh` against a real database, not by coverage.py — that
+`tools/run_smoke.sh` against a real database, not by coverage.py — that
 distinction is why they're excluded via `omit_patterns` below rather than
 appearing here with 0%.
 
@@ -26,7 +26,7 @@ LINE_THRESHOLDS: dict[str, float] = {
 }
 
 # Files under tools/ that legitimately have zero unit-test coverage because
-# they are integration scripts run only against a live Exasol Nano. Listing
+# they are integration scripts run only against a live Exasol instance. Listing
 # them here keeps the coverage report readable and prevents them from
 # dragging a per-file gate down to 0%.
 OMIT_PATTERNS: list[str] = [

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run persona-based user studies against local Exasol Nano and MCP."""
+"""Run persona-based user studies against local Exasol and MCP."""
 
 from __future__ import annotations
 
@@ -243,7 +243,7 @@ def study_casual_mcp(mcp: McpClient) -> Study:
         "persona-test-01-casual-mcp.md",
         "Nina Patel",
         "Casual business user using conversational analytics",
-        "Nano MCP Server only",
+        "MCP Server only",
         [
             "Find what sales data is available.",
             "Get revenue by region without knowing physical tables.",
@@ -1005,7 +1005,7 @@ def write_bug_log(studies: list[Study]) -> None:
         "# Consolidated Bug Log - Simulated User Tests",
         "",
         f"**Date:** {datetime.now().strftime('%Y-%m-%d')}",
-        f"**Environment:** Exasol Nano at `{DSN}`, MCP at `{MCP_BASE}`",
+        f"**Environment:** Exasol at `{DSN}`, MCP at `{MCP_BASE}`",
         "",
         "## Bug Index",
         "",

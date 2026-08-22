@@ -41,10 +41,17 @@ brew install lua
 
 Set `LUA_BIN` when the interpreter is installed under another name.
 
-## 2. Nano Integration Tests
+## 2. Live-DB Integration Tests
 
 ```sh
-sh tools/run_nano_smoke.sh
+sh tools/run_smoke.sh
+```
+
+Point the host at an Exasol Personal deployment (or any local Exasol) via
+`EXASOL_HOST` and `EXASOL_PORT`. To spin up a fresh throwaway deployment:
+
+```sh
+exasol install local -d dev   # requires the exasol-personal CLI
 ```
 
 The smoke workflow starts with the database-free tests, packages the same Lua
@@ -166,7 +173,7 @@ The probe selects the largest role-visible semantic object and measures:
 The default thresholds allow the bundled sales fixture to run. A CI environment
 with dedicated large/high-cardinality data should raise the minimums:
 
-The canonical Nano smoke command pins the bundled fixture floor at nine visible
+The canonical smoke command pins the bundled fixture floor at nine visible
 fields and cardinality three, preventing accidental shrinkage of that fixture.
 The standalone probe retains one/one defaults so it can inspect newly created
 models before a production-scale profile is selected.
@@ -188,6 +195,6 @@ profile. Changes should not weaken a committed profile merely to pass CI.
 
 Database-free coverage measures Lua runtime logic. It does not claim coverage
 of Exasol's `query()`, script import behavior, transaction semantics, optimizer,
-privilege evaluation, or generated SQL execution. Those belong to the Nano
+privilege evaluation, or generated SQL execution. Those belong to the live-DB
 lane. Host-side Ossie/OSI behavior remains in `tests/test_osi_tool.py`, which is
-also invoked by the canonical Nano smoke workflow.
+also invoked by the canonical smoke workflow.

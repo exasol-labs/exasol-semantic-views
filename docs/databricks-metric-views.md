@@ -150,4 +150,4 @@ python3 tools/verify_databricks_sql_compat.py   # MEASURE()/agg(), GROUP BY ALL,
 python3 tools/verify_databricks_import.py        # end-to-end import over the demo MART tables
 ```
 
-Both are part of `sh tools/run_nano_smoke.sh`.
+Both are part of `sh tools/run_smoke.sh`.

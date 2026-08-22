@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Verify Phase 1 semantic SQL subset improvements against Exasol Nano.
+"""Verify Phase 1 semantic SQL subset improvements against Exasol.
 
 Phase 1 covers:
   - ORDER BY ordinals (e.g. ORDER BY 1 DESC)
   - BETWEEN operator in semantic SQL WHERE clause
 
-Run against a local Nano instance after deploying 003_create_semantic_admin_scripts.sql.
+Run against a local Exasol instance after deploying 003_create_semantic_admin_scripts.sql.
 
 Sales model dimensions: customer_region (VARCHAR), order_month (DATE),
   order_status (VARCHAR), product_category (VARCHAR)

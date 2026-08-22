@@ -16,7 +16,16 @@ model:
 
 ## Essential Commands
 
-**Install onto a running Nano instance (full clean install with demo data):**
+**Provision a local Exasol Personal deployment** (one-time; requires the `exasol` CLI from https://github.com/exasol/exasol-personal):
+```sh
+exasol install local -d dev            # creates ~/.exasol/personal/deployments/dev
+```
+The deployment picks a random TCP port. Read it back with
+`cat ~/.exasol/personal/deployments/dev/deployment.json | jq -r .connection.dbPort`
+and export it via `EXASOL_PORT` (see connection defaults below). To run more
+than one deployment side-by-side, pass a different `-d <name>` to `install`.
+
+**Install onto the deployment (full clean install with demo data):**
 ```sh
 python3 tools/install.py --example --reset
 ```
@@ -26,16 +35,16 @@ python3 tools/install.py --example --reset
 python3 tools/install.py --example
 ```
 
-**Run the full smoke-test suite** (requires Nano running at localhost:8563):
+**Run the full smoke-test suite** (requires an Exasol Personal deployment reachable via `$EXASOL_HOST:$EXASOL_PORT`):
 ```sh
-sh tools/run_nano_smoke.sh
+sh tools/run_smoke.sh
 ```
 
 **Run the release gate before major releases** (smoke + wide fuzz campaign, minutes long):
 ```sh
 sh tools/run_release_gate.sh
 ```
-This is deliberately NOT part of `run_nano_smoke.sh` — a full fuzz campaign is
+This is deliberately NOT part of `run_smoke.sh` — a full fuzz campaign is
 too slow to run on every check. The release gate wraps the smoke suite and adds
 `tools/fuzz_semantic_differential.py` under both oracles (`differential` and
 `tlp`) across multiple seeds. Override cadence with `FUZZ_SEEDS` and `FUZZ_CASES`.
@@ -77,7 +86,7 @@ This is mandatory — the install SQL files contain embedded Lua. The source fil
 ```sh
 EXASOL_HOST=localhost EXASOL_PORT=8563 EXASOL_USER=sys EXASOL_PASSWORD=exasol
 ```
-Nano uses a self-signed TLS cert; all tools disable cert verification by default for local use.
+Exasol Personal deployments use self-signed TLS certs; all tools disable cert verification by default for local use.
 
 ## Architecture
 
@@ -209,7 +218,7 @@ The preferred authoring surface is SQL-native Semantic DDL via `APPLY_SEMANTIC_D
 | `tools/package_lua_scripts.py` | Regenerates install SQL from Lua source |
 | `tools/install.py` | Full installer: package → connect → reset? → run SQL files |
 | `tools/import_databricks.py` | Host helper: reads a Databricks UCMV YAML file and calls the in-DB importer |
-| `tools/run_nano_smoke.sh` | Full smoke suite |
+| `tools/run_smoke.sh` | Full smoke suite |
 
 The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) and its YAML parser/translator live in `semantic_definition.lua`; the MEASURE()/`GROUP BY ALL` query surface lives in `request_json.lua`. See `docs/databricks-metric-views.md`.
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify issues reported by the Claude persona studies against local Nano.
+"""Verify issues reported by the Claude persona studies against local Exasol.
 
 This is a host-side development tool. It intentionally mutates the local
 development semantic catalog with `zz_repro_*` objects while checking failure
-modes. Run `sh tools/run_nano_smoke.sh` afterwards to restore the baseline.
+modes. Run `sh tools/run_smoke.sh` afterwards to restore the baseline.
 """
 
 from __future__ import annotations

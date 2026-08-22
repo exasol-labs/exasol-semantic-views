@@ -1,7 +1,7 @@
 # Lua Runtime Tests
 
-The runtime has a database-free test lane in addition to the Exasol Nano
-integration suite.
+The runtime has a database-free test lane in addition to the live-DB
+integration suite (`tools/run_smoke.sh` — see `docs/runtime-testing.md`).
 
 Run it with:
 
@@ -32,7 +32,7 @@ Threshold policy:
 - raise a module threshold when tests increase its coverage;
 - never lower a threshold merely to make a change pass;
 - add a regression test before fixing a runtime defect;
-- keep Exasol-dependent behavior in the Nano suite.
+- keep Exasol-dependent behavior in the live-DB smoke suite.
 
 The `ESV_*_TEST_API` tables are created only when `ESV_TEST_MODE` is true. That
 flag is absent in Exasol, so they do not expand the installed public API.

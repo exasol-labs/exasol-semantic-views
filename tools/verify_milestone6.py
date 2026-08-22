@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Milestone 6 materialization selection on Exasol Nano."""
+"""Verify Milestone 6 materialization selection on Exasol."""
 
 from __future__ import annotations
 

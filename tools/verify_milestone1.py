@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Milestone 1 catalog and sales seed on Exasol Nano."""
+"""Verify Milestone 1 catalog and sales seed on Exasol."""
 
 from __future__ import annotations
 

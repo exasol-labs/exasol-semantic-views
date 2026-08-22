@@ -153,8 +153,8 @@ underlying Virtual Schema adapter.
   resolves semantic field names normally.
 - Lua `query()` results are copied into plain row arrays before `exit(...)`.
   Iterating a query result and returning that query object are not equivalent.
-- Local Nano pyexasol connections use TLS with certificate verification disabled
+- Local Exasol Personal pyexasol connections use TLS with certificate verification disabled
   only for the local self-signed development instance.
 
 See [Architecture](architecture.md) for component rationale and
-[Runtime Testing](runtime-testing.md) for database-free and Nano verification.
+[Runtime Testing](runtime-testing.md) for database-free and live-DB verification.

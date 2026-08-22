@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Phase 2 semantic SQL subset improvements against Exasol Nano.
+"""Verify Phase 2 semantic SQL subset improvements against Exasol.
 
 Phase 2 covers:
   - HAVING clause (HAVING metric > N)
