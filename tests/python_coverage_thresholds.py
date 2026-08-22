@@ -20,9 +20,12 @@ from __future__ import annotations
 LINE_THRESHOLDS: dict[str, float] = {
     "tools/semantic_client.py": 30.0,
     "tools/install.py":         40.0,
-    "tools/osi.py":             57.0,
-    "tools/run_sql_files.py":   62.0,
+    "tools/osi.py":             57.7,
+    "tools/run_sql_files.py":   62.3,
     "tools/release_notes.py":   72.0,
+    # Values floored to nearest 0.1 pp below the actual observed percentage so
+    # display-rounded floats (e.g. `48/77 × 100 = 62.337662…` displaying as
+    # `62.34`) don't trip the gate on unchanged code.
 }
 
 # Files under tools/ that legitimately have zero unit-test coverage because

@@ -128,6 +128,18 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 "$PYTHON_BIN" tools/verify_bug32_relationship_types_and_removal.py
 "$PYTHON_BIN" tools/verify_bug37_attribute_with_bindings.py
 
+# Live-DB negative-path coverage for SEMANTIC_ADMIN_* / SEMANTIC_SURFACE_*
+# error codes that the emitter grep found were untested. Cheap: every case is
+# a parameter-validation or duplicate check that fails before touching state.
+"$PYTHON_BIN" tools/verify_admin_error_codes.py
+
+# Concurrent-admin regression net (BUG-D-004): runs a small grid of admin
+# operations from several threads and asserts that (a) every refusal is a
+# well-formed SEMANTIC_*_NNN or Exasol GlobalTransactionRollback, never an
+# opaque error; (b) post-storm compile still returns OK; (c) no validation
+# run is left in RUNNING; (d) no half-created race objects survive.
+"$PYTHON_BIN" tools/verify_concurrent_admin.py
+
 # Claude study bug-reproduction classifier. Reports on historical study
 # findings and is safe to run last (uses zz_repro_* namespaces).
 "$PYTHON_BIN" tools/verify_claude_study_issues.py

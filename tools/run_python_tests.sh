@@ -19,7 +19,8 @@ TESTS="tests/test_osi_tool.py \
        tests/test_install.py \
        tests/test_release_notes.py \
        tests/test_sql_splitter.py \
-       tests/test_property.py"
+       tests/test_property.py \
+       tests/test_admin_invariants.py"
 
 # Discard any prior .coverage file so a stale run does not lower thresholds
 # below the honest baseline.

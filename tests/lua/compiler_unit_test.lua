@@ -46,6 +46,86 @@ test("request normalization property holds for varied ignored metadata", functio
     end
 end)
 
+test("cache key is sensitive to every compile-input field", function()
+    -- Complement of the "ignores metadata" test above: any change to a field
+    -- that affects generated SQL MUST change the cache key. Missing this
+    -- means genuinely different requests could collide on the cache and
+    -- return the wrong SQL. Iterates over each field the compiler consumes.
+    local base = {
+        model = "sales", object = "SALES",
+        metrics = {"total_revenue"}, dimensions = {"customer_region"},
+        filters = {{field = "order_status", op = "=", value = "COMPLETE"}},
+        having = {{field = "total_revenue", op = ">", value = 100}},
+        order_by = {{field = "customer_region", direction = "asc"}},
+        limit = 5,
+    }
+    local base_key = api.compile_cache_key(api.canonical_request_text(base))
+    local function copy(t)
+        local out = {}
+        for k, v in pairs(t) do out[k] = v end
+        return out
+    end
+    local variants = {
+        {label = "model", mutate = function(r) r.model = "other" end},
+        {label = "object", mutate = function(r) r.object = "OTHER" end},
+        {label = "metrics", mutate = function(r) r.metrics = {"total_cost"} end},
+        {label = "dimensions", mutate = function(r) r.dimensions = {"product_category"} end},
+        {label = "filter value", mutate = function(r)
+            r.filters = {{field = "order_status", op = "=", value = "CANCELLED"}}
+        end},
+        {label = "filter op", mutate = function(r)
+            r.filters = {{field = "order_status", op = "!=", value = "COMPLETE"}}
+        end},
+        {label = "having value", mutate = function(r)
+            r.having = {{field = "total_revenue", op = ">", value = 200}}
+        end},
+        {label = "order_by direction", mutate = function(r)
+            r.order_by = {{field = "customer_region", direction = "desc"}}
+        end},
+        {label = "limit", mutate = function(r) r.limit = 10 end},
+    }
+    for _, variant in ipairs(variants) do
+        local mutated = copy(base)
+        variant.mutate(mutated)
+        local mutated_key = api.compile_cache_key(api.canonical_request_text(mutated))
+        if mutated_key == base_key then
+            error("cache-key collision on " .. variant.label
+                .. ": mutating this field must change the key")
+        end
+    end
+end)
+
+test("cache key is deterministic and fixed-length across 500 varied requests", function()
+    -- LCG-driven fuzz over the shape space. Two invariants:
+    --   1. compile_cache_key(x) == compile_cache_key(x) — determinism.
+    --   2. #compile_cache_key(x) == 16 for every non-empty canonical text.
+    local seed = 42
+    local function next_number()
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        return seed
+    end
+    for index = 1, 500 do
+        local metric_count = 1 + (next_number() % 3)
+        local metrics = {}
+        for i = 1, metric_count do metrics[i] = "metric_" .. tostring(next_number() % 17) end
+        local dim_count = next_number() % 3
+        local dimensions = {}
+        for i = 1, dim_count do dimensions[i] = "dim_" .. tostring(next_number() % 11) end
+        local request = {
+            model = "m" .. tostring(index % 5),
+            object = "O" .. tostring(index % 3),
+            metrics = metrics,
+            dimensions = dimensions,
+            limit = next_number() % 100,
+        }
+        local text = api.canonical_request_text(request)
+        local k1 = api.compile_cache_key(text)
+        local k2 = api.compile_cache_key(text)
+        assert_equal(k1, k2)
+        assert_equal(#k1, 16)
+    end
+end)
+
 test("SQL tokenizer handles comments quoted names and nested commas", function()
     local tokens = api.sql_tokens([[SELECT "Region", MEASURE(total_revenue), 'a''b'
         FROM SEMANTIC_SALES.SALES -- ignored
