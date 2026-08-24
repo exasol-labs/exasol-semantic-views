@@ -8,6 +8,32 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Definition-time plannability gate (`SEMANTIC_MODEL_056`, `SEMANTIC_MODEL_057`)
+
+- A metric the planner could never compile was accepted, validated, published,
+  and reported `VALID` by every agent surface, failing only when someone queried
+  it — and since `SELECT *` expands to every column of the object, one such
+  metric took the whole object down with it. Two shapes did this: `COUNT(*)`,
+  which has no fact input and therefore no input grain
+  (`METRIC_INPUT_GRAIN_MISSING`), and a non-mergeable aggregate such as `AVG` on
+  an F3-partitioned entity, whose partitions merge aggregate states.
+- `VALIDATE_MODEL` now classifies every active metric with the planner's own
+  code (`ESV_METRIC_PLAN.build_dag`, packaged into the validator runtime), so the
+  gate cannot drift from what the compiler decides. `SEMANTIC_MODEL_056` reports
+  a missing or ambiguous input grain; `SEMANTIC_MODEL_057` an aggregate with no
+  mergeable state whose leaves force state merging.
+- The `COUNT(*)` refusal names both supported row-count forms: `COUNT(<fact>)`
+  over a non-null fact, and `FACT <name> AS 1` with `SUM(<name>)`.
+- Non-mergeable aggregates stay valid where the single-branch renderer compiles
+  them, so `AVG` on an unpartitioned single-fact entity is still accepted. The
+  gate judges each metric alone: a metric that cannot be planned by itself can
+  never be queried, while a combination that only fails together remains a
+  request-time concern.
+- Because every mutator revalidates, the reverse order is caught too:
+  partitioning an entity that already carries a non-mergeable metric is refused
+  by the mutation that would complete the partitioning.
+- Regression: `tools/verify_metric_plannability.py`, in the smoke suite.
+
 #### Quoted identifiers in Semantic DDL
 
 - The demo model ships an entity named `order`, a reserved word, and
@@ -130,6 +156,74 @@ All notable changes to Exasol Semantic Views are documented here.
 - Regression: `tools/verify_set_relationship.py`, in the smoke suite.
 
 ### Fixed
+#### F4 contributor joins emitted non-executable SQL for a lower-case key column
+
+- Attribute Reconciliation rendered the entity's declared
+  `UNIQUE_KEY_COLUMN.COLUMN_NAME` inside double quotes verbatim. Exasol resolves
+  a quoted identifier exactly, so a key declared `customer_id` — the case the
+  shipped demo model itself uses — produced `f4_rep_27."customer_id"` against a
+  physical `CUSTOMER_ID`. Validation reported zero errors, compilation returned
+  `STATUS = OK` with correct fusion provenance, and the SQL then failed at
+  execution. F4 worked only where keys happened to be declared upper case, which
+  is why the five shipped fusion verifiers were green.
+- The validator's conflict probe had always resolved declared names against
+  `EXA_ALL_COLUMNS`; the compiler had not. That resolution now lives in one
+  shared module (`lua/semantic_layer/shared/source_columns.lua`, embedded in both
+  runtimes), so what the validator probes and what the compiler renders cannot
+  disagree. Each side of the join resolves against its own source.
+- Where the metadata cannot answer — a source outside `EXA_ALL_COLUMNS` — the
+  declared spelling is used, exactly as before. The validator's conflict probe
+  remains the gate that refuses a key column no source exposes, and it runs for
+  precisely the two strategies that build this join.
+- Regression: `tools/verify_fusion_f4.py` now declares its key in lower case, as
+  a modeller would, and asserts the rendered join resolved it.
+
+#### `SET_ATTRIBUTE_FUSION_POLICY` and `SET_REPRESENTATION_AUTHORITY` were not prospective
+
+- Both persisted the change and returned successfully even when the candidate
+  left a **published** model failing validation, so one accepted call took a live
+  model offline for every consumer (`SEMANTIC_QUERY_010`) until someone worked
+  out which change to undo. The same gap let `RECONCILE` land on an attribute
+  whose bindings could not support it.
+- Both now follow the candidate-validate-restore path the representation
+  mutators already used: on a published model an invalid candidate is rejected
+  and the prior policy or authority restored (`SEMANTIC_ADMIN_094`). Drafts keep
+  the contract every other draft mutator has — applied and marked stale, because
+  compilation is gated on validation status and reverting would block the repair
+  in progress.
+- Deliberately *not* done: rejecting `COALESCE`/`RECONCILE` on a `FACT` outright.
+  The compiler refuses reconciled facts only in a multi-fact plan
+  (`SEMANTIC_REQUEST_074`); single-branch fact reconciliation is supported,
+  documented, and exact, so a blanket rejection would have removed a working
+  capability. The prospective validation is what prevents the broken state.
+- Regression: `tools/verify_fusion_governance.py`, in the smoke suite.
+
+#### Diagnostics did not name the alternate representation that blocks authoring
+
+- Registering an alternate representation on a draft is accepted and leaves the
+  model invalid until the declaration is completed. Every later authoring call
+  then failed on the representation rather than on what was attempted, and the
+  recovery — `REMOVE_ENTITY_REPRESENTATION` — appeared in no message.
+- Representation-scoped validation messages now name the blocking representation
+  and both ways out: complete the declaration (F3 coverage, attribute bindings,
+  or a certified F5 identity), or remove it. The suffix is added only when every
+  named representation is an `ALTERNATE`, since a `PRIMARY` cannot be removed.
+  `SEMANTIC_ADMIN_091`/`_092` inherit it, because they quote the validator.
+
+#### The documented F3 bootstrap order could not work
+
+- The bootstrap sequence put `SET_REPRESENTATION_COVERAGE_BATCH` after facts and
+  dimensions, and a second passage said to add all representations and attribute
+  bindings first. Both fail: until coverage exists the alternate is validated as
+  an F1 *equivalent*, and hot/cold key sets are disjoint by construction
+  (`SEMANTIC_MODEL_038`).
+- `SKILL.md`, `references/authoring-workflows.md`, and `docs/data-fusion.md` now
+  give the rule: declare the partition and its coverage as one candidate with
+  `ADD_ENTITY_REPRESENTATION_WITH_COVERAGE` — verified to work on a draft whose
+  object already has dimensions, facts, and metrics — or, when registering
+  separately on a draft, call `SET_REPRESENTATION_COVERAGE_BATCH` immediately
+  afterwards, before adding any attribute to that entity.
+
 #### The legacy entity key expression was a silent trap
 
 - `SEMANTIC_CATALOG.ENTITIES.PRIMARY_KEY_EXPR` reads as *the* entity key. It is

@@ -1,5 +1,8 @@
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local source_columns = assert(ESV_SOURCE_COLUMNS,
+    "shared source-column runtime is required")
+local metric_plan = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
 
 local VALID_CARDINALITIES = {
     ONE_TO_ONE = true,
@@ -1163,7 +1166,10 @@ local function load_catalog(ctx)
     local metric_rows = query([[
         SELECT METRIC_ID, METRIC_NAME, BASE_ENTITY_ID, EXPRESSION, FILTER_EXPR,
                METRIC_TYPE, DATA_TYPE, DESCRIPTION, UNIT_HINT, FORMAT_HINT,
-               IS_PRIVATE, IS_CERTIFIED
+               IS_PRIVATE, IS_CERTIFIED,
+               COALESCE(METRIC_KIND, METRIC_TYPE) AS METRIC_KIND,
+               AGGREGATION_FUNCTION, DISTINCT_KEY_EXPR,
+               NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON
         FROM SYS_SEMANTIC.METRICS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -1185,10 +1191,46 @@ local function load_catalog(ctx)
             format_hint = row_value(row, "FORMAT_HINT", 10),
             is_private = row_value(row, "IS_PRIVATE", 11),
             is_certified = row_value(row, "IS_CERTIFIED", 12),
+            -- Carried for the planner's classification, which decides whether
+            -- this metric has a mergeable aggregate state and a known input
+            -- grain. See validate_metric_plannability.
+            metric_kind = row_value(row, "METRIC_KIND", 13),
+            aggregation_function = row_value(row, "AGGREGATION_FUNCTION", 14),
+            distinct_key_expr = row_value(row, "DISTINCT_KEY_EXPR", 15),
+            non_additive_dimension_id = row_value(row, "NON_ADDITIVE_DIMENSION_ID", 16),
+            window_spec_json = row_value(row, "WINDOW_SPEC_JSON", 17),
+            inputs = {},
+            filters = {},
         }
         table.insert(ctx.metrics, metric)
         ctx.metric_by_id[key(id)] = metric
         ctx.metric_by_name[upper(metric.name)] = metric
+    end
+
+    local metric_input_rows = query([[
+        SELECT mi.METRIC_ID, mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE,
+               mi.INPUT_OBJECT_ID, mi.EXPRESSION_ALIAS, mi.FILTER_EXPR,
+               mi.ORDINAL_POSITION
+        FROM SYS_SEMANTIC.METRIC_INPUTS mi
+        JOIN SYS_SEMANTIC.METRICS mt
+          ON mt.METRIC_ID = mi.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY mi.METRIC_ID, mi.ORDINAL_POSITION
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(metric_input_rows or {}) do
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.inputs[#metric.inputs + 1] = {
+                role = row_value(row, "INPUT_ROLE", 2),
+                object_type = row_value(row, "INPUT_OBJECT_TYPE", 3),
+                object_id = row_value(row, "INPUT_OBJECT_ID", 4),
+                expression_alias = row_value(row, "EXPRESSION_ALIAS", 5),
+                filter_expr = row_value(row, "FILTER_EXPR", 6),
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 7),
+            }
+        end
     end
 
     ctx.relationships = {}
@@ -1668,6 +1710,35 @@ local function missing_unique_key_columns(ctx, entity, column_name)
     return {}
 end
 
+-- Name the remedy for a defect that lives in an alternate representation.
+--
+-- Registering an alternate is accepted on a draft and leaves the model invalid
+-- until the declaration is completed (F3 coverage, attribute bindings, or a
+-- certified F5 identity). Every later authoring call then fails on the
+-- representation rather than on what was attempted, and the recovery --
+-- REMOVE_ENTITY_REPRESENTATION -- appeared in no message. The suffix is added
+-- only when every named representation is an ALTERNATE: a PRIMARY cannot be
+-- removed, so suggesting it would be wrong.
+local function alternate_representation_remedy(ctx, names)
+    if names == nil or #names == 0 then return "" end
+    local role_by_name = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        role_by_name[upper(representation.name)] = upper(representation.role)
+    end
+    for _, name in ipairs(names) do
+        -- "entity.representation" for representation-scoped issues.
+        local bare = tostring(name):match("([^%.]+)$") or tostring(name)
+        if role_by_name[upper(bare)] ~= "ALTERNATE" then return "" end
+    end
+    local subject = #names == 1 and ("Representation " .. tostring(names[1]))
+        or ("Representations " .. table.concat(names, ", "))
+    return " " .. subject .. " is registered but not yet usable, and blocks"
+        .. " unrelated authoring until it is. Complete the declaration (F3"
+        .. " coverage with SET_REPRESENTATION_COVERAGE_BATCH, attribute bindings"
+        .. " with ADD_ATTRIBUTE_BINDING, or a certified F5 identity), or remove"
+        .. " it with REMOVE_ENTITY_REPRESENTATION."
+end
+
 local function representation_suffix(names)
     if names == nil or #names == 0 then return "" end
     return " in representation(s): " .. table.concat(names, ", ")
@@ -1765,6 +1836,7 @@ local function validate_structural_rules(ctx)
                         "SEMANTIC_MODEL_036", "Legacy primary-key expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
                             .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                             .. identity_binding_remedy())
                 end
                 if ref.alias == owning_alias then
@@ -1977,6 +2049,7 @@ local function validate_unique_key_expression(ctx, unique_key, column, entity, o
             add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
             "Unique key expression references unknown source column: " .. ref.alias .. "."
                     .. ref.column_name .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                     .. identity_binding_remedy())
         end
     end
@@ -2030,6 +2103,7 @@ local function validate_unique_keys(ctx)
                             "Unique key column references unknown source column: "
                                 .. tostring(column_name)
                                 .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                                 .. identity_binding_remedy())
                     end
                 else
@@ -2040,25 +2114,12 @@ local function validate_unique_keys(ctx)
     end
 end
 
+-- Delegates to the shared resolver so validator probes and compiler rendering
+-- agree on the physical spelling of a declared key column. See
+-- lua/semantic_layer/shared/source_columns.lua.
 local function resolved_source_column_name(representation, column_name)
-    local ok, rows = pcall(query, [[
-        SELECT COLUMN_NAME
-        FROM SYS.EXA_ALL_COLUMNS
-        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
-          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
-          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
-        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
-        LIMIT 1
-    ]], {
-        schema_name = representation.source_schema,
-        object_name = representation.source_object,
-        column_name = column_name,
-    })
-    if not ok then return nil, tostring(rows) end
-    if rows == nil or #rows == 0 then
-        return nil, "source column is not visible: " .. tostring(column_name)
-    end
-    return row_value(rows[1], "COLUMN_NAME", 1), nil
+    return source_columns.resolve(query, representation.source_schema,
+        representation.source_object, column_name)
 end
 
 local function representation_key_query(representation, unique_key)
@@ -2728,6 +2789,7 @@ local function relationship_edges(ctx)
                     "SEMANTIC_MODEL_017", "Relationship join condition references unknown source column: "
                         .. ref.alias .. "." .. ref.column_name
                         .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                         .. identity_binding_remedy())
             end
         end
@@ -2851,7 +2913,8 @@ local function validate_expressions(ctx, safe_edges)
                     add_issue(ctx, "ERROR", "DIMENSION", dimension.name, "SEMANTIC_MODEL_017",
                         "Dimension expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
         end
@@ -2887,7 +2950,8 @@ local function validate_expressions(ctx, safe_edges)
                     add_issue(ctx, "ERROR", "FACT", fact.name, "SEMANTIC_MODEL_017",
                         "Fact expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
         end
@@ -2995,7 +3059,8 @@ local function validate_expressions(ctx, safe_edges)
                     add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_017",
                         "Metric filter references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
         end
@@ -3515,6 +3580,126 @@ local function path_alternatives(ctx, safe_edges, from_id, to_id)
     return cached
 end
 
+-- Definition-time plannability gate.
+--
+-- A metric whose aggregate has no mergeable state, or whose input grain the
+-- planner cannot determine, compiles to nothing: COUNT(*) has no fact input
+-- (METRIC_INPUT_GRAIN_MISSING) and AVG on a partitioned entity has no mergeable
+-- state. Both used to validate clean, publish, and be reported ready by every
+-- agent surface, failing only when someone finally queried them -- and taking
+-- SELECT * on the whole object with them.
+--
+-- The classification is the planner's own (ESV_METRIC_PLAN.build_dag), so the
+-- gate cannot drift from what the compiler will decide. It judges each metric
+-- alone: a metric that cannot be planned by itself can never be queried, while
+-- a combination that only fails together is a request-time concern.
+local function entity_is_partitioned(ctx, entity)
+    for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+        if not missing(representation.coverage_predicate)
+            or not missing(representation.valid_from)
+            or not missing(representation.valid_to) then
+            return true
+        end
+    end
+    return false
+end
+
+local function row_count_remedy(metric)
+    if upper(metric.aggregation_function) ~= "COUNT"
+        and not string.find(upper(tostring(metric.expression or "")), "COUNT", 1, true) then
+        return ""
+    end
+    return " A row count needs something to count: use COUNT(<fact>) over a"
+        .. " non-null fact, or declare FACT <name> AS 1 and use SUM(<name>)."
+end
+
+local function validate_metric_plannability(ctx)
+    if #(ctx.metrics or {}) == 0 then return end
+    -- A metric that already failed a structural rule (an unknown fact, a
+    -- missing base entity) has no inputs to classify, and the precise error is
+    -- already reported. Running the gate on top would add a second, vaguer
+    -- diagnostic for the same defect.
+    if (ctx.error_count or 0) > 0 then return end
+    local fact_by_id = {}
+    for _, fact in ipairs(ctx.facts or {}) do
+        fact_by_id[key(fact.id)] = fact
+    end
+    -- The positional ADD_METRIC API records no structured inputs, so the
+    -- planner falls back to METRIC_DEPENDENCIES, which extract_metric_dependencies
+    -- has just written from the expression text. Read them back and hand the
+    -- classification the same fallback the compiler uses, or every metric
+    -- authored through that API would look input-less here.
+    for _, metric in ipairs(ctx.metrics) do
+        metric.dependencies = {}
+    end
+    for _, row in ipairs(query([[
+        SELECT md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
+        FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md
+        JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = md.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id}) or {}) do
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.dependencies[#metric.dependencies + 1] = {
+                object_type = row_value(row, "DEPENDS_ON_OBJECT_TYPE", 2),
+                object_id = row_value(row, "DEPENDS_ON_OBJECT_ID", 3),
+            }
+        end
+    end
+    local snapshot = {metric_by_id = ctx.metric_by_id, fact_by_id = fact_by_id}
+
+    for _, metric in ipairs(ctx.metrics) do
+        local dag = metric_plan.build_dag(snapshot, {metric})
+        local node = dag ~= nil and dag.node_by_id[key(metric.id)] or nil
+        if node ~= nil then
+            if node.invalid_reason == "METRIC_INPUT_GRAIN_MISSING" then
+                add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_056",
+                    "Metric aggregates no fact, so the planner cannot determine its input"
+                        .. " grain (METRIC_INPUT_GRAIN_MISSING) and the metric can never be"
+                        .. " compiled." .. row_count_remedy(metric))
+            elseif node.invalid_reason == "METRIC_INPUT_GRAIN_AMBIGUOUS" then
+                add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_056",
+                    "Metric aggregates facts from more than one entity in a single"
+                        .. " aggregate state (METRIC_INPUT_GRAIN_AMBIGUOUS), so its input"
+                        .. " grain is undefined. Split it into one metric per fact entity"
+                        .. " and combine them with a DERIVED metric.")
+            elseif node.node_kind == "UNSUPPORTED" or node.node_kind == "LEGACY_AGGREGATE" then
+                -- A non-mergeable aggregate is still valid on the single-branch
+                -- renderer. It is unqueryable only when the metric's own leaves
+                -- force state merging: a partitioned leaf, or more than one.
+                local partitioned_name = nil
+                for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
+                    local entity = ctx.entity_by_id[key(entity_id)]
+                    if entity ~= nil and entity_is_partitioned(ctx, entity) then
+                        partitioned_name = tostring(entity.name)
+                        break
+                    end
+                end
+                local aggregate = tostring(metric.aggregation_function
+                    or node.state_class or "this aggregate")
+                if partitioned_name ~= nil then
+                    add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_057",
+                        "Metric uses " .. aggregate .. ", which has no mergeable aggregate"
+                            .. " state; entity '" .. partitioned_name .. "' is partitioned"
+                            .. " (F3 supports SUM and COUNT), so the metric can never be"
+                            .. " compiled. Express it with mergeable SUM/COUNT states -- a"
+                            .. " RATIO of two such metrics is exact.")
+                elseif #(node.leaf_entity_ids or {}) > 1 then
+                    add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_057",
+                        "Metric uses " .. aggregate .. ", which has no mergeable aggregate"
+                            .. " state, over facts from " .. tostring(#node.leaf_entity_ids)
+                            .. " entities. Multi-entity metrics merge aggregate states, so"
+                            .. " the metric can never be compiled. Express it with mergeable"
+                            .. " SUM/COUNT states.")
+                end
+            end
+        end
+    end
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -3706,6 +3891,7 @@ function M.validate_model(model_name_arg)
         extract_metric_dependencies(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
+        validate_metric_plannability(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
         -- Remote equivalence proofs are full data scans. Do not launch them
@@ -3766,6 +3952,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         extract_metric_dependencies = extract_metric_dependencies,
         detect_metric_cycles = detect_metric_cycles,
         validate_agent_metadata = validate_agent_metadata,
+        validate_metric_plannability = validate_metric_plannability,
+        alternate_representation_remedy = alternate_representation_remedy,
         compute_metric_dimension_matrix = compute_metric_dimension_matrix,
         validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,
     }

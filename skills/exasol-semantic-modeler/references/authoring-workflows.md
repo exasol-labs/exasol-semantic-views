@@ -441,9 +441,18 @@ the complete representation validates cleanly.
 ### Fuse Hot and Cold Partitions
 
 F3 `UNION` fusion applies only to metric-leaf entities and mergeable `SUM` or
-`COUNT` states. First add every representation and every required dimension/fact
-binding. Do not validate the sources as F1 equivalents before coverage is
-complete: temporal partitions intentionally have different key sets.
+`COUNT` states — `AVG` on a partitioned entity is refused when it is defined
+(`SEMANTIC_MODEL_057`).
+
+Register the partition and its coverage as **one** candidate with
+`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE`. Temporal partitions intentionally
+have different key sets, so a partition registered without coverage is
+validated as an F1 *equivalent* and fails on key cardinality
+(`SEMANTIC_MODEL_038`); on a draft that failure is not raised at registration
+but blocks every later authoring call on the model until coverage exists. If
+you do register separately on a draft, call
+`SET_REPRESENTATION_COVERAGE_BATCH` immediately afterwards, before adding any
+dimension or fact to that entity.
 
 Before declaring coverage, verify the entity is the base of an active metric:
 

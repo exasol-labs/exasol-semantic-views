@@ -1,5 +1,7 @@
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local source_columns = assert(ESV_SOURCE_COLUMNS,
+    "shared source-column runtime is required")
 local query_spec_runtime = assert(ESV_QUERY_SPEC, "query spec runtime is required")
 local catalog_snapshot_runtime = assert(ESV_CATALOG_SNAPSHOT, "catalog snapshot runtime is required")
 local metric_plan_runtime = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
@@ -1804,6 +1806,7 @@ end
 
 local function fused_attribute_expression(ctx, entity, base_representation,
         attribute_key, strategy)
+    ctx._source_column_cache = ctx._source_column_cache or {}
     local unique_key = physical_unique_key(ctx, entity.id)
     local semantic_identity = complete_semantic_identity(ctx, entity)
     if unique_key == nil and semantic_identity == nil then
@@ -1846,9 +1849,32 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                     predicates[#predicates + 1] = alternate_identity
                         .. " = " .. base_identity_expression
                 else
+                    -- Resolve the declared key column to the physical name each
+                    -- source actually carries. A declared `customer_id` quoted
+                    -- verbatim against a physical `CUSTOMER_ID` produces SQL
+                    -- that parses and plans and then fails at execution, which
+                    -- is what made a clean-validating model unqueryable. The
+                    -- validator's conflict probe resolves the same way through
+                    -- the same module, so probe and render cannot disagree.
                     for _, column in ipairs(unique_key.columns) do
-                        predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
-                            .. " = " .. quote_column(base_representation.alias, column.column_name)
+                        -- Each side resolves against its own source, so sources
+                        -- that spell the key differently still join. When the
+                        -- metadata cannot answer -- a source outside
+                        -- EXA_ALL_COLUMNS -- fall back to the declared spelling,
+                        -- which is what this rendered before: the validator's
+                        -- conflict probe is the gate that refuses a key column
+                        -- no source exposes, and it runs for exactly the two
+                        -- strategies that build this join.
+                        local lookup_column = source_columns.resolve(
+                            query, representation.source_schema,
+                            representation.source_object, column.column_name,
+                            ctx._source_column_cache) or column.column_name
+                        local base_column = source_columns.resolve(
+                            query, base_representation.source_schema,
+                            base_representation.source_object, column.column_name,
+                            ctx._source_column_cache) or column.column_name
+                        predicates[#predicates + 1] = quote_column(lookup_alias, lookup_column)
+                            .. " = " .. quote_column(base_representation.alias, base_column)
                     end
                 end
                 entity.fusion_joins = entity.fusion_joins or {}

@@ -908,6 +908,13 @@ local function compiler_query_fixture(options)
         elseif normalized:find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
             if options.f51_direct and params.schema_name == "MONGO"
                 and params.column_name == "CUSTOMER_ID" then return {{0}} end
+            -- Two shapes reach this view: an existence count, and the shared
+            -- resolver asking for the physical spelling of a declared column.
+            -- Exasol stores an unquoted identifier upper-cased, so the resolver
+            -- answer is upper case even when the model declared lower case.
+            if normalized:find("SELECT COLUMN_NAME", 1, true) then
+                return {{COLUMN_NAME = string.upper(tostring(params.column_name))}}
+            end
             return {{1}}
         end
         error("unexpected compiler fixture query: " .. normalized)
@@ -1016,7 +1023,10 @@ test("F4 compiler reconciles attribute values by declared authority", function()
     assert_equal(result.status, "OK")
     assert_contains(result.generated_sql, "COALESCE(o.status, f4_rep_104.archive_status)")
     assert_contains(result.generated_sql, 'LEFT JOIN "ARCHIVE"."ORDERS" f4_rep_104')
-    assert_contains(result.generated_sql, 'ON f4_rep_104."order_id" = o."order_id"')
+    -- BUG-F03: the declared key column resolves to the physical spelling on
+    -- each side, so a key declared in lower case no longer renders a quoted
+    -- identifier the database cannot resolve.
+    assert_contains(result.generated_sql, 'ON f4_rep_104."ORDER_ID" = o."ORDER_ID"')
     assert_contains(result.plan_json, '"fusion_strategy":"RECONCILE"')
     assert_contains(result.plan_json, '"authority_role":"AUTHORITATIVE"')
     assert_contains(result.plan_json, '"authority_role":"SUPPLEMENTAL"')

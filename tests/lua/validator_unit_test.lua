@@ -1728,6 +1728,187 @@ test("verified queries accept a renamed metric through its retained synonym", fu
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_023"))
 end)
 
+test("validator rejects a metric the planner could never compile", function()
+    -- BUG-F01 / BUG-F02: COUNT(*) has no fact input and AVG has no mergeable
+    -- state on a partitioned entity. Both validated clean, published, and were
+    -- reported ready by every agent surface, failing only when queried -- and
+    -- taking SELECT * on the object with them. The gate uses the planner's own
+    -- classification so it cannot disagree with what the compiler will decide.
+    local function context_with(metric, entity_overrides)
+        local entity = {id = 1, name = "order"}
+        for name, value in pairs(entity_overrides or {}) do entity[name] = value end
+        local ctx = validation_context({
+            metrics = {metric},
+            metric_by_id = {['30'] = metric},
+            facts = {{id = 20, name = "freight", entity_id = 1,
+                data_type = "DECIMAL(18,2)"}},
+            entities = {entity},
+            entity_by_id = {['1'] = entity},
+            entity_name_by_id = {['1'] = "order"},
+            representations_by_entity = {['1'] = entity_overrides
+                and entity_overrides.representations or {}},
+        })
+        return ctx
+    end
+
+    local counted = {id = 30, name = "line_count", base_entity_id = 1,
+        expression = "COUNT(*)", aggregation_function = "COUNT",
+        metric_kind = "SIMPLE", inputs = {}, filters = {}}
+    local no_grain = context_with(counted)
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(no_grain)
+    end)
+    local grain_issue = issue_for_rule(no_grain, "SEMANTIC_MODEL_056")
+    assert_equal(grain_issue.severity, "ERROR")
+    assert_contains(grain_issue.message, "METRIC_INPUT_GRAIN_MISSING")
+    -- The remedy names both supported row-count forms.
+    assert_contains(grain_issue.message, "COUNT(<fact>)")
+    assert_contains(grain_issue.message, "SUM(<name>)")
+    assert_branch("validator.metric.plannable", has_rule(no_grain, "SEMANTIC_MODEL_056"), true)
+
+    -- A mergeable SUM over one fact is fine, partitioned or not.
+    local summed = {id = 30, name = "total_freight", base_entity_id = 1,
+        expression = "SUM(freight)", aggregation_function = "SUM",
+        metric_kind = "SIMPLE", filters = {},
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 20,
+            ordinal_position = 1}}}
+    local clean = context_with(summed, {representations = {
+        {id = 5, name = "primary", role = "PRIMARY",
+            coverage_predicate = "o.order_date >= TIMESTAMP '2026-07-01 00:00:00'"},
+        {id = 6, name = "cold", role = "ALTERNATE",
+            coverage_predicate = "o.order_date < TIMESTAMP '2026-07-01 00:00:00'"},
+    }})
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(clean)
+    end)
+    assert_equal(#clean.issues, 0)
+    assert_branch("validator.metric.plannable", has_rule(clean, "SEMANTIC_MODEL_056"), false)
+
+    -- AVG over the same partitioned entity can never be compiled.
+    local averaged = {id = 30, name = "mean_freight", base_entity_id = 1,
+        expression = "AVG(freight)", aggregation_function = "AVG",
+        metric_kind = "SIMPLE", filters = {},
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 20,
+            ordinal_position = 1}}}
+    local partitioned = context_with(averaged, {representations = {
+        {id = 5, name = "primary", role = "PRIMARY",
+            coverage_predicate = "o.order_date >= TIMESTAMP '2026-07-01 00:00:00'"},
+        {id = 6, name = "cold", role = "ALTERNATE",
+            coverage_predicate = "o.order_date < TIMESTAMP '2026-07-01 00:00:00'"},
+    }})
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(partitioned)
+    end)
+    local state_issue = issue_for_rule(partitioned, "SEMANTIC_MODEL_057")
+    assert_equal(state_issue.severity, "ERROR")
+    assert_contains(state_issue.message, "AVG")
+    assert_contains(state_issue.message, "no mergeable aggregate state")
+    assert_contains(state_issue.message, "'order' is partitioned")
+
+    -- The same AVG on an unpartitioned entity stays valid: the single-branch
+    -- renderer handles it, and the compiler still accepts it.
+    local unpartitioned = context_with(averaged)
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(unpartitioned)
+    end)
+    assert_true(not has_rule(unpartitioned, "SEMANTIC_MODEL_057"))
+
+    -- A model that already failed a structural rule is left to that rule.
+    local already_broken = context_with(counted)
+    already_broken.error_count = 1
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(already_broken)
+    end)
+    assert_equal(#already_broken.issues, 0)
+end)
+
+test("validator rejects metrics whose input grain spans entities", function()
+    -- The other two shapes the planner cannot compile: one aggregate state over
+    -- facts from two entities, and a non-mergeable aggregate over the same.
+    local function context_with(metric)
+        local order = {id = 1, name = "order"}
+        local line = {id = 2, name = "order_line"}
+        return validation_context({
+            metrics = {metric},
+            metric_by_id = {['30'] = metric},
+            facts = {
+                {id = 20, name = "freight", entity_id = 1, data_type = "DECIMAL(18,2)"},
+                {id = 21, name = "net_revenue", entity_id = 2, data_type = "DECIMAL(18,2)"},
+            },
+            entities = {order, line},
+            entity_by_id = {['1'] = order, ['2'] = line},
+            entity_name_by_id = {['1'] = "order", ['2'] = "order_line"},
+        })
+    end
+    local two_entity_inputs = {
+        {role = "MEASURE", object_type = "FACT", object_id = 20, ordinal_position = 1},
+        {role = "MEASURE", object_type = "FACT", object_id = 21, ordinal_position = 2},
+    }
+
+    local summed = {id = 30, name = "mixed_sum", base_entity_id = 1,
+        expression = "SUM(freight)", aggregation_function = "SUM",
+        metric_kind = "SIMPLE", filters = {}, inputs = two_entity_inputs}
+    local ambiguous = context_with(summed)
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(ambiguous)
+    end)
+    assert_contains(issue_for_rule(ambiguous, "SEMANTIC_MODEL_056").message,
+        "METRIC_INPUT_GRAIN_AMBIGUOUS")
+
+    local averaged = {id = 30, name = "mixed_avg", base_entity_id = 1,
+        expression = "AVG(freight)", aggregation_function = "AVG",
+        metric_kind = "SIMPLE", filters = {}, inputs = two_entity_inputs}
+    local unmergeable = context_with(averaged)
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(unmergeable)
+    end)
+    local issue = issue_for_rule(unmergeable, "SEMANTIC_MODEL_057")
+    assert_contains(issue.message, "over facts from 2 entities")
+
+    -- A metric with no inputs that is not a count gets the diagnosis without
+    -- the row-count remedy, which would make no sense for it. (MIN and MAX are
+    -- legacy aggregates rather than states: the single-branch renderer still
+    -- compiles them from the expression, so they are not rejected here.)
+    local summed_nothing = {id = 30, name = "orphan_sum", base_entity_id = 1,
+        expression = "SUM(freight)", aggregation_function = "SUM",
+        metric_kind = "SIMPLE", filters = {}, inputs = {}}
+    local no_inputs = context_with(summed_nothing)
+    with_query(function() return {} end, function()
+        api.validate_metric_plannability(no_inputs)
+    end)
+    local plain = issue_for_rule(no_inputs, "SEMANTIC_MODEL_056")
+    assert_contains(plain.message, "METRIC_INPUT_GRAIN_MISSING")
+    assert_true(not string.find(plain.message, "row count", 1, true))
+end)
+
+test("validator names the alternate representation blocking unrelated authoring", function()
+    -- BUG-F06: registering an alternate on a draft is accepted and then blocks
+    -- every later authoring call with a message about the representation. The
+    -- recovery is REMOVE_ENTITY_REPRESENTATION, which no message named.
+    local ctx = validation_context({representations = {
+        {id = 5, name = "primary", role = "PRIMARY"},
+        {id = 6, name = "crm", role = "ALTERNATE"},
+    }})
+    local remedy = api.alternate_representation_remedy(ctx, {"crm"})
+    assert_contains(remedy, "Representation crm is registered but not yet usable")
+    assert_contains(remedy, "REMOVE_ENTITY_REPRESENTATION")
+    assert_contains(remedy, "SET_REPRESENTATION_COVERAGE_BATCH")
+    assert_branch("validator.representation.remedy", remedy ~= "", true)
+
+    -- Entity-qualified names resolve to the representation.
+    assert_contains(api.alternate_representation_remedy(ctx, {"order.crm"}),
+        "Representation order.crm is registered")
+
+    -- A PRIMARY cannot be removed, so no remedy is offered for it, and none is
+    -- offered when any named representation is not an alternate.
+    assert_equal(api.alternate_representation_remedy(ctx, {"primary"}), "")
+    assert_equal(api.alternate_representation_remedy(ctx, {"crm", "primary"}), "")
+    assert_equal(api.alternate_representation_remedy(ctx, {}), "")
+    assert_equal(api.alternate_representation_remedy(ctx, {"unknown"}), "")
+    assert_branch("validator.representation.remedy",
+        api.alternate_representation_remedy(ctx, {"primary"}) ~= "", false)
+end)
+
 test("validator computes safe fanout and missing-entity matrix outcomes", function()
     local inserted = {}
     local ctx = validation_context({
@@ -1994,6 +2175,12 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_DEPENDENCIES") then
             lifecycle.dependency_inserted = true
             return {}
+        elseif contains(sql, "FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md") then
+            return {}
+        elseif contains(sql, "FROM SYS_SEMANTIC.METRIC_INPUTS mi") then
+            -- The plannability gate classifies metrics with the planner's own
+            -- code, which needs the structured inputs.
+            return {{30, "MEASURE", "FACT", 20, nil, nil, 1}}
         elseif contains(sql, "SELECT vq.VERIFIED_QUERY_ID")
             or contains(sql, "SELECT QUERY_NAME, REQUEST_JSON")
             or contains(sql, "FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS") then

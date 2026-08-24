@@ -1450,40 +1450,86 @@ local model_id = row_value(rows[1], "MODEL_ID", 1)
 local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local entity_id = row_value(rows[1], "ENTITY_ID", 3)
 local representation_id = row_value(rows[1], "REPRESENTATION_ID", 4)
-local existing = query([[
-    SELECT COUNT(*) FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
+local existing_rows = query([[
+    SELECT AUTHORITY_ROLE FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND REPRESENTATION_ID = :representation_id
 ]], {model_id = model_id, version_id = version_id,
       representation_id = representation_id})
-if tonumber(existing[1][1] or 0) == 0 then
+local had_row = existing_rows ~= nil and #existing_rows > 0
+local previous_role = had_row and row_value(existing_rows[1], "AUTHORITY_ROLE", 1) or nil
+
+-- Prospective on a published model: authority decides which representation wins
+-- a reconciliation, so one call can leave a live model failing validation and
+-- dark for every consumer. Apply, revalidate, and restore the prior state if
+-- the candidate does not hold -- the contract ADD_ENTITY_REPRESENTATION already
+-- honours (SEMANTIC_ADMIN_094).
+local function apply_authority(role)
+    if role == nil then
+        query([[
+            DELETE FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+              AND REPRESENTATION_ID = :representation_id
+        ]], {model_id = model_id, version_id = version_id,
+              representation_id = representation_id})
+    elseif not had_row and role == authority_role then
+        query([[
+            INSERT INTO SYS_SEMANTIC.REPRESENTATION_AUTHORITIES (
+              MODEL_ID, VERSION_ID, ENTITY_ID, REPRESENTATION_ID, AUTHORITY_ROLE, STATUS
+            ) VALUES (
+              :model_id, :version_id, :entity_id, :representation_id, :authority_role, 'ACTIVE'
+            )
+        ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+              representation_id = representation_id, authority_role = role})
+    else
+        query([[
+            UPDATE SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
+            SET AUTHORITY_ROLE = :authority_role, STATUS = 'ACTIVE',
+                UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+              AND REPRESENTATION_ID = :representation_id
+        ]], {model_id = model_id, version_id = version_id,
+              representation_id = representation_id, authority_role = role})
+    end
+    query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+        {version_id = version_id})
     query([[
-        INSERT INTO SYS_SEMANTIC.REPRESENTATION_AUTHORITIES (
-          MODEL_ID, VERSION_ID, ENTITY_ID, REPRESENTATION_ID, AUTHORITY_ROLE, STATUS
-        ) VALUES (
-          :model_id, :version_id, :entity_id, :representation_id, :authority_role, 'ACTIVE'
-        )
-    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
-          representation_id = representation_id, authority_role = authority_role})
-else
-    query([[
-        UPDATE SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
-        SET AUTHORITY_ROLE = :authority_role, STATUS = 'ACTIVE',
-            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-          AND REPRESENTATION_ID = :representation_id
-    ]], {model_id = model_id, version_id = version_id,
-          representation_id = representation_id, authority_role = authority_role})
+          AND STATUS IN ('OK', 'WARNING')
+    ]], {model_id = model_id, version_id = version_id})
+    return query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+        {model_name = model_name})
 end
-query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
-    {version_id = version_id})
-query([[
-    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
-    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-      AND STATUS IN ('OK', 'WARNING')
-]], {model_id = model_id, version_id = version_id})
-query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
-    {model_name = model_name})
+
+local recertified = apply_authority(authority_role)
+-- A draft is left STALE rather than reverted: compilation is gated on
+-- validation status, so a stale draft serves nothing, and reverting would block
+-- the repair sequence a modeller needs on a model that is already invalid.
+local validation_status = "NOT_REQUIRED"
+if recertified ~= nil and #recertified > 0 then
+    validation_status = tostring(row_value(recertified[1], "VALIDATION_STATUS", 3))
+end
+if validation_status == "ERROR" or validation_status == "PRECONDITION" then
+    local detail_rows = query([[
+        SELECT RULE_CODE, MESSAGE
+        FROM SYS_SEMANTIC.VALIDATION_RESULTS
+        WHERE VALIDATION_RUN_ID = (
+            SELECT MAX(VALIDATION_RUN_ID) FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id)
+          AND SEVERITY IN ('ERROR', 'PRECONDITION')
+        ORDER BY VALIDATION_RESULT_ID
+        LIMIT 1
+    ]], {model_id = model_id, version_id = version_id})
+    local detail = "model validation failed"
+    if detail_rows ~= nil and #detail_rows > 0 then
+        detail = tostring(row_value(detail_rows[1], "RULE_CODE", 1)) .. " "
+            .. tostring(row_value(detail_rows[1], "MESSAGE", 2))
+    end
+    apply_authority(previous_role)
+    error("SEMANTIC_ADMIN_094: published authority change rejected and restored; "
+        .. "candidate introduced validation error: " .. detail)
+end
 exit({{model_name, entity_name, representation_name, authority_role}}, [[
   MODEL_NAME VARCHAR(256), ENTITY_NAME VARCHAR(256),
   REPRESENTATION_NAME VARCHAR(256), AUTHORITY_ROLE VARCHAR(32)
@@ -1530,44 +1576,91 @@ local model_id = row_value(rows[1], "MODEL_ID", 1)
 local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local entity_id = row_value(rows[1], "ENTITY_ID", 3)
 local attribute_id = row_value(rows[1], id_column, 4)
-local existing = query([[
-    SELECT COUNT(*) FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+local existing_rows = query([[
+    SELECT FUSION_STRATEGY FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
       AND ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
 ]], {model_id = model_id, version_id = version_id,
       attribute_type = attribute_type, attribute_id = attribute_id})
-if tonumber(existing[1][1] or 0) == 0 then
+local had_row = existing_rows ~= nil and #existing_rows > 0
+local previous_strategy = had_row
+    and row_value(existing_rows[1], "FUSION_STRATEGY", 1) or nil
+
+-- Prospective on a published model. COALESCE and RECONCILE carry contracts the
+-- validator checks -- bindings on at least two representations, exactly one
+-- AUTHORITATIVE for RECONCILE -- and a policy that fails them leaves a live
+-- published model failing validation, which takes every consumer offline until
+-- someone works out which change to undo. Apply, revalidate, restore on error.
+local function apply_policy(strategy)
+    if strategy == nil then
+        query([[
+            DELETE FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+              AND ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
+        ]], {model_id = model_id, version_id = version_id,
+              attribute_type = attribute_type, attribute_id = attribute_id})
+    elseif not had_row and strategy == fusion_strategy then
+        query([[
+            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES (
+              MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+              FUSION_STRATEGY, STATUS
+            ) VALUES (
+              :model_id, :version_id, :entity_id, :attribute_type, :attribute_id,
+              :fusion_strategy, 'ACTIVE'
+            )
+        ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
+              attribute_type = attribute_type, attribute_id = attribute_id,
+              fusion_strategy = strategy})
+    else
+        query([[
+            UPDATE SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+            SET FUSION_STRATEGY = :fusion_strategy, STATUS = 'ACTIVE',
+                UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+              AND ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
+        ]], {model_id = model_id, version_id = version_id,
+              attribute_type = attribute_type, attribute_id = attribute_id,
+              fusion_strategy = strategy})
+    end
+    query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
+        {version_id = version_id})
     query([[
-        INSERT INTO SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES (
-          MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
-          FUSION_STRATEGY, STATUS
-        ) VALUES (
-          :model_id, :version_id, :entity_id, :attribute_type, :attribute_id,
-          :fusion_strategy, 'ACTIVE'
-        )
-    ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
-          attribute_type = attribute_type, attribute_id = attribute_id,
-          fusion_strategy = fusion_strategy})
-else
-    query([[
-        UPDATE SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
-        SET FUSION_STRATEGY = :fusion_strategy, STATUS = 'ACTIVE',
-            UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+        UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-          AND ATTRIBUTE_TYPE = :attribute_type AND ATTRIBUTE_ID = :attribute_id
-    ]], {model_id = model_id, version_id = version_id,
-          attribute_type = attribute_type, attribute_id = attribute_id,
-          fusion_strategy = fusion_strategy})
+          AND STATUS IN ('OK', 'WARNING')
+    ]], {model_id = model_id, version_id = version_id})
+    return query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
+        {model_name = model_name})
 end
-query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_id",
-    {version_id = version_id})
-query([[
-    UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE'
-    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-      AND STATUS IN ('OK', 'WARNING')
-]], {model_id = model_id, version_id = version_id})
-query("EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(:model_name)",
-    {model_name = model_name})
+
+local recertified = apply_policy(fusion_strategy)
+-- A draft is left STALE rather than reverted, for the same reason as every
+-- other mutator: compilation is gated on validation status, and reverting would
+-- block the repair sequence on a model that is already invalid.
+local validation_status = "NOT_REQUIRED"
+if recertified ~= nil and #recertified > 0 then
+    validation_status = tostring(row_value(recertified[1], "VALIDATION_STATUS", 3))
+end
+if validation_status == "ERROR" or validation_status == "PRECONDITION" then
+    local detail_rows = query([[
+        SELECT RULE_CODE, MESSAGE
+        FROM SYS_SEMANTIC.VALIDATION_RESULTS
+        WHERE VALIDATION_RUN_ID = (
+            SELECT MAX(VALIDATION_RUN_ID) FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id)
+          AND SEVERITY IN ('ERROR', 'PRECONDITION')
+        ORDER BY VALIDATION_RESULT_ID
+        LIMIT 1
+    ]], {model_id = model_id, version_id = version_id})
+    local detail = "model validation failed"
+    if detail_rows ~= nil and #detail_rows > 0 then
+        detail = tostring(row_value(detail_rows[1], "RULE_CODE", 1)) .. " "
+            .. tostring(row_value(detail_rows[1], "MESSAGE", 2))
+    end
+    apply_policy(previous_strategy)
+    error("SEMANTIC_ADMIN_094: published fusion-policy change rejected and restored; "
+        .. "candidate introduced validation error: " .. detail)
+end
 exit({{model_name, attribute_type, attribute_name, fusion_strategy}}, [[
   MODEL_NAME VARCHAR(256), ATTRIBUTE_TYPE VARCHAR(32),
   ATTRIBUTE_NAME VARCHAR(256), FUSION_STRATEGY VARCHAR(32)
@@ -8418,8 +8511,910 @@ end
 
 ESV_GRAIN_GRAPH = M
 
+-- Physical column-name resolution shared by the validator and compiler
+-- runtimes. The packaging step embeds this source into both Exasol scripts so
+-- the installed runtime has no external dependency.
+--
+-- A declared unique-key column carries the name the modeler typed, in whatever
+-- case they typed it. Exasol resolves an unquoted identifier case-insensitively
+-- but a quoted one exactly, so rendering a declared `customer_id` as
+-- `alias."customer_id"` against a physical `CUSTOMER_ID` produces SQL that
+-- parses, plans, and then fails at execution.
+--
+-- The validator resolved declared names against EXA_ALL_COLUMNS before probing;
+-- the compiler quoted them verbatim. That asymmetry is exactly what let a model
+-- validate clean, compile to `STATUS = OK`, and then fail to execute. Both
+-- runtimes now resolve through this module, so what the validator probes and
+-- what the compiler renders cannot drift apart.
+
+local M = {}
+
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function cache_key(source_schema, source_object, column_name)
+    return string.upper(tostring(source_schema)) .. "."
+        .. string.upper(tostring(source_object)) .. "."
+        .. string.upper(tostring(column_name))
+end
+
+-- Return the physical column name as the database spells it, or nil plus a
+-- reason. An exact match wins over a case-insensitive one, so a source that
+-- genuinely carries two columns differing only in case still resolves to the
+-- declared spelling. `cache` is an optional caller-owned table; the module
+-- keeps no state of its own so a long-running session cannot serve a stale
+-- name after a source is redefined.
+function M.resolve(query_fn, source_schema, source_object, column_name, cache)
+    if missing(source_schema) or missing(source_object) or missing(column_name) then
+        return nil, "source column is not visible: " .. tostring(column_name)
+    end
+    local key = cache_key(source_schema, source_object, column_name)
+    if cache ~= nil and cache[key] ~= nil then
+        local cached = cache[key]
+        if cached.name ~= nil then return cached.name, nil end
+        return nil, cached.error
+    end
+
+    local ok, rows = pcall(query_fn, [[
+        SELECT COLUMN_NAME
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
+          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
+          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
+        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
+        LIMIT 1
+    ]], {
+        schema_name = source_schema,
+        object_name = source_object,
+        column_name = column_name,
+    })
+    if not ok then
+        return nil, tostring(rows)
+    end
+    if rows == nil or #rows == 0 then
+        local reason = "source column is not visible: " .. tostring(column_name)
+        if cache ~= nil then cache[key] = {error = reason} end
+        return nil, reason
+    end
+    local row = rows[1]
+    local name = row["COLUMN_NAME"] or row["column_name"] or row[1]
+    if missing(name) then
+        local reason = "source column is not visible: " .. tostring(column_name)
+        if cache ~= nil then cache[key] = {error = reason} end
+        return nil, reason
+    end
+    name = tostring(name)
+    if cache ~= nil then cache[key] = {name = name} end
+    return name, nil
+end
+
+ESV_SOURCE_COLUMNS = M
+
+-- Typed metric planning and strict grain-proof boundary.
+
+local M = {PLAN_VERSION = 10}
+local graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+
+local function key(value) return tostring(value) end
+local function upper(value) return string.upper(tostring(value or "")) end
+local function missing(value)
+    return value == nil or value == null or type(value) == "userdata"
+        or tostring(value) == ""
+end
+
+local function sorted_keys(values)
+    local out = {}
+    for value_key, present in pairs(values or {}) do
+        if present then out[#out + 1] = value_key end
+    end
+    table.sort(out)
+    return out
+end
+
+local function classification(metric)
+    local kind = upper(metric.metric_kind or metric.metric_type)
+    local aggregate = upper(metric.aggregation_function)
+    local expression = upper(metric.expression)
+    if not missing(metric.window_spec_json) or kind == "WINDOW" then
+        return "UNSUPPORTED_WINDOW"
+    end
+    if not missing(metric.distinct_key_expr) or aggregate == "COUNT_DISTINCT"
+        or string.find(expression, "DISTINCT", 1, true) then
+        return "UNSUPPORTED_DISTINCT"
+    end
+    if not missing(metric.non_additive_dimension_id) then
+        return "UNSUPPORTED_NON_ADDITIVE"
+    end
+    if aggregate == "SUM" or string.match(expression, "^%s*SUM%s*%(") then
+        return (#(metric.filters or {}) > 0 or not missing(metric.filter_expr))
+            and "FILTERED_SUM" or "SUM"
+    end
+    if aggregate == "COUNT" or string.match(expression, "^%s*COUNT%s*%(") then
+        return (#(metric.filters or {}) > 0 or not missing(metric.filter_expr))
+            and "FILTERED_COUNT" or "COUNT"
+    end
+    if kind == "RATIO" or string.find(expression, "/", 1, true) then return "RATIO" end
+    if kind == "DERIVED" or kind == "CALCULATED" then return "DERIVED_ARITHMETIC" end
+    return "LEGACY_AGGREGATE"
+end
+
+local function authoritative_inputs(metric)
+    local source = metric.inputs or {}
+    local source_kind = "STRUCTURED_INPUTS"
+    if #source == 0 then
+        source = metric.dependencies or {}
+        source_kind = "DEPENDENCY_FALLBACK"
+    end
+    local inputs = {}
+    local seen = {}
+    for index, input in ipairs(source) do
+        local object_type = upper(input.object_type)
+        local object_id = input.object_id
+        local role = input.role or input.input_role
+        local signature = object_type .. ":" .. key(object_id) .. ":" .. upper(role)
+        if not seen[signature] then
+            seen[signature] = true
+            inputs[#inputs + 1] = {
+                object_type = object_type,
+                object_id = object_id,
+                role = role,
+                ordinal_position = input.ordinal_position or index,
+                expression_alias = input.expression_alias,
+                filter_expr = input.filter_expr,
+            }
+        end
+    end
+    return inputs, source_kind
+end
+
+local function state_spec(state_class, data_type)
+    if state_class == "SUM" or state_class == "FILTERED_SUM" then
+        return {
+            state_kind = "SUM",
+            merge_operator = "SUM",
+            data_type = data_type,
+            empty_behavior = "NULL",
+        }
+    end
+    if state_class == "COUNT" or state_class == "FILTERED_COUNT" then
+        return {
+            state_kind = "COUNT",
+            merge_operator = "SUM",
+            data_type = data_type,
+            empty_behavior = "ZERO",
+        }
+    end
+    return nil
+end
+
+function M.build_dag(snapshot, selected_metrics)
+    local nodes = {}
+    local node_by_id = {}
+    local metric_by_id = snapshot.metric_by_id or {}
+    local fact_by_id = snapshot.fact_by_id or {}
+    local visiting = {}
+    local visited = {}
+    local diagnostics = {}
+
+    local function fact_node(fact)
+        local node_id = "fact:" .. key(fact.id)
+        if node_by_id[node_id] == nil then
+            local node = {
+                node_id = node_id,
+                node_kind = "FACT_INPUT",
+                fact_id = fact.id,
+                name = fact.name,
+                entity_id = fact.entity_id,
+                data_type = fact.data_type,
+            }
+            nodes[#nodes + 1] = node
+            node_by_id[node_id] = node
+        end
+        return node_by_id[node_id]
+    end
+
+    local function visit(metric)
+        local metric_key = key(metric.id)
+        local node_id = "metric:" .. metric_key
+        if visiting[metric_key] then return nil, "METRIC_DEPENDENCY_CYCLE" end
+        if visited[metric_key] then return node_by_id[node_id] end
+        visiting[metric_key] = true
+
+        local normalized_inputs, input_source = authoritative_inputs(metric)
+        local inputs = {}
+        local leaf_set = {}
+        for _, input in ipairs(normalized_inputs) do
+            if input.object_type == "METRIC" then
+                local dependency = metric_by_id[key(input.object_id)]
+                if dependency == nil then return nil, "MISSING_PRIVATE_METRIC_DEPENDENCY" end
+                local dependency_node, err = visit(dependency)
+                if err ~= nil then return nil, err end
+                inputs[#inputs + 1] = {
+                    kind = "METRIC",
+                    id = dependency.id,
+                    node_id = dependency_node.node_id,
+                    role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
+                }
+                for _, entity_id in ipairs(dependency_node.leaf_entity_ids or {}) do
+                    leaf_set[key(entity_id)] = entity_id
+                end
+            elseif input.object_type == "FACT" then
+                local fact = fact_by_id[key(input.object_id)]
+                if fact == nil then return nil, "MISSING_FACT_DEPENDENCY" end
+                local dependency_node = fact_node(fact)
+                inputs[#inputs + 1] = {
+                    kind = "FACT",
+                    id = fact.id,
+                    node_id = dependency_node.node_id,
+                    entity_id = fact.entity_id,
+                    role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
+                }
+                leaf_set[key(fact.entity_id)] = fact.entity_id
+            else
+                inputs[#inputs + 1] = {
+                    kind = input.object_type,
+                    id = input.object_id,
+                    role = input.role,
+                    expression_alias = input.expression_alias,
+                    filter_expr = input.filter_expr,
+                }
+            end
+        end
+
+        local leaf_entities = {}
+        for _, entity_key in ipairs(sorted_keys(leaf_set)) do
+            leaf_entities[#leaf_entities + 1] = leaf_set[entity_key]
+        end
+        local state_class = classification(metric)
+        local state = state_spec(state_class, metric.data_type)
+        local node_kind
+        if state ~= nil then
+            node_kind = "AGGREGATE_STATE"
+        elseif state_class == "RATIO" or state_class == "DERIVED_ARITHMETIC" then
+            node_kind = "SCALAR_FINALIZER"
+        elseif string.sub(state_class, 1, 12) == "UNSUPPORTED_" then
+            node_kind = "UNSUPPORTED"
+        else
+            node_kind = "LEGACY_AGGREGATE"
+        end
+        local node = {
+            node_id = node_id,
+            node_kind = node_kind,
+            metric_id = metric.id,
+            name = metric.name,
+            expression = metric.expression,
+            data_type = metric.data_type,
+            state_class = state_class,
+            aggregation_function = metric.aggregation_function,
+            state_spec = state,
+            base_entity_id = metric.base_entity_id,
+            leaf_entity_ids = leaf_entities,
+            inputs = inputs,
+            input_source = input_source,
+            local_filters = metric.filters or {},
+            legacy_filter_expr = metric.filter_expr,
+            stage = node_kind == "AGGREGATE_STATE" and "AGGREGATE"
+                or (node_kind == "SCALAR_FINALIZER" and "FINALIZE" or "LEGACY"),
+        }
+        if node_kind == "AGGREGATE_STATE" and #leaf_entities == 0 then
+            node.invalid_reason = "METRIC_INPUT_GRAIN_MISSING"
+        elseif node_kind == "AGGREGATE_STATE" and #leaf_entities > 1 then
+            node.invalid_reason = "METRIC_INPUT_GRAIN_AMBIGUOUS"
+        end
+        if metric.base_entity_id ~= nil and #leaf_entities > 0 then
+            local matches_base = false
+            for _, entity_id in ipairs(leaf_entities) do
+                if key(entity_id) == key(metric.base_entity_id) then matches_base = true end
+            end
+            if not matches_base then
+                diagnostics[#diagnostics + 1] = {
+                    reason_code = "BASE_ENTITY_MISMATCH",
+                    metric_id = metric.id,
+                    declared_entity_id = metric.base_entity_id,
+                    leaf_entity_ids = leaf_entities,
+                }
+            end
+        end
+        visiting[metric_key] = nil
+        visited[metric_key] = true
+        nodes[#nodes + 1] = node
+        node_by_id[node_id] = node
+        node_by_id[metric_key] = node
+        return node
+    end
+
+    local selected_node_ids = {}
+    for _, metric in ipairs(selected_metrics or {}) do
+        local node, err = visit(metric_by_id[key(metric.id)] or metric)
+        if err ~= nil then return nil, err end
+        selected_node_ids[#selected_node_ids + 1] = node.node_id
+    end
+    return {
+        nodes = nodes,
+        node_by_id = node_by_id,
+        selected_node_ids = selected_node_ids,
+        diagnostics = diagnostics,
+    }
+end
+
+local function field_ref(field)
+    return {
+        id = field.id or field.field_id,
+        name = field.name or field.field,
+        kind = field.kind or field.field_kind,
+        entity_id = field.entity_id,
+        data_type = field.data_type,
+    }
+end
+
+function M.bind_query(spec, dimensions, metrics, global_filters, having_filters, relationship_targets)
+    local bound = {
+        bound_query_version = 1,
+        selected_dimensions = {},
+        selected_metrics = {},
+        global_filters = {},
+        having_filters = {},
+        relationship_targets = relationship_targets or {},
+        order_by = spec.order_by or {},
+        limit = spec.limit,
+    }
+    for _, dimension in ipairs(dimensions or {}) do
+        bound.selected_dimensions[#bound.selected_dimensions + 1] = field_ref(dimension)
+    end
+    for _, metric in ipairs(metrics or {}) do
+        bound.selected_metrics[#bound.selected_metrics + 1] = field_ref(metric)
+    end
+    for _, filter in ipairs(global_filters or {}) do
+        bound.global_filters[#bound.global_filters + 1] = {
+            scope = "GLOBAL",
+            field_id = filter.field_id,
+            field = filter.field,
+            entity_id = filter.entity_id,
+            operator = filter.op,
+            value = filter.value,
+            value_sql = filter.value_sql,
+            data_type = filter.data_type,
+        }
+    end
+    for _, filter in ipairs(having_filters or {}) do
+        bound.having_filters[#bound.having_filters + 1] = {
+            scope = "HAVING",
+            metric_id = filter.metric_id,
+            metric = filter.metric,
+            operator = filter.op,
+            value = filter.value,
+            value_sql = filter.value_sql,
+            data_type = filter.data_type,
+        }
+    end
+    return bound
+end
+
+local function mapping_has_expression(mapping)
+    return not missing(mapping.from_expression) or not missing(mapping.to_expression)
+end
+
+local function keys_for(snapshot, entity_id)
+    return (snapshot.unique_keys_by_entity or {})[key(entity_id)] or {}
+end
+
+local function matching_key(snapshot, relationship, side)
+    local mappings = relationship.key_mappings or {}
+    for _, mapping in ipairs(mappings) do
+        if mapping_has_expression(mapping) then
+            return nil, "EXPRESSION_KEY_PROOF_UNSUPPORTED"
+        end
+    end
+    local expression_key_seen = false
+    local column_key_seen = false
+    for _, unique_key in ipairs(keys_for(snapshot,
+        side == "from" and relationship.from_entity_id or relationship.to_entity_id)) do
+        local has_expression = false
+        for _, column in ipairs(unique_key.columns or {}) do
+            if not missing(column.expression) then has_expression = true end
+        end
+        if has_expression then
+            expression_key_seen = true
+        else
+            column_key_seen = true
+            if graph.mapping_matches_key(mappings, side, unique_key) then return unique_key end
+        end
+    end
+    if expression_key_seen and not column_key_seen then
+        return nil, "EXPRESSION_KEY_PROOF_UNSUPPORTED"
+    end
+    return nil, "MISMATCHED_UNIQUE_KEY"
+end
+
+local function add_strict_edge(snapshot, edges, rejected, relationship, from_id, to_id, target_side)
+    if #(relationship.key_mappings or {}) == 0 then
+        rejected[#rejected + 1] = {
+            relationship_id = relationship.id,
+            from_entity_id = from_id,
+            to_entity_id = to_id,
+            reason = "MISSING_RELATIONSHIP_KEY_MAPPING",
+        }
+        return
+    end
+    local unique_key, reason = matching_key(snapshot, relationship, target_side)
+    if unique_key == nil then
+        rejected[#rejected + 1] = {
+            relationship_id = relationship.id,
+            from_entity_id = from_id,
+            to_entity_id = to_id,
+            reason = reason,
+        }
+        return
+    end
+    local from_key = key(from_id)
+    edges[from_key] = edges[from_key] or {}
+    local edge = {
+        from_id = from_id,
+        to_id = to_id,
+        name = relationship.name,
+        relationship = relationship,
+        safe = true,
+        reason = "OK",
+        unique_key_id = unique_key.id,
+        mapping_ordinals = {},
+    }
+    for _, mapping in ipairs(relationship.key_mappings or {}) do
+        edge.mapping_ordinals[#edge.mapping_ordinals + 1] = mapping.ordinal_position
+    end
+    edges[from_key][#edges[from_key] + 1] = edge
+end
+
+function M.strict_edges(snapshot)
+    local edges = {}
+    local rejected = {}
+    for _, relationship in ipairs(snapshot.relationships or {}) do
+        local cardinality = upper(relationship.cardinality)
+        if cardinality == "ONE_TO_ONE" then
+            add_strict_edge(snapshot, edges, rejected, relationship,
+                relationship.from_entity_id, relationship.to_entity_id, "to")
+            add_strict_edge(snapshot, edges, rejected, relationship,
+                relationship.to_entity_id, relationship.from_entity_id, "from")
+        elseif cardinality == "MANY_TO_ONE" then
+            add_strict_edge(snapshot, edges, rejected, relationship,
+                relationship.from_entity_id, relationship.to_entity_id, "to")
+        elseif cardinality == "ONE_TO_MANY" then
+            add_strict_edge(snapshot, edges, rejected, relationship,
+                relationship.to_entity_id, relationship.from_entity_id, "from")
+        else
+            rejected[#rejected + 1] = {
+                relationship_id = relationship.id,
+                reason = "MANY_TO_MANY_PROOF_UNSUPPORTED",
+            }
+        end
+    end
+    return edges, rejected
+end
+
+local function proof_json(mode, proof)
+    local result = {
+        mode = mode,
+        status = proof.ok and "PROVEN" or "REJECTED",
+        reason = proof.reason,
+        candidate_paths = proof.candidate_paths or {},
+        edges = {},
+    }
+    for _, edge in ipairs(proof.edges or {}) do
+        result.edges[#result.edges + 1] = {
+            relationship_id = edge.relationship and edge.relationship.id,
+            relationship_name = edge.name,
+            from_entity_id = edge.from_id,
+            to_entity_id = edge.to_id,
+            unique_key_id = edge.unique_key_id,
+            mapping_ordinals = edge.mapping_ordinals or {},
+        }
+    end
+    return result
+end
+
+local STABLE_REASONS = {
+    MISSING_RELATIONSHIP_KEY_MAPPING = "RELATIONSHIP_MAPPING_MISSING",
+    MISMATCHED_UNIQUE_KEY = "RELATIONSHIP_TARGET_NOT_UNIQUE",
+    EXPRESSION_KEY_PROOF_UNSUPPORTED = "EXPRESSION_KEY_PROOF_UNSUPPORTED",
+    MANY_TO_MANY_PROOF_UNSUPPORTED = "MANY_TO_MANY_UNSUPPORTED",
+    AMBIGUOUS_RELATIONSHIP_PATH = "RELATIONSHIP_PATH_AMBIGUOUS",
+}
+
+local function strict_edge_exists(edges, edge)
+    for _, candidate in ipairs(edges[key(edge.from_id)] or {}) do
+        if key(candidate.to_id) == key(edge.to_id)
+            and key(candidate.relationship.id) == key(edge.relationship.id) then
+            return true
+        end
+    end
+    return false
+end
+
+local function direction_reason(edge)
+    local relationship = edge.relationship
+    local cardinality = upper(relationship.cardinality)
+    if cardinality == "MANY_TO_MANY" then return "MANY_TO_MANY_UNSUPPORTED" end
+    if cardinality == "MANY_TO_ONE"
+        and key(edge.from_id) == key(relationship.to_entity_id) then
+        return "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED"
+    end
+    if cardinality == "ONE_TO_MANY"
+        and key(edge.from_id) == key(relationship.from_entity_id) then
+        return "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED"
+    end
+    return nil
+end
+
+local function blocking_rejection(rejected, edge)
+    for _, item in ipairs(rejected or {}) do
+        if key(item.relationship_id) == key(edge.relationship.id)
+            and (item.from_entity_id == nil or key(item.from_entity_id) == key(edge.from_id))
+            and (item.to_entity_id == nil or key(item.to_entity_id) == key(edge.to_id)) then
+            return STABLE_REASONS[item.reason] or item.reason, item
+        end
+    end
+    return direction_reason(edge), nil
+end
+
+function M.prove_strict(snapshot, from_id, to_id)
+    local edges, rejected = M.strict_edges(snapshot)
+    local proof = graph.prove_path(edges, from_id, to_id, {
+        require_safe = true,
+        reject_ambiguous = true,
+        reject_any_ambiguity = true,
+    })
+    local rendered = proof_json("STRICT_GRAIN", proof)
+    rendered.from_entity_id = from_id
+    rendered.to_entity_id = to_id
+    rendered.rejected_edges = rejected
+    if proof.ok then return rendered end
+    if proof.reason == "AMBIGUOUS_RELATIONSHIP_PATH" then
+        rendered.reason_code = "RELATIONSHIP_PATH_AMBIGUOUS"
+        return rendered
+    end
+
+    local _, all_edges = graph.build_edges(snapshot.relationships or {})
+    local attempted = graph.prove_path(all_edges, from_id, to_id, {
+        require_safe = false,
+        reject_ambiguous = true,
+        reject_any_ambiguity = true,
+    })
+    if attempted.reason == "AMBIGUOUS_RELATIONSHIP_PATH" then
+        rendered.reason_code = "RELATIONSHIP_PATH_AMBIGUOUS"
+        rendered.candidate_paths = attempted.candidate_paths or {}
+        return rendered
+    end
+    if attempted.ok then
+        rendered.attempted_path = graph.path_text(attempted.edges)
+        for _, edge in ipairs(attempted.edges) do
+            if not strict_edge_exists(edges, edge) then
+                local reason_code, detail = blocking_rejection(rejected, edge)
+                rendered.reason_code = reason_code or "DIMENSION_NOT_CONFORMED"
+                rendered.blocking_edge = {
+                    relationship_id = edge.relationship.id,
+                    relationship_name = edge.relationship.name,
+                    from_entity_id = edge.from_id,
+                    to_entity_id = edge.to_id,
+                    detail = detail and detail.reason or nil,
+                }
+                return rendered
+            end
+        end
+    end
+    rendered.reason_code = "DIMENSION_NOT_CONFORMED"
+    return rendered
+end
+
+function M.prove(snapshot, from_id, to_id, mode)
+    if upper(mode) == "STRICT_GRAIN" then return M.prove_strict(snapshot, from_id, to_id) end
+    local edges = graph.build_edges(snapshot.relationships or {})
+    local proof = graph.prove_path(edges, from_id, to_id, {
+        require_safe = true,
+        reject_ambiguous = true,
+    })
+    local rendered = proof_json("LEGACY_JOIN", proof)
+    rendered.from_entity_id = from_id
+    rendered.to_entity_id = to_id
+    -- A proof that succeeded still has to say what it chose over what. This
+    -- lane selects the shortest safe path and rejects only a tie, so an
+    -- alternative of a different length would otherwise be selected against
+    -- without ever being named. STRICT_GRAIN reports the same candidate list
+    -- when it refuses the request.
+    if proof.ok then
+        local alternatives = graph.safe_path_alternatives(edges, from_id, to_id)
+        -- Recorded whether or not an alternative was kept: a capped search
+        -- proves nothing about what it did not reach.
+        rendered.candidate_search_truncated = alternatives.truncated or nil
+        if #alternatives.alternates > 0 then
+            rendered.selected_path = alternatives.selected.path
+            rendered.selection_reason = "SHORTEST_SAFE_PATH"
+            rendered.candidate_paths = {}
+            for _, candidate in ipairs(alternatives.paths) do
+                rendered.candidate_paths[#rendered.candidate_paths + 1] = candidate.path
+            end
+            rendered.alternate_paths = {}
+            for _, alternate in ipairs(alternatives.alternates) do
+                rendered.alternate_paths[#rendered.alternate_paths + 1] = alternate.path
+            end
+        end
+    end
+    return rendered
+end
+
+local function add_requirement(requirements, seen, target_entity_id, dimension_id,
+    dimension_name, scope, metric_id)
+    if target_entity_id == nil then return end
+    local signature = key(target_entity_id) .. ":" .. key(dimension_id) .. ":"
+        .. tostring(scope) .. ":" .. key(metric_id)
+    if seen[signature] then return end
+    seen[signature] = true
+    requirements[#requirements + 1] = {
+        target_entity_id = target_entity_id,
+        dimension_id = dimension_id,
+        dimension_name = dimension_name,
+        scope = scope,
+        metric_id = metric_id,
+    }
+end
+
+local function requirement_id(branch_id, requirement)
+    return table.concat({
+        branch_id,
+        "requirement",
+        tostring(requirement.scope),
+        "entity",
+        key(requirement.target_entity_id),
+        "dimension",
+        key(requirement.dimension_id),
+        "metric",
+        key(requirement.metric_id),
+    }, ":")
+end
+
+local function entity_name(snapshot, entity_id)
+    local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+    return entity and entity.name or nil
+end
+
+function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relationship_targets)
+    if bound_query == nil or bound_query.selected_dimensions == nil then
+        bound_query = M.bind_query(spec, bound_query or {}, selected_metrics or {},
+            {}, {}, relationship_targets or {})
+    end
+    local dag, dag_error = M.build_dag(snapshot, selected_metrics or snapshot.visible_metrics)
+    if dag == nil then return nil, dag_error end
+
+    local aggregate_nodes = {}
+    local leaf_set = {}
+    local failure = nil
+    local legacy_state_failure = nil
+    for _, node in ipairs(dag.nodes) do
+        if node.node_kind == "UNSUPPORTED" or node.node_kind == "LEGACY_AGGREGATE" then
+            if legacy_state_failure == nil then
+                legacy_state_failure = {
+                    reason_code = "METRIC_STATE_UNSUPPORTED",
+                    metric_id = node.metric_id,
+                    metric = node.name,
+                    state_class = node.state_class,
+                    aggregation_function = node.aggregation_function,
+                    leaf_entity_ids = node.leaf_entity_ids,
+                }
+            end
+            for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
+                leaf_set[key(entity_id)] = entity_id
+            end
+        elseif node.node_kind == "AGGREGATE_STATE" then
+            aggregate_nodes[#aggregate_nodes + 1] = node
+            if node.invalid_reason ~= nil and failure == nil then
+                failure = {
+                    reason_code = node.invalid_reason,
+                    metric_id = node.metric_id,
+                    metric = node.name,
+                }
+            end
+            for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
+                leaf_set[key(entity_id)] = entity_id
+            end
+        end
+    end
+
+    local leaf_entities = {}
+    for _, entity_key in ipairs(sorted_keys(leaf_set)) do
+        leaf_entities[#leaf_entities + 1] = leaf_set[entity_key]
+    end
+    local has_partitioned_leaf = false
+    for _, entity_id in ipairs(leaf_entities) do
+        local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION" then
+            has_partitioned_leaf = true
+            if legacy_state_failure ~= nil then
+                for _, failure_entity_id in ipairs(
+                    legacy_state_failure.leaf_entity_ids or {}) do
+                    if key(failure_entity_id) == key(entity.id) then
+                        legacy_state_failure.entity_id = entity.id
+                        legacy_state_failure.entity_name = entity.name
+                        legacy_state_failure.fusion_strategy = "UNION"
+                        break
+                    end
+                end
+            end
+        end
+    end
+    local plan_kind = (#leaf_entities > 1 or has_partitioned_leaf)
+        and "MULTI_BRANCH" or "SINGLE_BRANCH"
+    -- Non-mergeable legacy aggregates remain valid on the unchanged
+    -- single-branch compatibility renderer. They are rejected when a caller
+    -- explicitly requests the strict typed boundary or when multiple leaves
+    -- would require state merging.
+    if failure == nil and legacy_state_failure ~= nil
+        and (plan_kind == "MULTI_BRANCH" or spec.proof_mode == "STRICT_GRAIN") then
+        failure = legacy_state_failure
+    end
+    local plan = {
+        plan_version = M.PLAN_VERSION,
+        plan_kind = plan_kind,
+        query_spec_version = spec.query_spec_version,
+        catalog_snapshot_version = snapshot.catalog_snapshot_version,
+        bound_query = bound_query,
+        proof_mode = plan_kind == "MULTI_BRANCH" and "STRICT_GRAIN" or spec.proof_mode,
+        leaf_entity_ids = leaf_entities,
+        metric_stages = dag.nodes,
+        diagnostics = dag.diagnostics,
+        branches = {},
+        relationship_proofs = {},
+        requested_dimensions = bound_query.selected_dimensions,
+        requested_metrics = bound_query.selected_metrics,
+        failure = failure,
+        fusion_strategy = has_partitioned_leaf and "UNION" or nil,
+    }
+
+    local leaf_lookup = {}
+    for _, entity_id in ipairs(leaf_entities) do leaf_lookup[key(entity_id)] = true end
+    for _, dimension in ipairs(bound_query.selected_dimensions or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(dimension.entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+            and not leaf_lookup[key(entity.id)] and plan.failure == nil then
+            plan.failure = {
+                reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+                entity_id = entity.id,
+                entity_name = entity.name,
+                dimension_id = dimension.id,
+                dimension = dimension.name,
+                usage = "SELECTED_DIMENSION",
+            }
+        end
+    end
+    for _, filter in ipairs(bound_query.global_filters or {}) do
+        local entity = (snapshot.entity_by_id or {})[key(filter.entity_id)]
+        if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+            and not leaf_lookup[key(entity.id)] and plan.failure == nil then
+            plan.failure = {
+                reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED",
+                entity_id = entity.id,
+                entity_name = entity.name,
+                dimension_id = filter.field_id,
+                dimension = filter.field,
+                usage = "GLOBAL_FILTER",
+            }
+        end
+    end
+
+    if plan_kind == "MULTI_BRANCH" then
+        for _, leaf_entity_id in ipairs(leaf_entities) do
+            local branch = {
+                branch_id = "branch:" .. key(leaf_entity_id),
+                leaf_entity_id = leaf_entity_id,
+                leaf_entity_name = entity_name(snapshot, leaf_entity_id),
+                state_node_ids = {},
+                requirements = {},
+                proofs = {},
+            }
+            for _, node in ipairs(aggregate_nodes) do
+                if #node.leaf_entity_ids == 1
+                    and key(node.leaf_entity_ids[1]) == key(leaf_entity_id) then
+                    branch.state_node_ids[#branch.state_node_ids + 1] = node.node_id
+                end
+            end
+            local requirement_seen = {}
+            for _, dimension in ipairs(bound_query.selected_dimensions or {}) do
+                add_requirement(branch.requirements, requirement_seen,
+                    dimension.entity_id, dimension.id, dimension.name, "SELECTED", nil)
+            end
+            for _, filter in ipairs(bound_query.global_filters or {}) do
+                add_requirement(branch.requirements, requirement_seen,
+                    filter.entity_id, filter.field_id, filter.field, "GLOBAL_FILTER", nil)
+            end
+            for _, node in ipairs(aggregate_nodes) do
+                if #node.leaf_entity_ids == 1
+                    and key(node.leaf_entity_ids[1]) == key(leaf_entity_id) then
+                    for _, filter in ipairs(node.local_filters or {}) do
+                        local dimension_id = not missing(filter.required_dimension_id)
+                            and filter.required_dimension_id or nil
+                        local dimension = dimension_id ~= nil
+                            and (snapshot.dimension_by_id or {})[key(dimension_id)] or nil
+                        local entity_id = not missing(filter.required_entity_id)
+                            and filter.required_entity_id
+                            or (dimension and dimension.entity_id)
+                        -- A metric-local predicate expressed directly against
+                        -- its owning leaf needs no relationship proof. Only a
+                        -- semantic dimension dependency adds a branch
+                        -- requirement.
+                        if not missing(entity_id) then
+                            add_requirement(branch.requirements, requirement_seen,
+                                entity_id,
+                                dimension_id,
+                                dimension and dimension.name or nil,
+                                "METRIC_LOCAL",
+                                node.metric_id)
+                        end
+                    end
+                end
+            end
+            table.sort(branch.requirements, function(left, right)
+                local left_key = key(left.target_entity_id) .. ":" .. key(left.dimension_id)
+                    .. ":" .. tostring(left.scope) .. ":" .. key(left.metric_id)
+                local right_key = key(right.target_entity_id) .. ":" .. key(right.dimension_id)
+                    .. ":" .. tostring(right.scope) .. ":" .. key(right.metric_id)
+                return left_key < right_key
+            end)
+            for _, requirement in ipairs(branch.requirements) do
+                requirement.requirement_id = requirement_id(branch.branch_id, requirement)
+                local proof = M.prove_strict(snapshot, leaf_entity_id,
+                    requirement.target_entity_id)
+                proof.proof_id = "proof:" .. requirement.requirement_id
+                proof.requirement = requirement
+                if proof.status == "PROVEN" and #(proof.edges or {}) > 0 then
+                    proof.target_unique_key_id =
+                        proof.edges[#proof.edges].unique_key_id
+                elseif proof.status ~= "PROVEN" then
+                    proof.rejection_id = proof.proof_id .. ":rejection"
+                end
+                branch.proofs[#branch.proofs + 1] = proof
+                plan.relationship_proofs[#plan.relationship_proofs + 1] = proof
+                if proof.status ~= "PROVEN" and plan.failure == nil then
+                    plan.failure = {
+                        reason_code = proof.reason_code or "DIMENSION_NOT_CONFORMED",
+                        proof_id = proof.proof_id,
+                        rejection_id = proof.rejection_id,
+                        branch_id = branch.branch_id,
+                        leaf_entity_id = leaf_entity_id,
+                        metric_id = requirement.metric_id,
+                        dimension_id = requirement.dimension_id,
+                        dimension = requirement.dimension_name,
+                        blocking_edge = proof.blocking_edge,
+                        candidate_paths = proof.candidate_paths,
+                    }
+                end
+            end
+            plan.branches[#plan.branches + 1] = branch
+        end
+        if plan.failure == nil then
+            plan.execution = {
+                status = "PLANNING_ONLY",
+                reason_code = "MULTI_BRANCH_EXECUTION_NOT_ENABLED",
+            }
+        end
+    else
+        local root_id = snapshot.object.root_entity_id
+        for _, target in ipairs(bound_query.relationship_targets or {}) do
+            local proof = M.prove(snapshot, root_id, target.target_entity_id, spec.proof_mode)
+            plan.relationship_proofs[#plan.relationship_proofs + 1] = proof
+        end
+    end
+    return plan, nil
+end
+
+ESV_METRIC_PLAN = M
+
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local source_columns = assert(ESV_SOURCE_COLUMNS,
+    "shared source-column runtime is required")
+local metric_plan = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
 
 local VALID_CARDINALITIES = {
     ONE_TO_ONE = true,
@@ -9583,7 +10578,10 @@ local function load_catalog(ctx)
     local metric_rows = query([[
         SELECT METRIC_ID, METRIC_NAME, BASE_ENTITY_ID, EXPRESSION, FILTER_EXPR,
                METRIC_TYPE, DATA_TYPE, DESCRIPTION, UNIT_HINT, FORMAT_HINT,
-               IS_PRIVATE, IS_CERTIFIED
+               IS_PRIVATE, IS_CERTIFIED,
+               COALESCE(METRIC_KIND, METRIC_TYPE) AS METRIC_KIND,
+               AGGREGATION_FUNCTION, DISTINCT_KEY_EXPR,
+               NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON
         FROM SYS_SEMANTIC.METRICS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -9605,10 +10603,46 @@ local function load_catalog(ctx)
             format_hint = row_value(row, "FORMAT_HINT", 10),
             is_private = row_value(row, "IS_PRIVATE", 11),
             is_certified = row_value(row, "IS_CERTIFIED", 12),
+            -- Carried for the planner's classification, which decides whether
+            -- this metric has a mergeable aggregate state and a known input
+            -- grain. See validate_metric_plannability.
+            metric_kind = row_value(row, "METRIC_KIND", 13),
+            aggregation_function = row_value(row, "AGGREGATION_FUNCTION", 14),
+            distinct_key_expr = row_value(row, "DISTINCT_KEY_EXPR", 15),
+            non_additive_dimension_id = row_value(row, "NON_ADDITIVE_DIMENSION_ID", 16),
+            window_spec_json = row_value(row, "WINDOW_SPEC_JSON", 17),
+            inputs = {},
+            filters = {},
         }
         table.insert(ctx.metrics, metric)
         ctx.metric_by_id[key(id)] = metric
         ctx.metric_by_name[upper(metric.name)] = metric
+    end
+
+    local metric_input_rows = query([[
+        SELECT mi.METRIC_ID, mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE,
+               mi.INPUT_OBJECT_ID, mi.EXPRESSION_ALIAS, mi.FILTER_EXPR,
+               mi.ORDINAL_POSITION
+        FROM SYS_SEMANTIC.METRIC_INPUTS mi
+        JOIN SYS_SEMANTIC.METRICS mt
+          ON mt.METRIC_ID = mi.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY mi.METRIC_ID, mi.ORDINAL_POSITION
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(metric_input_rows or {}) do
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.inputs[#metric.inputs + 1] = {
+                role = row_value(row, "INPUT_ROLE", 2),
+                object_type = row_value(row, "INPUT_OBJECT_TYPE", 3),
+                object_id = row_value(row, "INPUT_OBJECT_ID", 4),
+                expression_alias = row_value(row, "EXPRESSION_ALIAS", 5),
+                filter_expr = row_value(row, "FILTER_EXPR", 6),
+                ordinal_position = row_value(row, "ORDINAL_POSITION", 7),
+            }
+        end
     end
 
     ctx.relationships = {}
@@ -10088,6 +11122,35 @@ local function missing_unique_key_columns(ctx, entity, column_name)
     return {}
 end
 
+-- Name the remedy for a defect that lives in an alternate representation.
+--
+-- Registering an alternate is accepted on a draft and leaves the model invalid
+-- until the declaration is completed (F3 coverage, attribute bindings, or a
+-- certified F5 identity). Every later authoring call then fails on the
+-- representation rather than on what was attempted, and the recovery --
+-- REMOVE_ENTITY_REPRESENTATION -- appeared in no message. The suffix is added
+-- only when every named representation is an ALTERNATE: a PRIMARY cannot be
+-- removed, so suggesting it would be wrong.
+local function alternate_representation_remedy(ctx, names)
+    if names == nil or #names == 0 then return "" end
+    local role_by_name = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        role_by_name[upper(representation.name)] = upper(representation.role)
+    end
+    for _, name in ipairs(names) do
+        -- "entity.representation" for representation-scoped issues.
+        local bare = tostring(name):match("([^%.]+)$") or tostring(name)
+        if role_by_name[upper(bare)] ~= "ALTERNATE" then return "" end
+    end
+    local subject = #names == 1 and ("Representation " .. tostring(names[1]))
+        or ("Representations " .. table.concat(names, ", "))
+    return " " .. subject .. " is registered but not yet usable, and blocks"
+        .. " unrelated authoring until it is. Complete the declaration (F3"
+        .. " coverage with SET_REPRESENTATION_COVERAGE_BATCH, attribute bindings"
+        .. " with ADD_ATTRIBUTE_BINDING, or a certified F5 identity), or remove"
+        .. " it with REMOVE_ENTITY_REPRESENTATION."
+end
+
 local function representation_suffix(names)
     if names == nil or #names == 0 then return "" end
     return " in representation(s): " .. table.concat(names, ", ")
@@ -10185,6 +11248,7 @@ local function validate_structural_rules(ctx)
                         "SEMANTIC_MODEL_036", "Legacy primary-key expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
                             .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                             .. identity_binding_remedy())
                 end
                 if ref.alias == owning_alias then
@@ -10397,6 +11461,7 @@ local function validate_unique_key_expression(ctx, unique_key, column, entity, o
             add_issue(ctx, "ERROR", "UNIQUE_KEY_COLUMN", object_name, "SEMANTIC_MODEL_029",
             "Unique key expression references unknown source column: " .. ref.alias .. "."
                     .. ref.column_name .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                     .. identity_binding_remedy())
         end
     end
@@ -10450,6 +11515,7 @@ local function validate_unique_keys(ctx)
                             "Unique key column references unknown source column: "
                                 .. tostring(column_name)
                                 .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                                 .. identity_binding_remedy())
                     end
                 else
@@ -10460,25 +11526,12 @@ local function validate_unique_keys(ctx)
     end
 end
 
+-- Delegates to the shared resolver so validator probes and compiler rendering
+-- agree on the physical spelling of a declared key column. See
+-- lua/semantic_layer/shared/source_columns.lua.
 local function resolved_source_column_name(representation, column_name)
-    local ok, rows = pcall(query, [[
-        SELECT COLUMN_NAME
-        FROM SYS.EXA_ALL_COLUMNS
-        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
-          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
-          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
-        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
-        LIMIT 1
-    ]], {
-        schema_name = representation.source_schema,
-        object_name = representation.source_object,
-        column_name = column_name,
-    })
-    if not ok then return nil, tostring(rows) end
-    if rows == nil or #rows == 0 then
-        return nil, "source column is not visible: " .. tostring(column_name)
-    end
-    return row_value(rows[1], "COLUMN_NAME", 1), nil
+    return source_columns.resolve(query, representation.source_schema,
+        representation.source_object, column_name)
 end
 
 local function representation_key_query(representation, unique_key)
@@ -11148,6 +12201,7 @@ local function relationship_edges(ctx)
                     "SEMANTIC_MODEL_017", "Relationship join condition references unknown source column: "
                         .. ref.alias .. "." .. ref.column_name
                         .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations)
                         .. identity_binding_remedy())
             end
         end
@@ -11271,7 +12325,8 @@ local function validate_expressions(ctx, safe_edges)
                     add_issue(ctx, "ERROR", "DIMENSION", dimension.name, "SEMANTIC_MODEL_017",
                         "Dimension expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
         end
@@ -11307,7 +12362,8 @@ local function validate_expressions(ctx, safe_edges)
                     add_issue(ctx, "ERROR", "FACT", fact.name, "SEMANTIC_MODEL_017",
                         "Fact expression references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
         end
@@ -11415,7 +12471,8 @@ local function validate_expressions(ctx, safe_edges)
                     add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_017",
                         "Metric filter references unknown source column: "
                             .. ref.alias .. "." .. ref.column_name
-                            .. representation_suffix(missing_representations) .. ".")
+                            .. representation_suffix(missing_representations) .. "."
+                            .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
         end
@@ -11935,6 +12992,126 @@ local function path_alternatives(ctx, safe_edges, from_id, to_id)
     return cached
 end
 
+-- Definition-time plannability gate.
+--
+-- A metric whose aggregate has no mergeable state, or whose input grain the
+-- planner cannot determine, compiles to nothing: COUNT(*) has no fact input
+-- (METRIC_INPUT_GRAIN_MISSING) and AVG on a partitioned entity has no mergeable
+-- state. Both used to validate clean, publish, and be reported ready by every
+-- agent surface, failing only when someone finally queried them -- and taking
+-- SELECT * on the whole object with them.
+--
+-- The classification is the planner's own (ESV_METRIC_PLAN.build_dag), so the
+-- gate cannot drift from what the compiler will decide. It judges each metric
+-- alone: a metric that cannot be planned by itself can never be queried, while
+-- a combination that only fails together is a request-time concern.
+local function entity_is_partitioned(ctx, entity)
+    for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+        if not missing(representation.coverage_predicate)
+            or not missing(representation.valid_from)
+            or not missing(representation.valid_to) then
+            return true
+        end
+    end
+    return false
+end
+
+local function row_count_remedy(metric)
+    if upper(metric.aggregation_function) ~= "COUNT"
+        and not string.find(upper(tostring(metric.expression or "")), "COUNT", 1, true) then
+        return ""
+    end
+    return " A row count needs something to count: use COUNT(<fact>) over a"
+        .. " non-null fact, or declare FACT <name> AS 1 and use SUM(<name>)."
+end
+
+local function validate_metric_plannability(ctx)
+    if #(ctx.metrics or {}) == 0 then return end
+    -- A metric that already failed a structural rule (an unknown fact, a
+    -- missing base entity) has no inputs to classify, and the precise error is
+    -- already reported. Running the gate on top would add a second, vaguer
+    -- diagnostic for the same defect.
+    if (ctx.error_count or 0) > 0 then return end
+    local fact_by_id = {}
+    for _, fact in ipairs(ctx.facts or {}) do
+        fact_by_id[key(fact.id)] = fact
+    end
+    -- The positional ADD_METRIC API records no structured inputs, so the
+    -- planner falls back to METRIC_DEPENDENCIES, which extract_metric_dependencies
+    -- has just written from the expression text. Read them back and hand the
+    -- classification the same fallback the compiler uses, or every metric
+    -- authored through that API would look input-less here.
+    for _, metric in ipairs(ctx.metrics) do
+        metric.dependencies = {}
+    end
+    for _, row in ipairs(query([[
+        SELECT md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
+        FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md
+        JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = md.METRIC_ID
+        WHERE mt.MODEL_ID = :model_id
+          AND mt.VERSION_ID = :version_id
+          AND mt.STATUS = 'ACTIVE'
+        ORDER BY md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id}) or {}) do
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 1))]
+        if metric ~= nil then
+            metric.dependencies[#metric.dependencies + 1] = {
+                object_type = row_value(row, "DEPENDS_ON_OBJECT_TYPE", 2),
+                object_id = row_value(row, "DEPENDS_ON_OBJECT_ID", 3),
+            }
+        end
+    end
+    local snapshot = {metric_by_id = ctx.metric_by_id, fact_by_id = fact_by_id}
+
+    for _, metric in ipairs(ctx.metrics) do
+        local dag = metric_plan.build_dag(snapshot, {metric})
+        local node = dag ~= nil and dag.node_by_id[key(metric.id)] or nil
+        if node ~= nil then
+            if node.invalid_reason == "METRIC_INPUT_GRAIN_MISSING" then
+                add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_056",
+                    "Metric aggregates no fact, so the planner cannot determine its input"
+                        .. " grain (METRIC_INPUT_GRAIN_MISSING) and the metric can never be"
+                        .. " compiled." .. row_count_remedy(metric))
+            elseif node.invalid_reason == "METRIC_INPUT_GRAIN_AMBIGUOUS" then
+                add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_056",
+                    "Metric aggregates facts from more than one entity in a single"
+                        .. " aggregate state (METRIC_INPUT_GRAIN_AMBIGUOUS), so its input"
+                        .. " grain is undefined. Split it into one metric per fact entity"
+                        .. " and combine them with a DERIVED metric.")
+            elseif node.node_kind == "UNSUPPORTED" or node.node_kind == "LEGACY_AGGREGATE" then
+                -- A non-mergeable aggregate is still valid on the single-branch
+                -- renderer. It is unqueryable only when the metric's own leaves
+                -- force state merging: a partitioned leaf, or more than one.
+                local partitioned_name = nil
+                for _, entity_id in ipairs(node.leaf_entity_ids or {}) do
+                    local entity = ctx.entity_by_id[key(entity_id)]
+                    if entity ~= nil and entity_is_partitioned(ctx, entity) then
+                        partitioned_name = tostring(entity.name)
+                        break
+                    end
+                end
+                local aggregate = tostring(metric.aggregation_function
+                    or node.state_class or "this aggregate")
+                if partitioned_name ~= nil then
+                    add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_057",
+                        "Metric uses " .. aggregate .. ", which has no mergeable aggregate"
+                            .. " state; entity '" .. partitioned_name .. "' is partitioned"
+                            .. " (F3 supports SUM and COUNT), so the metric can never be"
+                            .. " compiled. Express it with mergeable SUM/COUNT states -- a"
+                            .. " RATIO of two such metrics is exact.")
+                elseif #(node.leaf_entity_ids or {}) > 1 then
+                    add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_057",
+                        "Metric uses " .. aggregate .. ", which has no mergeable aggregate"
+                            .. " state, over facts from " .. tostring(#node.leaf_entity_ids)
+                            .. " entities. Multi-entity metrics merge aggregate states, so"
+                            .. " the metric can never be compiled. Express it with mergeable"
+                            .. " SUM/COUNT states.")
+                end
+            end
+        end
+    end
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -12126,6 +13303,7 @@ function M.validate_model(model_name_arg)
         extract_metric_dependencies(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
+        validate_metric_plannability(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
         -- Remote equivalence proofs are full data scans. Do not launch them
@@ -12186,6 +13364,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         extract_metric_dependencies = extract_metric_dependencies,
         detect_metric_cycles = detect_metric_cycles,
         validate_agent_metadata = validate_agent_metadata,
+        validate_metric_plannability = validate_metric_plannability,
+        alternate_representation_remedy = alternate_representation_remedy,
         compute_metric_dimension_matrix = compute_metric_dimension_matrix,
         validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,
     }
@@ -13108,6 +14288,86 @@ function M.direct_identity_remap(identity, primary_representation,
 end
 
 ESV_GRAIN_GRAPH = M
+
+-- Physical column-name resolution shared by the validator and compiler
+-- runtimes. The packaging step embeds this source into both Exasol scripts so
+-- the installed runtime has no external dependency.
+--
+-- A declared unique-key column carries the name the modeler typed, in whatever
+-- case they typed it. Exasol resolves an unquoted identifier case-insensitively
+-- but a quoted one exactly, so rendering a declared `customer_id` as
+-- `alias."customer_id"` against a physical `CUSTOMER_ID` produces SQL that
+-- parses, plans, and then fails at execution.
+--
+-- The validator resolved declared names against EXA_ALL_COLUMNS before probing;
+-- the compiler quoted them verbatim. That asymmetry is exactly what let a model
+-- validate clean, compile to `STATUS = OK`, and then fail to execute. Both
+-- runtimes now resolve through this module, so what the validator probes and
+-- what the compiler renders cannot drift apart.
+
+local M = {}
+
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function cache_key(source_schema, source_object, column_name)
+    return string.upper(tostring(source_schema)) .. "."
+        .. string.upper(tostring(source_object)) .. "."
+        .. string.upper(tostring(column_name))
+end
+
+-- Return the physical column name as the database spells it, or nil plus a
+-- reason. An exact match wins over a case-insensitive one, so a source that
+-- genuinely carries two columns differing only in case still resolves to the
+-- declared spelling. `cache` is an optional caller-owned table; the module
+-- keeps no state of its own so a long-running session cannot serve a stale
+-- name after a source is redefined.
+function M.resolve(query_fn, source_schema, source_object, column_name, cache)
+    if missing(source_schema) or missing(source_object) or missing(column_name) then
+        return nil, "source column is not visible: " .. tostring(column_name)
+    end
+    local key = cache_key(source_schema, source_object, column_name)
+    if cache ~= nil and cache[key] ~= nil then
+        local cached = cache[key]
+        if cached.name ~= nil then return cached.name, nil end
+        return nil, cached.error
+    end
+
+    local ok, rows = pcall(query_fn, [[
+        SELECT COLUMN_NAME
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
+          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
+          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
+        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
+        LIMIT 1
+    ]], {
+        schema_name = source_schema,
+        object_name = source_object,
+        column_name = column_name,
+    })
+    if not ok then
+        return nil, tostring(rows)
+    end
+    if rows == nil or #rows == 0 then
+        local reason = "source column is not visible: " .. tostring(column_name)
+        if cache ~= nil then cache[key] = {error = reason} end
+        return nil, reason
+    end
+    local row = rows[1]
+    local name = row["COLUMN_NAME"] or row["column_name"] or row[1]
+    if missing(name) then
+        local reason = "source column is not visible: " .. tostring(column_name)
+        if cache ~= nil then cache[key] = {error = reason} end
+        return nil, reason
+    end
+    name = tostring(name)
+    if cache ~= nil then cache[key] = {name = name} end
+    return name, nil
+end
+
+ESV_SOURCE_COLUMNS = M
 
 -- Canonical request boundary shared by JSON and Semantic SQL lowering.
 
@@ -15296,6 +16556,8 @@ ESV_GRAIN_SQL = M
 
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local source_columns = assert(ESV_SOURCE_COLUMNS,
+    "shared source-column runtime is required")
 local query_spec_runtime = assert(ESV_QUERY_SPEC, "query spec runtime is required")
 local catalog_snapshot_runtime = assert(ESV_CATALOG_SNAPSHOT, "catalog snapshot runtime is required")
 local metric_plan_runtime = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
@@ -17100,6 +18362,7 @@ end
 
 local function fused_attribute_expression(ctx, entity, base_representation,
         attribute_key, strategy)
+    ctx._source_column_cache = ctx._source_column_cache or {}
     local unique_key = physical_unique_key(ctx, entity.id)
     local semantic_identity = complete_semantic_identity(ctx, entity)
     if unique_key == nil and semantic_identity == nil then
@@ -17142,9 +18405,32 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                     predicates[#predicates + 1] = alternate_identity
                         .. " = " .. base_identity_expression
                 else
+                    -- Resolve the declared key column to the physical name each
+                    -- source actually carries. A declared `customer_id` quoted
+                    -- verbatim against a physical `CUSTOMER_ID` produces SQL
+                    -- that parses and plans and then fails at execution, which
+                    -- is what made a clean-validating model unqueryable. The
+                    -- validator's conflict probe resolves the same way through
+                    -- the same module, so probe and render cannot disagree.
                     for _, column in ipairs(unique_key.columns) do
-                        predicates[#predicates + 1] = quote_column(lookup_alias, column.column_name)
-                            .. " = " .. quote_column(base_representation.alias, column.column_name)
+                        -- Each side resolves against its own source, so sources
+                        -- that spell the key differently still join. When the
+                        -- metadata cannot answer -- a source outside
+                        -- EXA_ALL_COLUMNS -- fall back to the declared spelling,
+                        -- which is what this rendered before: the validator's
+                        -- conflict probe is the gate that refuses a key column
+                        -- no source exposes, and it runs for exactly the two
+                        -- strategies that build this join.
+                        local lookup_column = source_columns.resolve(
+                            query, representation.source_schema,
+                            representation.source_object, column.column_name,
+                            ctx._source_column_cache) or column.column_name
+                        local base_column = source_columns.resolve(
+                            query, base_representation.source_schema,
+                            base_representation.source_object, column.column_name,
+                            ctx._source_column_cache) or column.column_name
+                        predicates[#predicates + 1] = quote_column(lookup_alias, lookup_column)
+                            .. " = " .. quote_column(base_representation.alias, base_column)
                     end
                 end
                 entity.fusion_joins = entity.fusion_joins or {}

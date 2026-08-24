@@ -292,3 +292,52 @@ test("path enumeration caps report truncation instead of a false negative", func
     assert_equal(shallow.selected.path, "fact_to_beta")
     assert_equal(#shallow.alternates, 0)
 end)
+
+test("shared source-column resolution returns the physical spelling", function()
+    local resolver = ESV_SOURCE_COLUMNS
+    -- The validator probed resolved names while the compiler quoted the
+    -- declared ones verbatim, so a key declared `customer_id` against a
+    -- physical `CUSTOMER_ID` validated clean, compiled OK, and then failed to
+    -- execute. Both runtimes now go through this.
+    local calls = 0
+    local function fake_query(_, params)
+        calls = calls + 1
+        if string.upper(tostring(params.column_name)) == "CUSTOMER_ID" then
+            return {{COLUMN_NAME = "CUSTOMER_ID"}}
+        end
+        return {}
+    end
+
+    local name, err = resolver.resolve(fake_query, "HELIO", "CUSTOMER_DW", "customer_id")
+    assert_equal(name, "CUSTOMER_ID")
+    assert_equal(err, nil)
+    assert_branch("source_columns.resolved", name ~= nil, true)
+
+    local missing_name, missing_err = resolver.resolve(
+        fake_query, "HELIO", "CUSTOMER_DW", "nope")
+    assert_equal(missing_name, nil)
+    assert_contains(missing_err, "source column is not visible: nope")
+    assert_branch("source_columns.resolved", missing_name ~= nil, false)
+
+    -- A caller-owned cache serves repeats without re-querying, and caches the
+    -- negative answer too.
+    local cache = {}
+    local before = calls
+    assert_equal(resolver.resolve(fake_query, "HELIO", "CUSTOMER_DW", "customer_id", cache),
+        "CUSTOMER_ID")
+    assert_equal(resolver.resolve(fake_query, "HELIO", "CUSTOMER_DW", "CUSTOMER_ID", cache),
+        "CUSTOMER_ID")
+    assert_equal(calls, before + 1)
+    assert_equal(resolver.resolve(fake_query, "HELIO", "CUSTOMER_DW", "nope", cache), nil)
+    assert_equal(resolver.resolve(fake_query, "HELIO", "CUSTOMER_DW", "nope", cache), nil)
+    assert_equal(calls, before + 2)
+
+    -- Missing inputs and a failing query are reported, never guessed at.
+    local blank, blank_err = resolver.resolve(fake_query, "HELIO", "CUSTOMER_DW", nil)
+    assert_equal(blank, nil)
+    assert_contains(blank_err, "source column is not visible")
+    local raised, raised_err = resolver.resolve(function() error("no metadata access") end,
+        "HELIO", "CUSTOMER_DW", "customer_id")
+    assert_equal(raised, nil)
+    assert_contains(raised_err, "no metadata access")
+end)

@@ -57,6 +57,67 @@ def compile_names(con: Any) -> tuple[list[str], dict[str, Any], str]:
     return sorted(str(row[0]) for row in rows), json.loads(str(compiled[5])), generated_sql
 
 
+def lower_case_key_case(con) -> tuple[list[str], str]:
+    """The same COALESCE fusion, with the unique key declared in lower case.
+
+    Everything else is identical to the model above; only the spelling of
+    UNIQUE_KEY_COLUMN.COLUMN_NAME differs. The compiler resolves it against
+    EXA_ALL_COLUMNS the same way the validator's conflict probe always did.
+    """
+    try:
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('f4_verify_lower')")
+    except Exception:
+        pass
+    for statement in (
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL('f4_verify_lower', "
+        "'SEMANTIC_F4_VERIFY_LOWER', 'F4 lower-case key verification', NULL)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY('f4_verify_lower', 'customer', 'F4_VERIFY', "
+        "'CUSTOMERS_MDM', 'c', 'c.customer_id', 'One customer', 'Customer 360')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY('f4_verify_lower', 'customer', "
+        "'customer_pk', 'PRIMARY', 'Customer identity', 'NATIVE')",
+        # the whole point: declared lower case, physical column is CUSTOMER_ID
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN('f4_verify_lower', 'customer', "
+        "'customer_pk', 'customer_id', NULL, 1)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT('f4_verify_lower', 'CUSTOMER_360', "
+        "'customer', 'Customer 360')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('f4_verify_lower', 'CUSTOMER_360', "
+        "'customer', 'customer_name', 'c.customer_name', 'VARCHAR(100)', 'Customer Name', "
+        "'Resolved customer name', NULL, TRUE)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION('f4_verify_lower', 'customer', "
+        "'crm', 'RELATION', 'F4_VERIFY', 'CUSTOMERS_CRM', 20, 'MANUAL')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING('f4_verify_lower', 'DIMENSION', "
+        "'customer_name', 'crm', 'c.display_name', 'PREFER', 1)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY('f4_verify_lower', "
+        "'customer', 'primary', 'AUTHORITATIVE')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY('f4_verify_lower', "
+        "'customer', 'crm', 'SUPPLEMENTAL')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY('f4_verify_lower', "
+        "'DIMENSION', 'customer_name', 'RECONCILE')",
+    ):
+        execute(con, statement)
+
+    issues = execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f4_verify_lower')")
+    errors = [row for row in issues if str(row[0]).upper() == "ERROR"]
+    if errors:
+        raise AssertionError(f"lower-case key model failed validation: {errors}")
+
+    request = {
+        "model": "f4_verify_lower",
+        "object": "CUSTOMER_360",
+        "dimensions": ["customer_name"],
+        "client": "verify_fusion_f4",
+    }
+    payload = json.dumps(request, separators=(",", ":"))
+    compiled = execute(
+        con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({literal(payload)})"
+    )[0]
+    if str(compiled[0]) != "OK":
+        raise AssertionError(f"lower-case key compile failed: {compiled[1]} {compiled[2]}")
+    generated_sql = str(compiled[4])
+    rows = execute(con, generated_sql)
+    return sorted(str(row[0]) for row in rows), generated_sql
+
+
 def main() -> int:
     con = connect()
     try:
@@ -137,16 +198,37 @@ def main() -> int:
         if contributors[0]["authority_role"] != "AUTHORITATIVE":
             raise AssertionError(f"authority is not first in provenance: {contributors}")
 
+        # BUG-F03: the contributor join used to render the declared key column
+        # inside quotes verbatim, so a key declared in lower case -- the case the
+        # shipped demo model itself uses -- produced `alias."customer_id"`
+        # against a physical `CUSTOMER_ID`. Validation passed, compilation
+        # returned OK, and the SQL failed at execution. This case declares the
+        # key exactly as a modeller would type it.
+        lower_names, lower_sql = lower_case_key_case(con)
+        if lower_names != ["Alice", "Bob", "Carol"]:
+            raise AssertionError(f"F4 lower-case key result mismatch: {lower_names}")
+        join_lines = [line for line in lower_sql.splitlines() if "f4_rep" in line]
+        if not join_lines:
+            raise AssertionError(f"no contributor join rendered: {lower_sql}")
+        joined = " ".join(join_lines)
+        if '"customer_id"' in joined:
+            raise AssertionError(
+                f"contributor join quoted the declared spelling verbatim: {joined}")
+        if '"CUSTOMER_ID"' not in joined:
+            raise AssertionError(f"contributor join did not resolve the key column: {joined}")
+
         print("ok F4 COALESCE: null fallback with agreeing overlap")
         print("ok F4 conflict: SEMANTIC_MODEL_045")
         print("ok F4 RECONCILE: SEMANTIC_MODEL_046 with authoritative result")
+        print(f"ok F4 lower-case declared key: resolved join, rows {lower_names}")
         print(f"ok F4 rows: {names}")
         return 0
     finally:
-        try:
-            execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('f4_verify')")
-        except Exception:
-            pass
+        for model in ("f4_verify", "f4_verify_lower"):
+            try:
+                execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('{model}')")
+            except Exception:
+                pass
         try:
             con.execute("DROP SCHEMA IF EXISTS F4_VERIFY CASCADE")
         except Exception:

@@ -95,6 +95,8 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_053` | warning | Fanout policy value is unrecognized, or declared on a cardinality where it has no meaning. See [Fanout policy](#fanout-policy). |
 | `SEMANTIC_MODEL_054` | warning | Legacy entity key expression does not cover the declared primary key, so it is not unique at the entity's grain. It is a bootstrap hint; grain proofs use `UNIQUE_KEYS`. |
 | `SEMANTIC_MODEL_055` | warning | Two entities are connected by more than one safe relationship path of differing length. Compilation selects the shortest; the alternative can attribute a row differently. See [Path ambiguity](#path-ambiguity). |
+| `SEMANTIC_MODEL_056` | error | The planner cannot determine the metric's input grain: it aggregates no fact (`COUNT(*)`), or aggregates facts from several entities in one state. The metric could never be compiled. |
+| `SEMANTIC_MODEL_057` | error | The metric's aggregate has no mergeable state (`AVG`, `MIN`, `MAX`, `COUNT DISTINCT`) and its leaves force state merging — a partitioned (F3) entity, or facts from several entities. The metric could never be compiled. |
 
 ## Expression Validation Boundary
 
@@ -182,6 +184,39 @@ The remedy for a rejected pair is never a policy — it is object membership.
 Expose a metric only alongside dimensions reachable from its base entity
 without fan-out, in the same or a separate semantic object. `SEMANTIC_MODEL_030`
 spells this out in its message.
+
+## Metric Plannability
+
+Validation classifies every active metric with the planner's own code and
+rejects a metric the compiler could never plan. Two shapes used to validate
+clean, publish, be reported `VALID` by every agent surface, and fail only when
+someone queried them — taking `SELECT *` on the whole object with them:
+
+| Shape | Code | Why it cannot compile |
+|---|---|---|
+| `COUNT(*)` | `SEMANTIC_MODEL_056` | No fact input, so the aggregate has no grain (`METRIC_INPUT_GRAIN_MISSING`) |
+| One aggregate over facts from several entities | `SEMANTIC_MODEL_056` | Undefined input grain (`METRIC_INPUT_GRAIN_AMBIGUOUS`) |
+| `AVG` on an F3-partitioned entity | `SEMANTIC_MODEL_057` | Partitions merge aggregate states; `AVG` has none |
+| `AVG` over facts from several entities | `SEMANTIC_MODEL_057` | Multi-entity metrics merge states |
+
+A row count needs something to count. Both supported forms are exact:
+
+```sql
+FACT   line_one   ON ENTITY order_line AS 1 ...
+METRIC line_count AS SUM(line_one)     ...   -- sum a literal fact
+METRIC line_count AS COUNT(net_revenue) ...  -- count a non-null fact
+```
+
+Non-mergeable aggregates stay valid where the single-branch renderer can
+compile them: `AVG` on an unpartitioned single-fact entity is accepted, and a
+`RATIO` of two mergeable metrics (`total / NULLIF(count, 0)`) is exact on a
+partitioned entity. The gate judges each metric alone — a metric that cannot be
+planned by itself can never be queried, while a *combination* that only fails
+together stays a request-time concern.
+
+The rule re-runs on every validation, so it also catches the reverse order:
+declaring F3 coverage on an entity that already carries a non-mergeable metric
+is refused by the mutation that would otherwise complete the partitioning.
 
 ## Path Ambiguity
 

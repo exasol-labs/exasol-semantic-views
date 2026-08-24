@@ -387,13 +387,14 @@ previous to succeed.
 1. CREATE_MODEL (name, published schema, description, owner role)
 2. ADD_ENTITY (per semantic entity; creates its primary physical representation)
 3. ADD_UNIQUE_KEY, then ADD_UNIQUE_KEY_COLUMN (per proven entity key)
-4. Optional ADD_ENTITY_REPRESENTATION (equivalent or F3 temporal partitions)
-5. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
-6. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
-7. ADD_FACT or ADD_FACT_WITH_BINDINGS (per row-level expression)
-8. ADD_DIMENSION or ADD_DIMENSION_WITH_BINDINGS (per dimension)
-9. Optional ADD_ATTRIBUTE_BINDING (repair an existing draft attribute)
-10. Optional SET_REPRESENTATION_COVERAGE_BATCH (every active hot/cold partition)
+4. Optional ADD_ENTITY_REPRESENTATION (F1 equivalent representations only)
+5. Optional ADD_ENTITY_REPRESENTATION_WITH_COVERAGE (F3 temporal partitions —
+   register and cover in one candidate; see the F3 note below)
+6. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
+7. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
+8. ADD_FACT or ADD_FACT_WITH_BINDINGS (per row-level expression)
+9. ADD_DIMENSION or ADD_DIMENSION_WITH_BINDINGS (per dimension)
+10. Optional ADD_ATTRIBUTE_BINDING (repair an existing draft attribute)
 11. Optional SET_REPRESENTATION_AUTHORITY, then SET_ATTRIBUTE_FUSION_POLICY
     (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
 12. Optional ADD_SEMANTIC_IDENTITY, ADD_IDENTITY_BINDING for every representation,
@@ -403,6 +404,18 @@ previous to succeed.
 14. VALIDATE_MODEL
 15. PUBLISH_MODEL
 ```
+
+**F3 partitions are declared with coverage, not after it.** A partition
+without coverage is validated as an F1 *equivalent* representation, and
+hot/cold key sets are disjoint by construction, so the candidate fails on key
+cardinality (`SEMANTIC_MODEL_038`). Use
+`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE` (step 5), which validates the
+representation and every coverage declaration as one candidate, seeds
+compatibility bindings, and works whether or not the object already has
+dimensions, facts, and metrics. If you register the representation separately
+on a draft, call `SET_REPRESENTATION_COVERAGE_BATCH` *immediately* afterwards,
+before adding any dimension or fact to that entity: anything authored in
+between fails on the incomplete representation rather than on itself.
 
 See [authoring-workflows.md](references/authoring-workflows.md) for the full
 script syntax.
@@ -565,11 +578,14 @@ canonical-anchor checks. It still refuses targets with no clean validation
 history or unrelated stale evidence.
 
 For hot/cold data, use F3 `UNION` fusion only on a metric-leaf entity with
-mergeable `SUM` or `COUNT` metrics. On a draft, add all representations and
-attribute bindings first, then call `SET_REPRESENTATION_COVERAGE_BATCH`. On a
-published model where a genuine partition is not registered yet, use
-`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE`; ordinary registration validates as
-F1 first and rejects the expected partition key-set difference. The compound
+mergeable `SUM` or `COUNT` metrics — `AVG` on a partitioned entity is rejected
+when it is defined (`SEMANTIC_MODEL_057`). Register the partition with
+`ADD_ENTITY_REPRESENTATION_WITH_COVERAGE` on a draft and on a published model
+alike: ordinary registration validates as F1 first and rejects the expected
+partition key-set difference, so on a draft it leaves the model invalid and
+blocks unrelated authoring until coverage is declared. If you do register
+separately on a draft, call `SET_REPRESENTATION_COVERAGE_BATCH` immediately
+afterwards, before adding any dimension or fact to that entity. The compound
 call seeds compatibility bindings and validates the new representation plus
 every coverage declaration as one candidate. Declare contiguous half-open
 `[VALID_FROM, VALID_TO)` intervals:

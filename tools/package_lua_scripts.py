@@ -13,6 +13,7 @@ COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
 VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
 GRAIN_GRAPH_SOURCE = ROOT / "lua/semantic_layer/shared/grain_graph.lua"
+SOURCE_COLUMNS_SOURCE = ROOT / "lua/semantic_layer/shared/source_columns.lua"
 QUERY_SPEC_SOURCE = ROOT / "lua/semantic_layer/compiler/query_spec.lua"
 CATALOG_SNAPSHOT_SOURCE = ROOT / "lua/semantic_layer/compiler/catalog_snapshot.lua"
 METRIC_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/metric_plan.lua"
@@ -33,10 +34,19 @@ AGENT_END = "-- END GENERATED AGENT_RUNTIME"
 
 def validator_block() -> str:
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
+    source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
+    # The validator classifies metrics with the planner's own code so a metric
+    # that cannot be planned is rejected when it is defined, not when it is
+    # queried. Reimplementing the classification here would let the two drift.
+    metric_plan_source = METRIC_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
     source = VALIDATOR_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{VALIDATOR_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 {graph_source}
+
+{source_columns_source}
+
+{metric_plan_source}
 
 {source}
 /
@@ -45,6 +55,7 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 
 def compiler_block() -> str:
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
+    source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
     query_spec_source = QUERY_SPEC_SOURCE.read_text(encoding="utf-8").rstrip()
     catalog_snapshot_source = CATALOG_SNAPSHOT_SOURCE.read_text(encoding="utf-8").rstrip()
     metric_plan_source = METRIC_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -59,6 +70,8 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
 {graph_source}
+
+{source_columns_source}
 
 {query_spec_source}
 

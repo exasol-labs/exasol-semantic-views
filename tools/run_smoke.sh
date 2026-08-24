@@ -55,6 +55,20 @@ sh tools/run_lua_tests.sh
 # already shipped a wrong column layout once.
 "$PYTHON_BIN" tools/verify_catalog_introspection.py
 
+# Metric plannability gate: COUNT(*) and AVG-on-a-partition used to validate,
+# publish, and be reported ready, then fail only when queried -- poisoning
+# SELECT * for the whole object. Asserts the definition-time refusals, that the
+# supported row-count forms and single-branch AVG still work, and that
+# partitioning an entity under a non-mergeable metric is caught.
+"$PYTHON_BIN" tools/verify_metric_plannability.py
+
+# Fusion governance: SET_ATTRIBUTE_FUSION_POLICY and SET_REPRESENTATION_AUTHORITY
+# were not prospectively validated, so one call could take a published model
+# offline for every consumer. Asserts refuse-and-restore on published models,
+# that satisfiable fact reconciliation is still accepted and exact, and that an
+# incomplete alternate representation now names its own recovery.
+"$PYTHON_BIN" tools/verify_fusion_governance.py
+
 # Path ambiguity: a tie between safe paths is refused, but an alternative of a
 # different length used to lose silently — shortest wins, warnings: []. Asserts
 # the authoring warning, the plan warning, the strict-mode refusal, and that the

@@ -122,9 +122,31 @@ declares `coverage_predicate` + `valid_from`/`valid_to`; the compiler
 clones every grain-proven leaf branch into one partition-branch per
 representation and merges typed aggregate states across them. Only
 mergeable aggregate states may cross partitions; `AVG(...)` alone is
-rejected, but `SUM/COUNT` with an outer ratio survives. Temporal
-partition fusion is **mutually exclusive** with Attribute Reconciliation
-on the same entity.
+rejected — at definition time, by `SEMANTIC_MODEL_057` — but `SUM/COUNT`
+with an outer ratio survives. Temporal partition fusion is **mutually
+exclusive** with Attribute Reconciliation on the same entity.
+
+**Declaring a partition set: register and cover in one step.** A partition
+is not a valid representation on its own. Until coverage exists, the
+alternate is validated as an *equivalent* representation (F1), and hot/cold
+key sets are disjoint by construction, so the candidate fails on key
+cardinality (`SEMANTIC_MODEL_038`). Two orders work, and mixing them does
+not:
+
+- **Preferred, and the only one that is never invalid in between:**
+  `ADD_ENTITY_REPRESENTATION_WITH_COVERAGE`, which validates the new
+  representation and every coverage declaration as one candidate and seeds
+  compatibility bindings. It works on a draft and on a published model, and
+  it does not care whether the object already has dimensions, facts, or
+  metrics.
+- **If registering separately on a draft:** `ADD_ENTITY_REPRESENTATION`
+  followed *immediately* by `SET_REPRESENTATION_COVERAGE_BATCH`, before any
+  dimension or fact is added to the entity. Anything authored in between
+  fails on the incomplete representation rather than on itself, and the
+  bindings will not be seeded to the new partition.
+
+Sequential single-representation coverage calls cannot initialize a
+partition set; the batch call is what validates the set as a whole.
 
 ### Attribute Reconciliation
 
