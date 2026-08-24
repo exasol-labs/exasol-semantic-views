@@ -93,6 +93,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_051` | error | A simple relationship equality joins incompatible physical type families. The diagnostic names the relationship, endpoints, and resolved representation types. |
 | `SEMANTIC_MODEL_052` | error | A dimension or fact on an F3-partitioned entity lacks an active binding on one or more partitions. Each missing attribute/partition pair is reported. |
 | `SEMANTIC_MODEL_053` | warning | Fanout policy value is unrecognized, or declared on a cardinality where it has no meaning. See [Fanout policy](#fanout-policy). |
+| `SEMANTIC_MODEL_054` | warning | Legacy entity key expression does not cover the declared primary key, so it is not unique at the entity's grain. It is a bootstrap hint; grain proofs use `UNIQUE_KEYS`. |
 
 ## Expression Validation Boundary
 

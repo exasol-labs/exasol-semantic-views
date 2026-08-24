@@ -617,8 +617,28 @@ validates once, and then removes the key and components. A candidate needed by
 relationship grain proofs is reactivated and re-certified before returning
 `SEMANTIC_ADMIN_094`.
 
+### The Legacy Key Expression
+
+`ADD_ENTITY` takes a key expression, stored as
+`SYS_SEMANTIC.ENTITIES.PRIMARY_KEY_EXPR` and exposed by
+`SEMANTIC_CATALOG.ENTITIES` as **`LEGACY_PRIMARY_KEY_EXPR`**. The name is
+deliberate: it is a bootstrap hint, not the entity's key. Grain proofs, path
+safety, and relationship key matching all use `UNIQUE_KEYS` /
+`UNIQUE_KEY_COLUMNS`. The expression is read in exactly two places, and only
+when it is exactly `alias.column`: `SUGGEST_GRAIN_METADATA` proposes a
+one-column key from it, and OSI export falls back to it when an entity declares
+no primary unique key.
+
+Because nothing else consumes it, an expression that is not unique at the
+entity's grain used to sit in the catalog unremarked — and it is the first thing
+a reader inspecting `ENTITIES` takes for the key. `VALIDATE_MODEL` now reports
+`SEMANTIC_MODEL_054` (warning) when the expression does not reference every
+column of the entity's declared primary key, naming the columns it misses.
+Correct the expression or drop it; the declared key is what the compiler proves
+against either way.
+
 `SUGGEST_GRAIN_METADATA(model_name)` is dry-run only. It proposes a one-column
-primary key when a legacy `PRIMARY_KEY_EXPR` is exactly `alias.column`, and a
+primary key when a legacy key expression is exactly `alias.column`, and a
 one-column relationship mapping when `JOIN_CONDITION` is exactly one equality
 between the endpoint aliases. It does not canonicalize expressions, infer
 composite keys, execute admin helpers, or change the catalog. Review its

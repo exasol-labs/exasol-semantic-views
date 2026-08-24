@@ -551,7 +551,9 @@ def entity_payload(
         "source_object": row["SOURCE_OBJECT"],
         "source_alias": row["SOURCE_ALIAS"],
     }
-    add_if_present(data, "primary_key_expr", row.get("PRIMARY_KEY_EXPR"))
+    # The catalog view exposes the bootstrap hint as LEGACY_PRIMARY_KEY_EXPR;
+    # the OSI document field keeps its spec name.
+    add_if_present(data, "primary_key_expr", row.get("LEGACY_PRIMARY_KEY_EXPR"))
     add_if_present(data, "grain_description", row.get("GRAIN_DESCRIPTION"))
     add_if_present(data, "description", row.get("DESCRIPTION"))
     if unique_keys:
@@ -778,7 +780,9 @@ def build_document(catalog: dict[str, Any], options: ExportOptions) -> tuple[dic
             else:
                 unique_keys.append(values)
         if primary_key is None:
-            primary_key = simple_key_columns(entity.get("PRIMARY_KEY_EXPR"), entity.get("SOURCE_ALIAS"))
+            primary_key = simple_key_columns(
+                entity.get("LEGACY_PRIMARY_KEY_EXPR"), entity.get("SOURCE_ALIAS")
+            )
         if primary_key:
             dataset_doc["primary_key"] = primary_key
         if unique_keys:

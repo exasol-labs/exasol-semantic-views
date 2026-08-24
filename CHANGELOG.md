@@ -70,6 +70,24 @@ All notable changes to Exasol Semantic Views are documented here.
 - Regression: `tools/verify_set_relationship.py`, in the smoke suite.
 
 ### Fixed
+#### The legacy entity key expression was a silent trap
+
+- `SEMANTIC_CATALOG.ENTITIES.PRIMARY_KEY_EXPR` reads as *the* entity key. It is
+  not: grain proofs, path safety, and relationship key matching all use
+  `UNIQUE_KEYS`/`UNIQUE_KEY_COLUMNS`, and the expression is consumed only by
+  `SUGGEST_GRAIN_METADATA` and OSI export, only when it is exactly
+  `alias.column`. The validator's own messages already called it "Legacy
+  primary-key expression".
+- The catalog view now exposes it as `LEGACY_PRIMARY_KEY_EXPR` — the vocabulary
+  the runtime already used. **Breaking for readers of that view column**;
+  `SYS_SEMANTIC.ENTITIES.PRIMARY_KEY_EXPR` is unchanged, and the OSI document
+  field keeps its spec name `primary_key_expr`.
+- New `SEMANTIC_MODEL_054` (warning): the expression does not reference every
+  column of the entity's declared primary key, naming the columns it misses, so
+  an expression that is not unique at the entity's grain no longer sits in the
+  catalog unremarked. A warning, not an error, because nothing proves against
+  the expression.
+
 
 #### The installer claimed a publish it never performed
 

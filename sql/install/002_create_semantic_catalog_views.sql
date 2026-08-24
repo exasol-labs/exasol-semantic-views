@@ -79,7 +79,11 @@ SELECT
   e.SOURCE_SCHEMA,
   e.SOURCE_OBJECT,
   e.SOURCE_ALIAS,
-  e.PRIMARY_KEY_EXPR,
+  -- Exposed under its real status. The column is a bootstrap hint read by
+  -- SUGGEST_GRAIN_METADATA and OSI export when it is exactly alias.column;
+  -- grain proofs use UNIQUE_KEYS/UNIQUE_KEY_COLUMNS. Under the old name
+  -- PRIMARY_KEY_EXPR, readers took it for the entity's key.
+  e.PRIMARY_KEY_EXPR AS LEGACY_PRIMARY_KEY_EXPR,
   e.GRAIN_DESCRIPTION,
   e.DESCRIPTION,
   e.STATUS

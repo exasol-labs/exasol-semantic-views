@@ -1756,6 +1756,7 @@ local function validate_structural_rules(ctx)
                             .. tostring(alias) .. ".")
                 end
             end
+            local referenced = {}
             for _, ref in ipairs(column_refs_in_expression(entity.primary_key_expr)) do
                 local missing_representations =
                     missing_unique_key_columns(ctx, entity, ref.column_name)
@@ -1765,6 +1766,34 @@ local function validate_structural_rules(ctx)
                             .. ref.alias .. "." .. ref.column_name
                             .. representation_suffix(missing_representations) .. "."
                             .. identity_binding_remedy())
+                end
+                if ref.alias == owning_alias then
+                    referenced[upper(ref.column_name)] = true
+                end
+            end
+            -- The legacy expression is a bootstrap hint, not a proof source, so
+            -- nothing else checks it against the declared key. Left unchecked, an
+            -- entity can advertise a key expression that is not unique at its own
+            -- grain -- exactly what a reader inspecting ENTITIES takes for the key.
+            for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity.id)] or {}) do
+                if upper(unique_key.kind) == "PRIMARY" and #unique_key.columns > 0 then
+                    local uncovered = {}
+                    for _, column in ipairs(unique_key.columns) do
+                        local column_name = column.column_name
+                        if not missing(column_name)
+                            and not referenced[upper(column_name)] then
+                            uncovered[#uncovered + 1] = tostring(column_name)
+                        end
+                    end
+                    if #uncovered > 0 then
+                        add_issue(ctx, "WARNING", "ENTITY", entity.name,
+                            "SEMANTIC_MODEL_054",
+                            "Legacy primary-key expression does not reference every column of "
+                                .. "primary key " .. tostring(unique_key.name) .. " ("
+                                .. table.concat(uncovered, ", ") .. "), so it is not unique at "
+                                .. "the entity's grain. It is a bootstrap hint only: grain proofs "
+                                .. "use the declared unique key. Correct the expression or drop it.")
+                    end
                 end
             end
         end

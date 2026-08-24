@@ -578,6 +578,56 @@ test("validator rejects malformed and column-incompatible F1 representations", f
     assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_017").message, "archive")
 end)
 
+test("validator warns when the legacy key expression misses declared key columns", function()
+    -- The legacy expression is a bootstrap hint, not a proof source, so a
+    -- reader inspecting ENTITIES is the one it misleads: an order-grain
+    -- expression on a line-grain entity is not unique at that grain.
+    local entity = {id = 1, name = "order_line", alias = "ol",
+        primary_key_expr = "CAST(ol.order_id AS VARCHAR(36))"}
+    local composite = {
+        id = 5, entity_id = 1, name = "order_line_pk", kind = "PRIMARY",
+        columns = {
+            {ordinal_position = 1, column_name = "order_id"},
+            {ordinal_position = 2, column_name = "line_id"},
+        },
+    }
+    local function context_for(key_expression)
+        entity.primary_key_expr = key_expression
+        return validation_context({
+            version_id = 2,
+            entities = {entity},
+            entity_by_id = {["1"] = entity},
+            entity_name_by_id = {["1"] = "order_line"},
+            entity_alias_by_id = {["1"] = "OL"},
+            unique_keys = {composite},
+            unique_keys_by_entity = {["1"] = {composite}},
+            dimensions = {}, facts = {}, metrics = {},
+        })
+    end
+
+    local partial = context_for("CAST(ol.order_id AS VARCHAR(36))")
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        return {}
+    end, function() api.validate_structural_rules(partial) end)
+    assert_true(has_rule(partial, "SEMANTIC_MODEL_054"))
+    local issue = issue_for_rule(partial, "SEMANTIC_MODEL_054")
+    assert_equal(issue.severity, "WARNING")
+    assert_contains(issue.message, "line_id")
+    assert_contains(issue.message, "bootstrap hint only")
+
+    -- Covering every key column is silent, whatever shape the expression has.
+    local complete = context_for(
+        "CAST(ol.order_id AS VARCHAR(36)) || '-' || CAST(ol.line_id AS VARCHAR(36))")
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        return {}
+    end, function() api.validate_structural_rules(complete) end)
+    assert_true(not has_rule(complete, "SEMANTIC_MODEL_054"))
+end)
+
 test("validator enforces F2 attribute binding ownership and expressions", function()
     local entity = {id = 1, name = "orders", alias = "o"}
     local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",

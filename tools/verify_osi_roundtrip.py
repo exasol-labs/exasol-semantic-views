@@ -252,7 +252,7 @@ def semantic_snapshot(con, model_name: str, canonical_model_name: str) -> dict[s
         "entities": fetch_snapshot_rows(
             con,
             "SELECT MODEL_NAME, ENTITY_NAME, SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, "
-            "PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION, DESCRIPTION "
+            "LEGACY_PRIMARY_KEY_EXPR, GRAIN_DESCRIPTION, DESCRIPTION "
             f"FROM SEMANTIC_CATALOG.ENTITIES WHERE STATUS = 'ACTIVE' AND UPPER(MODEL_NAME) = UPPER({model})",
             canonical_model_name,
         ),
