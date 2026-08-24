@@ -19,7 +19,7 @@ return {
         ["lua/semantic_layer/compiler/request_json.lua"] = 86.0,
         ["lua/semantic_layer/admin/validator.lua"] = 93.0,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.0,
-        ["lua/semantic_layer/admin/semantic_definition.lua"] = 70.8,
+        ["lua/semantic_layer/admin/semantic_definition.lua"] = 71.1,
         ["lua/semantic_layer/agent/runtime.lua"] = 92.8,
     },
     branches = 100,

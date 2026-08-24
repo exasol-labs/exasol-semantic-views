@@ -8,31 +8,24 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
-#### The installer claimed a publish it never performed
+#### `ADD OR REPLACE FACT`
 
-- `install.py --example` printed "Sales model published at
-  SEMANTIC_SALES.SALES" while leaving the model `DRAFT`. Loading a model does
-  not create its published schema — `PUBLISH_MODEL` does — so `SEMANTIC_SALES`
-  did not exist at all, and a BI client reading JDBC/ODBC metadata found
-  nothing. Semantic SQL worked anyway, because the preprocessor rewrites from
-  the catalog rather than from the view, which is what made the missing publish
-  easy to miss.
-- The summary now says what actually happened: `loaded (DRAFT — no published
-  schema yet)` with the one command to publish, or `published at
-  SEMANTIC_SALES.SALES (typed views, BI-discoverable)`.
-- New `--publish` flag (implies `--example`) validates and publishes the demo,
-  so a BI-discoverable install is one command:
-  `python3 tools/install.py --example --publish`.
-- Left opt-in rather than publishing the demo by default: a published model is
-  a governed contract, where authoring requires compound declarations and every
-  candidate state is validated prospectively. That is correct for production and
-  friction for a model people poke at while learning — including this repo's own
-  validation suite, which works by deliberately breaking the demo model.
-- README gains a **What BI Tools See** section: discovery through
-  `EXA_ALL_COLUMNS` is adapter-free once published, the governance layer lives
-  in `SEMANTIC_CATALOG`/`SEMANTIC_AGENT` rather than in JDBC metadata, and
-  querying still needs a session that can activate the preprocessor. The
-  headline claim now says so instead of "BI tools can discover typed views".
+- Semantic SQL had `ADD OR REPLACE METRIC` but no fact equivalent, so adding
+  one fact meant restating every fact in the object through `REPLACE FACTS`.
+  Facts are the primitive metrics compose from, which made it the wrong
+  operation to omit.
+- `ALTER SEMANTIC VIEW <model>.<object> ADD OR REPLACE FACT <name> ON ENTITY
+  <entity> AS <expr> RETURNS <type> ...` now upserts one fact and leaves the
+  object's other facts in place.
+- Fixed while validating: a statement carrying only `REPLACE FACTS` was
+  rejected with `SEMANTIC_DDL_012` — whose message listed `REPLACE FACTS` as an
+  accepted form. Fact-only statements now parse.
+- The two single forms each consume the rest of the statement, so combining
+  them with each other or with a `REPLACE` block is refused explicitly
+  (`SEMANTIC_DDL_037`) instead of silently absorbing the tail.
+- Fact *removal* still has no DDL form; that waits until dependent-metric
+  rewrites are transactional, and the docs now say so where the forms are
+  listed.
 
 #### Build provenance in the catalog
 
@@ -77,6 +70,32 @@ All notable changes to Exasol Semantic Views are documented here.
 - Regression: `tools/verify_set_relationship.py`, in the smoke suite.
 
 ### Fixed
+
+#### The installer claimed a publish it never performed
+
+- `install.py --example` printed "Sales model published at
+  SEMANTIC_SALES.SALES" while leaving the model `DRAFT`. Loading a model does
+  not create its published schema — `PUBLISH_MODEL` does — so `SEMANTIC_SALES`
+  did not exist at all, and a BI client reading JDBC/ODBC metadata found
+  nothing. Semantic SQL worked anyway, because the preprocessor rewrites from
+  the catalog rather than from the view, which is what made the missing publish
+  easy to miss.
+- The summary now says what actually happened: `loaded (DRAFT — no published
+  schema yet)` with the one command to publish, or `published at
+  SEMANTIC_SALES.SALES (typed views, BI-discoverable)`.
+- New `--publish` flag (implies `--example`) validates and publishes the demo,
+  so a BI-discoverable install is one command:
+  `python3 tools/install.py --example --publish`.
+- Left opt-in rather than publishing the demo by default: a published model is
+  a governed contract, where authoring requires compound declarations and every
+  candidate state is validated prospectively. That is correct for production and
+  friction for a model people poke at while learning — including this repo's own
+  validation suite, which works by deliberately breaking the demo model.
+- README gains a **What BI Tools See** section: discovery through
+  `EXA_ALL_COLUMNS` is adapter-free once published, the governance layer lives
+  in `SEMANTIC_CATALOG`/`SEMANTIC_AGENT` rather than in JDBC metadata, and
+  querying still needs a session that can activate the preprocessor. The
+  headline claim now says so instead of "BI tools can discover typed views".
 
 #### `FANOUT_POLICY` was undocumented free text
 

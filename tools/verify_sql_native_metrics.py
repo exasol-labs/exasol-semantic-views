@@ -714,6 +714,108 @@ REPLACE METRICS (
         )
         assert_status_ok("reset total_revenue synonyms", apply_definition(con, reset_synonyms, False))
 
+        # ADD OR REPLACE FACT: adding one fact must not require restating every
+        # fact in the object, which REPLACE FACTS does.
+        facts_before = fetchall(
+            con,
+            "SELECT FACT_NAME FROM SEMANTIC_CATALOG.FACTS "
+            "WHERE MODEL_NAME = 'sales' ORDER BY FACT_NAME",
+        )
+        add_fact_ddl = """ALTER SEMANTIC VIEW sales.SALES
+ADD OR REPLACE FACT gross_line_amount
+  ON ENTITY order_line
+  AS ol.quantity * ol.net_unit_price
+  RETURNS DECIMAL(18,2)
+  ADDITIVE
+  DISPLAY 'Gross Line Amount'
+  COMMENT 'Line amount before discounts'
+  PUBLIC CERTIFIED"""
+        assert_status_ok("add or replace fact", apply_definition(con, add_fact_ddl, False))
+        facts_after = fetchall(
+            con,
+            "SELECT FACT_NAME FROM SEMANTIC_CATALOG.FACTS "
+            "WHERE MODEL_NAME = 'sales' ORDER BY FACT_NAME",
+        )
+        assert_equal(
+            "single fact upsert preserves the other facts",
+            facts_after,
+            sorted(facts_before + [("gross_line_amount",)]),
+        )
+        assert_equal(
+            "fact registered as an object column",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_CATALOG.OBJECT_COLUMNS "
+                "WHERE MODEL_NAME = 'sales' AND OBJECT_NAME = 'SALES' "
+                "AND COLUMN_KIND = 'FACT' AND COLUMN_NAME = 'gross_line_amount'",
+            ),
+            1,
+        )
+        update_fact_ddl = add_fact_ddl.replace(
+            "DISPLAY 'Gross Line Amount'", "DISPLAY 'Gross Line Amount v2'"
+        )
+        assert_status_ok("replace existing fact", apply_definition(con, update_fact_ddl, False))
+        assert_equal(
+            "fact display name updated in place",
+            fetchall(
+                con,
+                "SELECT DISPLAY_NAME FROM SEMANTIC_CATALOG.FACTS "
+                "WHERE MODEL_NAME = 'sales' AND FACT_NAME = 'gross_line_amount'",
+            ),
+            [("Gross Line Amount v2",)],
+        )
+        combined = apply_definition(
+            con,
+            "ALTER SEMANTIC VIEW sales.SALES "
+            "ADD OR REPLACE FACT combo_probe ON ENTITY order_line AS ol.quantity "
+            "RETURNS DECIMAL(18,0) PUBLIC "
+            "ADD OR REPLACE METRIC combo_metric AS SUM(combo_probe) ON ENTITY order_line "
+            "RETURNS DECIMAL(18,0) PUBLIC",
+            False,
+        )
+        assert_equal("combined single forms rejected", combined["status"], "ERROR")
+        assert_equal("combined single forms code", combined["error_code"], "SEMANTIC_DDL_037")
+
+        # A fact-only REPLACE block is a valid statement on its own; it used to
+        # be refused as SEMANTIC_DDL_012 despite being listed as accepted.
+        facts_only = """ALTER SEMANTIC VIEW sales.ORDER_HEADER
+REPLACE FACTS (
+  FACT freight_amount
+    ON ENTITY order
+    AS o.freight_amount
+    RETURNS DECIMAL(18,2)
+    ADDITIVE
+    DISPLAY 'Freight Amount'
+    COMMENT 'Freight charged on the order header'
+    PUBLIC CERTIFIED
+)"""
+        assert_status_ok("fact-only replacement block", apply_definition(con, facts_only, False))
+
+        # Fact removal has no DDL or admin form yet (dependent-metric rewrites
+        # are not transactional), so retire the probe fact by hand rather than
+        # leaving it in the shipped model for every later smoke step. Mirrors
+        # ADD_FACT's own rollback order.
+        con.execute("DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE COLUMN_KIND = 'FACT' "
+                     "AND OBJECT_REF_ID IN (SELECT FACT_ID FROM SYS_SEMANTIC.FACTS "
+                     "WHERE FACT_NAME = 'gross_line_amount')")
+        con.execute("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES "
+                     "WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID IN ("
+                     "SELECT FACT_ID FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'gross_line_amount')")
+        con.execute("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS "
+                     "WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID IN ("
+                     "SELECT FACT_ID FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'gross_line_amount')")
+        con.execute("DELETE FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'gross_line_amount'")
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+        assert_equal(
+            "probe fact retired",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_CATALOG.FACTS "
+                "WHERE MODEL_NAME = 'sales' AND FACT_NAME = 'gross_line_amount'",
+            ),
+            0,
+        )
+
         drop_dependency = apply_definition(
             con,
             "ALTER SEMANTIC VIEW sales.SALES DROP METRIC total_revenue",

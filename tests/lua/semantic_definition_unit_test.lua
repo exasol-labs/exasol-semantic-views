@@ -121,6 +121,49 @@ test("semantic definition parses single metric replacement", function()
     assert_branch("definition.replace.metrics", definition.replace_metrics, false)
 end)
 
+test("semantic definition parses single fact replacement", function()
+    -- Facts are the primitive metrics compose from, so adding one must not
+    -- require restating every fact in the object.
+    local definition = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        ADD OR REPLACE FACT gross_line_amount
+          ON ENTITY order_line
+          AS ol.quantity * ol.net_unit_price
+          RETURNS DECIMAL(18,2)
+          ADDITIVE
+          DISPLAY 'Gross Line Amount' COMMENT 'Line amount before discounts'
+          PUBLIC CERTIFIED
+    ]])
+    assert_equal(#definition.facts, 1)
+    assert_equal(#definition.metrics, 0)
+    assert_equal(definition.facts[1].name, "gross_line_amount")
+    assert_equal(definition.facts[1].entity, "order_line")
+    assert_equal(definition.facts[1].expression, "ol.quantity * ol.net_unit_price")
+    assert_equal(definition.facts[1].additive_policy, "ADDITIVE")
+    assert_equal(definition.facts[1].description, "Line amount before discounts")
+    assert_true(definition.facts[1].is_certified)
+    assert_true(not definition.facts[1].is_private)
+    -- replace_facts stays false: the object's other facts survive.
+    assert_branch("definition.replace.facts", definition.replace_facts, false)
+    assert_equal(api.definition_operation_count(definition), 1)
+end)
+
+test("semantic definition accepts a fact-only replacement block", function()
+    -- SEMANTIC_DDL_012 used to list REPLACE FACTS as an accepted form and then
+    -- reject it unless a metric change came with it.
+    local definition = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        REPLACE FACTS (
+          FACT net_revenue
+            ON ENTITY order_line AS ol.quantity * ol.net_unit_price
+            RETURNS DECIMAL(18,2) ADDITIVE PUBLIC
+        )
+    ]])
+    assert_equal(#definition.facts, 1)
+    assert_equal(#definition.metrics, 0)
+    assert_branch("definition.replace.facts", definition.replace_facts, true)
+end)
+
 test("semantic definition parses metric drop and rename", function()
     local dropped = api.parse_definition([[
         ALTER SEMANTIC VIEW sales.SALES DROP METRIC obsolete_revenue
@@ -308,6 +351,14 @@ test("semantic definition rejects incomplete authoring statements", function()
         {"ALTER SEMANTIC VIEW sales.SALES RENAME METRIC x TO X", "SEMANTIC_DDL_083"},
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC x ON ENTITY e RETURNS INT", "SEMANTIC_DDL_031"},
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC x AS SUM(f) ON ENTITY e", "SEMANTIC_DDL_032"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e RETURNS INT", "SEMANTIC_DDL_021"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f", "SEMANTIC_DDL_022"},
+        -- The single-fact form takes the rest of the statement, so it cannot
+        -- share one with another change.
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f RETURNS INT"
+            .. " ADD OR REPLACE METRIC m AS SUM(x) ON ENTITY e RETURNS INT", "SEMANTIC_DDL_037"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f RETURNS INT"
+            .. " REPLACE METRICS (METRIC m AS SUM(x) ON ENTITY e RETURNS INT)", "SEMANTIC_DDL_037"},
     }
     for _, case in ipairs(cases) do
         assert_error(function() api.parse_definition(case[1]) end, case[2])

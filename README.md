@@ -193,10 +193,11 @@ disabled, call that script directly with the Semantic SQL text and a `DRY_RUN`
 flag.
 
 `REPLACE FACTS` and `REPLACE METRICS` are full object-membership replacement
-forms intended for bootstrap and deliberate resets. For day-to-day metric
-edits, use `ADD OR REPLACE METRIC`. Failed Semantic SQL applies are rejected
-and the previous catalog state is restored before returning the validation
-error.
+forms intended for bootstrap and deliberate resets. For day-to-day edits, use
+`ADD OR REPLACE FACT` or `ADD OR REPLACE METRIC`, which upsert one definition
+and leave the rest of the object alone. Failed Semantic SQL applies are
+rejected and the previous catalog state is restored before returning the
+validation error.
 
 A SQL user can ask for a governed metric as if it were a column:
 

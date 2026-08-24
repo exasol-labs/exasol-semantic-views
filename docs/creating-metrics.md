@@ -143,9 +143,25 @@ REPLACE METRICS (
 
 `REPLACE FACTS` and `REPLACE METRICS` replace the visible fact or metric
 membership for the semantic object. They are appropriate for bootstrap,
-complete model regeneration, and deliberate resets. For one metric, use
-`ADD OR REPLACE METRIC` instead. Omitted definitions remain in the model
-catalog; use `DROP METRIC` for removal.
+complete model regeneration, and deliberate resets. For one definition, use the
+single forms instead, which upsert it and leave the object's other facts and
+metrics in place:
+
+```sql
+ALTER SEMANTIC VIEW sales.SALES
+ADD OR REPLACE FACT gross_line_amount
+  ON ENTITY order_line
+  AS ol.quantity * ol.net_unit_price
+  RETURNS DECIMAL(18,2)
+  ADDITIVE
+  DISPLAY 'Gross Line Amount'
+  COMMENT 'Line amount before discounts'
+  PUBLIC CERTIFIED;
+```
+
+Omitted definitions remain in the model catalog; use `DROP METRIC` for metric
+removal. Fact removal has no DDL form yet — it waits until dependent-metric
+rewrites are transactional.
 Within one replacement block, a requested synonym is released from its prior
 metric owner before assignment. Repeating that synonym on multiple metrics in
 the block remains an ambiguity and fails with `SEMANTIC_MODEL_021`.

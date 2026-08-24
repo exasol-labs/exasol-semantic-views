@@ -20380,6 +20380,7 @@ local function parse_definition(definition_sql)
 
     local replace_facts = find_sequence(tokens, {"REPLACE", "FACTS"}, next_index, 0)
     local replace_metrics = find_sequence(tokens, {"REPLACE", "METRICS"}, next_index, 0)
+    local add_fact = find_sequence(tokens, {"ADD", "OR", "REPLACE", "FACT"}, next_index, 0)
     local add_metric = find_sequence(tokens, {"ADD", "OR", "REPLACE", "METRIC"}, next_index, 0)
     local drop_metric = find_sequence(tokens, {"DROP", "METRIC"}, next_index, 0)
     local rename_metric = find_sequence(tokens, {"RENAME", "METRIC"}, next_index, 0)
@@ -20410,6 +20411,14 @@ local function parse_definition(definition_sql)
         return definition
     end
 
+    -- The single-fact and single-metric forms both take the rest of the
+    -- statement as one clause, so they cannot share a statement with each other
+    -- or with a REPLACE block. Say so instead of silently absorbing the tail.
+    if add_fact ~= nil and (replace_facts ~= nil or replace_metrics ~= nil
+        or add_metric ~= nil) then
+        error("SEMANTIC_DDL_037: ADD OR REPLACE FACT must be the only change in a statement")
+    end
+
     if replace_facts ~= nil then
         definition.replace_facts = true
         local open = replace_facts + 2
@@ -20424,6 +20433,12 @@ local function parse_definition(definition_sql)
         for _, part in ipairs(split_top_level_text(block)) do
             definition.facts[#definition.facts + 1] = parse_fact(part)
         end
+    elseif add_fact ~= nil then
+        -- Upsert one fact, leaving the object's other facts in place. Facts are
+        -- the composable primitive metrics are built from, so adding one must
+        -- not require restating all of them.
+        local fact_text = string.sub(source, tokens[add_fact + 3].start_pos)
+        definition.facts[#definition.facts + 1] = parse_fact(fact_text)
     end
 
     if replace_metrics ~= nil then
@@ -20443,8 +20458,11 @@ local function parse_definition(definition_sql)
     elseif add_metric ~= nil then
         local metric_text = string.sub(source, tokens[add_metric + 3].start_pos)
         definition.metrics[#definition.metrics + 1] = parse_metric(metric_text, false)
-    else
-        error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE METRICS, ADD OR REPLACE METRIC, DROP METRIC, or RENAME METRIC")
+    elseif replace_facts == nil and add_fact == nil then
+        -- Fact-only statements are valid: this used to reject `REPLACE FACTS`
+        -- on its own even though the message listed it as an accepted form.
+        error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE METRICS, "
+            .. "ADD OR REPLACE FACT, ADD OR REPLACE METRIC, DROP METRIC, or RENAME METRIC")
     end
 
     return definition
