@@ -354,6 +354,46 @@ test("compiler join planner follows safe cardinality direction", function()
     assert_equal(reverse_err.error_code, "SEMANTIC_REQUEST_042")
 end)
 
+test("request options tighten planner safeguards and never loosen them", function()
+    -- docs/data-fusion.md documented options.max_branches / options.max_bytes
+    -- while the closed schema rejected the key outright. They are accepted now,
+    -- and only downward: a request can ask to fail earlier, never later.
+    local spec = assert(ESV_QUERY_SPEC.new({
+        model = "sales", object = "SALES", metrics = {"total_revenue"},
+        options = {max_branches = 2, max_bytes = 250000},
+    }))
+    assert_equal(spec.options.max_branches, 2)
+    assert_equal(spec.options.max_bytes, 250000)
+    assert_branch("compiler.request.options", spec.options ~= nil, true)
+
+    local without = assert(ESV_QUERY_SPEC.new({
+        model = "sales", object = "SALES", metrics = {"total_revenue"},
+    }))
+    assert_equal(without.options, nil)
+    assert_branch("compiler.request.options", without.options ~= nil, false)
+
+    -- The contract is closed inside options too.
+    local accepted = api.validate_structured_request_keys({
+        model = "sales", object = "SALES", options = {max_branches = 1},
+    })
+    assert_equal(accepted, nil)
+    local unknown_option = api.validate_structured_request_keys({
+        model = "sales", options = {max_rows = 5},
+    })
+    assert_equal(unknown_option.error_code, "SEMANTIC_REQUEST_004")
+    assert_contains(unknown_option.error_message, "Unknown options key(s): max_rows")
+    local bad_value = api.validate_structured_request_keys({
+        model = "sales", options = {max_branches = 0},
+    })
+    assert_contains(bad_value.error_message, "must be a positive integer")
+    local not_object = api.validate_structured_request_keys({
+        model = "sales", options = {1, 2},
+    })
+    assert_contains(not_object.error_message, "options must be an object")
+    local unknown_key = api.validate_structured_request_keys({model = "sales", nope = 1})
+    assert_contains(unknown_key.error_message, "Unknown top-level request key(s): nope")
+end)
+
 test("compiler plan warns when a shorter safe path won over a longer one", function()
     -- The join planner selects the shortest safe path and refuses only a tie.
     -- A longer safe path therefore loses silently, so the plan has to carry the
@@ -1537,4 +1577,46 @@ test("grain metadata migration assistant is dry run and conservative", function(
         return suggest_grain_metadata("missing")
     end)
     assert_equal(missing[1][1], "ERROR")
+end)
+
+test("an unknown field answers with candidates instead of a dead end", function()
+    -- CLARIFICATION_JSON is the documented disambiguation channel and was
+    -- populated for ambiguity only. An unknown field is the most common thing an
+    -- agent gets wrong, and it is answerable.
+    local ctx = compiler_context()
+    ctx.model = {model_id = 5, version_id = 6}
+    ctx.object = {id = 7, name = "SALES", root_entity_id = 1}
+
+    local near, near_error = with_query(function() return {} end, function()
+        return api.resolve_field(ctx, "customer_regio", nil)
+    end)
+    assert_equal(near, nil)
+    assert_equal(near_error.error_code, "SEMANTIC_REQUEST_020")
+    assert_contains(near_error.error_message, "Did you mean: customer_region?")
+    local clarification = api.json_decode(near_error.clarification_json)
+    assert_equal(clarification.candidates[1], "customer_region")
+    assert_equal(clarification.object, "SALES")
+    assert_branch("compiler.field.clarified",
+        near_error.clarification_json ~= nil, true)
+
+    -- A field that belongs to another semantic view names that view.
+    local elsewhere, elsewhere_error = with_query(function(sql)
+        if tostring(sql):find("FROM SYS_SEMANTIC.OBJECT_COLUMNS oc", 1, true) then
+            return {{"ORDER_HEADER", "METRIC"}}
+        end
+        return {}
+    end, function()
+        return api.resolve_field(ctx, "total_freight", nil)
+    end)
+    assert_equal(elsewhere, nil)
+    assert_contains(elsewhere_error.error_message,
+        "It is a column of semantic view ORDER_HEADER, not of SALES.")
+    local other = api.json_decode(elsewhere_error.clarification_json)
+    assert_equal(other.available_in_objects[1], "ORDER_HEADER")
+    assert_contains(other.clarification_question, "belongs to semantic view ORDER_HEADER")
+
+    -- A known field still resolves without a clarification.
+    local known = api.resolve_field(ctx, "customer_region", "DIMENSION")
+    assert_equal(known.name, "customer_region")
+    assert_branch("compiler.field.clarified", false, false)
 end)

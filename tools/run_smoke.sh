@@ -55,6 +55,11 @@ sh tools/run_lua_tests.sh
 # already shipped a wrong column layout once.
 "$PYTHON_BIN" tools/verify_catalog_introspection.py
 
+# The two numbers the README quotes for data fusion: a re-loaded boundary day
+# double-counted by a hand-rolled union, and revenue stranded in a NULL bucket
+# that reconciliation recovers. Computed and asserted so the README cannot drift.
+"$PYTHON_BIN" tools/verify_fusion_value.py
+
 # Metric plannability gate: COUNT(*) and AVG-on-a-partition used to validate,
 # publish, and be reported ready, then fail only when queried -- poisoning
 # SELECT * for the whole object. Asserts the definition-time refusals, that the

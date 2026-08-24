@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -28,8 +29,69 @@ VALIDATOR_BEGIN = "-- BEGIN GENERATED VALIDATOR_RUNTIME"
 VALIDATOR_END = "-- END GENERATED VALIDATOR_RUNTIME"
 SEMANTIC_BEGIN = "-- BEGIN GENERATED SEMANTIC_DEFINITION_RUNTIME"
 SEMANTIC_END = "-- END GENERATED SEMANTIC_DEFINITION_RUNTIME"
+SCRIPT_PARAMETERS_BEGIN = "-- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS"
+SCRIPT_PARAMETERS_END = "-- END GENERATED ADMIN_SCRIPT_PARAMETERS"
+CATALOG_VIEWS_SQL = ROOT / "sql/install/002_create_semantic_catalog_views.sql"
+SCRIPT_SIGNATURE = re.compile(
+    r"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)\s*(?:\(([^)]*)\))?\s*\nRETURNS\s+\w+",
+    re.M,
+)
+
 AGENT_BEGIN = "-- BEGIN GENERATED AGENT_RUNTIME"
 AGENT_END = "-- END GENERATED AGENT_RUNTIME"
+
+
+def admin_script_parameters_block() -> str:
+    """A queryable signature for every SEMANTIC_ADMIN script.
+
+    Exasol checks parameter arity in the SQL layer, before a script body runs,
+    so a wrong call count can only ever produce `expected N script parameters
+    but got M` -- no script name, no parameter name. The signatures are
+    therefore published as data, generated from the install SQL itself so they
+    cannot drift from the scripts they describe.
+    """
+    rows: list[str] = []
+    for path in sorted(
+        (ROOT / "sql/install").glob("*.sql"), key=lambda candidate: candidate.name
+    ):
+        if path.name.startswith("002_"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in SCRIPT_SIGNATURE.finditer(text):
+            script_name = match.group(1)
+            parameters = [
+                parameter.strip()
+                for parameter in (match.group(2) or "").split(",")
+                if parameter.strip()
+            ]
+            if not parameters:
+                rows.append(
+                    f"  ('{script_name}', 0, NULL, NULL, "
+                    f"'EXECUTE SCRIPT SEMANTIC_ADMIN.{script_name}()')"
+                )
+                continue
+            template = "EXECUTE SCRIPT SEMANTIC_ADMIN.{}({})".format(
+                script_name, ", ".join(f"<{name.lower()}>" for name in parameters)
+            )
+            escaped_template = template.replace("'", "''")
+            for ordinal, parameter in enumerate(parameters, start=1):
+                rows.append(
+                    f"  ('{script_name}', {len(parameters)}, {ordinal}, "
+                    f"'{parameter}', '{escaped_template}')"
+                )
+    body = ",\n".join(rows)
+    return f"""{SCRIPT_PARAMETERS_BEGIN}
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS AS
+SELECT
+  CAST(SCRIPT_NAME AS VARCHAR(128)) AS SCRIPT_NAME,
+  CAST(PARAMETER_COUNT AS DECIMAL(18,0)) AS PARAMETER_COUNT,
+  CAST(ORDINAL_POSITION AS DECIMAL(18,0)) AS ORDINAL_POSITION,
+  CAST(PARAMETER_NAME AS VARCHAR(128)) AS PARAMETER_NAME,
+  CAST(CALL_TEMPLATE AS VARCHAR(2000000)) AS CALL_TEMPLATE
+FROM (VALUES
+{body}
+) AS signatures (SCRIPT_NAME, PARAMETER_COUNT, ORDINAL_POSITION, PARAMETER_NAME, CALL_TEMPLATE);
+{SCRIPT_PARAMETERS_END}"""
 
 
 def validator_block() -> str:
@@ -653,6 +715,16 @@ def main() -> int:
         print(f"updated {INSTALL_SQL.relative_to(ROOT)}")
     else:
         print(f"unchanged {INSTALL_SQL.relative_to(ROOT)}")
+
+    original_catalog = CATALOG_VIEWS_SQL.read_text(encoding="utf-8")
+    updated_catalog = replace_between_markers(
+        original_catalog, admin_script_parameters_block(),
+        SCRIPT_PARAMETERS_BEGIN, SCRIPT_PARAMETERS_END)
+    if updated_catalog != original_catalog:
+        CATALOG_VIEWS_SQL.write_text(updated_catalog, encoding="utf-8")
+        print(f"updated {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
+    else:
+        print(f"unchanged {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
 
     original_agent = AGENT_INSTALL_SQL.read_text(encoding="utf-8")
     updated_agent = replace_between_markers(original_agent, agent_block(), AGENT_BEGIN, AGENT_END)

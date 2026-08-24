@@ -77,6 +77,12 @@ function M.new(request, source)
     else
         spec.proof_mode = "LEGACY_JOIN"
     end
+    -- Planner safeguards travel with the canonical request: they can change
+    -- whether a plan is accepted, so they belong in the spec the cache is
+    -- keyed on, not only in the raw JSON.
+    if type(request.options) == "table" then
+        spec.options = copy(request.options)
+    end
     return spec
 end
 

@@ -24,13 +24,18 @@ class Result:
 
 
 class Connection:
-    def __init__(self, catalog_exists=True, catalog_broken=False):
+    def __init__(self, catalog_exists=True, catalog_broken=False, orphans=()):
         self.catalog_exists = catalog_exists
         self.catalog_broken = catalog_broken
+        self.orphans = list(orphans)
         self.sql = []
 
     def execute(self, sql):
         self.sql.append(sql)
+        if "EXA_ALL_TABLES" in sql and "SEMANTIC_DISCOVERY" in sql:
+            # The physical evidence of a published schema, which is how a reset
+            # finds one whose catalog row is already gone.
+            return Result([(name,) for name in self.orphans])
         if "EXA_ALL_VIEWS" in sql:
             return Result([(1 if self.catalog_exists else 0,)])
         if "SEMANTIC_CATALOG.MODELS" in sql:
@@ -276,7 +281,8 @@ class InstallerResetTest(unittest.TestCase):
         add_binding = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING(")
         )
         self.assertLess(
             add_binding.index("baseline_validation_rows"),
@@ -287,7 +293,8 @@ class InstallerResetTest(unittest.TestCase):
         replace_binding = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING(")
         )
         self.assertLess(
             replace_binding.index("baseline_validation_rows"),
@@ -306,7 +313,8 @@ class InstallerResetTest(unittest.TestCase):
         promotion = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(")
         )
         self.assertIn("stale_default_count", promotion)
         self.assertIn("stale default bindings were repaired", promotion)
@@ -336,7 +344,8 @@ class InstallerResetTest(unittest.TestCase):
         coverage = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(")
         )
         self.assertIn("COVERAGE_PREDICATE = :coverage_predicate", coverage)
         self.assertIn("VALID_FROM = :valid_from", coverage)
@@ -358,7 +367,8 @@ class InstallerResetTest(unittest.TestCase):
         batch = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH(")
         )
         self.assertIn("coverage batch must declare every active representation", batch)
         self.assertIn("for _, item in ipairs(prepared) do", batch)
@@ -373,7 +383,8 @@ class InstallerResetTest(unittest.TestCase):
         representation_batch = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE(")
         )
         self.assertIn("INSERT INTO SYS_SEMANTIC.ENTITY_REPRESENTATIONS", representation_batch)
         self.assertIn("SET_REPRESENTATION_COVERAGE_BATCH", representation_batch)
@@ -468,7 +479,8 @@ class InstallerResetTest(unittest.TestCase):
         add_mapping = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING(")
         )
         self.assertIn("validate_physical_column", add_mapping)
         self.assertIn('string.find(value, "%c")', add_mapping)
@@ -528,7 +540,8 @@ class InstallerResetTest(unittest.TestCase):
         key_batch = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS(")
         )
         self.assertIn("semantic_definition.decode_json", key_batch)
         self.assertIn("key-column ordinals must be contiguous from 1", key_batch)
@@ -539,7 +552,8 @@ class InstallerResetTest(unittest.TestCase):
         complete_key_remove = next(
             sql
             for sql in statements
-            if "SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS(")
         )
         self.assertIn("SET STATUS = 'INACTIVE'", complete_key_remove)
         self.assertIn("published complete-key removal rejected", complete_key_remove)
@@ -574,6 +588,7 @@ class InstallerResetTest(unittest.TestCase):
 
         inverse_overrides = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE": "REMOVE_ENTITY_REPRESENTATION",
+            "ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_OR_REPLACE_DIMENSION": "REMOVE_DIMENSION",
@@ -632,6 +647,8 @@ class InstallerResetTest(unittest.TestCase):
         published_compound_reachability = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE":
                 "tools/verify_bug27_published_multistep_declarations.py",
+            "ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY":
+                "tools/verify_fusion_governance.py",
             "ADD_UNIQUE_KEY_WITH_COLUMNS":
                 "tools/verify_bug27_published_multistep_declarations.py",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS":
@@ -702,9 +719,12 @@ class InstallerResetTest(unittest.TestCase):
         for fragment in expected_fragments:
             self.assertTrue(any(fragment in sql for sql in statements), fragment)
 
+        # Match the script definition itself: SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS
+        # publishes every script's call template, so a bare substring search now
+        # finds that view first.
         add_identity = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY" in sql
+            if sql.startswith("CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(")
         )
         self.assertIn("entity already has an active semantic identity", add_identity)
         self.assertIn('tostring(model_status) == "PUBLISHED"', add_identity)
@@ -712,7 +732,8 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("published semantic-identity change rejected", add_identity)
         add_complete_identity = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY_WITH_BINDINGS" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY_WITH_BINDINGS(")
         )
         self.assertIn("BINDINGS_JSON must be a non-empty JSON array", add_complete_identity)
         self.assertIn("no binding supplied for active representation", add_complete_identity)
@@ -722,14 +743,16 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("DELETE FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES", add_complete_identity)
         add_binding = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.ADD_IDENTITY_BINDING" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(")
         )
         self.assertIn('if binding_kind == "DIRECT"', add_binding)
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", add_binding)
 
         add_representation_binding = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING(")
         )
         self.assertIn("MAPPED binding requires MAPPING_JSON", add_representation_binding)
         self.assertIn("published representation-with-identity candidate rejected", add_representation_binding)
@@ -748,22 +771,26 @@ class InstallerResetTest(unittest.TestCase):
 
         remove_mapping = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION(")
         )
         self.assertIn("DELETE FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS", remove_mapping)
         remove_binding = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(")
         )
         self.assertIn("cannot remove an identity binding with an active mapping relation", remove_binding)
         remove_identity = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY(")
         )
         self.assertIn("cannot remove a semantic identity with active bindings", remove_identity)
         remove_representation = next(
             sql for sql in statements
-            if "SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION" in sql
+            if sql.startswith(
+                "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION(")
         )
         self.assertIn("cannot remove a representation with active identity bindings", remove_representation)
         self.assertIn("SET COVERAGE_PREDICATE = NULL", remove_representation)
@@ -788,6 +815,35 @@ class InstallerResetTest(unittest.TestCase):
     def test_reset_recovers_from_broken_catalog(self):
         statements = INSTALL.reset_statements(Connection(catalog_broken=True))
         self.assertEqual(INSTALL.RESET_STATEMENTS, statements)
+
+    def test_reset_drops_a_published_schema_the_catalog_has_forgotten(self):
+        """An orphan is a fully typed, BI-discoverable surface with no model.
+
+        Discovering published schemas only from the catalog meant no future
+        reset could ever remove one, so it outlived every reinstall.
+        """
+        statements = INSTALL.reset_statements(
+            Connection(catalog_exists=False, orphans=["SEMANTIC_GHOST"]))
+        self.assertEqual('DROP SCHEMA IF EXISTS "SEMANTIC_GHOST" CASCADE', statements[0])
+
+    def test_reset_finds_an_orphan_even_when_the_catalog_is_broken(self):
+        statements = INSTALL.reset_statements(
+            Connection(catalog_broken=True, orphans=["SEMANTIC_GHOST"]))
+        self.assertEqual('DROP SCHEMA IF EXISTS "SEMANTIC_GHOST" CASCADE', statements[0])
+
+    def test_reset_refuses_when_nothing_can_be_enumerated(self):
+        """An unreadable catalog is when orphans are made, not a reason to guess.
+
+        With neither the catalog nor the table scan available, dropping only the
+        fixed managed schemas would manufacture exactly the orphan this test
+        suite is about, so the reset refuses instead.
+        """
+        class Blind(Connection):
+            def execute(self, sql):
+                raise RuntimeError("no metadata access")
+
+        with self.assertRaises(RuntimeError):
+            INSTALL.reset_statements(Blind(catalog_broken=True))
 
     def test_identifier_quoting(self):
         self.assertEqual('"A""B"', INSTALL.quote_ident('A"B'))

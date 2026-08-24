@@ -344,6 +344,40 @@ metric/dimension pair, so agents can see the boundary without hitting it. Run
 `python3 tools/verify_fanout_guardrails.py` against an installed model to walk
 through all of it live; it is part of the smoke suite.
 
+## Fusion You Can See In The Number
+
+Two of the failures data fusion prevents are arithmetic, not opinion. Both are
+mistakes a hand-written query makes silently.
+
+**A re-loaded boundary day.** A hot/cold split is the most ordinary warehouse
+shape there is, and the most ordinary accident is the archive job loading the
+cutover day into both tables. A hand-rolled `UNION ALL` counts it twice; F3
+coverage predicates cannot, because each partition declares the half-open
+interval it owns:
+
+```
+hand-rolled UNION ALL : 5762.75
+declared F3 fusion    : 4972.00   <- the truth
+```
+
+**Revenue stranded in a NULL bucket.** A warehouse customer master has no
+loyalty tier for customers onboarded after its last load. Grouping revenue by
+that column reports them as `(null)` — a bucket nobody acts on. F4
+reconciliation against the CRM, declared authoritative for that attribute,
+recovers them:
+
+```
+warehouse only : {'(null)': 156253.44, 'Gold': 42000.00, 'Silver': 31500.00}
+reconciled     : {'Bronze': 27400.25, 'Gold': 100250.75, 'Silver': 102102.44}
+recovered      : 156253.44 — 68.0% of revenue, and the total is unchanged
+```
+
+Neither number is quoted from a slide: `tools/verify_fusion_value.py` builds
+both landscapes, computes both comparisons, and asserts them, so these figures
+cannot drift from what the product does. It is part of the smoke suite. See
+[docs/data-fusion.md](docs/data-fusion.md) for the six fusion levels and the
+declarations behind these two.
+
 ## Agent-First By Design
 
 Agents should not have to remember SQL snippets, join conditions, or aggregate

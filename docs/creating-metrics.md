@@ -188,6 +188,27 @@ with `SEMANTIC_DDL_080`, which names which of the three states applies — alrea
 dropped, active but a column of a different semantic view (the other view is
 named), or no such metric in the model.
 
+### Dimension names are unique per model
+
+A dimension belongs to an *entity* and is exposed by one or more semantic views,
+but its **name is unique across the whole model**, not per view. Two views in
+the same model therefore cannot both expose a column called `order_month`, even
+when both legitimately need it — the second `ADD_DIMENSION` is refused with
+`SEMANTIC_ADMIN_019`, naming the view that already owns it:
+
+```
+SEMANTIC_ADMIN_019: duplicate dimension: ship_mode. Dimension names are unique
+per model, not per semantic view, so this name is taken. It is defined on entity
+'order' and exposed by semantic view(s): SALES. Choose a distinct name for this
+view's column; there is no operation that shares one dimension between views.
+```
+
+Give the second view's column a distinct name (`header_ship_mode`), or model the
+two views so they do not need the same one. If a view ends up with metrics and no
+dimensions because its dimensions were refused, validation now says so
+(`SEMANTIC_MODEL_058`) instead of publishing a single grand-total column
+quietly.
+
 ### Names that collide with SQL keywords
 
 Any name position in a statement accepts a double-quoted identifier, which is

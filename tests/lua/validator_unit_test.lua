@@ -1728,6 +1728,31 @@ test("verified queries accept a renamed metric through its retained synonym", fu
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_023"))
 end)
 
+test("validator warns when a semantic view has metrics and no dimensions", function()
+    -- BUG-F15's aggravating factor: dimensions refused during authoring left an
+    -- object publishing a single grand-total column, and PUBLISH_MODEL only
+    -- refuses at *zero* columns, so it shipped quietly.
+    local ctx = validation_context({version_id = 2})
+    with_query(function() return {{"ORDER_HEADER", 0, 2}} end, function()
+        api.validate_object_dimension_coverage(ctx)
+    end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_058")
+    assert_equal(issue.severity, "WARNING")
+    assert_contains(issue.message, "2 metric(s) and no dimensions")
+    assert_contains(issue.message, "SEMANTIC_ADMIN_019")
+    assert_branch("validator.object.dimension_coverage",
+        has_rule(ctx, "SEMANTIC_MODEL_058"), true)
+
+    -- An object with dimensions, and one with neither, are both left alone.
+    local quiet = validation_context({version_id = 2})
+    with_query(function()
+        return {{"SALES", 3, 2}, {"EMPTY", 0, 0}}
+    end, function() api.validate_object_dimension_coverage(quiet) end)
+    assert_equal(#quiet.issues, 0)
+    assert_branch("validator.object.dimension_coverage",
+        has_rule(quiet, "SEMANTIC_MODEL_058"), false)
+end)
+
 test("validator rejects a metric the planner could never compile", function()
     -- BUG-F01 / BUG-F02: COUNT(*) has no fact input and AVG has no mergeable
     -- state on a partitioned entity. Both validated clean, published, and were
@@ -2303,6 +2328,9 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {}
         elseif contains(sql, "FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md") then
             return {}
+        elseif contains(sql, "SUM(CASE WHEN oc.COLUMN_KIND = 'DIMENSION'") then
+            -- One object with both dimensions and metrics: nothing to warn about.
+            return {{"SALES", 2, 1}}
         elseif contains(sql, "FROM SYS_SEMANTIC.METRIC_INPUTS mi") then
             -- The plannability gate classifies metrics with the planner's own
             -- code, which needs the structured inputs.

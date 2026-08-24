@@ -31,6 +31,27 @@ For a local Exasol Personal instance with a self-signed certificate, the MCP
 server may also need `EXA_SSL_CERT_VALIDATION=no`. Do not disable certificate
 validation for production connections.
 
+**A pinned `EXA_DSN` is unsafe on Exasol Personal.** Each deployment picks its
+port at start, and a stopped deployment can lose `8563` to another one, so a
+config that hardcodes `127.0.0.1:8563` can silently attach to a *different*
+database — and answer confidently from the wrong catalog. Read the port back
+from the deployment:
+
+```sh
+export EXASOL_PORT=$(jq -r .connection.dbPort ~/.exasol/personal/deployments/default/deployment.json)
+```
+
+and assert which deployment you reached before trusting an answer:
+
+```sql
+SELECT DATABASE_NAME, PRODUCT_VERSION, RUNTIME_CHECKSUM, MODEL_COUNT
+FROM SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT;
+```
+
+`DATABASE_NAME` plus `RUNTIME_CHECKSUM` identify the database and the exact
+installed build; `MODELS_FOR_AGENT` carries the same two columns, so an agent
+already reading that view can check without a second query.
+
 The connecting database user must be able to see the published semantic model,
 set the session preprocessor, and read the physical objects used by the compiled
 query. The preprocessor does not bypass Exasol privileges.

@@ -9,18 +9,19 @@
 -- fixed-length property tests, again after moving path-rejection
 -- diagnostics out of the validator into the shared grain graph, and again
 -- 2026-08-24 after reporting safe-path alternatives instead of selecting
--- silently between them, and again after accepting quoted identifiers and
--- naming which state blocked a metric drop.
+-- silently between them, again after accepting quoted identifiers and naming
+-- which state blocked a metric drop, and again after the fusion-study fixes
+-- (plannability gate, request options, unknown-field clarification).
 return {
     lines = {
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.6,
-        ["lua/semantic_layer/compiler/query_spec.lua"] = 96.5,
+        ["lua/semantic_layer/compiler/query_spec.lua"] = 96.7,
         ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 100,
-        ["lua/semantic_layer/compiler/metric_plan.lua"] = 93.4,
+        ["lua/semantic_layer/compiler/metric_plan.lua"] = 93.7,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.2,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 86.1,
-        ["lua/semantic_layer/admin/validator.lua"] = 93.1,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 86.5,
+        ["lua/semantic_layer/admin/validator.lua"] = 93.3,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.0,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 71.7,
         ["lua/semantic_layer/agent/runtime.lua"] = 92.8,

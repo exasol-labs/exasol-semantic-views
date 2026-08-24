@@ -3829,6 +3829,42 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     ctx.matrix = matrix
 end
 
+-- A semantic object with metrics but no dimensions publishes as a single
+-- aggregate column. That is legal, and occasionally intended, but far more
+-- often it is the visible symptom of dimensions that were refused while the
+-- object was authored (a name already taken elsewhere in the model, say) --
+-- and PUBLISH_MODEL only refuses at *zero* columns, so it shipped quietly.
+local function validate_object_dimension_coverage(ctx)
+    for _, row in ipairs(query([[
+        SELECT so.OBJECT_NAME,
+               SUM(CASE WHEN oc.COLUMN_KIND = 'DIMENSION' THEN 1 ELSE 0 END) AS DIMENSION_COUNT,
+               SUM(CASE WHEN oc.COLUMN_KIND = 'METRIC' THEN 1 ELSE 0 END) AS METRIC_COUNT
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so
+        LEFT JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+          ON oc.OBJECT_ID = so.OBJECT_ID
+         AND oc.IS_VISIBLE = TRUE
+        WHERE so.MODEL_ID = :model_id
+          AND so.VERSION_ID = :version_id
+          AND so.STATUS = 'ACTIVE'
+        GROUP BY so.OBJECT_NAME
+        ORDER BY so.OBJECT_NAME
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id}) or {}) do
+        local object_name = row_value(row, "OBJECT_NAME", 1)
+        local dimension_count = tonumber(row_value(row, "DIMENSION_COUNT", 2) or 0) or 0
+        local metric_count = tonumber(row_value(row, "METRIC_COUNT", 3) or 0) or 0
+        if dimension_count == 0 and metric_count > 0 then
+            add_issue(ctx, "WARNING", "SEMANTIC_OBJECT", object_name,
+                "SEMANTIC_MODEL_058",
+                "Semantic view exposes " .. tostring(metric_count)
+                    .. " metric(s) and no dimensions, so it publishes as a single"
+                    .. " grand-total column and can only be grouped by nothing."
+                    .. " If dimensions were meant to be here, check whether they"
+                    .. " were refused while authoring -- dimension names are"
+                    .. " unique per model (SEMANTIC_ADMIN_019).")
+        end
+    end
+end
+
 local function validate_visible_metric_dimension_pairs(ctx)
     local pairs = query([[
         SELECT
@@ -3960,6 +3996,7 @@ function M.validate_model(model_name_arg)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
         validate_metric_plannability(ctx)
+        validate_object_dimension_coverage(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
         -- Remote equivalence proofs are full data scans. Do not launch them
@@ -4021,6 +4058,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         detect_metric_cycles = detect_metric_cycles,
         validate_agent_metadata = validate_agent_metadata,
         validate_metric_plannability = validate_metric_plannability,
+        validate_object_dimension_coverage = validate_object_dimension_coverage,
         alternate_representation_remedy = alternate_representation_remedy,
         compute_metric_dimension_matrix = compute_metric_dimension_matrix,
         validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,

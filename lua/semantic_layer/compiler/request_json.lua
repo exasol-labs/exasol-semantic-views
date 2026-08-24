@@ -518,30 +518,72 @@ local CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
 -- SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT.
 local STRUCTURED_REQUEST_KEY_NAMES = {
     "client", "dimensions", "filters", "having", "limit", "metrics",
-    "model", "natural_language_text", "object", "order_by", "proof_mode",
-    "purpose",
+    "model", "natural_language_text", "object", "options", "order_by",
+    "proof_mode", "purpose",
 }
+
 local STRUCTURED_REQUEST_KEYS = {}
 for _, request_key in ipairs(STRUCTURED_REQUEST_KEY_NAMES) do
     STRUCTURED_REQUEST_KEYS[request_key] = true
 end
 
+-- Per-request planner safeguards. docs/data-fusion.md documented these as
+-- overridable while the closed schema rejected the key outright. They are
+-- accepted now, and they can only *tighten*: a request may ask to fail earlier
+-- than the deployment's limit, never later, so a caller cannot talk the planner
+-- out of a safeguard. (Declared inside the function on purpose: this chunk is
+-- close to Lua's 200-local limit for a main chunk.)
 local function validate_structured_request_keys(request)
+    local option_names = {"max_branches", "max_bytes"}
     local unknown = {}
     for request_key, _ in pairs(request) do
         if type(request_key) ~= "string" or not STRUCTURED_REQUEST_KEYS[request_key] then
             unknown[#unknown + 1] = tostring(request_key)
         end
     end
-    if #unknown == 0 then
+    if #unknown > 0 then
+        table.sort(unknown)
+        return error_result(
+            "SEMANTIC_REQUEST_004",
+            "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
+                .. ". Allowed keys: " .. table.concat(STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
+        )
+    end
+
+    local options = request.options
+    if options == nil or options == null or options == JSON_NULL then
         return nil
     end
-    table.sort(unknown)
-    return error_result(
-        "SEMANTIC_REQUEST_004",
-        "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
-            .. ". Allowed keys: " .. table.concat(STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
-    )
+    if type(options) ~= "table" or is_array(options) then
+        return error_result("SEMANTIC_REQUEST_004",
+            "options must be an object with keys: "
+                .. table.concat(option_names, ", ") .. ".")
+    end
+    local allowed_options = {}
+    for _, option_key in ipairs(option_names) do allowed_options[option_key] = true end
+    local unknown_options = {}
+    for option_key, _ in pairs(options) do
+        if type(option_key) ~= "string" or not allowed_options[option_key] then
+            unknown_options[#unknown_options + 1] = tostring(option_key)
+        end
+    end
+    if #unknown_options > 0 then
+        table.sort(unknown_options)
+        return error_result("SEMANTIC_REQUEST_004",
+            "Unknown options key(s): " .. table.concat(unknown_options, ", ")
+                .. ". Allowed keys: " .. table.concat(option_names, ", ") .. ".")
+    end
+    for _, option_key in ipairs(option_names) do
+        local value = options[option_key]
+        if value ~= nil and value ~= null and value ~= JSON_NULL then
+            local number = tonumber(value)
+            if number == nil or number < 1 or number ~= math.floor(number) then
+                return error_result("SEMANTIC_REQUEST_004",
+                    "options." .. option_key .. " must be a positive integer.")
+            end
+        end
+    end
+    return nil
 end
 
 local function canonical_value(value)
@@ -1441,7 +1483,84 @@ local function resolve_field(ctx, field_name, expected_kind)
             clarification_question = "Which field did you mean for " .. tostring(field_name) .. "?",
         })
     end
-    return nil, error_result("SEMANTIC_REQUEST_020", "Unknown semantic field: " .. tostring(field_name) .. ".")
+
+    -- An unknown field is the most common thing an agent gets wrong, and it is
+    -- answerable: either the name is near a field this object does have, or the
+    -- field exists in a different semantic view of the same model. Both are put
+    -- in CLARIFICATION_JSON, which was documented as the disambiguation channel
+    -- and never populated for anything but ambiguity.
+    local near = {}
+    local seen_near = {}
+    for candidate_name, candidate in pairs(ctx.canonical_fields or {}) do
+        if expected_kind == nil or candidate.kind == expected_kind then
+            local display = tostring(candidate.name or candidate_name)
+            if not seen_near[display]
+                and (string.find(candidate_name, normalized, 1, true)
+                    or string.find(normalized, candidate_name, 1, true)
+                    or (#normalized >= 3
+                        and string.sub(candidate_name, 1, 3) == string.sub(normalized, 1, 3))) then
+                seen_near[display] = true
+                near[#near + 1] = display
+            end
+        end
+    end
+    table.sort(near)
+    while #near > 5 do table.remove(near) end
+
+    local elsewhere = {}
+    if ctx.model ~= nil and ctx.object ~= nil then
+        for _, row in ipairs(query([[
+            SELECT so.OBJECT_NAME, oc.COLUMN_KIND
+            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
+            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
+              ON so.OBJECT_ID = oc.OBJECT_ID
+            WHERE so.MODEL_ID = :model_id
+              AND so.VERSION_ID = :version_id
+              AND so.STATUS = 'ACTIVE'
+              AND oc.IS_VISIBLE = TRUE
+              AND UPPER(oc.COLUMN_NAME) = UPPER(:field_name)
+              AND so.OBJECT_ID <> :object_id
+            ORDER BY so.OBJECT_NAME
+        ]], {
+            model_id = ctx.model.model_id,
+            version_id = ctx.model.version_id,
+            field_name = trim(field_name),
+            object_id = ctx.object.id,
+        }) or {}) do
+            elsewhere[#elsewhere + 1] = tostring(row_value(row, "OBJECT_NAME", 1))
+        end
+    end
+
+    local question = "Which field did you mean instead of "
+        .. tostring(field_name) .. "?"
+    local detail = ""
+    if #elsewhere > 0 then
+        question = tostring(field_name) .. " belongs to semantic view "
+            .. table.concat(elsewhere, ", ") .. ". Query that view, or choose a"
+            .. " field of " .. tostring(ctx.object.name) .. "."
+        detail = " It is a column of semantic view " .. table.concat(elsewhere, ", ")
+            .. ", not of " .. tostring(ctx.object.name) .. "."
+    elseif #near > 0 then
+        detail = " Did you mean: " .. table.concat(near, ", ") .. "?"
+    end
+    -- A clarification is attached only when there is something to clarify:
+    -- candidates in this object, or the view the field really belongs to. With
+    -- neither, the request is simply wrong and stays a plain ERROR -- attaching
+    -- an empty clarification would turn every typo into NEEDS_CLARIFICATION
+    -- while giving the caller nothing to act on.
+    if #near == 0 and #elsewhere == 0 then
+        return nil, error_result("SEMANTIC_REQUEST_020",
+            "Unknown semantic field: " .. tostring(field_name) .. ".")
+    end
+    return nil, error_result("SEMANTIC_REQUEST_020",
+        "Unknown semantic field: " .. tostring(field_name) .. "." .. detail, {
+            message = "Unknown semantic field.",
+            field = tostring(field_name),
+            object = ctx.object ~= nil and tostring(ctx.object.name) or nil,
+            candidates = near,
+            available_in_objects = elsewhere,
+            clarification_question = question,
+        })
 end
 
 local function relationship_edges(ctx)
@@ -3282,10 +3401,24 @@ local function compile_request_table(request, options)
             return plan_error("_074",
                 "F4 fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
         end
+        -- Safeguards tighten only: min() with the deployment default, so a
+        -- request can ask to fail earlier but never later.
+        local request_options = type(request.options) == "table" and request.options or {}
+        local requested_branches = tonumber(request_options.max_branches)
+        local requested_bytes = tonumber(request_options.max_bytes)
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,
             snapshot,
-            {output_order_by = order_by, limit = limit}
+            {
+                output_order_by = order_by,
+                limit = limit,
+                max_branches = requested_branches ~= nil
+                    and math.min(requested_branches,
+                        physical_plan_runtime.DEFAULT_MAX_BRANCHES) or nil,
+                max_sql_bytes = requested_bytes ~= nil
+                    and math.min(requested_bytes,
+                        physical_plan_runtime.DEFAULT_MAX_SQL_BYTES) or nil,
+            }
         )
         if physical_plan == nil then
             typed_plan.failure = physical_error
@@ -4466,6 +4599,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_filters = build_filters,
         plan_joins = plan_joins,
         relationship_path_warnings = relationship_path_warnings,
+        validate_structured_request_keys = validate_structured_request_keys,
         build_order_by = build_order_by,
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,

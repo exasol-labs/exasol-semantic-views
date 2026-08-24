@@ -219,13 +219,15 @@ def main() -> int:
 
         # 4. Now make the fusion legitimate, and check the valid path is accepted.
         for statement in (
-            f"ADD_ENTITY_REPRESENTATION('{MODEL}', 'customer', 'crm', 'RELATION', "
-            f"'{SCHEMA}', 'CUSTOMERS_CRM', 20, 'MANUAL')",
+            # SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY: register
+            # the alternate and declare its authority as one candidate, on a
+            # published model, so neither lands without the other.
+            f"ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY('{MODEL}', 'customer', 'crm', "
+            f"'RELATION', '{SCHEMA}', 'CUSTOMERS_CRM', 20, 'MANUAL', 'AUTHORITATIVE')",
             f"ADD_ATTRIBUTE_BINDING('{MODEL}', 'DIMENSION', 'customer_name', 'crm', "
             "'c.display_name', 'PREFER', 1)",
             f"ADD_ATTRIBUTE_BINDING('{MODEL}', 'FACT', 'spend', 'crm', "
             "'c.spend', 'PREFER', 1)",
-            f"SET_REPRESENTATION_AUTHORITY('{MODEL}', 'customer', 'crm', 'AUTHORITATIVE')",
             f"SET_REPRESENTATION_AUTHORITY('{MODEL}', 'customer', 'primary', 'SUPPLEMENTAL')",
             f"SET_ATTRIBUTE_FUSION_POLICY('{MODEL}', 'DIMENSION', 'customer_name', 'RECONCILE')",
             f"SET_ATTRIBUTE_FUSION_POLICY('{MODEL}', 'FACT', 'spend', 'RECONCILE')",

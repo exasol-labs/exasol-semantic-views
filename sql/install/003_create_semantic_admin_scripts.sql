@@ -642,30 +642,62 @@ query([[
       AND STATUS IN ('OK', 'WARNING')
 ]], {model_id = model_id, version_id = version_id})
 
-if tostring(model_status) == "PUBLISHED" then
-    local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
-        {model_name = model_name})
-    for _, validation_row in ipairs(candidate_validation or {}) do
-        if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
-            or tostring(row_value(validation_row, "SEVERITY", 1)) == "PRECONDITION" then
-            local rule_code = row_value(validation_row, "RULE_CODE", 4)
-                or "SEMANTIC_MODEL_ERROR"
-            local message = row_value(validation_row, "MESSAGE", 5)
-                or "model validation failed"
-            query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
-                {representation_id = representation_id})
-            query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
-                {model_name = model_name})
-            error("SEMANTIC_ADMIN_094: published representation change rejected and restored; "
-                .. "candidate introduced validation error: "
-                .. tostring(rule_code) .. " " .. tostring(message))
+-- Registering a representation seeds compatibility bindings, and a seeded
+-- binding that does not hold is the single most common reason the next
+-- authoring call fails. Report them here the way the F5 compound call already
+-- did, instead of leaving the modeller to find them in a later VALIDATE_MODEL.
+local candidate_validation = query(
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    {model_name = model_name})
+local validation_errors = {}
+local generated_binding_issues = {}
+local binding_suffix = "@" .. upper(representation_name)
+for _, validation_row in ipairs(candidate_validation or {}) do
+    local severity = tostring(row_value(validation_row, "SEVERITY", 1))
+    if severity == "ERROR" or severity == "PRECONDITION" then
+        local rule_code = row_value(validation_row, "RULE_CODE", 4)
+            or "SEMANTIC_MODEL_ERROR"
+        local message = row_value(validation_row, "MESSAGE", 5)
+            or "model validation failed"
+        local object_type = row_value(validation_row, "OBJECT_TYPE", 2) or "MODEL"
+        local object_name = row_value(validation_row, "OBJECT_NAME", 3) or model_name
+        local detail = tostring(rule_code) .. " [" .. tostring(object_type)
+            .. " " .. tostring(object_name) .. "] " .. tostring(message)
+        validation_errors[#validation_errors + 1] = detail
+        -- An issue belongs to this registration when it is attributed to one of
+        -- its seeded bindings, to the representation itself, or when the
+        -- message names it -- SEMANTIC_MODEL_017 reports "in representation(s):
+        -- <name>" against the *dimension*, which is the common case.
+        local normalized_object_name = upper(object_name)
+        local normalized_name = upper(representation_name)
+        if (upper(object_type) == "ATTRIBUTE_BINDING"
+                and string.sub(normalized_object_name, -#binding_suffix) == binding_suffix)
+            or (upper(object_type) == "ENTITY_REPRESENTATION"
+                and string.sub(normalized_object_name, -#normalized_name - 1)
+                    == "." .. normalized_name)
+            or string.find(upper(message), "REPRESENTATION(S): ", 1, true) ~= nil
+                and string.find(upper(message), normalized_name, 1, true) ~= nil then
+            generated_binding_issues[#generated_binding_issues + 1] = detail
         end
     end
 end
 
+if tostring(model_status) == "PUBLISHED" and #validation_errors > 0 then
+    query("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE REPRESENTATION_ID = :representation_id",
+        {representation_id = representation_id})
+    query("DELETE FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS WHERE REPRESENTATION_ID = :representation_id",
+        {representation_id = representation_id})
+    query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name})
+    error("SEMANTIC_ADMIN_094: published representation change rejected and restored; "
+        .. "candidate introduced validation error: " .. validation_errors[1])
+end
+
 exit({{representation_id, model_name, entity_name, representation_name,
-    source_kind, source_schema, source_object, source_alias, "ALTERNATE", priority}}, [[
+    source_kind, source_schema, source_object, source_alias, "ALTERNATE", priority,
+    #generated_binding_issues,
+    #generated_binding_issues == 0 and null
+        or table.concat(generated_binding_issues, "; ")}}, [[
   REPRESENTATION_ID DECIMAL(18,0),
   MODEL_NAME VARCHAR(256),
   ENTITY_NAME VARCHAR(256),
@@ -675,7 +707,240 @@ exit({{representation_id, model_name, entity_name, representation_name,
   SOURCE_OBJECT VARCHAR(256),
   SOURCE_ALIAS VARCHAR(128),
   REPRESENTATION_ROLE VARCHAR(64),
-  PRIORITY DECIMAL(18,0)
+  PRIORITY DECIMAL(18,0),
+  GENERATED_BINDING_ISSUE_COUNT DECIMAL(18,0),
+  GENERATED_BINDING_ISSUES VARCHAR(2000000)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.CALL_ADMIN_JSON(
+  SCRIPT_NAME,
+  ARGS_JSON
+)
+RETURNS TABLE AS
+-- Call any SEMANTIC_ADMIN script with a JSON object instead of positional
+-- arguments.
+--
+-- Exasol checks parameter arity in the SQL layer, before a script body runs, so
+-- a positional mistake can only ever surface as `expected N script parameters
+-- but got M` -- no script name, no parameter name, and no way for the script to
+-- improve it. Named arguments remove the failure mode instead of describing it:
+-- an unknown or missing parameter is reported here, by name, against the
+-- signature published in SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS.
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function sql_string(value)
+    if value == nil or value == null then return "NULL" end
+    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
+end
+
+local script_name = upper(SCRIPT_NAME)
+if script_name == "" then
+    error("SEMANTIC_ADMIN_001: SCRIPT_NAME is required")
+end
+if script_name == "CALL_ADMIN_JSON" then
+    error("SEMANTIC_ADMIN_100: CALL_ADMIN_JSON cannot call itself")
+end
+
+local signature_rows = query([[
+    SELECT ORDINAL_POSITION, PARAMETER_NAME, PARAMETER_COUNT, CALL_TEMPLATE
+    FROM SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS
+    WHERE SCRIPT_NAME = :script_name
+    ORDER BY ORDINAL_POSITION
+]], {script_name = script_name})
+if signature_rows == nil or #signature_rows == 0 then
+    error("SEMANTIC_ADMIN_100: unknown admin script: " .. script_name
+        .. ". Query SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS for the scripts and "
+        .. "their parameters.")
+end
+
+local parameters = {}
+local known = {}
+local call_template = nil
+for _, signature_row in ipairs(signature_rows) do
+    local parameter_name = row_value(signature_row, "PARAMETER_NAME", 2)
+    call_template = call_template or row_value(signature_row, "CALL_TEMPLATE", 4)
+    if parameter_name ~= nil and parameter_name ~= null then
+        parameters[#parameters + 1] = tostring(parameter_name)
+        known[upper(parameter_name)] = true
+    end
+end
+
+local args = {}
+local args_text = trim(ARGS_JSON)
+if args_text ~= "" and upper(args_text) ~= "NULL" then
+    local ok, decoded = pcall(semantic_definition.decode_json, args_text)
+    if not ok or type(decoded) ~= "table" then
+        error("SEMANTIC_ADMIN_101: ARGS_JSON must be a JSON object of parameter "
+            .. "names for " .. script_name .. ". Expected: " .. tostring(call_template))
+    end
+    for key, value in pairs(decoded) do
+        args[upper(key)] = value
+    end
+end
+
+local unknown = {}
+for key, _ in pairs(args) do
+    if not known[key] then unknown[#unknown + 1] = key end
+end
+if #unknown > 0 then
+    table.sort(unknown)
+    error("SEMANTIC_ADMIN_101: unknown parameter(s) for " .. script_name .. ": "
+        .. table.concat(unknown, ", ") .. ". Expected: " .. tostring(call_template))
+end
+
+local call_args = {}
+for _, parameter_name in ipairs(parameters) do
+    local value = args[upper(parameter_name)]
+    if value == nil or value == null then
+        call_args[#call_args + 1] = "NULL"
+    elseif type(value) == "boolean" then
+        call_args[#call_args + 1] = value and "TRUE" or "FALSE"
+    elseif type(value) == "number" then
+        call_args[#call_args + 1] = tostring(value)
+    elseif type(value) == "table" then
+        call_args[#call_args + 1] = sql_string(semantic_definition.encode_json(value))
+    else
+        call_args[#call_args + 1] = sql_string(value)
+    end
+end
+
+local statement = "EXECUTE SCRIPT SEMANTIC_ADMIN." .. script_name
+    .. "(" .. table.concat(call_args, ", ") .. ")"
+local rows = query(statement)
+
+local result = {}
+for _, result_row in ipairs(rows or {}) do
+    local values = {}
+    local index = 1
+    while result_row[index] ~= nil do
+        local value = result_row[index]
+        values[index] = (value == null) and null or value
+        index = index + 1
+    end
+    result[#result + 1] = values
+end
+
+exit({{"OK", script_name, #result, semantic_definition.encode_json(result), statement}}, [[
+  STATUS VARCHAR(32),
+  SCRIPT_NAME VARCHAR(128),
+  ROW_COUNT DECIMAL(18,0),
+  RESULT_JSON VARCHAR(2000000),
+  EXECUTED_STATEMENT VARCHAR(2000000)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME,
+  SOURCE_KIND,
+  SOURCE_SCHEMA,
+  SOURCE_OBJECT,
+  PRIORITY,
+  FRESHNESS_POLICY,
+  AUTHORITY_ROLE
+)
+RETURNS TABLE AS
+-- Register an alternate representation and declare its authority in one step.
+--
+-- F4 needs both: a representation with no authority declaration defaults to
+-- PREFER, so the two-call sequence passes through a state that says something
+-- the modeller did not mean, and on a published model each call is validated
+-- separately. This composes the two, and unwinds the representation if the
+-- authority declaration is refused -- so the pair either both land or neither
+-- does, which is what the other compound calls guarantee.
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+local function upper(value) return string.upper(trim(value)) end
+
+local model_name = trim(MODEL_NAME)
+local entity_name = trim(ENTITY_NAME)
+local representation_name = trim(REPRESENTATION_NAME)
+local authority_role = upper(AUTHORITY_ROLE)
+if authority_role ~= "AUTHORITATIVE" and authority_role ~= "PREFER"
+    and authority_role ~= "SUPPLEMENTAL" then
+    error("SEMANTIC_ADMIN_003: AUTHORITY_ROLE must be AUTHORITATIVE, PREFER, or SUPPLEMENTAL")
+end
+
+local added = query([[
+    EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
+        :model_name, :entity_name, :representation_name, :source_kind,
+        :source_schema, :source_object, :priority, :freshness_policy)
+]], {
+    model_name = model_name,
+    entity_name = entity_name,
+    representation_name = representation_name,
+    source_kind = SOURCE_KIND,
+    source_schema = SOURCE_SCHEMA,
+    source_object = SOURCE_OBJECT,
+    priority = PRIORITY,
+    freshness_policy = FRESHNESS_POLICY,
+})
+local added_row = added ~= nil and added[1] or nil
+if added_row == nil then
+    error("SEMANTIC_ADMIN_046: representation was not registered: " .. representation_name)
+end
+
+local ok, authority_error = pcall(query, [[
+    EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
+        :model_name, :entity_name, :representation_name, :authority_role)
+]], {
+    model_name = model_name,
+    entity_name = entity_name,
+    representation_name = representation_name,
+    authority_role = authority_role,
+})
+if not ok then
+    -- Unwind the half-applied pair, so a refused authority declaration does not
+    -- leave a representation the caller did not ask for on its own.
+    pcall(query, [[
+        EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION(
+            :model_name, :entity_name, :representation_name)
+    ]], {
+        model_name = model_name,
+        entity_name = entity_name,
+        representation_name = representation_name,
+    })
+    error("SEMANTIC_ADMIN_094: representation-with-authority candidate rejected and "
+        .. "restored; the authority declaration failed: " .. tostring(authority_error))
+end
+
+exit({{
+    row_value(added_row, "REPRESENTATION_ID", 1),
+    model_name,
+    entity_name,
+    representation_name,
+    row_value(added_row, "SOURCE_KIND", 5),
+    row_value(added_row, "SOURCE_SCHEMA", 6),
+    row_value(added_row, "SOURCE_OBJECT", 7),
+    row_value(added_row, "SOURCE_ALIAS", 8),
+    authority_role,
+    row_value(added_row, "PRIORITY", 10),
+    row_value(added_row, "GENERATED_BINDING_ISSUE_COUNT", 11),
+    row_value(added_row, "GENERATED_BINDING_ISSUES", 12),
+}}, [[
+  REPRESENTATION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256),
+  SOURCE_KIND VARCHAR(64),
+  SOURCE_SCHEMA VARCHAR(256),
+  SOURCE_OBJECT VARCHAR(256),
+  SOURCE_ALIAS VARCHAR(128),
+  AUTHORITY_ROLE VARCHAR(32),
+  PRIORITY DECIMAL(18,0),
+  GENERATED_BINDING_ISSUE_COUNT DECIMAL(18,0),
+  GENERATED_BINDING_ISSUES VARCHAR(2000000)
 ]])
 /
 
@@ -4110,7 +4375,45 @@ local duplicate = scalar([[
       AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
 ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
 if tonumber(duplicate or 0) > 0 then
-    error("SEMANTIC_ADMIN_019: duplicate dimension: " .. dimension_name)
+    -- Dimension names are unique per *model*, not per semantic object, while
+    -- membership lives in OBJECT_COLUMNS. "duplicate dimension: ship_mode" gave
+    -- no hint that the name was taken by a different object, nor that the
+    -- existing dimension can simply be added to this one.
+    local owner_rows = query([[
+        SELECT so.OBJECT_NAME, e.ENTITY_NAME
+        FROM SYS_SEMANTIC.DIMENSIONS d
+        JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = d.ENTITY_ID
+        LEFT JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+          ON oc.COLUMN_KIND = 'DIMENSION' AND oc.OBJECT_REF_ID = d.DIMENSION_ID
+        LEFT JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+        WHERE d.MODEL_ID = :model_id
+          AND d.VERSION_ID = :version_id
+          AND UPPER(d.DIMENSION_NAME) = UPPER(:dimension_name)
+        ORDER BY so.OBJECT_NAME
+    ]], {model_id = model.model_id, version_id = model.version_id,
+          dimension_name = dimension_name})
+    local owners = {}
+    local owning_entity = nil
+    for _, owner_row in ipairs(owner_rows or {}) do
+        local owner_object = row_value(owner_row, "OBJECT_NAME", 1)
+        owning_entity = owning_entity or row_value(owner_row, "ENTITY_NAME", 2)
+        if owner_object ~= nil and tostring(owner_object) ~= "" then
+            owners[#owners + 1] = tostring(owner_object)
+        end
+    end
+    local detail = " Dimension names are unique per model, not per semantic"
+        .. " view, so this name is taken."
+    if #owners > 0 then
+        detail = detail .. " It is defined on entity '" .. tostring(owning_entity)
+            .. "' and exposed by semantic view(s): " .. table.concat(owners, ", ")
+            .. "."
+    elseif owning_entity ~= nil then
+        detail = detail .. " It is defined on entity '" .. tostring(owning_entity)
+            .. "' and belongs to no semantic view yet."
+    end
+    detail = detail .. " Choose a distinct name for this view's column; there is"
+        .. " no operation that shares one dimension between views."
+    error("SEMANTIC_ADMIN_019: duplicate dimension: " .. dimension_name .. "." .. detail)
 end
 
 query([[
@@ -13241,6 +13544,42 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     ctx.matrix = matrix
 end
 
+-- A semantic object with metrics but no dimensions publishes as a single
+-- aggregate column. That is legal, and occasionally intended, but far more
+-- often it is the visible symptom of dimensions that were refused while the
+-- object was authored (a name already taken elsewhere in the model, say) --
+-- and PUBLISH_MODEL only refuses at *zero* columns, so it shipped quietly.
+local function validate_object_dimension_coverage(ctx)
+    for _, row in ipairs(query([[
+        SELECT so.OBJECT_NAME,
+               SUM(CASE WHEN oc.COLUMN_KIND = 'DIMENSION' THEN 1 ELSE 0 END) AS DIMENSION_COUNT,
+               SUM(CASE WHEN oc.COLUMN_KIND = 'METRIC' THEN 1 ELSE 0 END) AS METRIC_COUNT
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so
+        LEFT JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+          ON oc.OBJECT_ID = so.OBJECT_ID
+         AND oc.IS_VISIBLE = TRUE
+        WHERE so.MODEL_ID = :model_id
+          AND so.VERSION_ID = :version_id
+          AND so.STATUS = 'ACTIVE'
+        GROUP BY so.OBJECT_NAME
+        ORDER BY so.OBJECT_NAME
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id}) or {}) do
+        local object_name = row_value(row, "OBJECT_NAME", 1)
+        local dimension_count = tonumber(row_value(row, "DIMENSION_COUNT", 2) or 0) or 0
+        local metric_count = tonumber(row_value(row, "METRIC_COUNT", 3) or 0) or 0
+        if dimension_count == 0 and metric_count > 0 then
+            add_issue(ctx, "WARNING", "SEMANTIC_OBJECT", object_name,
+                "SEMANTIC_MODEL_058",
+                "Semantic view exposes " .. tostring(metric_count)
+                    .. " metric(s) and no dimensions, so it publishes as a single"
+                    .. " grand-total column and can only be grouped by nothing."
+                    .. " If dimensions were meant to be here, check whether they"
+                    .. " were refused while authoring -- dimension names are"
+                    .. " unique per model (SEMANTIC_ADMIN_019).")
+        end
+    end
+end
+
 local function validate_visible_metric_dimension_pairs(ctx)
     local pairs = query([[
         SELECT
@@ -13372,6 +13711,7 @@ function M.validate_model(model_name_arg)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
         validate_metric_plannability(ctx)
+        validate_object_dimension_coverage(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
         -- Remote equivalence proofs are full data scans. Do not launch them
@@ -13433,6 +13773,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         detect_metric_cycles = detect_metric_cycles,
         validate_agent_metadata = validate_agent_metadata,
         validate_metric_plannability = validate_metric_plannability,
+        validate_object_dimension_coverage = validate_object_dimension_coverage,
         alternate_representation_remedy = alternate_representation_remedy,
         compute_metric_dimension_matrix = compute_metric_dimension_matrix,
         validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,
@@ -14515,6 +14856,12 @@ function M.new(request, source)
         spec.proof_mode = string.upper(trim(request.proof_mode))
     else
         spec.proof_mode = "LEGACY_JOIN"
+    end
+    -- Planner safeguards travel with the canonical request: they can change
+    -- whether a plan is accepted, so they belong in the spec the cache is
+    -- keyed on, not only in the raw JSON.
+    if type(request.options) == "table" then
+        spec.options = copy(request.options)
     end
     return spec
 end
@@ -17142,30 +17489,72 @@ local CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
 -- SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT.
 local STRUCTURED_REQUEST_KEY_NAMES = {
     "client", "dimensions", "filters", "having", "limit", "metrics",
-    "model", "natural_language_text", "object", "order_by", "proof_mode",
-    "purpose",
+    "model", "natural_language_text", "object", "options", "order_by",
+    "proof_mode", "purpose",
 }
+
 local STRUCTURED_REQUEST_KEYS = {}
 for _, request_key in ipairs(STRUCTURED_REQUEST_KEY_NAMES) do
     STRUCTURED_REQUEST_KEYS[request_key] = true
 end
 
+-- Per-request planner safeguards. docs/data-fusion.md documented these as
+-- overridable while the closed schema rejected the key outright. They are
+-- accepted now, and they can only *tighten*: a request may ask to fail earlier
+-- than the deployment's limit, never later, so a caller cannot talk the planner
+-- out of a safeguard. (Declared inside the function on purpose: this chunk is
+-- close to Lua's 200-local limit for a main chunk.)
 local function validate_structured_request_keys(request)
+    local option_names = {"max_branches", "max_bytes"}
     local unknown = {}
     for request_key, _ in pairs(request) do
         if type(request_key) ~= "string" or not STRUCTURED_REQUEST_KEYS[request_key] then
             unknown[#unknown + 1] = tostring(request_key)
         end
     end
-    if #unknown == 0 then
+    if #unknown > 0 then
+        table.sort(unknown)
+        return error_result(
+            "SEMANTIC_REQUEST_004",
+            "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
+                .. ". Allowed keys: " .. table.concat(STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
+        )
+    end
+
+    local options = request.options
+    if options == nil or options == null or options == JSON_NULL then
         return nil
     end
-    table.sort(unknown)
-    return error_result(
-        "SEMANTIC_REQUEST_004",
-        "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
-            .. ". Allowed keys: " .. table.concat(STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
-    )
+    if type(options) ~= "table" or is_array(options) then
+        return error_result("SEMANTIC_REQUEST_004",
+            "options must be an object with keys: "
+                .. table.concat(option_names, ", ") .. ".")
+    end
+    local allowed_options = {}
+    for _, option_key in ipairs(option_names) do allowed_options[option_key] = true end
+    local unknown_options = {}
+    for option_key, _ in pairs(options) do
+        if type(option_key) ~= "string" or not allowed_options[option_key] then
+            unknown_options[#unknown_options + 1] = tostring(option_key)
+        end
+    end
+    if #unknown_options > 0 then
+        table.sort(unknown_options)
+        return error_result("SEMANTIC_REQUEST_004",
+            "Unknown options key(s): " .. table.concat(unknown_options, ", ")
+                .. ". Allowed keys: " .. table.concat(option_names, ", ") .. ".")
+    end
+    for _, option_key in ipairs(option_names) do
+        local value = options[option_key]
+        if value ~= nil and value ~= null and value ~= JSON_NULL then
+            local number = tonumber(value)
+            if number == nil or number < 1 or number ~= math.floor(number) then
+                return error_result("SEMANTIC_REQUEST_004",
+                    "options." .. option_key .. " must be a positive integer.")
+            end
+        end
+    end
+    return nil
 end
 
 local function canonical_value(value)
@@ -18065,7 +18454,84 @@ local function resolve_field(ctx, field_name, expected_kind)
             clarification_question = "Which field did you mean for " .. tostring(field_name) .. "?",
         })
     end
-    return nil, error_result("SEMANTIC_REQUEST_020", "Unknown semantic field: " .. tostring(field_name) .. ".")
+
+    -- An unknown field is the most common thing an agent gets wrong, and it is
+    -- answerable: either the name is near a field this object does have, or the
+    -- field exists in a different semantic view of the same model. Both are put
+    -- in CLARIFICATION_JSON, which was documented as the disambiguation channel
+    -- and never populated for anything but ambiguity.
+    local near = {}
+    local seen_near = {}
+    for candidate_name, candidate in pairs(ctx.canonical_fields or {}) do
+        if expected_kind == nil or candidate.kind == expected_kind then
+            local display = tostring(candidate.name or candidate_name)
+            if not seen_near[display]
+                and (string.find(candidate_name, normalized, 1, true)
+                    or string.find(normalized, candidate_name, 1, true)
+                    or (#normalized >= 3
+                        and string.sub(candidate_name, 1, 3) == string.sub(normalized, 1, 3))) then
+                seen_near[display] = true
+                near[#near + 1] = display
+            end
+        end
+    end
+    table.sort(near)
+    while #near > 5 do table.remove(near) end
+
+    local elsewhere = {}
+    if ctx.model ~= nil and ctx.object ~= nil then
+        for _, row in ipairs(query([[
+            SELECT so.OBJECT_NAME, oc.COLUMN_KIND
+            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
+            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
+              ON so.OBJECT_ID = oc.OBJECT_ID
+            WHERE so.MODEL_ID = :model_id
+              AND so.VERSION_ID = :version_id
+              AND so.STATUS = 'ACTIVE'
+              AND oc.IS_VISIBLE = TRUE
+              AND UPPER(oc.COLUMN_NAME) = UPPER(:field_name)
+              AND so.OBJECT_ID <> :object_id
+            ORDER BY so.OBJECT_NAME
+        ]], {
+            model_id = ctx.model.model_id,
+            version_id = ctx.model.version_id,
+            field_name = trim(field_name),
+            object_id = ctx.object.id,
+        }) or {}) do
+            elsewhere[#elsewhere + 1] = tostring(row_value(row, "OBJECT_NAME", 1))
+        end
+    end
+
+    local question = "Which field did you mean instead of "
+        .. tostring(field_name) .. "?"
+    local detail = ""
+    if #elsewhere > 0 then
+        question = tostring(field_name) .. " belongs to semantic view "
+            .. table.concat(elsewhere, ", ") .. ". Query that view, or choose a"
+            .. " field of " .. tostring(ctx.object.name) .. "."
+        detail = " It is a column of semantic view " .. table.concat(elsewhere, ", ")
+            .. ", not of " .. tostring(ctx.object.name) .. "."
+    elseif #near > 0 then
+        detail = " Did you mean: " .. table.concat(near, ", ") .. "?"
+    end
+    -- A clarification is attached only when there is something to clarify:
+    -- candidates in this object, or the view the field really belongs to. With
+    -- neither, the request is simply wrong and stays a plain ERROR -- attaching
+    -- an empty clarification would turn every typo into NEEDS_CLARIFICATION
+    -- while giving the caller nothing to act on.
+    if #near == 0 and #elsewhere == 0 then
+        return nil, error_result("SEMANTIC_REQUEST_020",
+            "Unknown semantic field: " .. tostring(field_name) .. ".")
+    end
+    return nil, error_result("SEMANTIC_REQUEST_020",
+        "Unknown semantic field: " .. tostring(field_name) .. "." .. detail, {
+            message = "Unknown semantic field.",
+            field = tostring(field_name),
+            object = ctx.object ~= nil and tostring(ctx.object.name) or nil,
+            candidates = near,
+            available_in_objects = elsewhere,
+            clarification_question = question,
+        })
 end
 
 local function relationship_edges(ctx)
@@ -19906,10 +20372,24 @@ local function compile_request_table(request, options)
             return plan_error("_074",
                 "F4 fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
         end
+        -- Safeguards tighten only: min() with the deployment default, so a
+        -- request can ask to fail earlier but never later.
+        local request_options = type(request.options) == "table" and request.options or {}
+        local requested_branches = tonumber(request_options.max_branches)
+        local requested_bytes = tonumber(request_options.max_bytes)
         local physical_plan, physical_error = physical_plan_runtime.build(
             typed_plan,
             snapshot,
-            {output_order_by = order_by, limit = limit}
+            {
+                output_order_by = order_by,
+                limit = limit,
+                max_branches = requested_branches ~= nil
+                    and math.min(requested_branches,
+                        physical_plan_runtime.DEFAULT_MAX_BRANCHES) or nil,
+                max_sql_bytes = requested_bytes ~= nil
+                    and math.min(requested_bytes,
+                        physical_plan_runtime.DEFAULT_MAX_SQL_BYTES) or nil,
+            }
         )
         if physical_plan == nil then
             typed_plan.failure = physical_error
@@ -21090,6 +21570,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_filters = build_filters,
         plan_joins = plan_joins,
         relationship_path_warnings = relationship_path_warnings,
+        validate_structured_request_keys = validate_structured_request_keys,
         build_order_by = build_order_by,
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,
@@ -25514,6 +25995,14 @@ explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition
 preprocess_sql = M.preprocess_sql
 decode_json = M.decode_json
+
+-- Published for SEMANTIC_ADMIN.CALL_ADMIN_JSON, which serialises a called
+-- script's rows back to the caller. decode_json was already public.
+function M.encode_json(value)
+    return json_encode(value)
+end
+
+encode_json = M.encode_json
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {

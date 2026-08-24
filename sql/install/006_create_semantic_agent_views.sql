@@ -1,3 +1,27 @@
+-- Which deployment am I actually attached to?
+--
+-- Exasol Personal reassigns a deployment's port on every start, so a client
+-- pinned to a static DSN can silently reach a *different* database and answer
+-- confidently from the wrong catalog. Nothing on the agent surface let a caller
+-- notice. This is the assertable identity: the database plus the installed
+-- build, which together are unique per deployment.
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT AS
+SELECT
+  (SELECT PARAM_VALUE FROM SYS.EXA_METADATA WHERE PARAM_NAME = 'databaseName')
+    AS DATABASE_NAME,
+  (SELECT PARAM_VALUE FROM SYS.EXA_METADATA WHERE PARAM_NAME = 'databaseProductVersion')
+    AS DATABASE_VERSION,
+  (SELECT MAX(DISPLAY_VERSION) FROM SEMANTIC_CATALOG.PRODUCT_VERSION)
+    AS PRODUCT_VERSION,
+  (SELECT MAX(RUNTIME_CHECKSUM) FROM SEMANTIC_CATALOG.PRODUCT_VERSION)
+    AS RUNTIME_CHECKSUM,
+  (SELECT MAX(INSTALLED_AT) FROM SEMANTIC_CATALOG.PRODUCT_VERSION)
+    AS INSTALLED_AT,
+  (SELECT COUNT(*) FROM SEMANTIC_CATALOG.MODELS) AS MODEL_COUNT,
+  CURRENT_USER AS CONNECTED_AS,
+  CURRENT_SESSION AS SESSION_ID
+FROM DUAL;
+
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.MODELS_FOR_AGENT AS
 SELECT
   m.MODEL_ID,
@@ -27,7 +51,14 @@ SELECT
     WHEN vr.WARNING_COUNT > 0 THEN 'WARNING'
     ELSE 'VALID'
   END AS AGENT_READINESS,
-  'STRUCTURED_REQUEST,SEMANTIC_SQL' AS QUERY_MODES
+  'STRUCTURED_REQUEST,SEMANTIC_SQL' AS QUERY_MODES,
+  -- A client pinned to a static host:port can reach a different deployment
+  -- than intended and answer confidently from the wrong catalog. Carry the
+  -- identity an agent can assert on the surface it already reads.
+  (SELECT DATABASE_NAME FROM SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT)
+    AS DATABASE_NAME,
+  (SELECT RUNTIME_CHECKSUM FROM SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT)
+    AS RUNTIME_CHECKSUM
 FROM SYS_SEMANTIC.MODELS m
 LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
   ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -69,6 +100,8 @@ SELECT
   m.AGENT_READINESS,
   m.PREPROCESSOR_QUALIFIED_NAME,
   m.QUERY_MODES,
+  m.DATABASE_NAME,
+  m.RUNTIME_CHECKSUM,
   -- Fusion is invisible on this surface unless it is said out loud: an agent
   -- reading only names cannot tell a single-source object from one whose
   -- numbers are merged across partitions or reconciled across systems.
@@ -449,6 +482,10 @@ UNION ALL
 SELECT 'REQUEST_KEY', 'natural_language_text', 'Optional originating question retained as request metadata.', FALSE, 'string', NULL
 UNION ALL
 SELECT 'REQUEST_KEY', 'proof_mode', 'Optional grain-proof mode.', FALSE, 'string', 'LEGACY_JOIN, STRICT_GRAIN'
+UNION ALL
+SELECT 'REQUEST_KEY', 'options', 'Optional planner safeguards. Tightening only: a lower limit fails earlier, a higher one is ignored.', FALSE, 'object', 'max_branches, max_bytes'
+UNION ALL
+SELECT 'OPTIONS_KEYS', 'max_branches, max_bytes', 'Positive integers. Capped at the deployment defaults (8 branches, 1000000 SQL bytes), so a request can only ask to fail earlier.', FALSE, 'integer', NULL
 UNION ALL
 SELECT
   'FILTER_KEYS' AS CONTRACT_SECTION,

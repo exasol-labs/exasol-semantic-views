@@ -257,10 +257,21 @@ enforces two limits, both reported on `plan_json.safeguards`:
   against this and rejected with `PLANNER_SQL_SIZE_LIMIT_EXCEEDED` if
   exceeded.
 
-Both are overridable per-request via `options.max_branches` and
-`options.max_bytes`. When either fires, the plan JSON carries the actual
-count, the limit, and the leaves that caused the multiplication — so the
-diagnostic is actionable rather than opaque.
+Both can be **tightened** per request via `options.max_branches` and
+`options.max_bytes`:
+
+```json
+{"model": "sales", "object": "SALES", "metrics": ["total_revenue"],
+ "options": {"max_branches": 2, "max_bytes": 250000}}
+```
+
+A request can ask the planner to fail earlier than the deployment's limit; it
+cannot ask it to fail later. A higher value than the default is clamped rather
+than honoured, so a caller can never talk the planner out of a safeguard, and a
+value that is not a positive integer is refused (`SEMANTIC_REQUEST_004`). When
+either limit fires, the plan JSON carries the actual count, the limit, and the
+leaves that caused the multiplication — so the diagnostic is actionable rather
+than opaque.
 
 Materialization substitution is disabled for temporally-partitioned and
 attribute-reconciled leaves — the substitution logic assumes a single

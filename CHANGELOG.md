@@ -8,6 +8,51 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Named admin calls and a published script signature
+
+- Exasol checks parameter arity in the SQL layer, *before* a script body runs, so
+  a miscount can only ever surface as `expected 5 script parameters but got 4` —
+  no script name, no parameter name, and nothing a script can do about it.
+- `SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS` publishes every `SEMANTIC_ADMIN`
+  script's signature, generated from the install SQL itself so it cannot drift,
+  with a ready-made `CALL_TEMPLATE`.
+- `SEMANTIC_ADMIN.CALL_ADMIN_JSON(SCRIPT_NAME, ARGS_JSON)` calls any of them with
+  named arguments, which removes the failure mode instead of describing it. An
+  unknown parameter is refused by name against the published signature
+  (`SEMANTIC_ADMIN_101`) and an unknown script with `SEMANTIC_ADMIN_100`.
+
+#### `ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY`, and binding issues everywhere
+
+- F4 needs a representation *and* its authority: the two-call sequence passes
+  through a state that says something the modeller did not mean, and on a
+  published model each call is validated separately. The compound call declares
+  both as one candidate and unwinds the representation if the authority
+  declaration is refused.
+- `ADD_ENTITY_REPRESENTATION` now reports `GENERATED_BINDING_ISSUE_COUNT` and
+  `GENERATED_BINDING_ISSUES` — the ergonomics that were unique to the F5 compound
+  call — so a registration that will block the next authoring call says so
+  immediately instead of at the next `VALIDATE_MODEL`.
+
+#### Deployment identity on the agent surface
+
+- Exasol Personal reassigns ports on restart, so a client pinned to a static DSN
+  can reach a different database and answer confidently from the wrong catalog.
+  Nothing on the agent surface let a caller notice.
+- `SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT` publishes the database name and
+  version, the product version, the runtime checksum, the install timestamp and
+  model count; `MODELS_FOR_AGENT` carries `DATABASE_NAME` and `RUNTIME_CHECKSUM`
+  so an agent already reading that view can assert without a second query.
+  `docs/mcp-server-integration.md` warns against a pinned `EXA_DSN`.
+
+#### Per-request planner safeguards (`options.max_branches`, `options.max_bytes`)
+
+- `docs/data-fusion.md` documented these as overridable while the closed request
+  schema rejected the key outright.
+- They are accepted now, and they **tighten only**: a request can ask the planner
+  to fail earlier than the deployment's limit, never later, so a caller cannot
+  talk the planner out of a safeguard. A value that is not a positive integer,
+  or an unknown options key, is refused with `SEMANTIC_REQUEST_004`.
+
 #### Fusion is discoverable (`FUSION_FOR_AGENT`, `FUSION_STRATEGY`, `SOURCE_COUNT`)
 
 - Fusion changes the answer — a partitioned entity merges aggregate states
@@ -174,6 +219,39 @@ All notable changes to Exasol Semantic Views are documented here.
 - Regression: `tools/verify_set_relationship.py`, in the smoke suite.
 
 ### Fixed
+#### `--reset` could not remove an orphaned published schema
+
+- Published schemas were discovered only from the catalog, so one whose model row
+  was already gone survived every future `--reset` — a fully typed,
+  BI-discoverable surface with no model behind it. Worse, an unreadable catalog
+  was silently treated as "nothing was published", which is exactly the case that
+  manufactures orphans.
+- Discovery now also scans for the `SEMANTIC_DISCOVERY` table `PUBLISH_MODEL`
+  always creates, which is the physical evidence of a published schema. A failure
+  to read either source is reported rather than swallowed, and if *neither* can
+  be read the reset refuses instead of dropping only the managed schemas.
+
+#### `CLARIFICATION_JSON` was never populated for an unknown field
+
+- The column is part of the published nine-column contract and documented as the
+  agent's disambiguation channel, but only ambiguity ever filled it — the most
+  common agent mistake, an unknown field, returned a dead end.
+- An unknown field now returns `NEEDS_CLARIFICATION` with near-miss candidates
+  from the same object, or names the semantic view the field actually belongs to,
+  both in the message and in `CLARIFICATION_JSON`.
+
+#### `SEMANTIC_ADMIN_019` did not say who owned the name
+
+- Dimension names are unique per *model*, not per semantic view. "duplicate
+  dimension: ship_mode" gave no hint that another view owned it, nor that there
+  is no operation to share one dimension between views. The refusal now names the
+  owning entity and views and states the rule; `docs/creating-metrics.md`
+  documents the scoping.
+- A view that ends up with metrics and no dimensions — the visible symptom of
+  dimensions refused during authoring — is now reported by validation
+  (`SEMANTIC_MODEL_058`) instead of publishing a single grand-total column
+  quietly.
+
 #### F3 coverage on a shared entity silently broke another object's dimensions
 
 - Orders are commonly both the grain of one object's metrics and the join hop

@@ -4284,6 +4284,14 @@ export_semantic_definition = M.export_semantic_definition
 preprocess_sql = M.preprocess_sql
 decode_json = M.decode_json
 
+-- Published for SEMANTIC_ADMIN.CALL_ADMIN_JSON, which serialises a called
+-- script's rows back to the caller. decode_json was already public.
+function M.encode_json(value)
+    return json_encode(value)
+end
+
+encode_json = M.encode_json
+
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {
         json_encode = json_encode,

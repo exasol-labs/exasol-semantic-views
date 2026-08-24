@@ -493,6 +493,7 @@ def main() -> int:
                 ("model",),
                 ("natural_language_text",),
                 ("object",),
+                ("options",),
                 ("order_by",),
                 ("proof_mode",),
                 ("purpose",),

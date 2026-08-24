@@ -278,21 +278,57 @@ def quote_ident(name: str) -> str:
 
 
 def discover_published_schemas(con: object) -> list[str]:
+    """Every schema a PUBLISH_MODEL created, from the catalog and from the database.
+
+    The catalog is the primary source, but it cannot describe a schema whose
+    model row is already gone — and a reset that only reads the catalog can
+    never clean up such an orphan, which is how a fully typed, BI-discoverable
+    surface outlives the model that defined it. Every published schema also
+    carries the SEMANTIC_DISCOVERY table PUBLISH_MODEL always creates, so that
+    table is the physical evidence a reset can act on.
+    """
+    schemas: list[str] = []
+
+    def add(name: object) -> None:
+        text = str(name)
+        if text and text.upper() not in {s.upper() for s in schemas}:
+            schemas.append(text)
+
+    catalog_readable = False
     try:
         rows = con.execute(  # type: ignore[union-attr]
             "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS "
             "WHERE VIEW_SCHEMA = 'SEMANTIC_CATALOG' AND VIEW_NAME = 'MODELS'"
         ).fetchall()
-        if not rows or int(rows[0][0]) == 0:
-            return []
-        rows = con.execute(  # type: ignore[union-attr]
-            "SELECT DISTINCT PUBLISHED_SCHEMA FROM SEMANTIC_CATALOG.MODELS "
-            "WHERE PUBLISHED_SCHEMA IS NOT NULL ORDER BY PUBLISHED_SCHEMA"
-        ).fetchall()
-    except Exception:
-        # A reset must still recover a partially installed or damaged catalog.
-        return []
-    return [str(row[0]) for row in rows if row and row[0]]
+        if rows and int(rows[0][0]) > 0:
+            for row in con.execute(  # type: ignore[union-attr]
+                "SELECT DISTINCT PUBLISHED_SCHEMA FROM SEMANTIC_CATALOG.MODELS "
+                "WHERE PUBLISHED_SCHEMA IS NOT NULL ORDER BY PUBLISHED_SCHEMA"
+            ).fetchall():
+                if row and row[0]:
+                    add(row[0])
+        catalog_readable = True
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        # A damaged catalog is exactly when orphans are manufactured, so this
+        # is reported rather than silently treated as "nothing was published".
+        print(f"  ! catalog unreadable while discovering published schemas: {exc}")
+
+    try:
+        for row in con.execute(  # type: ignore[union-attr]
+            "SELECT DISTINCT TABLE_SCHEMA FROM SYS.EXA_ALL_TABLES "
+            "WHERE TABLE_NAME = 'SEMANTIC_DISCOVERY' ORDER BY TABLE_SCHEMA"
+        ).fetchall():
+            if row and row[0]:
+                add(row[0])
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        print(f"  ! could not scan for orphaned published schemas: {exc}")
+        if not catalog_readable:
+            raise RuntimeError(
+                "--reset cannot enumerate published schemas: neither the semantic "
+                "catalog nor SYS.EXA_ALL_TABLES could be read. Refusing to reset "
+                "rather than leaving published schemas behind."
+            ) from exc
+    return schemas
 
 
 def reset_statements(con: object) -> list[str]:

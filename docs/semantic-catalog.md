@@ -773,6 +773,37 @@ Direct `SYS_SEMANTIC` reads are for internal maintenance; those tables are
 normalized around ids and do not repeat every convenience column such as
 `MODEL_NAME`.
 
+## Calling Admin Scripts
+
+Every `SEMANTIC_ADMIN` script publishes its signature:
+
+```sql
+SELECT ORDINAL_POSITION, PARAMETER_NAME, CALL_TEMPLATE
+FROM SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS
+WHERE SCRIPT_NAME = 'ADD_SYNONYM' ORDER BY ORDINAL_POSITION;
+```
+
+The rows are generated from the install SQL itself, so they cannot drift from
+the scripts they describe, and `CALL_TEMPLATE` is a ready-made call shape.
+
+Positional calls are still the primary form, but Exasol checks parameter arity
+in the SQL layer — *before* a script body runs — so a miscount can only ever
+surface as `expected 5 script parameters but got 4`, with no script name and no
+parameter name. No script can improve that message. Named arguments remove the
+failure mode instead:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.CALL_ADMIN_JSON('ADD_SYNONYM', '{
+  "model_name": "sales", "object_type": "METRIC",
+  "object_name": "total_revenue", "synonym": "turnover", "source": "MANUAL"}');
+```
+
+Omitted parameters are passed as `NULL`; an unknown one is refused by name
+against the published signature (`SEMANTIC_ADMIN_101`), and an unknown script is
+refused with `SEMANTIC_ADMIN_100`. The call returns `STATUS`, `SCRIPT_NAME`,
+`ROW_COUNT`, the called script's rows as `RESULT_JSON`, and the
+`EXECUTED_STATEMENT` it ran.
+
 ## Column Introspection
 
 The catalog is 40+ views, and a column name is not always guessable from the
