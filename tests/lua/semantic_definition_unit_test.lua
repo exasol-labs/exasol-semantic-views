@@ -215,6 +215,94 @@ test("metric drop removes membership and deactivates the final membership", func
     assert_true(deactivated)
 end)
 
+test("semantic DDL accepts a quoted identifier wherever it accepts a name", function()
+    -- The demo model ships an entity named `order`, a reserved word. Quoted
+    -- metric, fact, model, and object names already parsed, because the
+    -- tokenizer decodes a quoted token; ON ENTITY read raw source text and
+    -- refused the same form, so one statement disagreed with itself.
+    local fact = api.parse_definition([[
+        ALTER SEMANTIC VIEW "sales"."ORDER_HEADER"
+        ADD OR REPLACE FACT "freight" ON ENTITY "order"
+          AS o.freight_amount RETURNS DECIMAL(18,2) ADDITIVE PUBLIC
+    ]])
+    assert_equal(fact.model_name, "sales")
+    assert_equal(fact.object_name, "ORDER_HEADER")
+    assert_equal(fact.facts[1].name, "freight")
+    assert_equal(fact.facts[1].entity, "order")
+
+    local metric = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.ORDER_HEADER
+        ADD OR REPLACE METRIC total_freight AS SUM(freight) ON ENTITY "order"
+          RETURNS DECIMAL(18,2) ADDITIVE PUBLIC
+    ]])
+    assert_equal(metric.metrics[1].base_entity, "order")
+
+    -- Unquoted names are unchanged, and a quoted name still has to be a valid
+    -- identifier: quoting is not an escape hatch for arbitrary text.
+    local plain = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        ADD OR REPLACE FACT quantity ON ENTITY order_line
+          AS ol.quantity RETURNS DECIMAL(18,0) ADDITIVE PUBLIC
+    ]])
+    assert_equal(plain.facts[1].entity, "order_line")
+    assert_error(function()
+        api.parse_definition([[
+            ALTER SEMANTIC VIEW sales.SALES
+            ADD OR REPLACE FACT quantity ON ENTITY "order line"
+              AS ol.quantity RETURNS DECIMAL(18,0) ADDITIVE PUBLIC
+        ]])
+    end, "SEMANTIC_DDL_002")
+    -- The refusal quotes the name as written, not a half-decoded form.
+    assert_error(function()
+        api.parse_definition([[
+            ALTER SEMANTIC VIEW sales.SALES
+            ADD OR REPLACE FACT quantity ON ENTITY "order line"
+              AS ol.quantity RETURNS DECIMAL(18,0) ADDITIVE PUBLIC
+        ]])
+    end, '"order line"')
+end)
+
+test("metric drop names which of the three states blocked it", function()
+    -- "not found" reads as a contradiction while METRIC_OVERVIEW still lists
+    -- the metric as an INACTIVE row. Each state gets its own sentence.
+    local function drop_with(active_count, total_count, memberships)
+        return with_query(function(sql)
+            local text = tostring(sql)
+            if text:find("SELECT mt.METRIC_ID", 1, true) then
+                return {}
+            elseif text:find("FROM SYS_SEMANTIC.SEMANTIC_OBJECTS", 1, true)
+                and text:find("WHERE OBJECT_ID", 1, true) then
+                return {{"SALES"}}
+            elseif text:find("STATUS = 'ACTIVE'", 1, true)
+                and text:find("SELECT COUNT(*)", 1, true) then
+                return {{active_count}}
+            elseif text:find("SELECT COUNT(*)", 1, true) then
+                return {{total_count}}
+            elseif text:find("JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS", 1, true) then
+                return memberships
+            end
+            error("unexpected diagnostic query: " .. text)
+        end, function()
+            api.drop_metric({model_id = 1, version_id = 2}, 10, "probe_metric")
+        end)
+    end
+
+    -- Dropped already: the row the reader can see is explained.
+    assert_error(function() drop_with(0, 1, {}) end, "was already dropped")
+    assert_error(function() drop_with(0, 1, {}) end, "STATUS = 'INACTIVE'")
+
+    -- Active, but a column of a different semantic view: name that view.
+    assert_error(function() drop_with(1, 1, {{"ORDER_HEADER"}}) end,
+        "it is exposed by: ORDER_HEADER")
+
+    -- Active and in no object at all: the remedy is to add it first.
+    assert_error(function() drop_with(1, 1, {}) end, "is not a column of")
+
+    -- Genuinely absent: the original wording, now naming the view.
+    assert_error(function() drop_with(0, 0, {}) end,
+        "metric not found in semantic view SALES")
+end)
+
 test("metric rename preserves identity metadata and rewrites dependents", function()
     local updates = {}
     local synonym_inserted = false

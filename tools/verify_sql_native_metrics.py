@@ -859,6 +859,93 @@ ADD OR REPLACE METRIC obsolete_metric
             1,
         )
 
+        # A dropped metric stays visible as an INACTIVE row with no object
+        # membership, so "metric not found" read as a contradiction. Each of
+        # the three states a lookup can fail in gets named.
+        dropped_again = apply_definition(
+            con,
+            "ALTER SEMANTIC VIEW sales.SALES DROP METRIC obsolete_metric",
+            False,
+        )
+        assert_equal("re-drop refused", dropped_again["status"], "ERROR")
+        assert_equal("re-drop code", dropped_again["error_code"], "SEMANTIC_DDL_080")
+        assert_contains("re-drop names the state", dropped_again["message"],
+                        "was already dropped")
+        assert_contains("re-drop explains the visible row", dropped_again["message"],
+                        "STATUS = 'INACTIVE'")
+        assert_equal(
+            "the explained row is really there",
+            fetchall(
+                con,
+                "SELECT OBJECT_NAME, STATUS FROM SEMANTIC_CATALOG.METRIC_OVERVIEW "
+                "WHERE MODEL_NAME = 'sales' AND METRIC_NAME = 'obsolete_metric'",
+            ),
+            [(None, "INACTIVE")],
+        )
+
+        wrong_object = apply_definition(
+            con,
+            "ALTER SEMANTIC VIEW sales.SALES DROP METRIC total_freight",
+            False,
+        )
+        assert_equal("drop from the wrong view refused", wrong_object["status"], "ERROR")
+        assert_contains("wrong view names the owning view", wrong_object["message"],
+                        "it is exposed by: ORDER_HEADER")
+
+        absent = apply_definition(
+            con,
+            "ALTER SEMANTIC VIEW sales.SALES DROP METRIC never_defined_metric",
+            False,
+        )
+        assert_equal("absent metric refused", absent["status"], "ERROR")
+        assert_contains("absent metric wording", absent["message"],
+                        "metric not found in semantic view SALES")
+
+        # The demo ships an entity named `order`, a reserved word. Quoted names
+        # were accepted for metrics, facts, models, and objects but not after
+        # ON ENTITY, so one statement disagreed with itself.
+        quoted = apply_definition(
+            con,
+            'ALTER SEMANTIC VIEW "sales"."ORDER_HEADER" '
+            'ADD OR REPLACE FACT "quoted_probe" ON ENTITY "order" '
+            "AS o.freight_amount RETURNS DECIMAL(18,2) ADDITIVE PUBLIC",
+            False,
+        )
+        assert_status_ok("quoted identifiers in every name position", quoted)
+        assert_equal(
+            "quoted entity resolved to the unquoted entity",
+            fetchall(
+                con,
+                "SELECT ENTITY_NAME FROM SEMANTIC_CATALOG.FACTS "
+                "WHERE MODEL_NAME = 'sales' AND FACT_NAME = 'quoted_probe'",
+            ),
+            [("order",)],
+        )
+        bad_quoted = apply_definition(
+            con,
+            "ALTER SEMANTIC VIEW sales.SALES "
+            'ADD OR REPLACE FACT bad_probe ON ENTITY "order line" '
+            "AS ol.quantity RETURNS DECIMAL(18,0) ADDITIVE PUBLIC",
+            False,
+        )
+        assert_equal("quoting is not an escape hatch", bad_quoted["status"], "ERROR")
+        assert_equal("invalid quoted name code", bad_quoted["error_code"], "SEMANTIC_DDL_002")
+        assert_contains("invalid quoted name is echoed as written",
+                        bad_quoted["message"], '"order line"')
+
+        # Retire the probe fact the same way this suite retires the other one.
+        con.execute("DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE COLUMN_KIND = 'FACT' "
+                     "AND OBJECT_REF_ID IN (SELECT FACT_ID FROM SYS_SEMANTIC.FACTS "
+                     "WHERE FACT_NAME = 'quoted_probe')")
+        con.execute("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES "
+                     "WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID IN ("
+                     "SELECT FACT_ID FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'quoted_probe')")
+        con.execute("DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS "
+                     "WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID IN ("
+                     "SELECT FACT_ID FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'quoted_probe')")
+        con.execute("DELETE FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'quoted_probe'")
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+
         add_replace_rows = fetchall(
             con,
             "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION("

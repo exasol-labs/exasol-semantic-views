@@ -115,6 +115,10 @@ the published object.
 Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.
 
+Every name position accepts a double-quoted identifier for names that collide
+with SQL keywords (`ON ENTITY "order"`); the quoted text must still be a valid
+identifier.
+
 `ALTER SEMANTIC VIEW` currently supports `REPLACE FACTS`, `REPLACE METRICS`,
 single `ADD OR REPLACE FACT`, single `ADD OR REPLACE METRIC`, `DROP METRIC`,
 and `RENAME METRIC ... TO ...`. Either `REPLACE` block is a valid statement on

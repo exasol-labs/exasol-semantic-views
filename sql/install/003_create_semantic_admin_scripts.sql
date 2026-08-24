@@ -20161,8 +20161,18 @@ local function normalize_name(value, label)
         error("SEMANTIC_DDL_001: " .. label .. " is required")
     end
     local name = trim(value)
+    -- A double-quoted identifier is how SQL authors write a name that collides
+    -- with a reserved word, and the demo model ships one ('order'). The
+    -- tokenizer already decodes a quoted token where a name is read from one,
+    -- so quoted metric, fact, model, and object names were accepted while a
+    -- clause read from raw source text -- ON ENTITY -- was not. Decode here so
+    -- every name position in a statement behaves the same way.
+    local original = name
+    if string.match(name, '^".*"$') then
+        name = string.gsub(string.sub(name, 2, -2), '""', '"')
+    end
     if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
-        error("SEMANTIC_DDL_002: invalid " .. label .. ": " .. name)
+        error("SEMANTIC_DDL_002: invalid " .. label .. ": " .. original)
     end
     return name
 end
@@ -21415,7 +21425,78 @@ local function metric_id_for_object(model, object_id_value, metric_name)
         metric_name = metric_name,
     })
     if metric_id == nil then
-        error("SEMANTIC_DDL_080: metric not found in semantic view: " .. metric_name)
+        -- "not found" reads as a contradiction when the metric is still listed
+        -- in SEMANTIC_CATALOG.METRIC_OVERVIEW, which keeps a dropped metric as
+        -- an INACTIVE row with no object membership. Say which of the three
+        -- states actually holds.
+        local object_name = scalar([[
+            SELECT OBJECT_NAME FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+            WHERE OBJECT_ID = :object_id
+        ]], {object_id = object_id_value}) or tostring(object_id_value)
+        local active_count = scalar([[
+            SELECT COUNT(*)
+            FROM SYS_SEMANTIC.METRICS
+            WHERE MODEL_ID = :model_id
+              AND VERSION_ID = :version_id
+              AND STATUS = 'ACTIVE'
+              AND UPPER(METRIC_NAME) = UPPER(:metric_name)
+        ]], {
+            model_id = model.model_id,
+            version_id = model.version_id,
+            metric_name = metric_name,
+        })
+        local total_count = scalar([[
+            SELECT COUNT(*)
+            FROM SYS_SEMANTIC.METRICS
+            WHERE MODEL_ID = :model_id
+              AND VERSION_ID = :version_id
+              AND UPPER(METRIC_NAME) = UPPER(:metric_name)
+        ]], {
+            model_id = model.model_id,
+            version_id = model.version_id,
+            metric_name = metric_name,
+        })
+        if tonumber(active_count or 0) > 0 then
+            local other_objects = {}
+            for _, row in ipairs(query([[
+                SELECT so.OBJECT_NAME
+                FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
+                JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
+                  ON so.OBJECT_ID = oc.OBJECT_ID
+                JOIN SYS_SEMANTIC.METRICS mt
+                  ON mt.METRIC_ID = oc.OBJECT_REF_ID
+                WHERE oc.COLUMN_KIND = 'METRIC'
+                  AND mt.MODEL_ID = :model_id
+                  AND mt.VERSION_ID = :version_id
+                  AND mt.STATUS = 'ACTIVE'
+                  AND UPPER(mt.METRIC_NAME) = UPPER(:metric_name)
+                ORDER BY so.OBJECT_NAME
+            ]], {
+                model_id = model.model_id,
+                version_id = model.version_id,
+                metric_name = metric_name,
+            }) or {}) do
+                other_objects[#other_objects + 1] =
+                    tostring(row_value(row, "OBJECT_NAME", 1))
+            end
+            if #other_objects > 0 then
+                error("SEMANTIC_DDL_080: metric " .. metric_name .. " is not a column of"
+                    .. " semantic view " .. object_name .. "; it is exposed by: "
+                    .. table.concat(other_objects, ", ") .. ".")
+            end
+            error("SEMANTIC_DDL_080: metric " .. metric_name .. " is active in this model"
+                .. " but is not a column of semantic view " .. object_name
+                .. "; add it with ADD OR REPLACE METRIC before dropping or renaming it.")
+        end
+        if tonumber(total_count or 0) > 0 then
+            error("SEMANTIC_DDL_080: metric " .. metric_name .. " was already dropped from"
+                .. " semantic view " .. object_name .. "; it remains in"
+                .. " SEMANTIC_CATALOG.METRIC_OVERVIEW with STATUS = 'INACTIVE' and no"
+                .. " object membership as a record of the definition. Re-add it with"
+                .. " ADD OR REPLACE METRIC.")
+        end
+        error("SEMANTIC_DDL_080: metric not found in semantic view " .. object_name
+            .. ": " .. metric_name)
     end
     return metric_id
 end

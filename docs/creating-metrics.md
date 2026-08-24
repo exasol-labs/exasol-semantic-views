@@ -179,6 +179,31 @@ keeps the old name as a synonym. Drop removes the named object's membership and
 deactivates the metric after its final membership is removed. Both operations
 validate atomically and roll back when they would leave an invalid model.
 
+A dropped metric is deactivated, not deleted: it stays in
+`SEMANTIC_CATALOG.METRICS` and `SEMANTIC_CATALOG.METRIC_OVERVIEW` with
+`STATUS = 'INACTIVE'` and, once its last membership is gone, `OBJECT_NAME` of
+`NULL`. That row is the record of the definition, so filter on
+`STATUS = 'ACTIVE'` for the live surface. Dropping it a second time is refused
+with `SEMANTIC_DDL_080`, which names which of the three states applies — already
+dropped, active but a column of a different semantic view (the other view is
+named), or no such metric in the model.
+
+### Names that collide with SQL keywords
+
+Any name position in a statement accepts a double-quoted identifier, which is
+how a name that collides with a reserved word is written. The demo model's
+`order` entity is one:
+
+```sql
+ALTER SEMANTIC VIEW "sales"."ORDER_HEADER"
+ADD OR REPLACE FACT freight ON ENTITY "order"
+  AS o.freight_amount RETURNS DECIMAL(18,2) ADDITIVE PUBLIC;
+```
+
+Quoting selects the name, it does not widen what a name may be: the quoted text
+still has to be a valid identifier, so `"order line"` is refused with
+`SEMANTIC_DDL_002`.
+
 When Semantic SQL is enabled, Exasol routes that statement through the
 preprocessor:
 

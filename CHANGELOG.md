@@ -8,6 +8,17 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Quoted identifiers in Semantic DDL
+
+- The demo model ships an entity named `order`, a reserved word, and
+  `ON ENTITY "order"` was refused with `SEMANTIC_DDL_002` while unquoted `order`
+  parsed. Quoted metric, fact, model, and object names were already accepted —
+  the tokenizer decodes a quoted token — but `ON ENTITY` reads raw source text,
+  so a single statement disagreed with itself about quoting.
+- Every name position now accepts a double-quoted identifier. Quoting selects a
+  name, it does not widen what a name may be: the quoted text still has to be a
+  valid identifier, so `"order line"` is still refused, echoed as written.
+
 #### Column introspection (`CATALOG_COLUMNS`, `COMPILE_RESULT_SCHEMA_FOR_AGENT`)
 
 - The catalog is 40+ views whose column names are not guessable from the concept
@@ -229,6 +240,19 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Changed
 
+#### `SEMANTIC_DDL_080` names which state blocked a metric lookup
+
+- A dropped metric is deactivated, not deleted: it stays in
+  `SEMANTIC_CATALOG.METRIC_OVERVIEW` as an `INACTIVE` row whose `OBJECT_NAME` is
+  `NULL` once its last membership is gone. `DROP METRIC` answering "metric not
+  found" for a metric the reader can still see read as a contradiction.
+- `DROP METRIC` and `RENAME METRIC` now distinguish the three states: already
+  dropped (naming the `INACTIVE` row and how to re-add it), active but a column
+  of a different semantic view (naming that view), and genuinely absent (the
+  original wording, now naming the view searched).
+- `docs/creating-metrics.md` documents the deactivate-not-delete lifecycle and
+  the `STATUS = 'ACTIVE'` filter for the live surface.
+
 #### Compile results are read by column name
 
 - `EXECUTE SCRIPT` result sets are named — `RETURNS TABLE` carries the names over
@@ -243,6 +267,14 @@ All notable changes to Exasol Semantic Views are documented here.
   `CATALOG_COLUMNS` against `EXA_ALL_COLUMNS`; `tests/test_semantic_client.py`
   asserts the same contract against the install SQL without a database, and that
   the client never indexes a result row positionally.
+
+#### `EXASOL_PORT` is documented where the other connection variables are
+
+- The README listed `EXASOL_HOST`, `EXASOL_USER`, and `EXASOL_PASSWORD` but not
+  the port, which `install.py --help` documented all along. On Exasol Personal
+  only the first deployment gets 8563, so overriding the port is the common
+  case; the README now shows the variable, the `--port` flag, and how to read
+  the port back out of a deployment.
 
 #### The sales demo model is multi-grain, so fan-out protection is demonstrable
 

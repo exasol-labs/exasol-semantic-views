@@ -421,6 +421,13 @@ exasol install local
 exasol status
 ```
 
+Each deployment picks its own port, and only the first one gets 8563. Export it
+so every tool in this repo reaches the right deployment:
+
+```sh
+export EXASOL_PORT=$(jq -r .connection.dbPort ~/.exasol/personal/deployments/default/deployment.json)
+```
+
 Create a Python environment, install the client dependency, and install ESV with its sales example:
 
 ```sh
@@ -494,11 +501,23 @@ python3 tools/install.py
 
 This packages the Lua runtime into install SQL and runs all seven install scripts
 in order. Connection defaults to `localhost:8563` with user `sys`/`exasol`. Override
-with environment variables:
+with environment variables — `EXASOL_HOST`, `EXASOL_PORT`, `EXASOL_USER`,
+`EXASOL_PASSWORD` — or with `--port`:
 
 ```sh
-EXASOL_HOST=myhost EXASOL_USER=admin EXASOL_PASSWORD=secret python3 tools/install.py
+EXASOL_HOST=myhost EXASOL_PORT=60930 EXASOL_USER=admin EXASOL_PASSWORD=secret \
+  python3 tools/install.py
 ```
+
+On Exasol Personal only the *first* deployment gets 8563, so overriding the port
+is the common case rather than the exception. Read the port back from the
+deployment and export it once for every tool in this repo:
+
+```sh
+export EXASOL_PORT=$(jq -r .connection.dbPort ~/.exasol/personal/deployments/default/deployment.json)
+```
+
+Substitute the deployment name if you created it with `exasol install local -d <name>`.
 
 To also load the bundled sales demo model:
 
