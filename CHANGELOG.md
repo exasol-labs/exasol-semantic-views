@@ -239,6 +239,11 @@ All notable changes to Exasol Semantic Views are documented here.
 - An unknown field now returns `NEEDS_CLARIFICATION` with near-miss candidates
   from the same object, or names the semantic view the field actually belongs to,
   both in the message and in `CLARIFICATION_JSON`.
+- **Contract note:** the status of an unknown-field refusal changes from `ERROR`
+  to `NEEDS_CLARIFICATION` *only when there is something to clarify*. With no
+  near-miss and no other view, the field is simply wrong and the status stays
+  `ERROR`, so a consumer keying on `ERROR` sees a change only where the compiler
+  now has an answer to offer.
 
 #### `SEMANTIC_ADMIN_019` did not say who owned the name
 

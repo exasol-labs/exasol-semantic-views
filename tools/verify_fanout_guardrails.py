@@ -133,7 +133,14 @@ def main() -> None:
         "metrics": ["total_freight"], "dimensions": ["product_category"],
         "client": "verify_fanout_guardrails",
     })
-    assert_equal("total_freight by product_category refused", result["status"], "ERROR")
+    # The refusal now names where the field does live, so the status is
+    # NEEDS_CLARIFICATION rather than a bare ERROR: the request is answerable by
+    # querying the other view.
+    assert_equal("total_freight by product_category refused", result["status"],
+                 "NEEDS_CLARIFICATION")
+    assert_equal("refusal code", result["error_code"], "SEMANTIC_REQUEST_020")
+    assert_contains("refusal names the owning view", result["error_message"],
+                    "semantic view SALES")
     print(f"   {result['error_code']}: {result['error_message']}")
 
     # ------------------------------------------------------------------
