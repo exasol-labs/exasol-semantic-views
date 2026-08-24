@@ -378,6 +378,96 @@ SELECT 'HANDLE_TYPE', 'AGENT_REQUEST', 'Use with EXPLAIN_COMPILED_SQL and RECORD
 UNION ALL
 SELECT 'HANDLE_TYPE', 'QUERY_LOG', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK.', FALSE, 'string', 'AGENT_REQUEST, QUERY_LOG';
 
+-- The compile result contract, as data.
+--
+-- COMPILE_REQUEST_JSON, COMPILE_SQL, and COMPILE_SQL_DEBUG each return nine
+-- columns. A consumer that reads them positionally has to know two things that
+-- are easy to get wrong, and that a documentation error already got wrong once
+-- (see docs/known-issues.md): ORIGINAL_SQL is present but always NULL for the
+-- JSON entrypoint, and the ninth column is AGENT_REQUEST_ID for two of the
+-- scripts but QUERY_LOG_ID for the debug variant.
+--
+-- The first eight columns are shared by construction here, so the three
+-- layouts cannot drift apart in this view; tools/verify_catalog_introspection.py
+-- asserts every row against the live result set of each script.
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT AS
+WITH ENTRYPOINTS AS (
+  SELECT
+    'COMPILE_REQUEST_JSON' AS SCRIPT_NAME,
+    'AGENT_REQUEST_ID' AS HANDLE_COLUMN,
+    'AGENT_REQUEST' AS HANDLE_TYPE,
+    FALSE AS ECHOES_ORIGINAL_SQL
+  UNION ALL
+  SELECT 'COMPILE_SQL', 'AGENT_REQUEST_ID', 'AGENT_REQUEST', TRUE
+  UNION ALL
+  SELECT 'COMPILE_SQL_DEBUG', 'QUERY_LOG_ID', 'QUERY_LOG', TRUE
+),
+LAYOUT AS (
+  SELECT
+    1 AS ORDINAL_POSITION,
+    'STATUS' AS COLUMN_NAME,
+    CAST('VARCHAR(32)' AS VARCHAR(30)) AS DATA_TYPE,
+    CAST('OK, ERROR, NEEDS_CLARIFICATION' AS VARCHAR(200)) AS ALLOWED_VALUES,
+    CAST('Never NULL.' AS VARCHAR(200)) AS NULL_WHEN,
+    CAST('Compile outcome. Check this before reading any other column.'
+      AS VARCHAR(500)) AS DESCRIPTION
+  UNION ALL
+  SELECT 2, 'ERROR_CODE', 'VARCHAR(128)', NULL, 'NULL when STATUS is OK.',
+    'Stable SEMANTIC_REQUEST_* or SEMANTIC_QUERY_* code for a refusal.'
+  UNION ALL
+  SELECT 3, 'ERROR_MESSAGE', 'VARCHAR(2000000)', NULL, 'NULL when STATUS is OK.',
+    'Human-readable refusal text naming the blocking object where one applies.'
+  UNION ALL
+  SELECT 4, 'ORIGINAL_SQL', 'VARCHAR(2000000)', NULL,
+    'NULL unless the entrypoint takes Semantic SQL.',
+    'The request as submitted, echoed back for logging and diffing.'
+  UNION ALL
+  SELECT 5, 'GENERATED_SQL', 'VARCHAR(2000000)', NULL,
+    'NULL when STATUS is not OK.',
+    'Executable physical SQL. This is the column to run.'
+  UNION ALL
+  SELECT 6, 'PLAN_JSON', 'VARCHAR(2000000)', NULL,
+    'NULL when compilation stopped before planning.',
+    'Plan provenance: relationship paths, proofs, representations, '
+      || 'materialization decisions, and warnings.'
+  UNION ALL
+  SELECT 7, 'CLARIFICATION_JSON', 'VARCHAR(2000000)', NULL,
+    'NULL unless STATUS is NEEDS_CLARIFICATION.',
+    'Candidate fields and the question to ask when a request is ambiguous.'
+  UNION ALL
+  SELECT 8, 'VALIDATION_RUN_ID', 'DECIMAL(18,0)', NULL,
+    'NULL when no validation run gated the request.',
+    'The validation run the compile was proven against.'
+)
+SELECT
+  e.SCRIPT_NAME,
+  l.ORDINAL_POSITION,
+  l.ORDINAL_POSITION - 1 AS ZERO_BASED_INDEX,
+  l.COLUMN_NAME,
+  l.DATA_TYPE,
+  l.ALLOWED_VALUES,
+  CASE
+    WHEN l.COLUMN_NAME = 'ORIGINAL_SQL' AND NOT e.ECHOES_ORIGINAL_SQL
+      THEN 'Always NULL for this script; the column is still present, so '
+        || 'positional indices line up with the other entrypoints.'
+    ELSE l.NULL_WHEN
+  END AS NULL_WHEN,
+  l.DESCRIPTION
+FROM ENTRYPOINTS e
+CROSS JOIN LAYOUT l
+UNION ALL
+SELECT
+  e.SCRIPT_NAME,
+  9,
+  8,
+  e.HANDLE_COLUMN,
+  'DECIMAL(18,0)',
+  NULL,
+  'NULL when the request was not logged.',
+  'Handle for EXPLAIN_COMPILED_SQL and RECORD_AGENT_FEEDBACK, with handle type '
+    || e.HANDLE_TYPE || '. The ninth column differs by entrypoint.'
+FROM ENTRYPOINTS e;
+
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.MEASURE_GROUPS_FOR_AGENT AS
 SELECT
   MODEL_ID,

@@ -1066,6 +1066,48 @@ JOIN SYS_SEMANTIC.AGENT_SUGGESTIONS s
   ON s.SUGGESTION_ID = r.SUGGESTION_ID
 LEFT JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = s.MODEL_ID;
 
+-- Self-describing column index for every semantic surface.
+--
+-- The installed catalog is 40+ views whose column names are not guessable from
+-- the concept they expose: CURRENT_VALIDATION_ISSUES names the rule
+-- RULE_CODE, not ISSUE_CODE; VALIDATION_RUNS ends a run at FINISHED_AT, not
+-- COMPLETED_AT. Answering "what are the columns of X?" is therefore one query
+-- rather than a documentation table that rots on the next release:
+--
+--   SELECT ORDINAL_POSITION, COLUMN_NAME, DATA_TYPE
+--   FROM SEMANTIC_CATALOG.CATALOG_COLUMNS
+--   WHERE SURFACE_NAME = 'VALIDATION_RUNS'
+--   ORDER BY ORDINAL_POSITION;
+--
+-- Derived from EXA_ALL_COLUMNS, so it cannot drift from the installed objects,
+-- and EXA_ALL_COLUMNS is filtered by the querying session's own privileges --
+-- each caller sees exactly the surfaces they may read. Published model schemas
+-- are included, so the typed BI views a PUBLISH_MODEL creates are discoverable
+-- from the same place as the catalog itself.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.CATALOG_COLUMNS AS
+SELECT
+  CASE c.COLUMN_SCHEMA
+    WHEN 'SEMANTIC_CATALOG' THEN 'CATALOG'
+    WHEN 'SEMANTIC_AGENT' THEN 'AGENT'
+    WHEN 'SYS_SEMANTIC' THEN 'CORE'
+    ELSE 'PUBLISHED'
+  END AS SURFACE_KIND,
+  c.COLUMN_SCHEMA AS SURFACE_SCHEMA,
+  c.COLUMN_TABLE AS SURFACE_NAME,
+  c.COLUMN_OBJECT_TYPE AS SURFACE_TYPE,
+  c.COLUMN_ORDINAL_POSITION AS ORDINAL_POSITION,
+  c.COLUMN_NAME,
+  c.COLUMN_TYPE AS DATA_TYPE,
+  c.COLUMN_IS_NULLABLE AS IS_NULLABLE,
+  c.COLUMN_COMMENT AS DESCRIPTION
+FROM EXA_ALL_COLUMNS c
+WHERE c.COLUMN_SCHEMA IN ('SEMANTIC_CATALOG', 'SEMANTIC_AGENT', 'SYS_SEMANTIC')
+   OR c.COLUMN_SCHEMA IN (
+        SELECT PUBLISHED_SCHEMA
+        FROM SYS_SEMANTIC.MODELS
+        WHERE PUBLISHED_SCHEMA IS NOT NULL
+      );
+
 -- METRIC_TYPE: additive storage policy used by the compiler join/aggregation planner.
 --   Values: SIMPLE (fully additive), FILTERED (conditional aggregate), RATIO (non-additive quotient),
 --   DERIVED (formula over other metrics), WINDOW (pre-computed rolling window -- not yet supported).

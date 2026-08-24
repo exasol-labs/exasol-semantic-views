@@ -48,6 +48,13 @@ sh tools/run_lua_tests.sh
 # partners. Builds a disposable fanning model and asserts both refusal lanes.
 "$PYTHON_BIN" tools/verify_many_to_many_refusal.py
 
+# Catalog introspection: 40+ views with unguessable column names, and three
+# compile entrypoints whose ninth column is not the same. Asserts
+# CATALOG_COLUMNS against EXA_ALL_COLUMNS and the published compile-result
+# contract against each script's live result set, which is the drift that
+# already shipped a wrong column layout once.
+"$PYTHON_BIN" tools/verify_catalog_introspection.py
+
 # Path ambiguity: a tie between safe paths is refused, but an alternative of a
 # different length used to lose silently — shortest wins, warnings: []. Asserts
 # the authoring warning, the plan warning, the strict-mode refusal, and that the

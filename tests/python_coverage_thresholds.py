@@ -13,14 +13,16 @@ appearing here with 0%.
 Baselines captured 2026-08-22 from a fresh run of the four database-free
 test files plus `tests/test_property.py`; treat these as the point-of-truth
 we want to hold in place, not as aspirational targets. `tools/install.py`
-ratcheted 2026-08-23 with the build-provenance helpers.
+ratcheted 2026-08-23 with the build-provenance helpers, and again 2026-08-24
+alongside `tools/semantic_client.py`, whose result mapping is now unit-tested in
+`tests/test_semantic_client.py`.
 """
 
 from __future__ import annotations
 
 LINE_THRESHOLDS: dict[str, float] = {
-    "tools/semantic_client.py": 30.0,
-    "tools/install.py":         48.5,
+    "tools/semantic_client.py": 44.7,
+    "tools/install.py":         49.1,
     "tools/osi.py":             57.7,
     "tools/run_sql_files.py":   62.3,
     "tools/release_notes.py":   72.0,

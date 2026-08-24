@@ -8,6 +8,26 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Column introspection (`CATALOG_COLUMNS`, `COMPILE_RESULT_SCHEMA_FOR_AGENT`)
+
+- The catalog is 40+ views whose column names are not guessable from the concept
+  they expose (`CURRENT_VALIDATION_ISSUES` names the rule `RULE_CODE`, not
+  `ISSUE_CODE`; `VALIDATION_RUNS` ends a run at `FINISHED_AT`, not
+  `COMPLETED_AT`), and the only answer was to read the docs or guess.
+- `SEMANTIC_CATALOG.CATALOG_COLUMNS` answers "what are the columns of X?" in one
+  query, across `SEMANTIC_CATALOG` (`SURFACE_KIND = CATALOG`), `SEMANTIC_AGENT`
+  (`AGENT`), `SYS_SEMANTIC` (`CORE`), and published model schemas
+  (`PUBLISHED`). Derived from `EXA_ALL_COLUMNS`, so it cannot drift from the
+  installed objects, and privilege-filtered per session: a reader granted
+  `SEMANTIC_CATALOG` alone sees the catalog rows and nothing else.
+- `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT` publishes the compile result
+  contract as data — nine columns per entrypoint with ordinal, zero-based index,
+  type, null conditions, and meaning. It records the two details a positional
+  reader gets wrong: `ORIGINAL_SQL` is present but always `NULL` for
+  `COMPILE_REQUEST_JSON`, and the ninth column is `QUERY_LOG_ID` for
+  `COMPILE_SQL_DEBUG` where the other two entrypoints have `AGENT_REQUEST_ID`.
+  The three layouts share their first eight rows by construction.
+
 #### Path-choice reporting (`SEMANTIC_MODEL_055`, `RELATIONSHIP_PATH_ALTERNATIVES`)
 
 - Path proofs measured ambiguity as "more than one *shortest* safe path" and
@@ -208,6 +228,21 @@ All notable changes to Exasol Semantic Views are documented here.
   object on the other side of the bridge.
 
 ### Changed
+
+#### Compile results are read by column name
+
+- `EXECUTE SCRIPT` result sets are named — `RETURNS TABLE` carries the names over
+  the wire — so nothing needs to know which index `GENERATED_SQL` sits at.
+  Positional reads are what turned one wrong column layout in the docs into
+  consumers silently reading `NULL`.
+- `tools/semantic_client.py` now maps compile results by the result set's own
+  column names. `CLAUDE.md` documents that pattern instead of a hardcoded index
+  map, and points at the queryable contract.
+- Regressions: `tools/verify_catalog_introspection.py` (in the smoke suite)
+  asserts every published contract row against each script's live result set and
+  `CATALOG_COLUMNS` against `EXA_ALL_COLUMNS`; `tests/test_semantic_client.py`
+  asserts the same contract against the install SQL without a database, and that
+  the client never indexes a result row positionally.
 
 #### The sales demo model is multi-grain, so fan-out protection is demonstrable
 

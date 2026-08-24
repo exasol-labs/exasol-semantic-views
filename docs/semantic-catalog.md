@@ -741,6 +741,7 @@ Important views:
 - `VALIDATION_ERRORS_FOR_AGENT`
 - `EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `COMPILE_REQUEST_SCHEMA_FOR_AGENT`
+- `COMPILE_RESULT_SCHEMA_FOR_AGENT`
 - `REQUEST_HISTORY_FOR_AGENT`
 - `MODEL_EVOLUTION_REVIEW_QUEUE`
 
@@ -752,6 +753,8 @@ validation errors and session preconditions for visible models.
 static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` contains the accepted structured-request
 keys, filter aliases, operators, order-by fields, handle types, and enum values.
+`COMPILE_RESULT_SCHEMA_FOR_AGENT` contains the nine result columns of each
+compile entrypoint with their order, null conditions, and meanings.
 `REQUEST_HISTORY_FOR_AGENT` includes `STARTED_AT` and the compatibility alias
 `REQUEST_TIME`. Use the aliases when integrating with generic agent protocols
 that expect those names.
@@ -764,6 +767,49 @@ Use `SEMANTIC_AGENT` and `SEMANTIC_CATALOG` for integrations and docs examples.
 Direct `SYS_SEMANTIC` reads are for internal maintenance; those tables are
 normalized around ids and do not repeat every convenience column such as
 `MODEL_NAME`.
+
+## Column Introspection
+
+The catalog is 40+ views, and a column name is not always guessable from the
+concept it exposes: `CURRENT_VALIDATION_ISSUES` names the rule `RULE_CODE`, not
+`ISSUE_CODE`, and `VALIDATION_RUNS` ends a run at `FINISHED_AT`, not
+`COMPLETED_AT`. `SEMANTIC_CATALOG.CATALOG_COLUMNS` answers "what are the columns
+of X?" in one query:
+
+```sql
+SELECT ORDINAL_POSITION, COLUMN_NAME, DATA_TYPE
+FROM SEMANTIC_CATALOG.CATALOG_COLUMNS
+WHERE SURFACE_NAME = 'VALIDATION_RUNS'
+ORDER BY ORDINAL_POSITION;
+```
+
+`SURFACE_KIND` separates the surfaces:
+
+| `SURFACE_KIND` | Schema | Use |
+|---|---|---|
+| `CATALOG` | `SEMANTIC_CATALOG` | human and tool introspection |
+| `AGENT` | `SEMANTIC_AGENT` | role-scoped agent discovery |
+| `CORE` | `SYS_SEMANTIC` | internal maintenance only |
+| `PUBLISHED` | `SEMANTIC_<MODEL>` | typed BI views a `PUBLISH_MODEL` created |
+
+To list the surfaces themselves rather than their columns:
+
+```sql
+SELECT DISTINCT SURFACE_KIND, SURFACE_NAME, SURFACE_TYPE
+FROM SEMANTIC_CATALOG.CATALOG_COLUMNS
+ORDER BY SURFACE_KIND, SURFACE_NAME;
+```
+
+The view is derived from `EXA_ALL_COLUMNS`, so it cannot drift from the objects
+actually installed — there is no hand-maintained column list to fall behind a
+release. `EXA_ALL_COLUMNS` is filtered by the querying session's own privileges,
+so each caller sees exactly the surfaces they are allowed to read; a user with
+`SELECT` on `SEMANTIC_CATALOG` alone sees the `CATALOG` rows and nothing else.
+
+Script result sets are not catalog objects, so they are not in
+`CATALOG_COLUMNS`. The compile entrypoints publish their layout as data in
+`SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`; see
+[the compiler doc](semantic-compiler.md#reading-the-compile-result).
 
 ## Discovery Helpers
 

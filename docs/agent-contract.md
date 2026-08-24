@@ -47,6 +47,7 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT`
 - `SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`
+- `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`
 - `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`
 
@@ -60,6 +61,13 @@ validation errors and session preconditions.
 static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted request keys, filter
 aliases, operators, order fields, handle types, and enum values as rows.
+`COMPILE_RESULT_SCHEMA_FOR_AGENT` exposes the other half of that contract: the
+nine result columns of each compile entrypoint, in order, with the conditions
+under which each is `NULL`. Read a compile result by column name; the result set
+is named. Where a caller must index positionally, take the index from
+`ZERO_BASED_INDEX` rather than assuming, because the ninth column is
+`AGENT_REQUEST_ID` for `COMPILE_REQUEST_JSON` and `COMPILE_SQL` but
+`QUERY_LOG_ID` for `COMPILE_SQL_DEBUG`.
 `REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the compatibility
 alias `REQUEST_TIME`.
 
@@ -198,7 +206,10 @@ source.
 
 The database also exposes this contract in
 `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`, so adapters can discover the
-accepted keys without scraping documentation.
+accepted keys without scraping documentation, and the result layout in
+`SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`. Catalog and agent view columns
+are discoverable the same way through
+`SEMANTIC_CATALOG.CATALOG_COLUMNS`.
 
 ### Optional hierarchical results
 

@@ -33,52 +33,57 @@ def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def compile_request(conn: Any, request: dict) -> dict:
-    """Call COMPILE_REQUEST_JSON and return a dict with named keys.
+def _named_row(statement: Any) -> dict | None:
+    """Map one script result row by the result set's own column names.
 
-    Returns a dict with keys:
+    EXECUTE SCRIPT result sets are named -- a RETURNS TABLE declaration carries
+    STATUS, ERROR_CODE, and so on over the wire -- so nothing here needs to know
+    which index GENERATED_SQL sits at. Positional reads are what made an
+    incorrect column layout in the docs turn into consumers silently reading
+    NULL (see docs/known-issues.md), and the ninth column is AGENT_REQUEST_ID
+    for COMPILE_SQL but QUERY_LOG_ID for COMPILE_SQL_DEBUG. Query
+    SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT for the contract as data.
+    """
+    row = statement.fetchone()
+    if row is None:
+        return None
+    names = [name.lower() for name in statement.columns().keys()]
+    return dict(zip(names, row))
+
+
+def _client_error(message: str) -> dict:
+    return {"status": "ERROR", "error_code": "CLIENT_ERROR", "error_message": message}
+
+
+def compile_request(conn: Any, request: dict) -> dict:
+    """Call COMPILE_REQUEST_JSON and return a dict keyed by result column name.
+
+    Keys are the result set's own lower-cased column names:
       status, error_code, error_message, original_sql, generated_sql,
       plan_json, clarification_json, validation_run_id, agent_request_id
+
+    original_sql is always None here: the column exists so positional indices
+    line up with COMPILE_SQL, but a JSON request has no original SQL text.
     """
     sql = f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({_sql_string(json.dumps(request))})"
-    row = conn.execute(sql).fetchone()
-    if row is None:
-        return {"status": "ERROR", "error_code": "CLIENT_ERROR", "error_message": "No result row returned."}
-    return {
-        "status":            row[0],
-        "error_code":        row[1],
-        "error_message":     row[2],
-        "original_sql":      row[3],
-        "generated_sql":     row[4],
-        "plan_json":         row[5],
-        "clarification_json": row[6],
-        "validation_run_id": row[7],
-        "agent_request_id":  row[8],
-    }
+    result = _named_row(conn.execute(sql))
+    if result is None:
+        return _client_error("No result row returned.")
+    return result
 
 
 def compile_sql(conn: Any, semantic_sql: str) -> dict:
-    """Call COMPILE_SQL and return a dict with named keys.
+    """Call COMPILE_SQL and return a dict keyed by result column name.
 
-    Returns a dict with keys:
+    Keys are the result set's own lower-cased column names:
       status, error_code, error_message, original_sql, generated_sql,
       plan_json, clarification_json, validation_run_id, agent_request_id
     """
     sql = f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL({_sql_string(semantic_sql)})"
-    row = conn.execute(sql).fetchone()
-    if row is None:
-        return {"status": "ERROR", "error_code": "CLIENT_ERROR", "error_message": "No result row returned."}
-    return {
-        "status":            row[0],
-        "error_code":        row[1],
-        "error_message":     row[2],
-        "original_sql":      row[3],
-        "generated_sql":     row[4],
-        "plan_json":         row[5],
-        "clarification_json": row[6],
-        "validation_run_id": row[7],
-        "agent_request_id":  row[8],
-    }
+    result = _named_row(conn.execute(sql))
+    if result is None:
+        return _client_error("No result row returned.")
+    return result
 
 
 def execute_semantic_sql(conn: Any, semantic_sql: str) -> list[dict]:

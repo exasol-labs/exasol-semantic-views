@@ -165,23 +165,56 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales');
 
 ### COMPILE_REQUEST_JSON and COMPILE_SQL Column Layout
 
-Both scripts return the **identical 9-column** result set:
+`COMPILE_REQUEST_JSON` and `COMPILE_SQL` return the **identical 9-column** result set:
 
 `STATUS, ERROR_CODE, ERROR_MESSAGE, ORIGINAL_SQL, GENERATED_SQL, PLAN_JSON, CLARIFICATION_JSON, VALIDATION_RUN_ID, AGENT_REQUEST_ID`
 
-`GENERATED_SQL` is at **index 4** for both. For `COMPILE_REQUEST_JSON` there is no original SQL string, so `ORIGINAL_SQL` (index 3) is always `NULL` — but the column is still present, so positional indices line up with `COMPILE_SQL`.
+For `COMPILE_REQUEST_JSON` there is no original SQL string, so `ORIGINAL_SQL` is
+always `NULL` — but the column is still present, so positional indices line up
+with `COMPILE_SQL`. `COMPILE_SQL_DEBUG` shares the first eight columns and ends
+with **`QUERY_LOG_ID`**, not `AGENT_REQUEST_ID`.
 
-Python helper pattern to avoid positional indexing bugs (matches `tools/semantic_client.py`):
+**Read the result set by column name, not by index.** `EXECUTE SCRIPT` result
+sets are named — the `RETURNS TABLE` declaration carries the names over the
+wire — so no consumer needs to know where `GENERATED_SQL` sits. This is the
+pattern `tools/semantic_client.py` uses:
+
 ```python
 def sql_string(value): return "'" + value.replace("'", "''") + "'"
 
-rows = conn.execute(f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({sql_string(json.dumps(req))})").fetchall()
-row = rows[0]
-result = {"status": row[0], "error_code": row[1], "error_message": row[2],
-          "original_sql": row[3], "generated_sql": row[4], "plan_json": row[5],
-          "clarification_json": row[6], "validation_run_id": row[7], "agent_request_id": row[8]}
+statement = conn.execute(
+    f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({sql_string(json.dumps(req))})")
+names = [name.lower() for name in statement.columns().keys()]
+result = dict(zip(names, statement.fetchone()))
+generated_sql = result["generated_sql"]
 ```
+
+The contract is also queryable, so nothing has to trust a doc that can rot:
+
+```sql
+SELECT ORDINAL_POSITION, COLUMN_NAME, NULL_WHEN, DESCRIPTION
+FROM SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT
+WHERE SCRIPT_NAME = 'COMPILE_SQL' ORDER BY ORDINAL_POSITION;
+```
+
 `EXECUTE SCRIPT` does not support pyexasol bind parameters (`?` or `{name}`) — escape manually with `sql_string()`.
+
+### Catalog Column Introspection
+
+Catalog column names are not guessable from the concept they expose
+(`CURRENT_VALIDATION_ISSUES` uses `RULE_CODE`, not `ISSUE_CODE`;
+`VALIDATION_RUNS` uses `FINISHED_AT`, not `COMPLETED_AT`). Do not guess, and do
+not hand-maintain a list — ask the catalog:
+
+```sql
+SELECT ORDINAL_POSITION, COLUMN_NAME, DATA_TYPE
+FROM SEMANTIC_CATALOG.CATALOG_COLUMNS
+WHERE SURFACE_NAME = 'VALIDATION_RUNS' ORDER BY ORDINAL_POSITION;
+```
+
+`CATALOG_COLUMNS` covers `SEMANTIC_CATALOG` (`SURFACE_KIND = CATALOG`),
+`SEMANTIC_AGENT` (`AGENT`), `SYS_SEMANTIC` (`CORE`), and published model
+schemas (`PUBLISHED`).
 
 ### SQL Expression Validation: Static Policy, Not SQL Compilation
 

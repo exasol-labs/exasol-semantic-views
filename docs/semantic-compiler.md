@@ -40,6 +40,35 @@ path needs such an edge is refused with `SEMANTIC_REQUEST_042` naming the
 blocking relationship and reason `MANY_TO_MANY_UNSUPPORTED`, rather than
 compiling to a flat join that counts a row once per matching partner.
 
+### Reading the compile result
+
+`COMPILE_REQUEST_JSON`, `COMPILE_SQL`, and `COMPILE_SQL_DEBUG` each return nine
+columns. The result set is **named**: a `RETURNS TABLE` declaration carries
+`STATUS`, `GENERATED_SQL`, and the rest over the wire, so a consumer should map
+by column name and never by index. Two details make positional reads fragile,
+and one of them has already cost consumers a release (see
+[known issues](known-issues.md)):
+
+- `ORIGINAL_SQL` is present for every entrypoint but always `NULL` for
+  `COMPILE_REQUEST_JSON`, which has no original SQL text;
+- the ninth column is `AGENT_REQUEST_ID` for `COMPILE_REQUEST_JSON` and
+  `COMPILE_SQL`, but `QUERY_LOG_ID` for `COMPILE_SQL_DEBUG`.
+
+The contract is queryable rather than only documented:
+
+```sql
+SELECT ORDINAL_POSITION, ZERO_BASED_INDEX, COLUMN_NAME, DATA_TYPE, NULL_WHEN, DESCRIPTION
+FROM SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT
+WHERE SCRIPT_NAME = 'COMPILE_SQL'
+ORDER BY ORDINAL_POSITION;
+```
+
+The three layouts share their first eight rows by construction in that view, and
+`tools/verify_catalog_introspection.py` asserts every row against the live
+result set of each script, so the published contract cannot drift from the
+scripts. For catalog and agent *views*, use
+[`SEMANTIC_CATALOG.CATALOG_COLUMNS`](semantic-catalog.md#column-introspection).
+
 `PLAN_JSON.warnings` carries decisions the compiler made that a governed
 consumer should see. Today it carries one code,
 `RELATIONSHIP_PATH_ALTERNATIVES`: more than one safe relationship path reached a

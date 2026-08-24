@@ -36,6 +36,13 @@ Earlier docs claimed an 8-column layout (`GENERATED_SQL` at index 3); a consumer
 The rest of the tooling (`tools/semantic_client.py`, `verify_milestone3.py`,
 `verify_dimension_discovery.py`, `verify_claude_study_issues.py`) already used the correct mapping.
 
+The durable fix is not to restate the layout correctly but to stop reading it by index: the result
+set is named, `tools/semantic_client.py` now maps by column name, and
+`SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT` publishes the contract as data — including the
+detail that `COMPILE_SQL_DEBUG` ends with `QUERY_LOG_ID` rather than `AGENT_REQUEST_ID`.
+`tools/verify_catalog_introspection.py` asserts that view against each script's live result set, so
+the published contract cannot drift from the scripts again.
+
 ## Historical bugs — status on Exasol 2026.1.0
 
 These were tracked in the old git-ignored `reports/bug-log.md`. None reproduce on a clean install of
