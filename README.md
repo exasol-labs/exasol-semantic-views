@@ -44,8 +44,11 @@ Business model
 
 The result is one governed contract. Modelers can author and review metrics with
 SQL-native Semantic SQL. Humans can query governed metrics as columns. Agents
-can call structured compiler scripts. BI tools can discover typed views. The
-generated SQL still runs inside Exasol, under normal Exasol privileges.
+can call structured compiler scripts. BI tools can discover typed views through
+ordinary JDBC/ODBC metadata once a model is published, and query them in
+sessions that can activate the preprocessor
+([what BI tools see](#what-bi-tools-see)). The generated SQL still runs inside
+Exasol, under normal Exasol privileges.
 
 ## Semantic Model At A Glance
 
@@ -220,7 +223,44 @@ West             1500
 ```
 
 Without the preprocessor, the published view fails loudly with an actionable
-guard error instead of returning misleading placeholder data.
+guard error instead of returning misleading placeholder data:
+
+```text
+SEMANTIC_SURFACE_001: semantic query requires the Lua SQL preprocessor.
+Run EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL() for this session.
+```
+
+### What BI Tools See
+
+`PUBLISH_MODEL` creates the published schema; loading a model does not. Until a
+model is published, `SEMANTIC_SALES` does not exist at all — and Semantic SQL
+still works, because the preprocessor rewrites from the catalog rather than
+from the view, which makes a missing publish easy to overlook. Install the demo
+published with:
+
+```sh
+python3 tools/install.py --example --publish
+```
+
+Once published, the schema holds ordinary Exasol views with typed columns and
+column comments, so JDBC/ODBC metadata discovery works without any adapter:
+
+```sql
+SELECT COLUMN_TABLE, COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT
+FROM SYS.EXA_ALL_COLUMNS WHERE COLUMN_SCHEMA = 'SEMANTIC_SALES';
+--  SALES  TOTAL_REVENUE  DECIMAL(18,2)  Net recognized revenue excluding tax
+```
+
+What that metadata does *not* carry is the governance layer — synonyms,
+certification, verified examples, and which metric/dimension pairs are valid.
+Those live in `SEMANTIC_CATALOG` and `SEMANTIC_AGENT`, and a client that wants
+them reads those views rather than `EXA_ALL_COLUMNS`. Published objects also
+publish a `SEMANTIC_SALES.SEMANTIC_DISCOVERY` table naming the queries to use.
+
+Discovery is therefore adapter-free; *querying* is not. A BI client must be
+able to activate the preprocessor for its session, or the guard error above is
+what it gets. `docs/virtual-schema-adapter.md` is candid that the adapter which
+would remove that requirement does not exist yet.
 
 The preprocessor can be enabled per session, through BI connection
 initialization, or as a database-wide operator setting. See

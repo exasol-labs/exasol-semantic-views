@@ -4,6 +4,7 @@
 Usage:
     python3 tools/install.py                          # install the extension
     python3 tools/install.py --example                # also load the sales demo model
+    python3 tools/install.py --example --publish      # ... and publish it as BI-visible views
     python3 tools/install.py --example --reset        # wipe and reinstall from scratch
     python3 tools/install.py --reset                  # wipe all schemas then reinstall
     python3 tools/install.py --skip-package           # skip Lua packaging (use existing SQL)
@@ -152,6 +153,34 @@ def record_installation(con: object, version: str, state: str,
         f") VALUES ({sql_literal(version)}, {sql_literal(state)}, "
         f"{sql_literal(commit)}, {sql_literal(git_state)}, {sql_literal(checksum)})"
     )
+
+
+def publish_example(con: object) -> None:
+    """Validate and publish the demo model.
+
+    Loading a model does not create its published schema; PUBLISH_MODEL does.
+    """
+    con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")  # type: ignore[attr-defined]
+    con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")  # type: ignore[attr-defined]
+
+
+def example_summary_lines(published: bool) -> list[str]:
+    """Summary lines describing what the demo install actually left behind.
+
+    An unpublished model has no schema at all, and Semantic SQL works anyway,
+    so saying "published" when nothing was published sends people looking for
+    views that do not exist.
+    """
+    if published:
+        return [
+            "  Sales model " + bold("published") + " at " + bold("SEMANTIC_SALES.SALES")
+            + dim(" (typed views, BI-discoverable)"),
+        ]
+    return [
+        "  Sales model " + bold("loaded") + dim(" (DRAFT — no published schema yet)"),
+        dim("    Publish it to expose typed views to BI metadata:"),
+        dim("      EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales');"),
+    ]
 
 
 def display_version(version: str, state: str) -> str:
@@ -358,6 +387,11 @@ def main() -> int:
         help="also load the sales demo model and materializations",
     )
     parser.add_argument(
+        "--publish", action="store_true",
+        help="publish the demo model after loading it, creating the BI-discoverable "
+             "views in SEMANTIC_SALES (implies --example)",
+    )
+    parser.add_argument(
         "--reset", action="store_true",
         help="drop all managed schemas before installing (clean slate)",
     )
@@ -381,7 +415,11 @@ def main() -> int:
         print(red("pyexasol is required:") + "  pip install pyexasol", file=sys.stderr)
         return 2
 
-    total_steps = 3 + (1 if args.example else 0) + (1 if args.reset else 0)
+    # --publish implies --example: there is nothing else to publish.
+    if args.publish:
+        args.example = True
+    total_steps = (3 + (1 if args.example else 0) + (1 if args.reset else 0)
+                   + (1 if args.publish else 0))
     step = 0
 
     # header
@@ -451,6 +489,19 @@ def main() -> int:
         print(f"\n[{step}/{total_steps}] Loading sales example model")
         run_sql_files(con, EXAMPLE_FILES, "example")
 
+    # Optional: publish. Loading the model does not create its published
+    # schema -- PUBLISH_MODEL does. Semantic SQL works either way, because the
+    # preprocessor rewrites from the catalog, so an unpublished model is easy
+    # to miss until a BI client reads JDBC/ODBC metadata and finds nothing.
+    # Left opt-in because a published model is a governed contract: authoring
+    # against it requires compound declarations and passes prospective
+    # validation, which is friction for a model people poke at while learning.
+    if args.publish:
+        step += 1
+        print(f"\n[{step}/{total_steps}] Publishing the sales model", end="  ", flush=True)
+        publish_example(con)
+        print(green("done"))
+
     con.close()
 
     # summary
@@ -468,7 +519,8 @@ def main() -> int:
         print("  " + bold(f"Exasol Semantic Views {provenance}"))
         print(dim("  SELECT * FROM SEMANTIC_CATALOG.PRODUCT_VERSION;"))
         print()
-        print("  Sales model published at " + bold("SEMANTIC_SALES.SALES"))
+        for line in example_summary_lines(args.publish):
+            print(line)
         print()
         print("  Try it:")
         print(dim("    EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL();"))

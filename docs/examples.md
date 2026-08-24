@@ -40,6 +40,11 @@ Runnable example files:
 - `sql/examples/sales_semantic_queries.sql`
 - `tools/verify_fanout_guardrails.py`
 
+The demo installs as a draft. `PUBLISH_MODEL` is what creates the
+`SEMANTIC_SALES` schema and its typed, BI-discoverable views; Semantic SQL
+works before that too, because the preprocessor rewrites from the catalog.
+`python3 tools/install.py --example --publish` does both in one step.
+
 After installation, publish and query the example through the semantic layer:
 
 ```sql

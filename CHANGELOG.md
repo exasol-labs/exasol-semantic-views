@@ -8,6 +8,32 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### The installer claimed a publish it never performed
+
+- `install.py --example` printed "Sales model published at
+  SEMANTIC_SALES.SALES" while leaving the model `DRAFT`. Loading a model does
+  not create its published schema — `PUBLISH_MODEL` does — so `SEMANTIC_SALES`
+  did not exist at all, and a BI client reading JDBC/ODBC metadata found
+  nothing. Semantic SQL worked anyway, because the preprocessor rewrites from
+  the catalog rather than from the view, which is what made the missing publish
+  easy to miss.
+- The summary now says what actually happened: `loaded (DRAFT — no published
+  schema yet)` with the one command to publish, or `published at
+  SEMANTIC_SALES.SALES (typed views, BI-discoverable)`.
+- New `--publish` flag (implies `--example`) validates and publishes the demo,
+  so a BI-discoverable install is one command:
+  `python3 tools/install.py --example --publish`.
+- Left opt-in rather than publishing the demo by default: a published model is
+  a governed contract, where authoring requires compound declarations and every
+  candidate state is validated prospectively. That is correct for production and
+  friction for a model people poke at while learning — including this repo's own
+  validation suite, which works by deliberately breaking the demo model.
+- README gains a **What BI Tools See** section: discovery through
+  `EXA_ALL_COLUMNS` is adapter-free once published, the governance layer lives
+  in `SEMANTIC_CATALOG`/`SEMANTIC_AGENT` rather than in JDBC metadata, and
+  querying still needs a session that can activate the preprocessor. The
+  headline claim now says so instead of "BI tools can discover typed views".
+
 #### Build provenance in the catalog
 
 - The database recorded nothing about the product build serving it: the only

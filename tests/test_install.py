@@ -124,6 +124,27 @@ class BuildProvenanceTest(unittest.TestCase):
         self.assertIn("CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_INSTALL_HISTORY", views)
 
 
+class ExampleInstallSummaryTest(unittest.TestCase):
+    """Loading a model does not publish it, and the summary must say so."""
+
+    def test_publish_example_validates_before_publishing(self):
+        connection = RecordingConnection()
+        INSTALL.publish_example(connection)
+        self.assertEqual(len(connection.sql), 2)
+        self.assertIn("VALIDATE_MODEL('sales')", connection.sql[0])
+        self.assertIn("PUBLISH_MODEL('sales')", connection.sql[1])
+
+    def test_summary_does_not_claim_a_publish_that_did_not_happen(self):
+        drafted = "\n".join(INSTALL.example_summary_lines(False))
+        self.assertIn("DRAFT", drafted)
+        self.assertIn("PUBLISH_MODEL('sales')", drafted)
+        self.assertNotIn("published at", drafted)
+
+        published = "\n".join(INSTALL.example_summary_lines(True))
+        self.assertIn("SEMANTIC_SALES.SALES", published)
+        self.assertNotIn("DRAFT", published)
+
+
 class _Completed:
     def __init__(self, returncode, stdout):
         self.returncode = returncode
