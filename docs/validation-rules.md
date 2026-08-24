@@ -282,6 +282,15 @@ The matrix records:
 - `REASON_CODE`
 - `RELATIONSHIP_PATH`
 
+Validation also rejects a pair whose dimension entity carries F3 temporal
+coverage while the metric is based somewhere else
+(`FUSION_PARTITION_DIMENSION_UNSUPPORTED`). F3 merges aggregate states across
+partitions of a *metric-leaf* entity; reached as a joined dimension, the same
+entity has no defined attribution, and the compiler refuses every such request
+(`SEMANTIC_REQUEST_074`). Declaring coverage on an entity that another object
+reaches this way used to leave that object's published dimensions permanently
+unqueryable with no validation error at all.
+
 Validation accepts same-entity pairs and non-fanout relationship paths. It
 rejects paths that fan out: traversing from the one-side to the many-side of a
 relationship (`ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED`), and any many-to-many

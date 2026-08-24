@@ -1881,6 +1881,132 @@ test("validator rejects metrics whose input grain spans entities", function()
     assert_true(not string.find(plain.message, "row count", 1, true))
 end)
 
+test("validator invalidates a partitioned entity used as a joined dimension", function()
+    -- BUG-F07: F3 applies only to an entity a metric is based on. Declaring
+    -- coverage on an entity that another object reaches as a joined dimension
+    -- made that object's published dimensions permanently unqueryable
+    -- (SEMANTIC_REQUEST_074) with no validation error at all.
+    local order = {id = 1, name = "order"}
+    local line = {id = 2, name = "order_line"}
+    local partitions = {
+        {id = 5, name = "primary", role = "PRIMARY",
+            coverage_predicate = "o.order_ts >= TIMESTAMP '2026-07-01 00:00:00'"},
+        {id = 6, name = "cold", role = "ALTERNATE",
+            coverage_predicate = "o.order_ts < TIMESTAMP '2026-07-01 00:00:00'"},
+    }
+    local freight = {id = 30, name = "total_freight", base_entity_id = 1,
+        expression = "SUM(freight)", aggregation_function = "SUM",
+        metric_kind = "SIMPLE", filters = {},
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 20,
+            ordinal_position = 1}}}
+    local revenue = {id = 31, name = "total_revenue", base_entity_id = 2,
+        expression = "SUM(net_revenue)", aggregation_function = "SUM",
+        metric_kind = "SIMPLE", filters = {},
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 21,
+            ordinal_position = 1}}}
+    local ship_mode = {id = 40, name = "ship_mode", entity_id = 1}
+    local ctx = validation_context({
+        version_id = 2,
+        semantic_objects = {{root_entity_id = 1}, {root_entity_id = 2}},
+        entities = {order, line},
+        entity_by_id = {['1'] = order, ['2'] = line},
+        entity_name_by_id = {['1'] = "order", ['2'] = "order_line"},
+        representations_by_entity = {['1'] = partitions},
+        metrics = {freight, revenue},
+        metric_by_id = {['30'] = freight, ['31'] = revenue},
+        dimensions = {ship_mode},
+        dimension_by_id = {['40'] = ship_mode},
+        facts = {
+            {id = 20, name = "freight", entity_id = 1, data_type = "DECIMAL(18,2)"},
+            {id = 21, name = "net_revenue", entity_id = 2, data_type = "DECIMAL(18,2)"},
+        },
+    })
+    -- order_line reaches order safely; order reaches itself.
+    local safe = {['2'] = {{from_id = 2, to_id = 1, name = "line_to_order",
+        safe = true, reason = "OK"}}}
+    with_query(function() return {} end, function()
+        api.compute_metric_dimension_matrix(ctx, safe, safe)
+    end)
+    -- The order-grain metric keeps the dimension: it is based on the
+    -- partitioned entity, which is exactly what F3 supports.
+    assert_true(ctx.matrix['30']['40'].is_valid)
+    -- The line-grain metric loses it.
+    assert_true(not ctx.matrix['31']['40'].is_valid)
+    assert_equal(ctx.matrix['31']['40'].reason_code,
+        "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
+    assert_branch("validator.matrix.partitioned_dimension",
+        ctx.matrix['31']['40'].is_valid, false)
+    assert_branch("validator.matrix.partitioned_dimension",
+        ctx.matrix['30']['40'].is_valid, true)
+
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+            return {{"SALES", 31, "total_revenue", 40, "ship_mode"}}
+        end
+        return {}
+    end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_030")
+    assert_contains(issue.message, "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
+    assert_contains(issue.message, "carries F3 temporal coverage")
+    assert_contains(issue.message, "metrics based at 'order'")
+end)
+
+test("coverage predicate errors name a DATE literal as the near-miss", function()
+    -- BUG-F16: a DATE literal on a DATE column is the natural thing to write,
+    -- and the canonical-form message read as if the interval did not match.
+    local entity = {id = 1, name = "order"}
+    local ctx = validation_context({
+        entities = {entity},
+        entity_by_id = {['1'] = entity},
+        entity_name_by_id = {['1'] = "order"},
+        metrics = {{id = 30, name = "total_freight", base_entity_id = 1}},
+        representations_by_entity = {['1'] = {
+            {id = 5, name = "primary", role = "PRIMARY", alias = "o",
+                coverage_predicate = "o.order_date >= DATE '2026-07-01'",
+                valid_from = "2026-07-01 00:00:00", valid_to = null},
+            {id = 6, name = "cold", role = "ALTERNATE", alias = "o",
+                coverage_predicate = "o.order_date < DATE '2026-07-01'",
+                valid_from = null, valid_to = "2026-07-01 00:00:00"},
+        }},
+    })
+    with_query(function() return {} end, function()
+        api.validate_partition_coverage(ctx, entity)
+    end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_042")
+    assert_contains(issue.message, "Found DATE '2026-07-01'")
+    assert_contains(issue.message, "must be a TIMESTAMP literal")
+    assert_contains(issue.message, "TIMESTAMP '2026-07-01 00:00:00'")
+    assert_branch("validator.coverage.literal_hint",
+        string.find(issue.message, "Found DATE", 1, true) ~= nil, true)
+
+    -- The canonical form gets no hint appended, and no error.
+    local canonical = validation_context({
+        entities = {entity},
+        entity_by_id = {['1'] = entity},
+        entity_name_by_id = {['1'] = "order"},
+        metrics = {{id = 30, name = "total_freight", base_entity_id = 1}},
+        representations_by_entity = {['1'] = {
+            {id = 5, name = "primary", role = "PRIMARY", alias = "o",
+                coverage_predicate = "o.order_date >= TIMESTAMP '2026-07-01 00:00:00'",
+                valid_from = "2026-07-01 00:00:00", valid_to = null},
+            {id = 6, name = "cold", role = "ALTERNATE", alias = "o",
+                coverage_predicate = "o.order_date < TIMESTAMP '2026-07-01 00:00:00'",
+                valid_from = null, valid_to = "2026-07-01 00:00:00"},
+        }},
+    })
+    with_query(function() return {} end, function()
+        api.validate_partition_coverage(canonical, entity)
+    end)
+    -- The canonical form gets no literal hint. (It still reports the stubbed
+    -- column probe, which is what a database-free context can say about a
+    -- physical column.)
+    for _, reported in ipairs(canonical.issues) do
+        assert_true(string.find(reported.message, "Found ", 1, true) == nil)
+    end
+    assert_branch("validator.coverage.literal_hint",
+        string.find(canonical.issues[1].message, "Found ", 1, true) ~= nil, false)
+end)
+
 test("validator names the alternate representation blocking unrelated authoring", function()
     -- BUG-F06: registering an alternate on a draft is accepted and then blocks
     -- every later authoring call with a message about the representation. The

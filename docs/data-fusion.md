@@ -158,6 +158,40 @@ contributor representations and rewrites the attribute expression as
 dimensions replicate their joins inside every proven fact branch;
 reconciled facts are not permitted (`SEMANTIC_REQUEST_074`).
 
+### What An F4 Alternate Must Carry
+
+Two rules decide whether a supplemental source can be registered at all, and
+between them they make F4 look impossible when it is not:
+
+1. **The alternate must be key-complete.** Its key set must match the primary's,
+   because an alternate is validated as an *equivalent* representation
+   (`SEMANTIC_MODEL_038` compares key cardinality). A CRM extract covering 67 of
+   120 customers fails this. The fix is a key-completing view — a `LEFT JOIN`
+   from the primary key set — which is a one-statement change and leaves the
+   uncovered rows `NULL`.
+2. **Every dimension of the entity must resolve on every representation**
+   (`SEMANTIC_MODEL_017`), which reads like a contradiction of F4's purpose:
+   different systems own different attributes. It is not, because of the escape
+   hatch below.
+
+**Modelling an attribute a representation does not carry.** Bind it explicitly
+to a null cast. This is the supported way to say "this source has no opinion
+about this attribute", and it validates and compiles:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(
+  'sales', 'SALES', 'customer', 'customer_region', 'c.region', 'VARCHAR(20)',
+  'Customer Region', 'Commercial region', NULL, TRUE,
+  '[{"representation_name":"crm",
+     "source_expression":"CAST(NULL AS VARCHAR(20))",
+     "binding_role":"FALLBACK","binding_priority":2}]');
+```
+
+Plain `ADD_DIMENSION` is refused in that situation, because it would leave the
+dimension unresolvable on the alternate. Use
+`ADD_DIMENSION_WITH_BINDINGS`/`ADD_FACT_WITH_BINDINGS` whenever a representation
+either computes the attribute differently *or* does not carry it at all.
+
 ### Semantic Identity
 
 Unlocks Attribute Reconciliation — and cross-source joins in general —
@@ -181,6 +215,33 @@ Deliberately not part of the query path. Agents write proposals into
 `REVIEW_MODEL_EVOLUTION`; the compiler ignores both tables entirely.
 The audit record is one-way — certification doesn't activate anything,
 it just records the decision.
+
+## Seeing What Fusion Is Doing
+
+Fusion changes the answer, so every declaration is discoverable as data rather
+than only as catalog trivia:
+
+```sql
+SELECT ENTITY_NAME, FUSION_ASPECT, REPRESENTATION_NAME, ATTRIBUTE_NAME, STRATEGY
+FROM SEMANTIC_AGENT.FUSION_FOR_AGENT
+WHERE MODEL_NAME = 'sales'
+ORDER BY ENTITY_NAME, FUSION_ASPECT;
+```
+
+`FUSION_ASPECT` separates the four kinds of declaration: `REPRESENTATION` and
+`PARTITION` (with the coverage predicate and interval), `AUTHORITY`,
+`ATTRIBUTE_POLICY`, and `IDENTITY` (with its certification status).
+
+`OBJECTS_FOR_AGENT` and `FIELDS_FOR_AGENT` carry a summary of the same thing:
+
+| Column | Meaning |
+|---|---|
+| `SOURCE_COUNT` | active representations of the entity behind the object or field |
+| `FUSION_STRATEGY` | `UNION` for an F3 partition set, `COALESCE`/`RECONCILE` for a fused attribute, `NONE` for a single-source column |
+
+Published columns carry the same fact in their comment, so a BI user who never
+reads the catalog still sees it — for example *"Resolved customer name. Fused
+across 2 sources (RECONCILE)."*
 
 ## Cost Model And Safeguards
 

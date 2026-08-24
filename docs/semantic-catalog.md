@@ -742,6 +742,7 @@ Important views:
 - `EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `COMPILE_RESULT_SCHEMA_FOR_AGENT`
+- `FUSION_FOR_AGENT`
 - `REQUEST_HISTORY_FOR_AGENT`
 - `MODEL_EVOLUTION_REVIEW_QUEUE`
 
@@ -755,6 +756,10 @@ static expression validation, including binding expressions.
 keys, filter aliases, operators, order-by fields, handle types, and enum values.
 `COMPILE_RESULT_SCHEMA_FOR_AGENT` contains the nine result columns of each
 compile entrypoint with their order, null conditions, and meanings.
+`FUSION_FOR_AGENT` contains every fusion declaration in the model — partitions
+with their coverage, authority roles, attribute policies, and certified identity
+mappings — and `OBJECTS_FOR_AGENT`/`FIELDS_FOR_AGENT` summarise it per object
+and per field as `SOURCE_COUNT` and `FUSION_STRATEGY`.
 `REQUEST_HISTORY_FOR_AGENT` includes `STARTED_AT` and the compatibility alias
 `REQUEST_TIME`. Use the aliases when integrating with generic agent protocols
 that expect those names.

@@ -333,6 +333,54 @@ ADD OR REPLACE METRIC avg_freight AS total_freight / NULLIF(order_count, 0)
                      Decimal(str(execute(con, compiled["generated_sql"])[0][0])),
                      Decimal("25"))
 
+        # BUG-F07: F3 applies to a metric-leaf entity. Reached as a joined
+        # dimension by a metric based elsewhere, every request for the pair is
+        # refused by the compiler -- which used to happen with no validation
+        # error, silently breaking another object's published dimensions.
+        for statement in (
+            f"ADD_RELATIONSHIP('{MODEL}', 'line_to_order', 'line', 'order', "
+            "'l.order_id = o.order_id', 'MANY_TO_ONE', 'INNER', NULL)",
+            f"ADD_RELATIONSHIP_KEY_MAPPING('{MODEL}', 'line_to_order', 'order_id', "
+            "NULL, 'order_id', NULL, 1)",
+        ):
+            execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.{statement}")
+        try:
+            execute(
+                con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION("
+                f"'{MODEL}', 'LINES', 'order', 'order_ts', 'o.order_ts', 'TIMESTAMP', "
+                "'Order Time', 'Time of the owning order', NULL, TRUE)",
+            )
+            raise AssertionError(
+                "a partitioned entity was accepted as a joined dimension")
+        except AssertionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the refusal is the assertion
+            message = str(exc)
+            assert_contains("partitioned joined dimension refused", message,
+                            "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
+            assert_contains("refusal names the remedy", message,
+                            "carries F3 temporal coverage")
+
+        # The same dimension is fine in the object whose metrics are based on
+        # that entity, which is exactly what F3 supports.
+        execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION("
+            f"'{MODEL}', 'ORDERS', 'order', 'order_ts', 'o.order_ts', 'TIMESTAMP', "
+            "'Order Time', 'Time of the order', NULL, TRUE)",
+        )
+        assert_equal(
+            "the same dimension is valid on the partitioned entity's own object",
+            execute(
+                con,
+                "SELECT IS_VALID, REASON_CODE FROM SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX "
+                f"WHERE MODEL_NAME = {literal(MODEL)} AND METRIC_NAME = 'total_freight' "
+                "AND DIMENSION_NAME = 'order_ts'",
+            ),
+            [(True, "OK")],
+        )
+
         print()
         print("metric plannability gate verified.")
         return 0

@@ -215,7 +215,38 @@ for _, object_row in ipairs(object_rows or {}) do
           oc.COLUMN_KIND,
           COALESCE(d.DATA_TYPE, f.DATA_TYPE, mt.DATA_TYPE) AS DATA_TYPE,
           oc.ORDINAL_POSITION,
-          COALESCE(d.DESCRIPTION, f.DESCRIPTION, mt.DESCRIPTION) AS DESCRIPTION
+          COALESCE(d.DESCRIPTION, f.DESCRIPTION, mt.DESCRIPTION) AS DESCRIPTION,
+          -- Fusion changes the number a column reports, so a BI user reading
+          -- only the column comment should be told which sources it came from
+          -- and how they were combined.
+          (
+            SELECT COUNT(*)
+            FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+            WHERE er.ENTITY_ID = COALESCE(d.ENTITY_ID, f.ENTITY_ID, mt.BASE_ENTITY_ID)
+              AND er.VERSION_ID = :version_id
+              AND er.STATUS = 'ACTIVE'
+          ) AS SOURCE_COUNT,
+          COALESCE(
+            (
+              SELECT afp.FUSION_STRATEGY
+              FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES afp
+              WHERE afp.ATTRIBUTE_TYPE = oc.COLUMN_KIND
+                AND afp.ATTRIBUTE_ID = oc.OBJECT_REF_ID
+                AND afp.VERSION_ID = :version_id
+                AND afp.STATUS = 'ACTIVE'
+              LIMIT 1
+            ),
+            (
+              SELECT 'UNION'
+              FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+              WHERE er.ENTITY_ID = COALESCE(d.ENTITY_ID, f.ENTITY_ID, mt.BASE_ENTITY_ID)
+                AND er.VERSION_ID = :version_id
+                AND er.STATUS = 'ACTIVE'
+                AND er.COVERAGE_PREDICATE IS NOT NULL
+              LIMIT 1
+            ),
+            'NONE'
+          ) AS FUSION_STRATEGY
         FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
         LEFT JOIN SYS_SEMANTIC.DIMENSIONS d
           ON oc.COLUMN_KIND = 'DIMENSION'
@@ -229,7 +260,7 @@ for _, object_row in ipairs(object_rows or {}) do
         WHERE oc.OBJECT_ID = :object_id
           AND oc.IS_VISIBLE = TRUE
         ORDER BY oc.ORDINAL_POSITION
-    ]], {object_id = object_id})
+    ]], {object_id = object_id, version_id = model.version_id})
 
     if column_rows == nil or #column_rows == 0 then
         error("SEMANTIC_SURFACE_014: semantic object has no visible columns: " .. tostring(object_name))
@@ -241,9 +272,27 @@ for _, object_row in ipairs(object_rows or {}) do
         local column_name = row_value(column_row, "COLUMN_NAME", 1)
         local data_type = safe_data_type(row_value(column_row, "DATA_TYPE", 3))
         local description = row_value(column_row, "DESCRIPTION", 5)
+        local source_count = tonumber(row_value(column_row, "SOURCE_COUNT", 6) or 1) or 1
+        local fusion_strategy = upper(row_value(column_row, "FUSION_STRATEGY", 7) or "NONE")
+        local provenance = nil
+        if source_count > 1 and fusion_strategy == "UNION" then
+            provenance = "Fused across " .. tostring(source_count)
+                .. " temporal partitions (F3 UNION)."
+        elseif source_count > 1 and fusion_strategy ~= "NONE" then
+            provenance = "Fused across " .. tostring(source_count)
+                .. " sources (" .. fusion_strategy .. ")."
+        elseif source_count > 1 then
+            provenance = "Read from one of " .. tostring(source_count)
+                .. " representations of its entity."
+        end
+        local comment_text = trim(description or "")
+        if provenance ~= nil then
+            comment_text = missing(comment_text) and provenance
+                or (comment_text .. " " .. provenance)
+        end
         local declaration = quote_ident(upper(column_name))
-        if not missing(description) then
-            declaration = declaration .. " COMMENT IS " .. sql_string(utf8_prefix(description, 2000))
+        if not missing(comment_text) then
+            declaration = declaration .. " COMMENT IS " .. sql_string(utf8_prefix(comment_text, 2000))
         end
         column_declarations[#column_declarations + 1] = declaration
         select_parts[#select_parts + 1] = "CAST(SEMANTIC_ADMIN.SEMANTIC_GUARD() AS "

@@ -48,6 +48,7 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`
+- `SEMANTIC_AGENT.FUSION_FOR_AGENT`
 - `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`
 - `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`
 
@@ -61,6 +62,13 @@ validation errors and session preconditions.
 static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted request keys, filter
 aliases, operators, order fields, handle types, and enum values as rows.
+`FUSION_FOR_AGENT` exposes every fusion declaration — representations and their
+partition coverage, authority roles, attribute policies, and certified identity
+mappings — one row each, keyed by entity. `OBJECTS_FOR_AGENT` and
+`FIELDS_FOR_AGENT` carry the summary as `SOURCE_COUNT` and `FUSION_STRATEGY`
+(`UNION`, `COALESCE`, `RECONCILE`, or `NONE`), so an agent can tell a
+single-source column from one whose value is merged across sources, and can say
+so when it explains a number.
 `COMPILE_RESULT_SCHEMA_FOR_AGENT` exposes the other half of that contract: the
 nine result columns of each compile entrypoint, in order, with the conditions
 under which each is `NULL`. Read a compile result by column name; the result set

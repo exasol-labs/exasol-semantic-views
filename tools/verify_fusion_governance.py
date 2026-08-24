@@ -237,6 +237,50 @@ def main() -> int:
             [("DIMENSION", "customer_name", "RECONCILE"), ("FACT", "spend", "RECONCILE")],
         )
 
+        # Fusion is now discoverable: an agent reading the surface can tell a
+        # single-source column from a reconciled one, and see the declarations.
+        assert_equal(
+            "fields report their fusion",
+            execute(
+                con,
+                "SELECT FIELD_NAME, SOURCE_COUNT, FUSION_STRATEGY "
+                "FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT "
+                f"WHERE MODEL_NAME = {literal(MODEL)} ORDER BY FIELD_NAME",
+            ),
+            # The metric inherits its base entity's source count; the reconciled
+            # dimension names the strategy that decides its value.
+            [("customer_name", 2, "RECONCILE"), ("total_spend", 2, "NONE")],
+        )
+        assert_equal(
+            "the object reports its fusion",
+            execute(
+                con,
+                "SELECT SOURCE_COUNT, FUSION_STRATEGY FROM SEMANTIC_AGENT.OBJECTS_FOR_AGENT "
+                f"WHERE MODEL_NAME = {literal(MODEL)}",
+            ),
+            [(2, "RECONCILE")],
+        )
+        assert_equal(
+            "the declarations are projected",
+            execute(
+                con,
+                "SELECT FUSION_ASPECT, COUNT(*) FROM SEMANTIC_AGENT.FUSION_FOR_AGENT "
+                f"WHERE MODEL_NAME = {literal(MODEL)} GROUP BY FUSION_ASPECT "
+                "ORDER BY FUSION_ASPECT",
+            ),
+            [("ATTRIBUTE_POLICY", 2), ("AUTHORITY", 2), ("REPRESENTATION", 2)],
+        )
+        assert_equal(
+            "authority is projected per representation",
+            execute(
+                con,
+                "SELECT REPRESENTATION_NAME, STRATEGY FROM SEMANTIC_AGENT.FUSION_FOR_AGENT "
+                f"WHERE MODEL_NAME = {literal(MODEL)} AND FUSION_ASPECT = 'AUTHORITY' "
+                "ORDER BY REPRESENTATION_NAME",
+            ),
+            [("crm", "AUTHORITATIVE"), ("primary", "SUPPLEMENTAL")],
+        )
+
         # 3b. Fact reconciliation is a supported single-branch shape, so the
         # admin script must not forbid it outright: it is exact here, and only a
         # multi-fact plan refuses it (SEMANTIC_REQUEST_074).

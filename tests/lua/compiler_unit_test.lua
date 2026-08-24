@@ -905,6 +905,10 @@ local function compiler_query_fixture(options)
             return {{true, "OK", "SELF"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS", 1, true) then
             return {{"MEASURE", "FACT", "net_revenue"}}
+        elseif normalized:find("FROM SYS.EXA_ALL_TABLES", 1, true) then
+            -- The orphan probe: does this schema carry the SEMANTIC_DISCOVERY
+            -- table PUBLISH_MODEL always creates?
+            return {{options.orphaned_schema and 1 or 0}}
         elseif normalized:find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
             if options.f51_direct and params.schema_name == "MONGO"
                 and params.column_name == "CUSTOMER_ID" then return {{0}} end
@@ -1415,6 +1419,21 @@ test("semantic SQL public APIs compile debug and preserve non-semantic SQL", fun
     local rejected = compile_sql("DELETE FROM SEMANTIC_SALES.SALES")
     assert_equal(rejected.status, "ERROR")
     assert_equal(rejected.error_code, "SEMANTIC_QUERY_009")
+
+    -- A schema that PUBLISH_MODEL created but that no model claims any more is
+    -- an orphaned publication. Passing it through sent the query to the view's
+    -- own guard, which could only advise enabling the preprocessor that is
+    -- already active.
+    local orphan_mock = compiler_query_fixture({schema_missing = true, orphaned_schema = true})
+    local orphan = with_query(orphan_mock, function()
+        return compile_sql_for_preprocessor("SELECT * FROM SEMANTIC_GONE.SALES")
+    end)
+    assert_equal(orphan.status, "ERROR")
+    assert_equal(orphan.error_code, "SEMANTIC_QUERY_005")
+    assert_contains(orphan.error_message, "orphaned publication")
+    assert_contains(orphan.error_message, "SEMANTIC_GONE")
+    assert_branch("compiler.preprocessor.orphaned_schema", orphan.status == "ERROR", true)
+    assert_branch("compiler.preprocessor.orphaned_schema", unknown.status == "ERROR", false)
 end)
 
 test("materialized SQL renders every supported rollup policy", function()

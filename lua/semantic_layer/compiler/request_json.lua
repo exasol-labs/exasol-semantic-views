@@ -2809,6 +2809,19 @@ local function latest_successful_validation(model)
     return row_value(rows[1], "VALIDATION_RUN_ID", 1), nil
 end
 
+-- A schema that PUBLISH_MODEL created (it always creates SEMANTIC_DISCOVERY)
+-- but that no active model claims any more.
+local function orphaned_published_schema(published_schema)
+    local rows = query([[
+        SELECT COUNT(*) AS DISCOVERY_COUNT
+        FROM SYS.EXA_ALL_TABLES
+        WHERE (TABLE_SCHEMA = :schema_name OR TABLE_SCHEMA = UPPER(:schema_name))
+          AND TABLE_NAME = 'SEMANTIC_DISCOVERY'
+    ]], {schema_name = published_schema})
+    if rows == nil or #rows == 0 then return false end
+    return tonumber(row_value(rows[1], "DISCOVERY_COUNT", 1) or 0) > 0
+end
+
 local function load_model_by_published_schema(schema_name)
     local rows = query([[
         SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER
@@ -3996,6 +4009,21 @@ local function parse_semantic_sql(sql_text, options)
     local model = load_model_by_published_schema(published_schema)
     if model == nil then
         if options.unchanged_unknown_schema then
+            -- The preprocessor is active and declined, so the query falls
+            -- through to the published view's own guard, which can only advise
+            -- enabling the preprocessor -- telling the user to do the thing they
+            -- just did. A schema that carries the SEMANTIC_DISCOVERY table
+            -- PUBLISH_MODEL creates, but resolves to no active model, is an
+            -- orphaned publication: name it as such instead.
+            if orphaned_published_schema(published_schema) then
+                return nil, error_result("SEMANTIC_QUERY_005",
+                    "Published schema " .. tostring(published_schema)
+                        .. " has no active model in the catalog: it is an orphaned"
+                        .. " publication left by a dropped or reset model. The"
+                        .. " preprocessor is active and declined to rewrite. Re-create"
+                        .. " and publish the model, or drop schema "
+                        .. tostring(published_schema) .. ".")
+            end
             return unchanged_result(sql_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_004", "No semantic model is published to schema " .. tostring(published_schema) .. ".")

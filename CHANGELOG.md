@@ -8,6 +8,24 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Fusion is discoverable (`FUSION_FOR_AGENT`, `FUSION_STRATEGY`, `SOURCE_COUNT`)
+
+- Fusion changes the answer — a partitioned entity merges aggregate states
+  across sources, a reconciled attribute takes its value from the authoritative
+  one — and none of it was visible on the agent surface. An agent reading
+  `FIELDS_FOR_AGENT` could not tell a single-source column from a reconciled one,
+  and had no way to explain the number it reported.
+- `SEMANTIC_AGENT.FUSION_FOR_AGENT` projects every fusion declaration as one row
+  per entity: representations and their partition coverage (`FUSION_ASPECT` of
+  `REPRESENTATION`/`PARTITION`, with predicate and interval), authority roles,
+  attribute policies, and certified identity mappings.
+- `OBJECTS_FOR_AGENT` and `FIELDS_FOR_AGENT` gained `SOURCE_COUNT` and
+  `FUSION_STRATEGY` (`UNION`, `COALESCE`, `RECONCILE`, or `NONE`).
+- `PUBLISH_MODEL` carries the same fact into the published column comment, so a
+  BI user who never reads the catalog still sees it: *"Resolved customer name.
+  Fused across 2 sources (RECONCILE)."*
+- Listed in `SEMANTIC_AGENT_DISCOVERY.KEY_VIEWS` with a ready-made query.
+
 #### Definition-time plannability gate (`SEMANTIC_MODEL_056`, `SEMANTIC_MODEL_057`)
 
 - A metric the planner could never compile was accepted, validated, published,
@@ -156,6 +174,51 @@ All notable changes to Exasol Semantic Views are documented here.
 - Regression: `tools/verify_set_relationship.py`, in the smoke suite.
 
 ### Fixed
+#### F3 coverage on a shared entity silently broke another object's dimensions
+
+- Orders are commonly both the grain of one object's metrics and the join hop
+  another object's dimensions hang off. Declaring F3 coverage on such an entity
+  was accepted with no validation error, and every dimension the *other* object
+  exposed from it became permanently unqueryable (`SEMANTIC_REQUEST_074`) while
+  the published contract still advertised the columns.
+- The metric/dimension matrix now marks those pairs invalid with
+  `FUSION_PARTITION_DIMENSION_UNSUPPORTED`, so `VALIDATE_MODEL` names every
+  affected pair (`SEMANTIC_MODEL_030`) with the remedy, `PUBLISH_MODEL` refuses,
+  and on a published model the coverage declaration itself is rejected and
+  restored. Pairs whose metric *is* based on the partitioned entity stay valid —
+  that is what F3 supports.
+- Regression: `tools/verify_metric_plannability.py`.
+
+#### Agent surfaces reported unqueryable metrics as valid and ready
+
+- `VALID_COMBINATIONS_FOR_AGENT`, `FIELDS_FOR_AGENT`, and `MODELS_FOR_AGENT` all
+  agreed that a metric the compiler always refuses was valid, certified, and
+  ready. This is the historical BUG-003 class, reached through metric
+  plannability rather than path divergence.
+- Closed from both ends: an unplannable metric can no longer validate at all
+  (`SEMANTIC_MODEL_056`/`_057`), and the matrix now reflects F3 joined-dimension
+  reachability, so the agent views inherit the correct answer.
+  `docs/known-issues.md` records the reproduction and the general lesson — pair
+  every new compiler refusal with an authoring-time rule.
+
+#### The preprocessor guard told you to enable an already-enabled preprocessor
+
+- Querying an orphaned published schema — one whose model was dropped or reset
+  away — fell through to the view's own guard, which could only advise running
+  `ENABLE_SEMANTIC_SQL()`: the thing the user had just done.
+- The preprocessor now recognises a schema that carries the `SEMANTIC_DISCOVERY`
+  table `PUBLISH_MODEL` creates but that no active model claims, and refuses with
+  `SEMANTIC_QUERY_005` naming it as an orphaned publication and giving both ways
+  out. Ordinary non-semantic queries still pass through untouched.
+
+#### `SEMANTIC_MODEL_042` did not say a `TIMESTAMP` literal is required
+
+- Hot/cold splits are usually written on a `DATE` column, so `DATE '2026-07-01'`
+  is the natural bound to type — and the canonical-form message read as though
+  the interval did not match, when it did.
+- The message now names the near-miss: *"Found DATE '2026-07-01': a coverage
+  bound must be a TIMESTAMP literal, so write TIMESTAMP '2026-07-01 00:00:00'"*.
+
 #### F4 contributor joins emitted non-executable SQL for a lower-case key column
 
 - Attribute Reconciliation rendered the entity's declared

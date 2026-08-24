@@ -1502,6 +1502,27 @@ local function parse_partition_predicate(predicate)
     return {first, second}
 end
 
+-- Name the near-miss a modeller actually makes. Hot/cold boundaries are usually
+-- written on a DATE column, so `DATE '2026-07-01'` is the natural thing to type,
+-- and the canonical-form message never said the literal itself must be a
+-- TIMESTAMP -- it read as if the interval did not match, when it did.
+local function partition_literal_hint(predicate)
+    local text = tostring(predicate or "")
+    for type_word, literal in string.gmatch(text, "([%a_]+)%s*'([^']*)'") do
+        if upper(type_word) ~= "TIMESTAMP" then
+            local suggestion = literal
+            if not string.find(literal, ":", 1, true) then
+                suggestion = literal .. " 00:00:00"
+            end
+            return " Found " .. type_word .. " '" .. literal
+                .. "': a coverage bound must be a TIMESTAMP literal, so write"
+                .. " TIMESTAMP '" .. suggestion .. "' (a TIMESTAMP literal compares"
+                .. " correctly against a DATE column)."
+        end
+    end
+    return ""
+end
+
 local function predicate_matches_partition_interval(representation)
     local bounds = parse_partition_predicate(representation.coverage_predicate)
     if bounds == nil then return false, nil end
@@ -1583,7 +1604,8 @@ local function validate_partition_coverage(ctx, entity)
                 "SEMANTIC_MODEL_042",
                 "Coverage predicate must be canonical half-open SQL over one qualified column: "
                     .. ">= VALID_FROM and < VALID_TO, omitting comparisons for NULL bounds. "
-                    .. "Predicate timestamp literals must exactly match the declared interval.")
+                    .. "Predicate timestamp literals must exactly match the declared interval."
+                    .. partition_literal_hint(predicate))
         elseif partition_key == nil then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_042", "Coverage predicate has no certifiable partition key.")
@@ -3613,6 +3635,28 @@ local function row_count_remedy(metric)
         .. " non-null fact, or declare FACT <name> AS 1 and use SUM(<name>)."
 end
 
+-- Leaf (fact) entities of a metric, from the planner's own DAG, cached per
+-- validation run. The matrix needs them to tell a metric's own partitioned
+-- entity from one it merely joins to.
+local function metric_leaf_entities(ctx, metric)
+    ctx._metric_leaves = ctx._metric_leaves or {}
+    local cached = ctx._metric_leaves[key(metric.id)]
+    if cached ~= nil then return cached end
+    local fact_by_id = {}
+    for _, fact in ipairs(ctx.facts or {}) do
+        fact_by_id[key(fact.id)] = fact
+    end
+    local dag = metric_plan.build_dag(
+        {metric_by_id = ctx.metric_by_id, fact_by_id = fact_by_id}, {metric})
+    local node = dag ~= nil and dag.node_by_id[key(metric.id)] or nil
+    local leaves = {}
+    for _, entity_id in ipairs(node ~= nil and node.leaf_entity_ids or {}) do
+        leaves[key(entity_id)] = true
+    end
+    ctx._metric_leaves[key(metric.id)] = leaves
+    return leaves
+end
+
 local function validate_metric_plannability(ctx)
     if #(ctx.metrics or {}) == 0 then return end
     -- A metric that already failed a structural rule (an unknown fact, a
@@ -3729,7 +3773,20 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 reason_code = "MISSING_DIMENSION_ENTITY"
             else
                 local ok, reason, relationship_path = find_path(safe_edges, metric.base_entity_id, dimension.entity_id, true)
-                if ok then
+                local dimension_entity = ctx.entity_by_id[key(dimension.entity_id)]
+                if ok and dimension_entity ~= nil
+                    and entity_is_partitioned(ctx, dimension_entity)
+                    and not metric_leaf_entities(ctx, metric)[key(dimension.entity_id)] then
+                    -- F3 partitions a metric-leaf entity. Reached as a joined
+                    -- dimension by a metric based elsewhere, every request for
+                    -- the pair is refused by the compiler
+                    -- (SEMANTIC_REQUEST_074), so the pair is not valid however
+                    -- safe the join path is. Declaring coverage on an entity a
+                    -- second object reaches this way used to break that object's
+                    -- published dimensions silently.
+                    reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED"
+                    path = relationship_path
+                elseif ok then
                     is_valid = true
                     reason_code = "OK"
                     path = relationship_path
@@ -3845,6 +3902,7 @@ local function validate_visible_metric_dimension_pairs(ctx)
             -- the relationship level, whatever FANOUT_POLICY says, so point at
             -- object membership instead of implying a declaration would help.
             local metric = ctx.metric_by_id[key(metric_id)]
+            local dimension = ctx.dimension_by_id[key(dimension_id)]
             local base_name = metric ~= nil
                 and (ctx.entity_name_by_id[key(metric.base_entity_id)]
                     or tostring(metric.base_entity_id))
@@ -3855,6 +3913,16 @@ local function validate_visible_metric_dimension_pairs(ctx)
                         .. base_name .. "', or remove this metric from object '"
                         .. tostring(object_name) .. "'."
                 end
+            elseif matrix_row.reason_code == "FUSION_PARTITION_DIMENSION_UNSUPPORTED" then
+                local dimension_entity_name = dimension ~= nil
+                    and (ctx.entity_name_by_id[key(dimension.entity_id)]
+                        or tostring(dimension.entity_id)) or "the dimension's entity"
+                message = message .. " Entity '" .. dimension_entity_name
+                    .. "' carries F3 temporal coverage, and F3 applies only to an"
+                    .. " entity a metric is based on. Expose this dimension only"
+                    .. " alongside metrics based at '" .. dimension_entity_name
+                    .. "', in this or a separate semantic object, or remove the"
+                    .. " coverage declarations from that entity."
             elseif FANOUT_REASONS[tostring(matrix_row.reason_code)] and base_name ~= nil then
                 message = message .. " No relationship declaration makes a fanning"
                     .. " traversal safe. Expose this metric only alongside dimensions"

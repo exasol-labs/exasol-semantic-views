@@ -78,6 +78,21 @@ Exasol 2026.1.0:
 - **Current safeguard:** validator and compiler path decisions delegate to the
   packaged `lua/semantic_layer/shared/grain_graph.lua`. Keep proof behavior in
   that shared module rather than adding planner-specific path rules.
+- **Reproduced again 2026-08-24, through a different mechanism, and closed.** A
+  fusion user study found the same *class* — agent surfaces reporting an
+  unqueryable metric as valid, certified, and ready — arising from metric
+  plannability rather than from path divergence: `COUNT(*)` (no input grain) and
+  `AVG` on an F3-partitioned entity (no mergeable aggregate state) validated
+  clean and published. Both are now refused when the metric is defined
+  (`SEMANTIC_MODEL_056`, `SEMANTIC_MODEL_057`). Separately, declaring F3
+  coverage on an entity another object reaches as a joined dimension made that
+  object's dimensions permanently unqueryable while the matrix still reported
+  `IS_VALID=True`; the matrix now marks those pairs invalid with
+  `FUSION_PARTITION_DIMENSION_UNSUPPORTED`, so `VALID_COMBINATIONS_FOR_AGENT`
+  and `SEMANTIC_MODEL_030` agree with the compiler. The lesson generalises: this
+  class returns whenever a *new* refusal is added to the compiler without the
+  matching authoring-time rule, so pair every new `SEMANTIC_REQUEST_0xx` with a
+  validator rule.
 
 ## Deferred / not yet implemented (by design)
 
