@@ -354,6 +354,55 @@ test("compiler join planner follows safe cardinality direction", function()
     assert_equal(reverse_err.error_code, "SEMANTIC_REQUEST_042")
 end)
 
+test("compiler plan warns when a shorter safe path won over a longer one", function()
+    -- The join planner selects the shortest safe path and refuses only a tie.
+    -- A longer safe path therefore loses silently, so the plan has to carry the
+    -- choice: the two paths can attribute a fact row to a different customer.
+    local ctx = compiler_context()
+    local proven = {
+        relationship_proofs = {{
+            status = "PROVEN",
+            to_entity_id = 2,
+            selected_path = "orders_customer",
+            selection_reason = "SHORTEST_SAFE_PATH",
+            candidate_paths = {"orders_customer", "orders_store > store_customer"},
+            alternate_paths = {"orders_store > store_customer"},
+        }},
+    }
+    local warnings = api.relationship_path_warnings(ctx, proven)
+    assert_equal(#warnings, 1)
+    assert_equal(warnings[1].code, "RELATIONSHIP_PATH_ALTERNATIVES")
+    assert_equal(warnings[1].severity, "WARNING")
+    assert_equal(warnings[1].target_entity, "customers")
+    assert_equal(warnings[1].selected_path, "orders_customer")
+    assert_equal(warnings[1].selection_reason, "SHORTEST_SAFE_PATH")
+    assert_contains(warnings[1].message, "reachable by 2 safe relationship paths")
+    assert_contains(warnings[1].message, "orders_store > store_customer")
+    -- Name no remedy that does not work: PATH_PRIORITY does not select here.
+    assert_contains(warnings[1].message, "PATH_PRIORITY does not choose")
+    assert_branch("compiler.plan.path_alternatives", #warnings > 0, true)
+
+    -- One path, or a rejected proof, warns about nothing.
+    assert_equal(#api.relationship_path_warnings(ctx, {
+        relationship_proofs = {{status = "PROVEN", to_entity_id = 2}},
+    }), 0)
+    assert_equal(#api.relationship_path_warnings(ctx, {
+        relationship_proofs = {{status = "REJECTED", to_entity_id = 2,
+            candidate_paths = {"a", "b"}, alternate_paths = {"b"}}},
+    }), 0)
+    local quiet = api.relationship_path_warnings(ctx, {})
+    assert_equal(#quiet, 0)
+    assert_branch("compiler.plan.path_alternatives", #quiet > 0, false)
+
+    -- An entity the context cannot name still reports its id rather than nil.
+    local unnamed = api.relationship_path_warnings(ctx, {
+        relationship_proofs = {{status = "PROVEN", to_entity_id = 99,
+            selected_path = "a", candidate_paths = {"a", "b"},
+            alternate_paths = {"b"}}},
+    })
+    assert_equal(unnamed[1].target_entity, "99")
+end)
+
 test("compiler join planner refuses many-to-many despite a fanout policy", function()
     -- A FANOUT_POLICY records intent; it is not an allocation proof. Traversing
     -- the edge would attribute one fact row to several dimension rows, so the

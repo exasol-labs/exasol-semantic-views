@@ -94,6 +94,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_052` | error | A dimension or fact on an F3-partitioned entity lacks an active binding on one or more partitions. Each missing attribute/partition pair is reported. |
 | `SEMANTIC_MODEL_053` | warning | Fanout policy value is unrecognized, or declared on a cardinality where it has no meaning. See [Fanout policy](#fanout-policy). |
 | `SEMANTIC_MODEL_054` | warning | Legacy entity key expression does not cover the declared primary key, so it is not unique at the entity's grain. It is a bootstrap hint; grain proofs use `UNIQUE_KEYS`. |
+| `SEMANTIC_MODEL_055` | warning | Two entities are connected by more than one safe relationship path of differing length. Compilation selects the shortest; the alternative can attribute a row differently. See [Path ambiguity](#path-ambiguity). |
 
 ## Expression Validation Boundary
 
@@ -182,6 +183,54 @@ Expose a metric only alongside dimensions reachable from its base entity
 without fan-out, in the same or a separate semantic object. `SEMANTIC_MODEL_030`
 spells this out in its message.
 
+## Path Ambiguity
+
+Two entities can be connected by more than one safe relationship path. The paths
+are not interchangeable: each attributes a row of the source entity to a
+possibly different row of the target, so the path decides the number.
+
+How a model is treated depends on the shape of the ambiguity, and on the proof
+mode:
+
+| Shape | Default `LEGACY_JOIN` | `STRICT_GRAIN` |
+|---|---|---|
+| One safe path | Compiles. | Compiles. |
+| Several safe paths of **equal** length | Refused at authoring time: `SEMANTIC_MODEL_030` / `AMBIGUOUS_RELATIONSHIP_PATH`, so no query compiles. | Refused: `RELATIONSHIP_PATH_AMBIGUOUS`. |
+| Several safe paths of **differing** length | Compiles using the shortest, and reports the choice: `SEMANTIC_MODEL_055` at authoring time, a `RELATIONSHIP_PATH_ALTERNATIVES` plan warning at compile time. | Refused: `RELATIONSHIP_PATH_AMBIGUOUS`. |
+
+A tie is an error because nothing distinguishes the candidates. A differing
+length is a warning, not an error, because the shortest path is a defensible
+default — a denormalized shortcut edge alongside the long way round is a common
+and harmless shape — while the engine cannot tell that case apart from two
+genuinely different roles. It reports the choice rather than deciding quietly on
+the modeler's behalf, and `STRICT_GRAIN` refuses to choose at all.
+
+Length is the whole of the selection rule. `PATH_PRIORITY` orders relationship
+traversal deterministically but does **not** select between candidate paths in
+either proof mode, so neither message offers it as a remedy. The remedies that
+do exist are to remove the redundant relationship, or to model the paths as
+separate entities with their own dimensions, so each role is named.
+
+Both messages name the selected path and each path not selected. The compile
+plan additionally carries the full candidate list on the relationship proof:
+
+```json
+"warnings": [{
+  "code": "RELATIONSHIP_PATH_ALTERNATIVES",
+  "severity": "WARNING",
+  "target_entity": "beta",
+  "selected_path": "fact_to_beta",
+  "selection_reason": "SHORTEST_SAFE_PATH",
+  "candidate_paths": ["fact_to_beta", "fact_to_alpha > alpha_to_beta"],
+  "alternate_paths": ["fact_to_alpha > alpha_to_beta"]
+}]
+```
+
+The enumeration behind this is bounded (path length, candidate count, and work
+done). A search that hits a cap sets `candidate_search_truncated` on the
+relationship proof, so a plan never reports "no alternative" from a walk that
+stopped early. The caps are far above any realistic relationship graph.
+
 ## Metric/Dimension Matrix
 
 Validation rebuilds `SYS_SEMANTIC.METRIC_DIMENSION_MATRIX` for the active model
@@ -221,6 +270,11 @@ prevents attributing one fact row to multiple dimension rows; see
 [Grain-Aware Result Semantics](architecture-decisions/001-grain-aware-result-semantics.md).
 Declare a semantic object rooted at the metric's base entity to establish that
 branch grain, or remove the metric from the incompatible object.
+
+`RELATIONSHIP_PATH` for a valid pair contains the single path the compiler will
+use. When more than one safe path connects the pair, that column still holds one
+path — the selected one — and the choice is reported separately; see
+[Path ambiguity](#path-ambiguity).
 
 ## Test Coverage
 

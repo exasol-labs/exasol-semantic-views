@@ -526,6 +526,29 @@ function M.prove(snapshot, from_id, to_id, mode)
     local rendered = proof_json("LEGACY_JOIN", proof)
     rendered.from_entity_id = from_id
     rendered.to_entity_id = to_id
+    -- A proof that succeeded still has to say what it chose over what. This
+    -- lane selects the shortest safe path and rejects only a tie, so an
+    -- alternative of a different length would otherwise be selected against
+    -- without ever being named. STRICT_GRAIN reports the same candidate list
+    -- when it refuses the request.
+    if proof.ok then
+        local alternatives = graph.safe_path_alternatives(edges, from_id, to_id)
+        -- Recorded whether or not an alternative was kept: a capped search
+        -- proves nothing about what it did not reach.
+        rendered.candidate_search_truncated = alternatives.truncated or nil
+        if #alternatives.alternates > 0 then
+            rendered.selected_path = alternatives.selected.path
+            rendered.selection_reason = "SHORTEST_SAFE_PATH"
+            rendered.candidate_paths = {}
+            for _, candidate in ipairs(alternatives.paths) do
+                rendered.candidate_paths[#rendered.candidate_paths + 1] = candidate.path
+            end
+            rendered.alternate_paths = {}
+            for _, alternate in ipairs(alternatives.alternates) do
+                rendered.alternate_paths[#rendered.alternate_paths + 1] = alternate.path
+            end
+        end
+    end
     return rendered
 end
 

@@ -532,6 +532,14 @@ rejected in *both* modes: the shared grain graph never marks a many-to-many edge
 safe, whatever `FANOUT_POLICY` says (see
 [Fanout policy](validation-rules.md#fanout-policy)).
 
+The two modes differ on path ambiguity. Both refuse several safe paths of equal
+length. `STRICT_GRAIN` also refuses an alternative of a different length;
+`LEGACY_JOIN` selects the shortest and reports the choice as a
+`SEMANTIC_MODEL_055` validation warning and a `RELATIONSHIP_PATH_ALTERNATIVES`
+plan warning, because path length is a tie-break convention rather than a
+statement about meaning (see
+[Path ambiguity](validation-rules.md#path-ambiguity)).
+
 For a request involving several fact grains, the compiler does not create one
 large join and aggregate afterward. It follows an aggregate-state strategy:
 

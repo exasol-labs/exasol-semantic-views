@@ -8,6 +8,35 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Path-choice reporting (`SEMANTIC_MODEL_055`, `RELATIONSHIP_PATH_ALTERNATIVES`)
+
+- Path proofs measured ambiguity as "more than one *shortest* safe path" and
+  refused that outright. An alternative of a *different* length passed the same
+  gate silently: the shortest path won, validation said nothing, and the plan
+  reported `warnings: []` with an empty `candidate_paths`. Path length is a
+  tie-break convention, not a statement about meaning — the longer path can
+  attribute a fact row to a different dimension row and change the number.
+- `VALIDATE_MODEL` now reports `SEMANTIC_MODEL_055` (warning) for a visible
+  metric/dimension pair whose entities are connected by more than one safe
+  path, naming the selected path and each path not selected.
+- `PLAN_JSON.warnings` — declared since the first release and never populated —
+  now carries `RELATIONSHIP_PATH_ALTERNATIVES` with the selected path, the
+  alternatives, and `selection_reason = SHORTEST_SAFE_PATH`. The `LEGACY_JOIN`
+  relationship proof carries the same candidate list that `STRICT_GRAIN`
+  already emitted when refusing.
+- Unchanged: a tie in length is still an authoring-time ERROR
+  (`SEMANTIC_MODEL_030` / `AMBIGUOUS_RELATIONSHIP_PATH`), and `STRICT_GRAIN`
+  still refuses an alternative of any length. The new code is a warning because
+  a denormalized shortcut edge alongside the long way round is a common and
+  harmless shape that the engine cannot distinguish from two genuinely
+  different roles; it reports the choice instead of deciding quietly.
+- Neither message offers `PATH_PRIORITY` as a remedy, because it does not
+  select between candidate paths in either mode. Documented in
+  `docs/validation-rules.md#path-ambiguity` with the full mode matrix.
+- The alternative enumeration is bounded by path length, candidate count, and
+  work done, and reports truncation rather than a false "no alternative".
+- Regression: `tools/verify_path_ambiguity.py`, in the smoke suite.
+
 #### `ADD OR REPLACE FACT`
 
 - Semantic SQL had `ADD OR REPLACE METRIC` but no fact equivalent, so adding

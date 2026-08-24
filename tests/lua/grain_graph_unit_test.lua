@@ -210,3 +210,85 @@ test("shared attempted path reports every candidate when the graph is ambiguous"
     assert_contains(paths, "billing > billing_customer (rejected: MANY_TO_MANY_UNSUPPORTED)")
     assert_contains(paths, "shipping > shipping_customer")
 end)
+
+test("safe path alternatives name a longer path the shortest one won against", function()
+    -- A shortcut edge to beta plus the two-step walk through alpha. Both are
+    -- safe, so prove_path selects the shortest and reports no ambiguity: the
+    -- tie test never fires because the lengths differ. The alternative still
+    -- attributes a fact row to a different row of beta.
+    local relationships = {
+        {id = 1, name = "fact_to_beta", from_entity_id = 1, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE"},
+        {id = 2, name = "fact_to_alpha", from_entity_id = 1, to_entity_id = 2,
+            cardinality = "MANY_TO_ONE"},
+        {id = 3, name = "alpha_to_beta", from_entity_id = 2, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE"},
+    }
+    local safe = graph.build_edges(relationships)
+
+    local selection = graph.prove_path(safe, 1, 3, {
+        require_safe = true,
+        reject_ambiguous = true,
+    })
+    assert_true(selection.ok)
+    assert_true(not selection.ambiguous)
+    assert_equal(selection.path, "fact_to_beta")
+
+    local alternatives = graph.safe_path_alternatives(safe, 1, 3)
+    assert_equal(alternatives.selected.path, "fact_to_beta")
+    assert_equal(alternatives.selected.length, 1)
+    assert_equal(#alternatives.alternates, 1)
+    assert_equal(alternatives.alternates[1].path, "fact_to_alpha > alpha_to_beta")
+    assert_equal(alternatives.alternates[1].length, 2)
+    assert_true(not alternatives.truncated)
+    assert_branch("grain_graph.safe_path_alternative_exists",
+        #alternatives.alternates > 0, true)
+
+    -- The selected path must be the one prove_path returns, or a caller would
+    -- report a choice the compiler did not make.
+    assert_equal(alternatives.selected.path, selection.path)
+
+    -- One path only: nothing to report.
+    local single = graph.safe_path_alternatives(safe, 2, 3)
+    assert_equal(single.selected.path, "alpha_to_beta")
+    assert_equal(#single.alternates, 0)
+    assert_branch("grain_graph.safe_path_alternative_exists",
+        #single.alternates > 0, false)
+
+    -- Unreachable target: no selection, and no alternatives to claim.
+    local absent = graph.safe_path_alternatives(safe, 3, 1)
+    assert_equal(absent.selected, nil)
+    assert_equal(#absent.alternates, 0)
+end)
+
+test("path enumeration caps report truncation instead of a false negative", function()
+    local relationships = {
+        {id = 1, name = "fact_to_beta", from_entity_id = 1, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE"},
+        {id = 2, name = "fact_to_alpha", from_entity_id = 1, to_entity_id = 2,
+            cardinality = "MANY_TO_ONE"},
+        {id = 3, name = "alpha_to_beta", from_entity_id = 2, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE"},
+    }
+    local safe = graph.build_edges(relationships)
+
+    -- Candidate cap: the walk keeps the shortest path and reports that it
+    -- stopped, so "no alternative" cannot be read out of a capped search.
+    local capped = graph.safe_path_alternatives(safe, 1, 3, {max_candidates = 1})
+    assert_equal(capped.selected.path, "fact_to_beta")
+    assert_equal(#capped.alternates, 0)
+    assert_true(capped.truncated)
+
+    -- Visit cap: the same, bounded by work done rather than results kept.
+    local visit_capped = graph.prove_path(safe, 1, 3, {
+        require_safe = true,
+        reject_any_ambiguity = true,
+        max_visits = 1,
+    })
+    assert_true(visit_capped.truncated)
+
+    -- Depth cap keeps the shortest path and drops the longer one entirely.
+    local shallow = graph.safe_path_alternatives(safe, 1, 3, {max_depth = 1})
+    assert_equal(shallow.selected.path, "fact_to_beta")
+    assert_equal(#shallow.alternates, 0)
+end)

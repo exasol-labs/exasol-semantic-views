@@ -3498,6 +3498,23 @@ local function metric_reachable_from_any_root(ctx, metric, safe_edges, all_edges
     return false, diagnostic_path
 end
 
+-- Safe paths that lost to the selected one, cached per entity pair.
+--
+-- A path proof measures ambiguity as "more than one shortest path" and rejects
+-- that outright (AMBIGUOUS_RELATIONSHIP_PATH). An alternative of a different
+-- length passes the same gate: the shortest path wins, silently. Length is not
+-- a statement about meaning, so the model has to say the choice exists.
+local function path_alternatives(ctx, safe_edges, from_id, to_id)
+    ctx.path_alternatives_cache = ctx.path_alternatives_cache or {}
+    local cache_key = key(from_id) .. ">" .. key(to_id)
+    local cached = ctx.path_alternatives_cache[cache_key]
+    if cached == nil then
+        cached = grain_graph.safe_path_alternatives(safe_edges, from_id, to_id)
+        ctx.path_alternatives_cache[cache_key] = cached
+    end
+    return cached
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -3517,6 +3534,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             local is_valid = false
             local reason_code = "OK"
             local path = nil
+            local alternates = nil
             if not root_can_reach_metric then
                 reason_code = "NO_SAFE_JOIN_PATH"
                 path = root_path
@@ -3530,6 +3548,8 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                     is_valid = true
                     reason_code = "OK"
                     path = relationship_path
+                    alternates = path_alternatives(
+                        ctx, safe_edges, metric.base_entity_id, dimension.entity_id)
                 else
                     local blocked_path, blocked_reason = attempted_path(
                         all_edges, metric.base_entity_id, dimension.entity_id)
@@ -3541,6 +3561,8 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 is_valid = is_valid,
                 reason_code = reason_code,
                 path = path,
+                alternate_paths = alternates ~= nil
+                    and #alternates.alternates > 0 and alternates.alternates or nil,
             }
             query([[
                 INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX (
@@ -3594,6 +3616,39 @@ local function validate_visible_metric_dimension_pairs(ctx)
         local metric_id = row_value(row, "METRIC_ID", 2)
         local dimension_id = row_value(row, "DIMENSION_ID", 4)
         local matrix_row = ctx.matrix[key(metric_id)] and ctx.matrix[key(metric_id)][key(dimension_id)]
+        if matrix_row ~= nil and matrix_row.is_valid
+            and matrix_row.alternate_paths ~= nil then
+            -- Keyed on the entity pair, not the metric/dimension pair: every
+            -- metric on the same base and every dimension on the same entity
+            -- share the one choice, and add_issue dedupes the identical text.
+            local metric = ctx.metric_by_id[key(metric_id)]
+            local dimension = ctx.dimension_by_id[key(dimension_id)]
+            local from_name = metric ~= nil
+                and (ctx.entity_name_by_id[key(metric.base_entity_id)]
+                    or tostring(metric.base_entity_id)) or "?"
+            local to_name = dimension ~= nil
+                and (ctx.entity_name_by_id[key(dimension.entity_id)]
+                    or tostring(dimension.entity_id)) or "?"
+            local alternates = {}
+            for _, alternate in ipairs(matrix_row.alternate_paths) do
+                alternates[#alternates + 1] = tostring(alternate.path)
+            end
+            add_issue(ctx, "WARNING", "SEMANTIC_OBJECT", row_value(row, "OBJECT_NAME", 1),
+                "SEMANTIC_MODEL_055",
+                "Entity " .. from_name .. " reaches entity " .. to_name
+                    .. " by more than one safe relationship path. Compilation"
+                    .. " selects " .. tostring(matrix_row.path)
+                    .. " because it is the shortest; not selected: "
+                    .. table.concat(alternates, ", ")
+                    .. ". The paths can attribute a row of " .. from_name
+                    .. " to a different row of " .. to_name .. ", so the choice"
+                    .. " decides the number, and path length is not a statement"
+                    .. " about meaning. Remove the redundant relationship, or"
+                    .. " model the paths as separate entities with their own"
+                    .. " dimensions. A tie in length is rejected"
+                    .. " (SEMANTIC_MODEL_030 / AMBIGUOUS_RELATIONSHIP_PATH) and"
+                    .. " proof mode STRICT_GRAIN refuses either shape.")
+        end
         if matrix_row ~= nil and not matrix_row.is_valid then
             local object_name = row_value(row, "OBJECT_NAME", 1)
             local path_detail = missing(matrix_row.path)

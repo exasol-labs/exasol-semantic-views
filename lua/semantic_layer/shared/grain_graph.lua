@@ -150,7 +150,18 @@ function M.prove_path(edge_map, from_id, to_id, options)
     local index = 1
 
     local max_depth = tonumber(options.max_depth) or 64
+    -- Enumerating paths of every length (reject_any_ambiguity) is unbounded in a
+    -- densely connected graph. These caps bound that walk, and a walk that hit
+    -- one reports truncated = true so no caller can read "there is no
+    -- alternative path" out of a search that stopped early.
+    local max_candidates = tonumber(options.max_candidates)
+    local max_visits = tonumber(options.max_visits)
+    local truncated = false
     while index <= #queue do
+        if max_visits ~= nil and index > max_visits then
+            truncated = true
+            break
+        end
         local current = queue[index]
         index = index + 1
         local depth = #current.path
@@ -170,8 +181,13 @@ function M.prove_path(edge_map, from_id, to_id, options)
                             if next_depth == shortest or options.reject_any_ambiguity then
                                 local signature = path_signature(next_path)
                                 if not candidate_seen[signature] then
-                                    candidate_seen[signature] = true
-                                    candidates[#candidates + 1] = next_path
+                                    if max_candidates ~= nil
+                                        and #candidates >= max_candidates then
+                                        truncated = true
+                                    else
+                                        candidate_seen[signature] = true
+                                        candidates[#candidates + 1] = next_path
+                                    end
                                 end
                             end
                         elseif (shortest == nil or options.reject_any_ambiguity)
@@ -202,6 +218,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
             reason = first_blocked_reason or "NO_RELATIONSHIP_PATH",
             candidates = {},
             ambiguous = false,
+            truncated = truncated,
         }
     end
 
@@ -221,6 +238,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
             candidates = candidates,
             candidate_paths = descriptions,
             ambiguous = true,
+            truncated = truncated,
         }
     end
 
@@ -231,6 +249,45 @@ function M.prove_path(edge_map, from_id, to_id, options)
         path = path_text(candidates[1]),
         candidates = candidates,
         ambiguous = ambiguous,
+        truncated = truncated,
+    }
+end
+
+-- Every distinct safe path between two entities, shortest first, not only the
+-- shortest ones.
+--
+-- prove_path measures ambiguity as "more than one shortest path" and refuses
+-- that. An alternative of a different length is invisible to it: the shortest
+-- path simply wins. But path length is not a semantic authority — a longer
+-- path can attribute a fact row to a different dimension row and so change the
+-- number. Callers use this to report the choice instead of making it silently.
+-- STRICT_GRAIN refuses any such alternative outright (reject_any_ambiguity).
+function M.safe_path_alternatives(edge_map, from_id, to_id, options)
+    options = options or {}
+    local proof = M.prove_path(edge_map, from_id, to_id, {
+        require_safe = true,
+        reject_ambiguous = false,
+        reject_any_ambiguity = true,
+        max_depth = tonumber(options.max_depth) or 64,
+        max_candidates = tonumber(options.max_candidates) or 8,
+        max_visits = tonumber(options.max_visits) or 50000,
+    })
+    local paths = {}
+    for _, candidate in ipairs(proof.candidates or {}) do
+        paths[#paths + 1] = {
+            path = path_text(candidate),
+            length = #candidate,
+        }
+    end
+    local alternates = {}
+    for index = 2, #paths do
+        alternates[#alternates + 1] = paths[index]
+    end
+    return {
+        selected = paths[1],
+        alternates = alternates,
+        paths = paths,
+        truncated = proof.truncated == true,
     }
 end
 

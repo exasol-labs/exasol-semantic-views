@@ -277,6 +277,53 @@ test("Strict proof rejects many to many and unequal alternative paths", function
     assert_equal(rejected[#rejected].reason, "MANY_TO_MANY_PROOF_UNSUPPORTED")
 end)
 
+test("Legacy proof names the paths the shortest one won against", function()
+    -- STRICT_GRAIN refuses an alternative path of any length. The default
+    -- LEGACY_JOIN lane selects the shortest and refuses only a tie, so the
+    -- proof has to name what it selected against: length does not make one
+    -- attribution more correct than the other.
+    local ctx = base_context()
+    local function relationship(id, name, from_id, to_id)
+        return {
+            id = id, name = name, from_entity_id = from_id, to_entity_id = to_id,
+            cardinality = "MANY_TO_ONE",
+            key_mappings = {{
+                ordinal_position = 1, from_column_name = "id", to_column_name = "id",
+            }},
+        }
+    end
+    ctx.relationships = {
+        relationship(1, "direct", 1, 3),
+        relationship(2, "via_customer", 1, 2),
+        relationship(3, "via_region", 2, 3),
+    }
+    local snapshot = snapshots.from_context(ctx, {})
+
+    local legacy = planner.prove(snapshot, 1, 3, "LEGACY_JOIN")
+    assert_equal(legacy.status, "PROVEN")
+    assert_equal(legacy.selected_path, "direct")
+    assert_equal(legacy.selection_reason, "SHORTEST_SAFE_PATH")
+    assert_equal(#legacy.candidate_paths, 2)
+    assert_equal(legacy.candidate_paths[1], "direct")
+    assert_equal(legacy.alternate_paths[1], "via_customer > via_region")
+    assert_equal(legacy.candidate_search_truncated, nil)
+    assert_branch("metric_plan.legacy_proof_has_path_alternatives",
+        #(legacy.alternate_paths or {}) > 0, true)
+
+    -- One path only: a proven proof stays quiet, and the strict lane accepts it.
+    local single = planner.prove(snapshot, 2, 3, "LEGACY_JOIN")
+    assert_equal(single.status, "PROVEN")
+    assert_equal(single.selected_path, nil)
+    assert_equal(#single.candidate_paths, 0)
+    assert_branch("metric_plan.legacy_proof_has_path_alternatives",
+        #(single.alternate_paths or {}) > 0, false)
+
+    -- No path at all: nothing to select between, and no alternatives claimed.
+    local absent = planner.prove(snapshot, 3, 1, "LEGACY_JOIN")
+    assert_equal(absent.status, "REJECTED")
+    assert_equal(absent.alternate_paths, nil)
+end)
+
 test("C1 logical planner emits a planning-only multi branch plan", function()
     local ctx, public = base_context()
     ctx.facts[2].entity_id = 2

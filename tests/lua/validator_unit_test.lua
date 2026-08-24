@@ -1792,6 +1792,81 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
     assert_contains(fanout_issue.message, "object 'SALES'")
 end)
 
+test("validator warns when a shorter safe path won over a longer one", function()
+    -- A tie in path length is an ERROR (AMBIGUOUS_RELATIONSHIP_PATH). An
+    -- alternative of a different length passes the same gate silently, because
+    -- the shortest path simply wins — yet the two can attribute an order to a
+    -- different customer. The model has to say the choice exists.
+    local ctx = validation_context({
+        version_id = 2,
+        semantic_objects = {{root_entity_id = 1}},
+        entity_name_by_id = {['1'] = "orders", ['2'] = "stores", ['3'] = "customers"},
+        metrics = {{id = 10, name = "revenue", base_entity_id = 1}},
+        metric_by_id = {['10'] = {id = 10, name = "revenue", base_entity_id = 1}},
+        dimensions = {{id = 20, name = "customer_region", entity_id = 3}},
+        dimension_by_id = {['20'] = {id = 20, name = "customer_region", entity_id = 3}},
+    })
+    local safe = {
+        ['1'] = {
+            {from_id = 1, to_id = 3, name = "order_customer", safe = true, reason = "OK"},
+            {from_id = 1, to_id = 2, name = "order_store", safe = true, reason = "OK"},
+        },
+        ['2'] = {{from_id = 2, to_id = 3, name = "store_customer", safe = true, reason = "OK"}},
+    }
+    with_query(function() return {} end, function()
+        api.compute_metric_dimension_matrix(ctx, safe, safe)
+    end)
+    assert_true(ctx.matrix['10']['20'].is_valid)
+    assert_equal(ctx.matrix['10']['20'].path, "order_customer")
+    assert_equal(#ctx.matrix['10']['20'].alternate_paths, 1)
+    assert_equal(ctx.matrix['10']['20'].alternate_paths[1].path,
+        "order_store > store_customer")
+
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+            return {{"SALES", 10, "revenue", 20, "customer_region"}}
+        end
+        return {}
+    end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_055")
+    assert_equal(issue.severity, "WARNING")
+    assert_contains(issue.message,
+        "Entity orders reaches entity customers by more than one safe relationship path")
+    assert_contains(issue.message, "selects order_customer because it is the shortest")
+    assert_contains(issue.message, "not selected: order_store > store_customer")
+    -- The pair is still valid: a warning, not a refusal.
+    assert_true(not has_rule(ctx, "SEMANTIC_MODEL_030"))
+    assert_branch("validator.matrix.path_alternatives",
+        has_rule(ctx, "SEMANTIC_MODEL_055"), true)
+
+    -- One safe path: nothing to warn about, and the matrix row stays clean.
+    local single = validation_context({
+        version_id = 2,
+        semantic_objects = {{root_entity_id = 1}},
+        entity_name_by_id = {['1'] = "orders", ['3'] = "customers"},
+        metrics = {{id = 10, name = "revenue", base_entity_id = 1}},
+        metric_by_id = {['10'] = {id = 10, name = "revenue", base_entity_id = 1}},
+        dimensions = {{id = 20, name = "customer_region", entity_id = 3}},
+        dimension_by_id = {['20'] = {id = 20, name = "customer_region", entity_id = 3}},
+    })
+    local one_path = {
+        ['1'] = {{from_id = 1, to_id = 3, name = "order_customer", safe = true, reason = "OK"}},
+    }
+    with_query(function() return {} end, function()
+        api.compute_metric_dimension_matrix(single, one_path, one_path)
+    end)
+    assert_equal(single.matrix['10']['20'].alternate_paths, nil)
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+            return {{"SALES", 10, "revenue", 20, "customer_region"}}
+        end
+        return {}
+    end, function() api.validate_visible_metric_dimension_pairs(single) end)
+    assert_true(not has_rule(single, "SEMANTIC_MODEL_055"))
+    assert_branch("validator.matrix.path_alternatives",
+        has_rule(single, "SEMANTIC_MODEL_055"), false)
+end)
+
 test("validator matrix rejects metrics unreachable from published roots", function()
     local inserted = nil
     local ctx = validation_context({

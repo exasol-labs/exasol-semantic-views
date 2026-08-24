@@ -2290,6 +2290,48 @@ local function validate_metric_dimensions(ctx, metrics, dimensions)
     return nil
 end
 
+-- Turn a relationship proof that had to choose between safe paths into a plan
+-- warning. The compiler picks the shortest safe path and refuses only a tie
+-- (SEMANTIC_REQUEST_042 / AMBIGUOUS_RELATIONSHIP_PATH), so an alternative of a
+-- different length is selected against silently. Path length is not a semantic
+-- authority: the alternative can attribute a fact row to a different dimension
+-- row, which changes the number. Say so instead of choosing quietly.
+local function relationship_path_warnings(ctx, typed_plan)
+    local warnings = {}
+    for _, proof in ipairs((typed_plan or {}).relationship_proofs or {}) do
+        if proof.status == "PROVEN" and #(proof.alternate_paths or {}) > 0 then
+            local entity = ctx.entity_by_id[key(proof.to_entity_id)]
+            local entity_name = entity ~= nil and entity.name
+                or tostring(proof.to_entity_id)
+            local alternates = table.concat(proof.alternate_paths, ", ")
+            local message = "Entity " .. entity_name .. " is reachable by "
+                .. tostring(#(proof.candidate_paths or {})) .. " safe relationship"
+                .. " paths. Selected " .. tostring(proof.selected_path)
+                .. " because it is the shortest; not selected: " .. alternates
+                .. ". Paths can attribute a fact row to a different row of "
+                .. entity_name .. ", so the selected path decides the number, and"
+                .. " path length is not a statement about meaning. PATH_PRIORITY"
+                .. " does not choose between them. Remove the redundant"
+                .. " relationship, or model the paths as separate entities with"
+                .. " their own dimensions, to make the choice explicit."
+                .. " Proof mode STRICT_GRAIN refuses the request instead of"
+                .. " choosing."
+            warnings[#warnings + 1] = {
+                code = "RELATIONSHIP_PATH_ALTERNATIVES",
+                severity = "WARNING",
+                target_entity_id = proof.to_entity_id,
+                target_entity = entity_name,
+                selected_path = proof.selected_path,
+                selection_reason = proof.selection_reason or "SHORTEST_SAFE_PATH",
+                candidate_paths = proof.candidate_paths or {},
+                alternate_paths = proof.alternate_paths,
+                message = message,
+            }
+        end
+    end
+    return warnings
+end
+
 local function plan_joins(ctx, needed_entities)
     local root_id = ctx.object.root_entity_id
     needed_entities[key(root_id)] = true
@@ -3066,7 +3108,7 @@ local function compile_request_table(request, options)
                 or {},
             materialization_decision = materialization_decision,
             validation_run_id = validation_run_id,
-            warnings = {},
+            warnings = relationship_path_warnings(ctx, typed_plan),
             selected_representations = {},
         }
         if #(ctx.relationship_identity_remaps or {}) > 0 then
@@ -4369,6 +4411,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_dimension_predicate = build_dimension_predicate,
         build_filters = build_filters,
         plan_joins = plan_joins,
+        relationship_path_warnings = relationship_path_warnings,
         build_order_by = build_order_by,
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,

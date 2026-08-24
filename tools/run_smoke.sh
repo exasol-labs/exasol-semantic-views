@@ -48,6 +48,12 @@ sh tools/run_lua_tests.sh
 # partners. Builds a disposable fanning model and asserts both refusal lanes.
 "$PYTHON_BIN" tools/verify_many_to_many_refusal.py
 
+# Path ambiguity: a tie between safe paths is refused, but an alternative of a
+# different length used to lose silently — shortest wins, warnings: []. Asserts
+# the authoring warning, the plan warning, the strict-mode refusal, and that the
+# fixture's two paths still disagree about the answer.
+"$PYTHON_BIN" tools/verify_path_ambiguity.py
+
 # SET_RELATIONSHIP: relationships were add-only, so correcting a cardinality or
 # fanout policy meant remove-mappings/remove/add/re-add. Asserts in-place edit,
 # surviving key mappings, the closed policy set, and published rollback.

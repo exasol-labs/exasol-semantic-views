@@ -8113,7 +8113,18 @@ function M.prove_path(edge_map, from_id, to_id, options)
     local index = 1
 
     local max_depth = tonumber(options.max_depth) or 64
+    -- Enumerating paths of every length (reject_any_ambiguity) is unbounded in a
+    -- densely connected graph. These caps bound that walk, and a walk that hit
+    -- one reports truncated = true so no caller can read "there is no
+    -- alternative path" out of a search that stopped early.
+    local max_candidates = tonumber(options.max_candidates)
+    local max_visits = tonumber(options.max_visits)
+    local truncated = false
     while index <= #queue do
+        if max_visits ~= nil and index > max_visits then
+            truncated = true
+            break
+        end
         local current = queue[index]
         index = index + 1
         local depth = #current.path
@@ -8133,8 +8144,13 @@ function M.prove_path(edge_map, from_id, to_id, options)
                             if next_depth == shortest or options.reject_any_ambiguity then
                                 local signature = path_signature(next_path)
                                 if not candidate_seen[signature] then
-                                    candidate_seen[signature] = true
-                                    candidates[#candidates + 1] = next_path
+                                    if max_candidates ~= nil
+                                        and #candidates >= max_candidates then
+                                        truncated = true
+                                    else
+                                        candidate_seen[signature] = true
+                                        candidates[#candidates + 1] = next_path
+                                    end
                                 end
                             end
                         elseif (shortest == nil or options.reject_any_ambiguity)
@@ -8165,6 +8181,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
             reason = first_blocked_reason or "NO_RELATIONSHIP_PATH",
             candidates = {},
             ambiguous = false,
+            truncated = truncated,
         }
     end
 
@@ -8184,6 +8201,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
             candidates = candidates,
             candidate_paths = descriptions,
             ambiguous = true,
+            truncated = truncated,
         }
     end
 
@@ -8194,6 +8212,45 @@ function M.prove_path(edge_map, from_id, to_id, options)
         path = path_text(candidates[1]),
         candidates = candidates,
         ambiguous = ambiguous,
+        truncated = truncated,
+    }
+end
+
+-- Every distinct safe path between two entities, shortest first, not only the
+-- shortest ones.
+--
+-- prove_path measures ambiguity as "more than one shortest path" and refuses
+-- that. An alternative of a different length is invisible to it: the shortest
+-- path simply wins. But path length is not a semantic authority — a longer
+-- path can attribute a fact row to a different dimension row and so change the
+-- number. Callers use this to report the choice instead of making it silently.
+-- STRICT_GRAIN refuses any such alternative outright (reject_any_ambiguity).
+function M.safe_path_alternatives(edge_map, from_id, to_id, options)
+    options = options or {}
+    local proof = M.prove_path(edge_map, from_id, to_id, {
+        require_safe = true,
+        reject_ambiguous = false,
+        reject_any_ambiguity = true,
+        max_depth = tonumber(options.max_depth) or 64,
+        max_candidates = tonumber(options.max_candidates) or 8,
+        max_visits = tonumber(options.max_visits) or 50000,
+    })
+    local paths = {}
+    for _, candidate in ipairs(proof.candidates or {}) do
+        paths[#paths + 1] = {
+            path = path_text(candidate),
+            length = #candidate,
+        }
+    end
+    local alternates = {}
+    for index = 2, #paths do
+        alternates[#alternates + 1] = paths[index]
+    end
+    return {
+        selected = paths[1],
+        alternates = alternates,
+        paths = paths,
+        truncated = proof.truncated == true,
     }
 end
 
@@ -11861,6 +11918,23 @@ local function metric_reachable_from_any_root(ctx, metric, safe_edges, all_edges
     return false, diagnostic_path
 end
 
+-- Safe paths that lost to the selected one, cached per entity pair.
+--
+-- A path proof measures ambiguity as "more than one shortest path" and rejects
+-- that outright (AMBIGUOUS_RELATIONSHIP_PATH). An alternative of a different
+-- length passes the same gate: the shortest path wins, silently. Length is not
+-- a statement about meaning, so the model has to say the choice exists.
+local function path_alternatives(ctx, safe_edges, from_id, to_id)
+    ctx.path_alternatives_cache = ctx.path_alternatives_cache or {}
+    local cache_key = key(from_id) .. ">" .. key(to_id)
+    local cached = ctx.path_alternatives_cache[cache_key]
+    if cached == nil then
+        cached = grain_graph.safe_path_alternatives(safe_edges, from_id, to_id)
+        ctx.path_alternatives_cache[cache_key] = cached
+    end
+    return cached
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -11880,6 +11954,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             local is_valid = false
             local reason_code = "OK"
             local path = nil
+            local alternates = nil
             if not root_can_reach_metric then
                 reason_code = "NO_SAFE_JOIN_PATH"
                 path = root_path
@@ -11893,6 +11968,8 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                     is_valid = true
                     reason_code = "OK"
                     path = relationship_path
+                    alternates = path_alternatives(
+                        ctx, safe_edges, metric.base_entity_id, dimension.entity_id)
                 else
                     local blocked_path, blocked_reason = attempted_path(
                         all_edges, metric.base_entity_id, dimension.entity_id)
@@ -11904,6 +11981,8 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 is_valid = is_valid,
                 reason_code = reason_code,
                 path = path,
+                alternate_paths = alternates ~= nil
+                    and #alternates.alternates > 0 and alternates.alternates or nil,
             }
             query([[
                 INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX (
@@ -11957,6 +12036,39 @@ local function validate_visible_metric_dimension_pairs(ctx)
         local metric_id = row_value(row, "METRIC_ID", 2)
         local dimension_id = row_value(row, "DIMENSION_ID", 4)
         local matrix_row = ctx.matrix[key(metric_id)] and ctx.matrix[key(metric_id)][key(dimension_id)]
+        if matrix_row ~= nil and matrix_row.is_valid
+            and matrix_row.alternate_paths ~= nil then
+            -- Keyed on the entity pair, not the metric/dimension pair: every
+            -- metric on the same base and every dimension on the same entity
+            -- share the one choice, and add_issue dedupes the identical text.
+            local metric = ctx.metric_by_id[key(metric_id)]
+            local dimension = ctx.dimension_by_id[key(dimension_id)]
+            local from_name = metric ~= nil
+                and (ctx.entity_name_by_id[key(metric.base_entity_id)]
+                    or tostring(metric.base_entity_id)) or "?"
+            local to_name = dimension ~= nil
+                and (ctx.entity_name_by_id[key(dimension.entity_id)]
+                    or tostring(dimension.entity_id)) or "?"
+            local alternates = {}
+            for _, alternate in ipairs(matrix_row.alternate_paths) do
+                alternates[#alternates + 1] = tostring(alternate.path)
+            end
+            add_issue(ctx, "WARNING", "SEMANTIC_OBJECT", row_value(row, "OBJECT_NAME", 1),
+                "SEMANTIC_MODEL_055",
+                "Entity " .. from_name .. " reaches entity " .. to_name
+                    .. " by more than one safe relationship path. Compilation"
+                    .. " selects " .. tostring(matrix_row.path)
+                    .. " because it is the shortest; not selected: "
+                    .. table.concat(alternates, ", ")
+                    .. ". The paths can attribute a row of " .. from_name
+                    .. " to a different row of " .. to_name .. ", so the choice"
+                    .. " decides the number, and path length is not a statement"
+                    .. " about meaning. Remove the redundant relationship, or"
+                    .. " model the paths as separate entities with their own"
+                    .. " dimensions. A tie in length is rejected"
+                    .. " (SEMANTIC_MODEL_030 / AMBIGUOUS_RELATIONSHIP_PATH) and"
+                    .. " proof mode STRICT_GRAIN refuses either shape.")
+        end
         if matrix_row ~= nil and not matrix_row.is_valid then
             local object_name = row_value(row, "OBJECT_NAME", 1)
             local path_detail = missing(matrix_row.path)
@@ -12692,7 +12804,18 @@ function M.prove_path(edge_map, from_id, to_id, options)
     local index = 1
 
     local max_depth = tonumber(options.max_depth) or 64
+    -- Enumerating paths of every length (reject_any_ambiguity) is unbounded in a
+    -- densely connected graph. These caps bound that walk, and a walk that hit
+    -- one reports truncated = true so no caller can read "there is no
+    -- alternative path" out of a search that stopped early.
+    local max_candidates = tonumber(options.max_candidates)
+    local max_visits = tonumber(options.max_visits)
+    local truncated = false
     while index <= #queue do
+        if max_visits ~= nil and index > max_visits then
+            truncated = true
+            break
+        end
         local current = queue[index]
         index = index + 1
         local depth = #current.path
@@ -12712,8 +12835,13 @@ function M.prove_path(edge_map, from_id, to_id, options)
                             if next_depth == shortest or options.reject_any_ambiguity then
                                 local signature = path_signature(next_path)
                                 if not candidate_seen[signature] then
-                                    candidate_seen[signature] = true
-                                    candidates[#candidates + 1] = next_path
+                                    if max_candidates ~= nil
+                                        and #candidates >= max_candidates then
+                                        truncated = true
+                                    else
+                                        candidate_seen[signature] = true
+                                        candidates[#candidates + 1] = next_path
+                                    end
                                 end
                             end
                         elseif (shortest == nil or options.reject_any_ambiguity)
@@ -12744,6 +12872,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
             reason = first_blocked_reason or "NO_RELATIONSHIP_PATH",
             candidates = {},
             ambiguous = false,
+            truncated = truncated,
         }
     end
 
@@ -12763,6 +12892,7 @@ function M.prove_path(edge_map, from_id, to_id, options)
             candidates = candidates,
             candidate_paths = descriptions,
             ambiguous = true,
+            truncated = truncated,
         }
     end
 
@@ -12773,6 +12903,45 @@ function M.prove_path(edge_map, from_id, to_id, options)
         path = path_text(candidates[1]),
         candidates = candidates,
         ambiguous = ambiguous,
+        truncated = truncated,
+    }
+end
+
+-- Every distinct safe path between two entities, shortest first, not only the
+-- shortest ones.
+--
+-- prove_path measures ambiguity as "more than one shortest path" and refuses
+-- that. An alternative of a different length is invisible to it: the shortest
+-- path simply wins. But path length is not a semantic authority — a longer
+-- path can attribute a fact row to a different dimension row and so change the
+-- number. Callers use this to report the choice instead of making it silently.
+-- STRICT_GRAIN refuses any such alternative outright (reject_any_ambiguity).
+function M.safe_path_alternatives(edge_map, from_id, to_id, options)
+    options = options or {}
+    local proof = M.prove_path(edge_map, from_id, to_id, {
+        require_safe = true,
+        reject_ambiguous = false,
+        reject_any_ambiguity = true,
+        max_depth = tonumber(options.max_depth) or 64,
+        max_candidates = tonumber(options.max_candidates) or 8,
+        max_visits = tonumber(options.max_visits) or 50000,
+    })
+    local paths = {}
+    for _, candidate in ipairs(proof.candidates or {}) do
+        paths[#paths + 1] = {
+            path = path_text(candidate),
+            length = #candidate,
+        }
+    end
+    local alternates = {}
+    for index = 2, #paths do
+        alternates[#alternates + 1] = paths[index]
+    end
+    return {
+        selected = paths[1],
+        alternates = alternates,
+        paths = paths,
+        truncated = proof.truncated == true,
     }
 end
 
@@ -13672,6 +13841,29 @@ function M.prove(snapshot, from_id, to_id, mode)
     local rendered = proof_json("LEGACY_JOIN", proof)
     rendered.from_entity_id = from_id
     rendered.to_entity_id = to_id
+    -- A proof that succeeded still has to say what it chose over what. This
+    -- lane selects the shortest safe path and rejects only a tie, so an
+    -- alternative of a different length would otherwise be selected against
+    -- without ever being named. STRICT_GRAIN reports the same candidate list
+    -- when it refuses the request.
+    if proof.ok then
+        local alternatives = graph.safe_path_alternatives(edges, from_id, to_id)
+        -- Recorded whether or not an alternative was kept: a capped search
+        -- proves nothing about what it did not reach.
+        rendered.candidate_search_truncated = alternatives.truncated or nil
+        if #alternatives.alternates > 0 then
+            rendered.selected_path = alternatives.selected.path
+            rendered.selection_reason = "SHORTEST_SAFE_PATH"
+            rendered.candidate_paths = {}
+            for _, candidate in ipairs(alternatives.paths) do
+                rendered.candidate_paths[#rendered.candidate_paths + 1] = candidate.path
+            end
+            rendered.alternate_paths = {}
+            for _, alternate in ipairs(alternatives.alternates) do
+                rendered.alternate_paths[#rendered.alternate_paths + 1] = alternate.path
+            end
+        end
+    end
     return rendered
 end
 
@@ -17394,6 +17586,48 @@ local function validate_metric_dimensions(ctx, metrics, dimensions)
     return nil
 end
 
+-- Turn a relationship proof that had to choose between safe paths into a plan
+-- warning. The compiler picks the shortest safe path and refuses only a tie
+-- (SEMANTIC_REQUEST_042 / AMBIGUOUS_RELATIONSHIP_PATH), so an alternative of a
+-- different length is selected against silently. Path length is not a semantic
+-- authority: the alternative can attribute a fact row to a different dimension
+-- row, which changes the number. Say so instead of choosing quietly.
+local function relationship_path_warnings(ctx, typed_plan)
+    local warnings = {}
+    for _, proof in ipairs((typed_plan or {}).relationship_proofs or {}) do
+        if proof.status == "PROVEN" and #(proof.alternate_paths or {}) > 0 then
+            local entity = ctx.entity_by_id[key(proof.to_entity_id)]
+            local entity_name = entity ~= nil and entity.name
+                or tostring(proof.to_entity_id)
+            local alternates = table.concat(proof.alternate_paths, ", ")
+            local message = "Entity " .. entity_name .. " is reachable by "
+                .. tostring(#(proof.candidate_paths or {})) .. " safe relationship"
+                .. " paths. Selected " .. tostring(proof.selected_path)
+                .. " because it is the shortest; not selected: " .. alternates
+                .. ". Paths can attribute a fact row to a different row of "
+                .. entity_name .. ", so the selected path decides the number, and"
+                .. " path length is not a statement about meaning. PATH_PRIORITY"
+                .. " does not choose between them. Remove the redundant"
+                .. " relationship, or model the paths as separate entities with"
+                .. " their own dimensions, to make the choice explicit."
+                .. " Proof mode STRICT_GRAIN refuses the request instead of"
+                .. " choosing."
+            warnings[#warnings + 1] = {
+                code = "RELATIONSHIP_PATH_ALTERNATIVES",
+                severity = "WARNING",
+                target_entity_id = proof.to_entity_id,
+                target_entity = entity_name,
+                selected_path = proof.selected_path,
+                selection_reason = proof.selection_reason or "SHORTEST_SAFE_PATH",
+                candidate_paths = proof.candidate_paths or {},
+                alternate_paths = proof.alternate_paths,
+                message = message,
+            }
+        end
+    end
+    return warnings
+end
+
 local function plan_joins(ctx, needed_entities)
     local root_id = ctx.object.root_entity_id
     needed_entities[key(root_id)] = true
@@ -18170,7 +18404,7 @@ local function compile_request_table(request, options)
                 or {},
             materialization_decision = materialization_decision,
             validation_run_id = validation_run_id,
-            warnings = {},
+            warnings = relationship_path_warnings(ctx, typed_plan),
             selected_representations = {},
         }
         if #(ctx.relationship_identity_remaps or {}) > 0 then
@@ -19473,6 +19707,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_dimension_predicate = build_dimension_predicate,
         build_filters = build_filters,
         plan_joins = plan_joins,
+        relationship_path_warnings = relationship_path_warnings,
         build_order_by = build_order_by,
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,

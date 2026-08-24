@@ -21,7 +21,6 @@ The compiler separates request normalization, catalog loading, logical metric
 planning, physical source planning, and SQL rendering. The current logical plan
 version is `10`, catalog snapshot version is `4`, and physical plan version is
 `6`. `PLAN_JSON.logical_plan` records:
-`PLAN_JSON.logical_plan` records:
 
 - `LEGACY_JOIN` or `STRICT_GRAIN` proof mode
 - leaf entity ids and typed metric stages
@@ -40,6 +39,19 @@ records intent, not an allocation proof (see
 path needs such an edge is refused with `SEMANTIC_REQUEST_042` naming the
 blocking relationship and reason `MANY_TO_MANY_UNSUPPORTED`, rather than
 compiling to a flat join that counts a row once per matching partner.
+
+`PLAN_JSON.warnings` carries decisions the compiler made that a governed
+consumer should see. Today it carries one code,
+`RELATIONSHIP_PATH_ALTERNATIVES`: more than one safe relationship path reached a
+needed entity, and `LEGACY_JOIN` selected the shortest. The warning names the
+selected path, the paths not selected, and `selection_reason =
+SHORTEST_SAFE_PATH`; the relationship proof carries the same list as
+`candidate_paths`. A tie in length is refused instead
+(`SEMANTIC_REQUEST_042` / `AMBIGUOUS_RELATIONSHIP_PATH`), and `STRICT_GRAIN`
+refuses any alternative regardless of length with
+`RELATIONSHIP_PATH_AMBIGUOUS`. See
+[Path ambiguity](validation-rules.md#path-ambiguity) for the full matrix and the
+remedies; `PATH_PRIORITY` is not one of them.
 
 For metrics whose normalized aggregate states span multiple fact entities, the
 logical and physical planners:
