@@ -847,6 +847,69 @@ Script result sets are not catalog objects, so they are not in
 `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`; see
 [the compiler doc](semantic-compiler.md#reading-the-compile-result).
 
+## Join Introspection
+
+`CATALOG_COLUMNS` answers "what are the columns of X?".
+`SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS` answers the other half — "how is X
+connected to anything else?" — so nothing has to guess a join or reverse-engineer
+one from the compiler's Lua:
+
+```sql
+SELECT RELATIONSHIP_KIND, CHILD_COLUMN, PARENT_SURFACE, JOIN_TEMPLATE
+FROM SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS
+WHERE CHILD_SURFACE = 'METRIC_INPUTS'
+ORDER BY RELATIONSHIP_KIND, CHILD_COLUMN;
+```
+
+`JOIN_TEMPLATE` is the ON clause, ready to paste. Three kinds of edge exist and
+only the first is expressible as a SQL constraint, which is why a consumer that
+reads `EXA_ALL_CONSTRAINT_COLUMNS` alone sees roughly half the graph:
+
+| `RELATIONSHIP_KIND` | Where it comes from |
+|---|---|
+| `FOREIGN_KEY` | Declared constraints on the `SYS_SEMANTIC` tables, read back from `EXA_ALL_CONSTRAINT_COLUMNS` |
+| `DISCRIMINATED` | Polymorphic references whose target table is chosen by a sibling discriminator column; one row per discriminator value |
+| `VIEW_REFERENCE` | An ID column a `SEMANTIC_CATALOG` or `SEMANTIC_AGENT` view exposes, pointing out to another surface |
+| `VIEW_IDENTITY` | An ID column that is the view's own row key rather than a pointer; `JOIN_TEMPLATE` is `NULL` |
+
+### Declared, not enforced
+
+Every foreign key on `SYS_SEMANTIC` is created `DISABLE`: declared and fully
+visible in `EXA_ALL_CONSTRAINTS`, but not enforced on write. `IS_ENFORCED`
+reports this honestly (`FALSE` on every `FOREIGN_KEY` row) rather than implying
+integrity nobody checks. The constraints exist to describe the schema, and
+enforcing them would be a different change — the catalog soft-deletes through
+`STATUS` columns, keeps run history whose parents a re-publish can legitimately
+rebuild, and `MODELS.ACTIVE_VERSION_ID` and `MODEL_VERSIONS.MODEL_ID` reference
+each other, so no insert order satisfies both under enforcement.
+
+### Discriminated references
+
+A discriminated reference is a foreign key in every sense except the one SQL can
+express: the table it points at is chosen at runtime by a sibling column, so no
+single `REFERENCES` clause is correct. `METRIC_INPUTS.INPUT_OBJECT_ID` is a
+`FACT_ID` or a `METRIC_ID` depending on `INPUT_OBJECT_TYPE`. **Join on the
+discriminator as well as the id** — the generated `JOIN_TEMPLATE` already does,
+and omitting it silently mixes rows of different object kinds that happen to
+share an id. Each such column also carries a `COMMENT` describing its targets,
+which surfaces as `CATALOG_COLUMNS.DESCRIPTION`.
+
+### Views resolve to the caller's own schema
+
+A view carries no constraints, so `VIEW_REFERENCE` edges are derived by matching
+a view column against the declared foreign-key column names. Their parents
+resolve to a sibling view in the caller's own schema where one exists, because a
+caller granted only `SEMANTIC_CATALOG` cannot follow an edge into
+`SYS_SEMANTIC`. Column names that are polymorphic anywhere in the catalog are
+excluded from this inference — `OBJECT_ID` means `SEMANTIC_OBJECTS` in
+`OBJECT_COLUMNS` but is discriminated in `OBJECT_PRIVILEGES` — so those edges
+come from the `DISCRIMINATED` rows instead of a guess that would be wrong half
+the time.
+
+Like `CATALOG_COLUMNS`, the whole view is derived from `EXA_ALL_*`, so it cannot
+drift from what is installed, and each caller sees edges only between surfaces
+they may actually read.
+
 ## Discovery Helpers
 
 Some generic metadata tools list base tables but not views. To keep semantic

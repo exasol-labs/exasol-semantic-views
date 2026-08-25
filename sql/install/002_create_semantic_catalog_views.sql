@@ -1455,3 +1455,202 @@ WHERE c.COLUMN_SCHEMA IN ('SEMANTIC_CATALOG', 'SEMANTIC_AGENT', 'SYS_SEMANTIC')
 -- METRIC_KIND: semantic classification used by agents and discovery tools.
 --   Values: SIMPLE, FILTERED, RATIO, DERIVED. Mirrors METRIC_TYPE for standard metrics.
 --   An older column name for METRIC_TYPE also exists in legacy rows -- use METRIC_KIND for display.
+
+-- Self-describing join index for every semantic surface.
+--
+-- CATALOG_COLUMNS answers "what are the columns of X?"; this answers the other
+-- half, "how is X connected to anything else?". Three kinds of edge exist in
+-- this installation and only the first is expressible as a SQL constraint, so
+-- an agent that consults EXA_ALL_CONSTRAINT_COLUMNS alone sees roughly half the
+-- graph. All three are unioned here:
+--
+--   FOREIGN_KEY     Declared constraints on the SYS_SEMANTIC tables, read back
+--                   from EXA_ALL_CONSTRAINT_COLUMNS so this view cannot drift
+--                   from what 001 actually installed. They are created DISABLE
+--                   (declared, not enforced) -- IS_ENFORCED reports that
+--                   honestly rather than implying integrity nobody checks.
+--   DISCRIMINATED   Polymorphic references whose target table is chosen by a
+--                   sibling discriminator column. One row per discriminator
+--                   value, so the edge is a fact to read rather than a comment
+--                   to parse. Declared here because SQL cannot declare them.
+--   VIEW_REFERENCE  The SEMANTIC_CATALOG and SEMANTIC_AGENT views expose the
+--     / VIEW_IDENTITY same ID columns as the tables underneath, but a view
+--                   carries no constraints, so these edges are derived by
+--                   matching a view column against the declared foreign-key
+--                   column names. VIEW_IDENTITY marks a view's own row key
+--                   (SEMANTIC_CATALOG.METRICS.METRIC_ID); VIEW_REFERENCE marks
+--                   a pointer out to another surface. Parents resolve to a
+--                   sibling view in the caller's own schema where one exists,
+--                   because a caller granted only SEMANTIC_CATALOG cannot
+--                   follow an edge into SYS_SEMANTIC.
+--
+-- JOIN_TEMPLATE is the ready-to-paste ON clause, including the discriminator
+-- predicate on a DISCRIMINATED edge, where omitting it silently mixes rows
+-- from different object kinds that happen to share an id. It is NULL only on a
+-- VIEW_IDENTITY row, which describes a surface's own key rather than an edge to
+-- follow; every non-NULL template is executable as written.
+--
+--   SELECT CHILD_COLUMN, PARENT_SURFACE, JOIN_TEMPLATE
+--   FROM SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS
+--   WHERE CHILD_SURFACE = 'METRIC_INPUTS';
+--
+-- Derived from EXA_ALL_* throughout, which are filtered by the querying
+-- session's privileges, so each caller sees edges only between surfaces they
+-- may actually read.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS AS
+WITH fk_edges AS (
+  SELECT
+    cc.CONSTRAINT_SCHEMA AS CHILD_SCHEMA,
+    cc.CONSTRAINT_TABLE  AS CHILD_SURFACE,
+    cc.COLUMN_NAME       AS CHILD_COLUMN,
+    cc.REFERENCED_SCHEMA AS PARENT_SCHEMA,
+    cc.REFERENCED_TABLE  AS PARENT_SURFACE,
+    cc.REFERENCED_COLUMN AS PARENT_COLUMN,
+    cc.CONSTRAINT_NAME,
+    cc.ORDINAL_POSITION
+  FROM EXA_ALL_CONSTRAINT_COLUMNS cc
+  WHERE cc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+    AND cc.REFERENCED_TABLE IS NOT NULL
+),
+-- Column name -> parent, taken from the declared constraints rather than from
+-- a naming rule, so the view inherits whatever 001 declared. Names that are
+-- polymorphic anywhere in the catalog are excluded: OBJECT_ID means
+-- SEMANTIC_OBJECTS in OBJECT_COLUMNS but is discriminated in
+-- OBJECT_PRIVILEGES, and inferring one parent for it on a view would assert an
+-- edge that is wrong half the time. Those cases are covered by DISCRIMINATED.
+key_columns AS (
+  SELECT
+    e.CHILD_COLUMN AS KEY_COLUMN,
+    MIN(e.PARENT_SURFACE) AS PARENT_SURFACE,
+    MIN(e.PARENT_COLUMN)  AS PARENT_COLUMN
+  FROM fk_edges e
+  WHERE e.CHILD_SCHEMA = 'SYS_SEMANTIC'
+    AND e.CHILD_COLUMN NOT IN (
+      'OBJECT_ID', 'OBJECT_REF_ID', 'DEPENDS_ON_OBJECT_ID',
+      'INPUT_OBJECT_ID', 'ATTRIBUTE_ID', 'SCOPE_ID')
+  GROUP BY e.CHILD_COLUMN
+  HAVING COUNT(DISTINCT e.PARENT_SURFACE) = 1
+),
+discriminated AS (
+  SELECT * FROM (VALUES
+  ('OBJECT_COLUMNS', 'OBJECT_REF_ID', 'COLUMN_KIND', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('OBJECT_COLUMNS', 'OBJECT_REF_ID', 'COLUMN_KIND', 'FACT', 'FACTS', 'FACT_ID'),
+  ('OBJECT_COLUMNS', 'OBJECT_REF_ID', 'COLUMN_KIND', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('METRIC_DEPENDENCIES', 'DEPENDS_ON_OBJECT_ID', 'DEPENDS_ON_OBJECT_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('METRIC_DEPENDENCIES', 'DEPENDS_ON_OBJECT_ID', 'DEPENDS_ON_OBJECT_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('METRIC_INPUTS', 'INPUT_OBJECT_ID', 'INPUT_OBJECT_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('METRIC_INPUTS', 'INPUT_OBJECT_ID', 'INPUT_OBJECT_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('ATTRIBUTE_BINDINGS', 'ATTRIBUTE_ID', 'ATTRIBUTE_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('ATTRIBUTE_BINDINGS', 'ATTRIBUTE_ID', 'ATTRIBUTE_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('ATTRIBUTE_FUSION_POLICIES', 'ATTRIBUTE_ID', 'ATTRIBUTE_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('ATTRIBUTE_FUSION_POLICIES', 'ATTRIBUTE_ID', 'ATTRIBUTE_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('SYNONYMS', 'OBJECT_ID', 'OBJECT_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('SYNONYMS', 'OBJECT_ID', 'OBJECT_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'MODEL', 'MODELS', 'MODEL_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'SEMANTIC_OBJECT', 'SEMANTIC_OBJECTS', 'OBJECT_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'ENTITY', 'ENTITIES', 'ENTITY_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'RELATIONSHIP', 'RELATIONSHIPS', 'RELATIONSHIP_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('CUSTOM_EXTENSIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('AGENT_INSTRUCTIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'MODEL', 'MODELS', 'MODEL_ID'),
+  ('AGENT_INSTRUCTIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'SEMANTIC_OBJECT', 'SEMANTIC_OBJECTS', 'OBJECT_ID'),
+  ('AGENT_INSTRUCTIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'ENTITY', 'ENTITIES', 'ENTITY_ID'),
+  ('AGENT_INSTRUCTIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('AGENT_INSTRUCTIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('AGENT_INSTRUCTIONS', 'SCOPE_ID', 'SCOPE_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'MODEL', 'MODELS', 'MODEL_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'SEMANTIC_OBJECT', 'SEMANTIC_OBJECTS', 'OBJECT_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'ENTITY', 'ENTITIES', 'ENTITY_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'RELATIONSHIP', 'RELATIONSHIPS', 'RELATIONSHIP_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'FACT', 'FACTS', 'FACT_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('AGENT_SUGGESTIONS', 'OBJECT_ID', 'OBJECT_TYPE', 'SEMANTIC_IDENTITY', 'SEMANTIC_IDENTITIES', 'IDENTITY_ID'),
+  ('MATERIALIZATION_COLUMNS', 'OBJECT_ID', 'OBJECT_TYPE', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
+  ('MATERIALIZATION_COLUMNS', 'OBJECT_ID', 'OBJECT_TYPE', 'METRIC', 'METRICS', 'METRIC_ID'),
+  ('OBJECT_PRIVILEGES', 'OBJECT_ID', 'OBJECT_TYPE', 'MODEL', 'MODELS', 'MODEL_ID'),
+  ('OBJECT_PRIVILEGES', 'OBJECT_ID', 'OBJECT_TYPE', 'SEMANTIC_OBJECT', 'SEMANTIC_OBJECTS', 'OBJECT_ID')
+  ) AS d (CHILD_SURFACE, CHILD_COLUMN, DISCRIMINATOR_COLUMN, DISCRIMINATOR_VALUE,
+          PARENT_SURFACE, PARENT_COLUMN)
+),
+view_columns AS (
+  SELECT
+    c.COLUMN_SCHEMA AS CHILD_SCHEMA,
+    c.COLUMN_TABLE  AS CHILD_SURFACE,
+    c.COLUMN_NAME   AS CHILD_COLUMN,
+    k.PARENT_SURFACE,
+    k.PARENT_COLUMN
+  FROM EXA_ALL_COLUMNS c
+  JOIN key_columns k
+    ON k.KEY_COLUMN = c.COLUMN_NAME
+  WHERE c.COLUMN_SCHEMA IN ('SEMANTIC_CATALOG', 'SEMANTIC_AGENT')
+    AND c.COLUMN_OBJECT_TYPE = 'VIEW'
+)
+SELECT
+  'FOREIGN_KEY' AS RELATIONSHIP_KIND,
+  e.CHILD_SCHEMA,
+  e.CHILD_SURFACE,
+  e.CHILD_COLUMN,
+  CAST(NULL AS VARCHAR(256)) AS DISCRIMINATOR_COLUMN,
+  CAST(NULL AS VARCHAR(256)) AS DISCRIMINATOR_VALUE,
+  e.PARENT_SCHEMA,
+  e.PARENT_SURFACE,
+  e.PARENT_COLUMN,
+  e.CONSTRAINT_NAME,
+  co.CONSTRAINT_ENABLED AS IS_ENFORCED,
+  'JOIN ' || e.PARENT_SCHEMA || '.' || e.PARENT_SURFACE
+    || ' ON ' || e.PARENT_SURFACE || '.' || e.PARENT_COLUMN
+    || ' = ' || e.CHILD_SURFACE || '.' || e.CHILD_COLUMN AS JOIN_TEMPLATE
+FROM fk_edges e
+JOIN EXA_ALL_CONSTRAINTS co
+  ON co.CONSTRAINT_SCHEMA = e.CHILD_SCHEMA
+ AND co.CONSTRAINT_TABLE = e.CHILD_SURFACE
+ AND co.CONSTRAINT_NAME = e.CONSTRAINT_NAME
+UNION ALL
+SELECT
+  'DISCRIMINATED' AS RELATIONSHIP_KIND,
+  'SYS_SEMANTIC' AS CHILD_SCHEMA,
+  d.CHILD_SURFACE,
+  d.CHILD_COLUMN,
+  d.DISCRIMINATOR_COLUMN,
+  d.DISCRIMINATOR_VALUE,
+  'SYS_SEMANTIC' AS PARENT_SCHEMA,
+  d.PARENT_SURFACE,
+  d.PARENT_COLUMN,
+  CAST(NULL AS VARCHAR(128)) AS CONSTRAINT_NAME,
+  CAST(NULL AS BOOLEAN) AS IS_ENFORCED,
+  'JOIN SYS_SEMANTIC.' || d.PARENT_SURFACE
+    || ' ON ' || d.PARENT_SURFACE || '.' || d.PARENT_COLUMN
+    || ' = ' || d.CHILD_SURFACE || '.' || d.CHILD_COLUMN
+    || ' AND ' || d.CHILD_SURFACE || '.' || d.DISCRIMINATOR_COLUMN
+    || ' = ''' || d.DISCRIMINATOR_VALUE || '''' AS JOIN_TEMPLATE
+FROM discriminated d
+UNION ALL
+SELECT
+  CASE WHEN v.CHILD_SURFACE = v.PARENT_SURFACE
+       THEN 'VIEW_IDENTITY' ELSE 'VIEW_REFERENCE' END AS RELATIONSHIP_KIND,
+  v.CHILD_SCHEMA,
+  v.CHILD_SURFACE,
+  v.CHILD_COLUMN,
+  CAST(NULL AS VARCHAR(256)) AS DISCRIMINATOR_COLUMN,
+  CAST(NULL AS VARCHAR(256)) AS DISCRIMINATOR_VALUE,
+  CASE WHEN v.CHILD_SURFACE = v.PARENT_SURFACE
+       THEN 'SYS_SEMANTIC'
+       ELSE NVL(sib.VIEW_SCHEMA, 'SYS_SEMANTIC') END AS PARENT_SCHEMA,
+  v.PARENT_SURFACE,
+  v.PARENT_COLUMN,
+  CAST(NULL AS VARCHAR(128)) AS CONSTRAINT_NAME,
+  CAST(NULL AS BOOLEAN) AS IS_ENFORCED,
+  -- NULL on a VIEW_IDENTITY row: the column is the surface's own row key, and
+  -- a surface does not join to itself. The row still records where that
+  -- identity comes from, so every non-NULL JOIN_TEMPLATE in this view is a
+  -- clause that actually runs.
+  CASE WHEN v.CHILD_SURFACE = v.PARENT_SURFACE THEN NULL
+       ELSE 'JOIN ' || NVL(sib.VIEW_SCHEMA, 'SYS_SEMANTIC') || '.' || v.PARENT_SURFACE
+         || ' ON ' || v.PARENT_SURFACE || '.' || v.PARENT_COLUMN
+         || ' = ' || v.CHILD_SURFACE || '.' || v.CHILD_COLUMN END AS JOIN_TEMPLATE
+FROM view_columns v
+LEFT JOIN EXA_ALL_VIEWS sib
+  ON sib.VIEW_SCHEMA = v.CHILD_SCHEMA
+ AND sib.VIEW_NAME = v.PARENT_SURFACE;

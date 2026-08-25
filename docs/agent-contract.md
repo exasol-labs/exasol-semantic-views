@@ -217,7 +217,13 @@ The database also exposes this contract in
 accepted keys without scraping documentation, and the result layout in
 `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`. Catalog and agent view columns
 are discoverable the same way through
-`SEMANTIC_CATALOG.CATALOG_COLUMNS`.
+`SEMANTIC_CATALOG.CATALOG_COLUMNS`, and the joins between those surfaces through
+[`SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS`](semantic-catalog.md#join-introspection),
+which returns a ready-to-paste `JOIN_TEMPLATE` per edge. The `SEMANTIC_AGENT`
+views are pre-joined and answer most questions without a join at all; reach for
+`CATALOG_RELATIONSHIPS` when connecting two surfaces directly, and note that a
+view carries no SQL constraints, so `EXA_ALL_CONSTRAINT_COLUMNS` alone shows only
+part of the graph.
 
 ### Optional hierarchical results
 

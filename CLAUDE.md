@@ -216,6 +216,35 @@ WHERE SURFACE_NAME = 'VALIDATION_RUNS' ORDER BY ORDINAL_POSITION;
 `SEMANTIC_AGENT` (`AGENT`), `SYS_SEMANTIC` (`CORE`), and published model
 schemas (`PUBLISHED`).
 
+### Catalog Join Introspection
+
+Do not guess how two surfaces join, and do not read it out of the compiler's
+Lua. `SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS` carries every edge in the
+installation and hands back a ready-to-paste ON clause:
+
+```sql
+SELECT RELATIONSHIP_KIND, CHILD_COLUMN, PARENT_SURFACE, JOIN_TEMPLATE
+FROM SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS
+WHERE CHILD_SURFACE = 'METRIC_INPUTS' ORDER BY RELATIONSHIP_KIND, CHILD_COLUMN;
+```
+
+The `SYS_SEMANTIC` tables carry 106 declared `FOREIGN KEY` constraints, all
+created `DISABLE` — declared and visible in `EXA_ALL_CONSTRAINTS`, deliberately
+not enforced on write. Adding a table or an ID column means adding its FK to the
+declaration block at the end of
+`sql/install/001_create_semantic_catalog.sql`; the block is idempotent
+(`DROP CONSTRAINT IF EXISTS` then `ADD CONSTRAINT`) because 001 re-runs over an
+existing catalog. `tests/test_sql_splitter.py` pins the statement count, so it
+fails if a new statement is added there without updating it.
+
+Two kinds of edge are not FK constraints and will not appear in
+`EXA_ALL_CONSTRAINT_COLUMNS`: **discriminated** references, whose target table is
+chosen by a sibling discriminator column (`METRIC_INPUTS.INPUT_OBJECT_ID` is a
+`FACT_ID` or a `METRIC_ID` per `INPUT_OBJECT_TYPE` — always join on the
+discriminator too, or rows of different object kinds sharing an id will silently
+mix), and **view** edges, since a view carries no constraints. Both are covered
+by `CATALOG_RELATIONSHIPS`. See `docs/semantic-catalog.md`.
+
 ### SQL Expression Validation: Static Policy, Not SQL Compilation
 
 Dimension, fact, binding, filter, and identity expressions are checked for alias

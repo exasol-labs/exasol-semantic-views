@@ -65,7 +65,7 @@ SELECT 1;
         for name, splitter in SPLITTERS.items():
             with self.subTest(splitter=name):
                 statements = splitter(sql)
-                self.assertEqual(49, len(statements))
+                self.assertEqual(273, len(statements))
                 self.assertFalse(
                     any(
                         "CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.ATTRIBUTE_BINDINGS" in item
@@ -73,6 +73,53 @@ SELECT 1;
                         for item in statements
                     )
                 )
+
+    def test_foreign_key_declarations_split_one_per_statement(self) -> None:
+        """Each DROP/ADD CONSTRAINT pair must reach the server separately.
+
+        The FK section is written as DROP CONSTRAINT IF EXISTS followed by ADD
+        CONSTRAINT so a re-install re-asserts the map. Merging a pair into one
+        statement would make the file fail on the second install, which is
+        exactly the case the pairing exists to handle.
+        """
+        sql = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(
+            encoding="utf-8"
+        )
+        for name, splitter in SPLITTERS.items():
+            with self.subTest(splitter=name):
+                statements = splitter(sql)
+                adds = [s for s in statements if "ADD CONSTRAINT" in s]
+                drops = [s for s in statements if "DROP CONSTRAINT IF EXISTS" in s]
+                self.assertEqual(106, len(adds))
+                self.assertEqual(106, len(drops))
+                for item in adds:
+                    self.assertNotIn("DROP CONSTRAINT", item)
+                    self.assertEqual(1, item.count("ADD CONSTRAINT"))
+                    self.assertIn("DISABLE", item)
+
+    def test_double_dash_inside_string_literal_is_not_a_comment(self) -> None:
+        """A COMMENT ON body may contain `--` as prose.
+
+        SYS_SEMANTIC.VALIDATION_RESULTS.OBJECT_NAME is documented with an em
+        dash written as `--` inside the literal. Treating that as a line comment
+        would truncate the statement mid-literal and leave an unterminated
+        string, so the whole install file would fail to parse.
+        """
+        sql = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(
+            encoding="utf-8"
+        )
+        for name, splitter in SPLITTERS.items():
+            with self.subTest(splitter=name):
+                statements = splitter(sql)
+                matching = [
+                    item for item in statements
+                    if "Name -- not id -- of the offending object" in item
+                ]
+                self.assertEqual(1, len(matching))
+                statement = matching[0]
+                self.assertTrue(statement.startswith("COMMENT ON TABLE"))
+                self.assertEqual(0, statement.count("'") % 2)
+                self.assertTrue(statement.rstrip().endswith(")"))
 
     def test_lua_quotes_do_not_hide_script_terminator(self) -> None:
         sql = r'''CREATE OR REPLACE SCRIPT TEST.RUNTIME AS
