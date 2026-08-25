@@ -263,7 +263,32 @@ The reference model is in `sql/examples/`. Authoring order matters:
 4. Optional representations, bindings, coverage, authority, and identity through complete or compound declarations
 5. `VALIDATE_MODEL` -> `PUBLISH_MODEL`
 
-The preferred authoring surface is SQL-native Semantic DDL via `APPLY_SEMANTIC_DEFINITION`. The positional `ADD_*` scripts are compatibility APIs. See `sql/examples/sales_metrics_semantic_definition.sql` for the DDL syntax.
+### Two Authoring Surfaces, Neither Complete
+
+Do not reach for Semantic DDL expecting to author a model with it. It covers a
+narrow slice, and the scripts cover the rest:
+
+- **SQL-native Semantic DDL** — `APPLY_SEMANTIC_DEFINITION`, or `ALTER SEMANTIC
+  VIEW` directly once `ENABLE_SEMANTIC_SQL()` is on — covers **facts and metrics
+  only**, on a semantic object that already exists. The accepted forms are
+  `REPLACE FACTS`, `REPLACE METRICS`, `ADD OR REPLACE FACT`, `ADD OR REPLACE
+  METRIC`, `DROP METRIC`, `RENAME METRIC`. An unsupported clause — **including
+  `DIMENSION`** — is refused with `SEMANTIC_DDL_012`, which lists those six
+  forms; any other statement, including `CREATE SEMANTIC VIEW`, is refused with
+  `SEMANTIC_DDL_010: expected ALTER SEMANTIC VIEW`. Note that
+  `APPLY_SEMANTIC_DEFINITION` reports a refusal as `STATUS = 'ERROR'` in its
+  result row rather than raising, so check the column, not just for an exception.
+  See `sql/examples/sales_metrics_semantic_definition.sql`.
+- **The `ADD_*` / `SET_*` / `REMOVE_*` scripts** cover everything else, which is
+  most of a model: the model itself, entities, semantic objects, relationships,
+  unique keys, dimensions, representations, coverage (F3), authority (F4),
+  identity (F5), and materializations. Call them positionally, or by name through
+  `CALL_ADMIN_JSON` to avoid counting arguments.
+
+So: bootstrap with the scripts, and maintain facts and metrics in DDL where it is
+the clearer record. Calling the scripts "compatibility APIs" would be misleading
+— for representations, identity, authority and materializations they are the only
+surface that exists.
 
 ## Key Files
 

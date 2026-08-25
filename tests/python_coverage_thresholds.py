@@ -15,14 +15,16 @@ test files plus `tests/test_property.py`; treat these as the point-of-truth
 we want to hold in place, not as aspirational targets. `tools/install.py`
 ratcheted 2026-08-23 with the build-provenance helpers, and again 2026-08-24
 alongside `tools/semantic_client.py`, whose result mapping is now unit-tested in
-`tests/test_semantic_client.py`.
+`tests/test_semantic_client.py`. Ratcheted again 2026-08-25 with the packager
+signature-coverage, main-chunk-local ceiling, and packager-output formatting
+tests -- the last of which covers reformatting that had never executed.
 """
 
 from __future__ import annotations
 
 LINE_THRESHOLDS: dict[str, float] = {
     "tools/semantic_client.py": 44.7,
-    "tools/install.py":         49.1,
+    "tools/install.py":         52.7,
     "tools/osi.py":             57.7,
     "tools/run_sql_files.py":   62.3,
     "tools/release_notes.py":   72.0,

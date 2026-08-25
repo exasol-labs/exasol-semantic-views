@@ -930,5 +930,117 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
                 PACKAGER.SCRIPT_PARAMETERS_BEGIN))
 
 
+class PackagerOutputFormattingTest(unittest.TestCase):
+    """The installer realigns the packager's per-file lines.
+
+    This reformatting was dead for as long as it existed: `mod.main()` -- the
+    only thing that prints -- sat outside the `redirect_stdout` block, so the
+    captured buffer was always empty. Nothing noticed, because nothing could
+    test it, and the packager's own unindented lines appeared among the
+    installer's aligned ones. It also parsed the wrong end of the line.
+    """
+
+    def test_a_status_line_puts_the_file_name_first(self):
+        formatted = INSTALL.format_packager_line(
+            "unchanged sql/install/003_create_semantic_admin_scripts.sql")
+        self.assertIn("003_create_semantic_admin_scripts.sql", formatted)
+        self.assertTrue(formatted.startswith("      "))
+        # The status is the first word of the input and must not become the label.
+        self.assertLess(formatted.index("003_create"), formatted.index("unchanged"))
+
+    def test_both_statuses_are_recognised(self):
+        for status in INSTALL.PACKAGER_STATUSES:
+            formatted = INSTALL.format_packager_line(f"{status} sql/install/x.sql")
+            self.assertIn("x.sql", formatted)
+            self.assertIn(status, formatted)
+
+    def test_an_advisory_passes_through_untouched(self):
+        """The ceiling advisory carries its own indent and has no status word."""
+        advisory = "      COMPILER_RUNTIME: 200/200 main-chunk locals, 0 left"
+        self.assertEqual(advisory, INSTALL.format_packager_line(advisory))
+
+    def test_an_advisory_is_not_mangled_by_path_parsing(self):
+        """'200/200' would become a Path component if the line were parsed."""
+        formatted = INSTALL.format_packager_line(
+            "      COMPILER_RUNTIME: 200/200 main-chunk locals, 0 left")
+        self.assertIn("200/200", formatted)
+
+    def test_a_bare_line_is_left_alone(self):
+        self.assertEqual("something", INSTALL.format_packager_line("something"))
+
+
+class MainChunkLocalCeilingTest(unittest.TestCase):
+    """Exasol allows 200 locals per function; a runtime script is one chunk.
+
+    A generated runtime concatenates several source files into a single
+    `CREATE ... AS` body, so the ceiling applies to the sum of their top-level
+    locals. Crossing it fails at install time citing a line number in a generated
+    artefact and no source file at all, which is a poor way to learn about it.
+    COMPILER_RUNTIME sat at exactly 200 during the BUG-G03 fix and one added
+    helper broke the install.
+    """
+
+    def test_counts_names_not_statements(self):
+        body = "local a, b, c = 1, 2, 3\nlocal d\n"
+        self.assertEqual(4, PACKAGER.main_chunk_local_count(body))
+
+    def test_counts_local_functions(self):
+        body = "local function one() end\nlocal function two() end\n"
+        self.assertEqual(2, PACKAGER.main_chunk_local_count(body))
+
+    def test_ignores_locals_inside_functions(self):
+        """Only the main chunk has the budget; nested scopes have their own."""
+        body = (
+            "local function outer()\n"
+            "    local inner_a = 1\n"
+            "    local inner_b, inner_c = 2, 3\n"
+            "    for _, item in ipairs({}) do local deep = item end\n"
+            "end\n"
+        )
+        self.assertEqual(1, PACKAGER.main_chunk_local_count(body))
+
+    def test_ignores_words_merely_starting_with_local(self):
+        self.assertEqual(0, PACKAGER.main_chunk_local_count("locale = 1\n"))
+
+    def test_refuses_a_body_over_the_ceiling(self):
+        over = "".join(f"local n{index} = {index}\n"
+                       for index in range(PACKAGER.MAIN_CHUNK_LOCAL_LIMIT + 1))
+        text = f"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE_RUNTIME AS\n{over}/\n"
+        with self.assertRaises(SystemExit) as raised:
+            PACKAGER.check_main_chunk_locals(Path("probe.sql"), text)
+        message = str(raised.exception)
+        # The message has to name the script, the numbers, and a way out.
+        self.assertIn("PROBE_RUNTIME", message)
+        self.assertIn(str(PACKAGER.MAIN_CHUNK_LOCAL_LIMIT + 1), message)
+        self.assertIn("shared", message)
+
+    def test_accepts_a_body_exactly_at_the_ceiling(self):
+        """200 installs; 201 does not. The boundary is load-bearing."""
+        exact = "".join(f"local n{index} = {index}\n"
+                        for index in range(PACKAGER.MAIN_CHUNK_LOCAL_LIMIT))
+        text = f"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE_RUNTIME AS\n{exact}/\n"
+        PACKAGER.check_main_chunk_locals(Path("probe.sql"), text)
+
+    def test_the_committed_tree_installs(self):
+        """Every generated script in the tree is within the ceiling."""
+        for name in ("sql/install/003_create_semantic_admin_scripts.sql",
+                     "sql/install/006_create_semantic_agent_views.sql"):
+            path = ROOT / name
+            PACKAGER.check_main_chunk_locals(path, path.read_text(encoding="utf-8"))
+
+    def test_the_compiler_runtime_is_measured_at_all(self):
+        """Guard the parser: a regex that stops matching would pass silently."""
+        text = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+            encoding="utf-8")
+        counts = {match.group(1): PACKAGER.main_chunk_local_count(match.group(2))
+                  for match in PACKAGER.SCRIPT_BODY.finditer(text)}
+        self.assertIn("COMPILER_RUNTIME", counts)
+        # It has historically sat at the ceiling; assert it is being counted in a
+        # plausible range rather than silently returning zero.
+        self.assertGreater(counts["COMPILER_RUNTIME"], 100)
+        self.assertLessEqual(counts["COMPILER_RUNTIME"],
+                             PACKAGER.MAIN_CHUNK_LOCAL_LIMIT)
+
+
 if __name__ == "__main__":
     unittest.main()

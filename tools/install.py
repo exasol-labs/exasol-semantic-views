@@ -344,6 +344,26 @@ def reset_statements(con: object) -> list[str]:
 
 # ── core steps ────────────────────────────────────────────────────────────────
 
+# Every line tools/package_lua_scripts.py prints per file. Anything else it
+# writes is an advisory and is passed through untouched.
+PACKAGER_STATUSES = frozenset({"updated", "unchanged"})
+
+
+def format_packager_line(line: str) -> str:
+    """Align one line of packager output with the installer's other steps.
+
+    The packager emits "<status> <path>", so the status is the *first* word --
+    the previous reformatting read it as the last, which would have dimmed the
+    path and labelled the row "unchanged" had it ever run. Anything that is not a
+    known status is an advisory (the main-chunk local ceiling), already indented
+    and with no status word to align on, so it passes through untouched.
+    """
+    status, separator, name = line.partition(" ")
+    if separator and status in PACKAGER_STATUSES:
+        return f"      {Path(name).name:<48} {dim(status)}"
+    return line
+
+
 def run_package_lua(quiet: bool = False) -> None:
     spec = importlib.util.spec_from_file_location(
         "package_lua_scripts", ROOT / "tools/package_lua_scripts.py"
@@ -352,19 +372,24 @@ def run_package_lua(quiet: bool = False) -> None:
     if quiet:
         import io, contextlib
         buf = io.StringIO()
+        # main() has to be inside the redirect: it is what prints. Loading the
+        # module only defines things, so capturing exec_module alone left `output`
+        # permanently empty and the reformatting below permanently dead, which is
+        # why the packager's own lines appeared unindented among the aligned ones.
         with contextlib.redirect_stdout(buf):
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
-        mod.main()
-        output = buf.getvalue().strip()
+            mod.main()
+        # Trim only the surrounding blank lines: an advisory line carries its
+        # own indentation and .strip() would eat the first one's.
+        output = buf.getvalue().strip("\n")
     else:
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        mod.main()
         output = None
 
     if quiet and output:
         for line in output.splitlines():
-            name, _, status = line.rpartition(" ")
-            label = Path(name).name if name else line
-            print(f"      {label:<48} {dim(status)}")
+            print(format_packager_line(line))
 
 
 def run_sql_files(con: object, files: list[Path], label: str) -> None:

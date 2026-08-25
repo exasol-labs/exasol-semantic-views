@@ -76,6 +76,85 @@ AGENT_BEGIN = "-- BEGIN GENERATED AGENT_RUNTIME"
 AGENT_END = "-- END GENERATED AGENT_RUNTIME"
 
 
+# Exasol's Lua caps a single function at 200 local variables, and a generated
+# runtime script is one `CREATE ... AS` chunk holding several concatenated source
+# files -- so the ceiling applies to the *sum* of their top-level locals, not to
+# any one file. Exceeding it fails at install time with
+#
+#   failed to create script: syntax error in line 7202:
+#   too many local variables (limit is 200) in main function
+#
+# which names a line in a generated artefact and no source file. COMPILER_RUNTIME
+# reached exactly 200 during the BUG-G03 fix, and adding one helper broke the
+# install; the fix was to move that helper into a shared module, which is not a
+# move that generalises. Counting here turns the wall into a build error that
+# names the script, the count, and the sources it is assembled from.
+MAIN_CHUNK_LOCAL_LIMIT = 200
+
+# Report the ceiling before it is hit. A script this close cannot absorb another
+# top-level local, which is worth knowing before writing one rather than after.
+MAIN_CHUNK_LOCAL_WARN_AT = 190
+
+SCRIPT_BODY = re.compile(
+    r"^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)[^\n]*\n"
+    r"(.*?)^/$",
+    re.S | re.M,
+)
+
+LOCAL_FUNCTION = re.compile(r"local\s+function\s+[\w.:]+")
+LOCAL_NAMES = re.compile(r"local\s+([^=]+?)\s*(?:=|$)")
+
+
+def main_chunk_local_count(body: str) -> int:
+    """Locals declared in a script's main chunk.
+
+    Counts declared *names*, not statements, because `local a, b` costs two. A
+    declaration at column 0 is in the main chunk and one that is indented is
+    inside a function -- true throughout these sources, and validated against the
+    real ceiling: this returns exactly 200 for the COMPILER_RUNTIME body that
+    Exasol accepted, and 201 for the one it rejected.
+    """
+    total = 0
+    for line in body.splitlines():
+        if not line.startswith("local"):
+            continue
+        if LOCAL_FUNCTION.match(line):
+            total += 1
+            continue
+        names = LOCAL_NAMES.match(line)
+        if names:
+            total += len([part for part in names.group(1).split(",") if part.strip()])
+    return total
+
+
+def check_main_chunk_locals(path: Path, text: str) -> None:
+    over: list[str] = []
+    for match in SCRIPT_BODY.finditer(text):
+        name, body = match.group(1), match.group(2)
+        count = main_chunk_local_count(body)
+        if count > MAIN_CHUNK_LOCAL_LIMIT:
+            over.append(
+                f"{name} declares {count} main-chunk locals"
+                f" (limit {MAIN_CHUNK_LOCAL_LIMIT})"
+            )
+        elif count >= MAIN_CHUNK_LOCAL_WARN_AT:
+            headroom = MAIN_CHUNK_LOCAL_LIMIT - count
+            print(
+                f"      {name}: {count}/{MAIN_CHUNK_LOCAL_LIMIT} main-chunk locals,"
+                f" {headroom} left"
+            )
+    if over:
+        raise SystemExit(
+            f"package_lua_scripts: {path.name} would not install -- "
+            + "; ".join(over)
+            + ". Exasol allows 200 locals per function and a runtime script is one"
+            " chunk of concatenated sources, so this is their sum. Move a helper"
+            " into an existing shared module (lua/semantic_layer/shared/), attach"
+            " it to a module table instead of declaring a local, or split the"
+            " source file."
+        )
+
+
 def admin_script_parameters_block() -> str:
     """A queryable signature for every callable SEMANTIC_ADMIN script.
 
@@ -772,6 +851,7 @@ def main() -> int:
     updated = replace_between_markers(original, validator_block(), VALIDATOR_BEGIN, VALIDATOR_END)
     updated = replace_between_markers(updated, semantic_definition_block(), SEMANTIC_BEGIN, SEMANTIC_END)
     updated = replace_between_markers(updated, compiler_block(), BEGIN, END)
+    check_main_chunk_locals(INSTALL_SQL, updated)
     if updated != original:
         INSTALL_SQL.write_text(updated, encoding="utf-8")
         print(f"updated {INSTALL_SQL.relative_to(ROOT)}")
@@ -790,6 +870,7 @@ def main() -> int:
 
     original_agent = AGENT_INSTALL_SQL.read_text(encoding="utf-8")
     updated_agent = replace_between_markers(original_agent, agent_block(), AGENT_BEGIN, AGENT_END)
+    check_main_chunk_locals(AGENT_INSTALL_SQL, updated_agent)
     if updated_agent != original_agent:
         AGENT_INSTALL_SQL.write_text(updated_agent, encoding="utf-8")
         print(f"updated {AGENT_INSTALL_SQL.relative_to(ROOT)}")

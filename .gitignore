@@ -10,6 +10,11 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+# Coverage data is rewritten by every test run and has no review value; the
+# durable record is tests/lua/coverage_thresholds.lua and
+# tests/python_coverage_thresholds.py.
+.coverage
+.coverage.*
 venv/
 .venv/
 *.egg-info/
