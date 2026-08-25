@@ -849,5 +849,86 @@ class InstallerResetTest(unittest.TestCase):
         self.assertEqual('"A""B"', INSTALL.quote_ident('A"B'))
 
 
+PACKAGER_SPEC = importlib.util.spec_from_file_location(
+    "package_lua_scripts", ROOT / "tools/package_lua_scripts.py")
+PACKAGER = importlib.util.module_from_spec(PACKAGER_SPEC)  # type: ignore[arg-type]
+PACKAGER_SPEC.loader.exec_module(PACKAGER)  # type: ignore[union-attr]
+
+
+class AdminScriptSignatureCoverageTest(unittest.TestCase):
+    """Every callable SEMANTIC_ADMIN script must publish a signature.
+
+    `CALL_ADMIN_JSON` resolves script names from
+    `SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS` and nothing else, so a script
+    missing from that view is unreachable through the named API — and the failure
+    is a clean `SEMANTIC_ADMIN_100: unknown admin script`, which reads as though
+    the script does not exist.
+
+    That is how BUG-G02 hid: the signature pattern required a `RETURNS` clause,
+    and the nine mutators that "complete without returning rows" are declared
+    `) AS`. The omission was systematic rather than random — every script it hit
+    was one that returns no rows — so `CALL_ADMIN_JSON` could not perform a single
+    step of the documented bootstrap (`CREATE_MODEL`, `ADD_ENTITY`,
+    `ADD_SEMANTIC_OBJECT`, `ADD_RELATIONSHIP`, ...) while looking healthy on
+    every script that did return a table.
+    """
+
+    def setUp(self) -> None:
+        self.declared: set[str] = set()
+        self.published: set[str] = set()
+        for path in sorted((ROOT / "sql/install").glob("*.sql"),
+                           key=lambda candidate: candidate.name):
+            if path.name.startswith("002_"):
+                continue
+            text = path.read_text(encoding="utf-8")
+            self.declared.update(PACKAGER.ANY_SCRIPT_DECLARATION.findall(text))
+            self.published.update(
+                match.group(1) for match in PACKAGER.SCRIPT_SIGNATURE.finditer(text))
+
+    def test_every_declared_script_is_published_or_explicitly_excluded(self):
+        unaccounted = self.declared - self.published - PACKAGER.NON_CALLABLE_SCRIPTS
+        self.assertEqual(
+            set(), unaccounted,
+            "declared but unreachable through CALL_ADMIN_JSON; add to "
+            "NON_CALLABLE_SCRIPTS if it is a runtime library")
+
+    def test_exclusions_are_all_real_scripts(self):
+        """A stale exclusion would silently hide a future script of that name."""
+        self.assertEqual(
+            set(), PACKAGER.NON_CALLABLE_SCRIPTS - self.declared,
+            "NON_CALLABLE_SCRIPTS lists scripts that no longer exist")
+
+    def test_row_returning_and_silent_mutators_are_both_published(self):
+        """The distinction that used to decide visibility must not matter."""
+        # Declared `) RETURNS TABLE AS`.
+        for script in ("ADD_FACT", "ADD_DIMENSION", "ADD_METRIC", "VALIDATE_MODEL"):
+            self.assertIn(script, self.published, script)
+        # Declared `) AS` -- the nine BUG-G02 omitted.
+        for script in ("CREATE_MODEL", "ADD_ENTITY", "ADD_SEMANTIC_OBJECT",
+                       "ADD_RELATIONSHIP", "ADD_RELATIONSHIP_KEY_MAPPING",
+                       "CREATE_SEMANTIC_OBJECT", "REGISTER_MATERIALIZATION",
+                       "SET_MATERIALIZATION_STATUS", "ADD_MATERIALIZATION_COLUMN"):
+            self.assertIn(script, self.published, script)
+
+    def test_runtime_libraries_are_not_published(self):
+        """Publishing one would advertise an uncallable script as an API."""
+        block = PACKAGER.admin_script_parameters_block()
+        for library in PACKAGER.NON_CALLABLE_SCRIPTS:
+            self.assertNotIn(f"  ('{library}',", block, library)
+
+    def test_generated_block_carries_the_bootstrap_arity(self):
+        """The signature is only useful if the parameter list is right."""
+        block = PACKAGER.admin_script_parameters_block()
+        # CREATE_MODEL(MODEL_NAME, PUBLISHED_SCHEMA, DESCRIPTION, OWNER_ROLE)
+        self.assertIn("('CREATE_MODEL', 4, 1, 'MODEL_NAME'", block)
+        self.assertIn("('ADD_RELATIONSHIP', 8, 6, 'CARDINALITY'", block)
+
+    def test_the_block_generates_without_tripping_its_own_assertion(self):
+        """The packaging guard must pass on the tree as committed."""
+        self.assertTrue(
+            PACKAGER.admin_script_parameters_block().startswith(
+                PACKAGER.SCRIPT_PARAMETERS_BEGIN))
+
+
 if __name__ == "__main__":
     unittest.main()

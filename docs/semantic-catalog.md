@@ -786,7 +786,7 @@ normalized around ids and do not repeat every convenience column such as
 
 ## Calling Admin Scripts
 
-Every `SEMANTIC_ADMIN` script publishes its signature:
+Every callable `SEMANTIC_ADMIN` script publishes its signature:
 
 ```sql
 SELECT ORDINAL_POSITION, PARAMETER_NAME, CALL_TEMPLATE
@@ -796,6 +796,24 @@ WHERE SCRIPT_NAME = 'ADD_SYNONYM' ORDER BY ORDINAL_POSITION;
 
 The rows are generated from the install SQL itself, so they cannot drift from
 the scripts they describe, and `CALL_TEMPLATE` is a ready-made call shape.
+
+"Cannot drift" is enforced rather than intended: packaging fails if a declared
+`SEMANTIC_ADMIN` script publishes no signature and is not on the explicit
+runtime-library exclusion list in `tools/package_lua_scripts.py`
+(`NON_CALLABLE_SCRIPTS`), and fails again if that list names a script that no
+longer exists. The seven runtime libraries — the `*_RUNTIME` modules that other
+scripts `import`, plus `SEMANTIC_GUARD` and `SEMANTIC_PREPROCESSOR`, which Exasol
+invokes itself — are the only scripts absent, because they are not callable.
+
+This mattered: the generator used to require a `RETURNS` clause, so the nine
+mutators declared `) AS` because they complete without returning rows
+(`CREATE_MODEL`, `ADD_ENTITY`, `ADD_SEMANTIC_OBJECT`, `ADD_RELATIONSHIP`,
+`ADD_RELATIONSHIP_KEY_MAPPING`, `CREATE_SEMANTIC_OBJECT`,
+`REGISTER_MATERIALIZATION`, `SET_MATERIALIZATION_STATUS`,
+`ADD_MATERIALIZATION_COLUMN`) published nothing — and since `CALL_ADMIN_JSON`
+resolves names from this view and nothing else, the named path could not perform
+a single step of a model bootstrap while working normally on every script that
+did return a table.
 
 Positional calls are still the primary form, but Exasol checks parameter arity
 in the SQL layer — *before* a script body runs — so a miscount can only ever
@@ -814,6 +832,16 @@ against the published signature (`SEMANTIC_ADMIN_101`), and an unknown script is
 refused with `SEMANTIC_ADMIN_100`. The call returns `STATUS`, `SCRIPT_NAME`,
 `ROW_COUNT`, the called script's rows as `RESULT_JSON`, and the
 `EXECUTED_STATEMENT` it ran.
+
+**Omit an optional parameter; do not pass `null` for it.** Omission becomes SQL
+`NULL`, which is what the positional form wants, but an explicit JSON `null`
+reaches the script as the text `null` and is rejected on its own terms — for
+example `SEMANTIC_ADMIN_003: invalid FANOUT_POLICY: null`. The two forms are not
+interchangeable here.
+
+A script that completes without returning rows is not a special case for the
+caller: it comes back `STATUS = OK` with `ROW_COUNT = 0` and an empty
+`RESULT_JSON`.
 
 ## Column Introspection
 

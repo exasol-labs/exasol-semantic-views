@@ -32,17 +32,52 @@ SEMANTIC_END = "-- END GENERATED SEMANTIC_DEFINITION_RUNTIME"
 SCRIPT_PARAMETERS_BEGIN = "-- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS"
 SCRIPT_PARAMETERS_END = "-- END GENERATED ADMIN_SCRIPT_PARAMETERS"
 CATALOG_VIEWS_SQL = ROOT / "sql/install/002_create_semantic_catalog_views.sql"
+# A callable admin script, with or without a RETURNS clause.
+#
+# Requiring `RETURNS` used to be the whole bug: the mutators that "complete
+# without returning rows" (CREATE_MODEL, ADD_ENTITY, ADD_RELATIONSHIP, ...) are
+# declared `) AS`, so nine callable APIs were silently absent from the published
+# signatures -- and CALL_ADMIN_JSON resolves names from nothing else, so the
+# named-call path could not perform the first five steps of the documented
+# bootstrap. The exclusion was systematic rather than incidental, which is why it
+# went unnoticed: every script it hit was one that returns no rows.
 SCRIPT_SIGNATURE = re.compile(
-    r"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)\s*(?:\(([^)]*)\))?\s*\nRETURNS\s+\w+",
+    r"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)\s*"
+    r"(?:\(([^)]*)\))?\s*(?:\nRETURNS\s+\w+\s*)?\bAS\b",
     re.M,
 )
+
+# Every script declaration form, for the drift assertion below. Deliberately
+# broader than SCRIPT_SIGNATURE: it has to see the scripts that must *not* be
+# published as well as the ones that must.
+ANY_SCRIPT_DECLARATION = re.compile(
+    r"CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)",
+    re.M,
+)
+
+# Scripts that exist in SEMANTIC_ADMIN but are not callable APIs, so they carry
+# no published signature. Imported as libraries (`import(...)`) or invoked by
+# Exasol itself, never by a caller through CALL_ADMIN_JSON.
+#
+# This list is the reason the assertion below can be strict. A new runtime
+# library has to be added here on purpose; anything else that stops being
+# published fails packaging instead of going quiet.
+NON_CALLABLE_SCRIPTS = frozenset({
+    "AGENT_RUNTIME",
+    "COMPILER_RUNTIME",
+    "MATERIALIZATION_RUNTIME",
+    "SEMANTIC_DEFINITION_RUNTIME",
+    "SEMANTIC_GUARD",          # LUA SCALAR, called from generated view SQL
+    "SEMANTIC_PREPROCESSOR",   # LUA PREPROCESSOR, invoked by the session
+    "VALIDATOR_RUNTIME",
+})
 
 AGENT_BEGIN = "-- BEGIN GENERATED AGENT_RUNTIME"
 AGENT_END = "-- END GENERATED AGENT_RUNTIME"
 
 
 def admin_script_parameters_block() -> str:
-    """A queryable signature for every SEMANTIC_ADMIN script.
+    """A queryable signature for every callable SEMANTIC_ADMIN script.
 
     Exasol checks parameter arity in the SQL layer, before a script body runs,
     so a wrong call count can only ever produce `expected N script parameters
@@ -51,14 +86,20 @@ def admin_script_parameters_block() -> str:
     cannot drift from the scripts they describe.
     """
     rows: list[str] = []
+    published: set[str] = set()
+    declared: set[str] = set()
     for path in sorted(
         (ROOT / "sql/install").glob("*.sql"), key=lambda candidate: candidate.name
     ):
         if path.name.startswith("002_"):
             continue
         text = path.read_text(encoding="utf-8")
+        declared.update(ANY_SCRIPT_DECLARATION.findall(text))
         for match in SCRIPT_SIGNATURE.finditer(text):
             script_name = match.group(1)
+            if script_name in NON_CALLABLE_SCRIPTS:
+                continue
+            published.add(script_name)
             parameters = [
                 parameter.strip()
                 for parameter in (match.group(2) or "").split(",")
@@ -79,6 +120,27 @@ def admin_script_parameters_block() -> str:
                     f"  ('{script_name}', {len(parameters)}, {ordinal}, "
                     f"'{parameter}', '{escaped_template}')"
                 )
+    # Enforce the "cannot drift" claim instead of intending it. A callable script
+    # that the signature pattern fails to match is invisible to CALL_ADMIN_JSON
+    # and to anyone reading the catalog, and the failure is a clean
+    # SEMANTIC_ADMIN_100 that looks like the script does not exist.
+    unpublished = sorted(declared - published - NON_CALLABLE_SCRIPTS)
+    if unpublished:
+        raise SystemExit(
+            "package_lua_scripts: these SEMANTIC_ADMIN scripts are declared but "
+            "publish no signature, so CALL_ADMIN_JSON cannot reach them: "
+            + ", ".join(unpublished)
+            + ". Either the declaration does not match SCRIPT_SIGNATURE, or the "
+            "script is a runtime library and belongs in NON_CALLABLE_SCRIPTS."
+        )
+    stale = sorted(NON_CALLABLE_SCRIPTS - declared)
+    if stale:
+        raise SystemExit(
+            "package_lua_scripts: NON_CALLABLE_SCRIPTS lists scripts that no "
+            "longer exist: " + ", ".join(stale) + ". Remove them so the list "
+            "cannot hide a future script of the same name."
+        )
+
     body = ",\n".join(rows)
     return f"""{SCRIPT_PARAMETERS_BEGIN}
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS AS
