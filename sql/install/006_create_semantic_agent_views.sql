@@ -1239,7 +1239,7 @@ local EXISTING_EVOLUTION_TARGETS = {
     METRIC = {table_name = "SYS_SEMANTIC.METRICS", id_column = "METRIC_ID",
         name_column = "METRIC_NAME"},
     SEMANTIC_IDENTITY = {table_name = "SYS_SEMANTIC.SEMANTIC_IDENTITIES",
-        id_column = "SEMANTIC_IDENTITY_ID", name_column = "IDENTITY_NAME"},
+        id_column = "IDENTITY_ID", name_column = "IDENTITY_NAME"},
 }
 
 local NEW_CONCEPT_TARGETS = {
