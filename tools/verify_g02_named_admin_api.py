@@ -252,6 +252,41 @@ def main() -> int:
                         f"unknown-script refusal lacks {fragment!r}: {message}") from None
         print("ok an unknown script name is still refused and names the catalog")
 
+        # ---- an omitted parameter must never surface as a Lua address ------
+        # `CALL_ADMIN_JSON` renders an omitted key as SQL NULL, which reaches a
+        # Lua script as *userdata*, not nil -- and userdata is truthy, so the
+        # common `tostring(value or "")` normalisation turns it into
+        # "userdata: 0x...". That both defeats the script's own
+        # required-parameter check and reports an address to the caller. Three
+        # scripts were doing it (REMOVE_RELATIONSHIP, REMOVE_UNIQUE_KEY,
+        # REMOVE_UNIQUE_KEY_WITH_COLUMNS) and each answered a missing key with
+        # "not found: userdata: 0x..." instead of SEMANTIC_ADMIN_001.
+        #
+        # Probed against a model that does not exist, so no call can mutate
+        # anything: only scripts whose first parameter is MODEL_NAME and which
+        # take at least one more are model-scoped, and every one of them must
+        # refuse this call.
+        probes = [row[0] for row in execute(
+            con, "SELECT SCRIPT_NAME FROM SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS"
+                 " WHERE ORDINAL_POSITION = 1 AND PARAMETER_NAME = 'MODEL_NAME'"
+                 " AND PARAMETER_COUNT > 1 ORDER BY SCRIPT_NAME")]
+        if len(probes) < 40:
+            raise AssertionError(
+                f"only {len(probes)} model-scoped scripts found; the probe has "
+                "stopped covering the admin surface")
+        leaks = []
+        for script in probes:
+            try:
+                named(con, script, {"MODEL_NAME": "no_such_model_for_probe"})
+            except Exception as exc:  # noqa: BLE001 - the refusal is the point
+                if "userdata" in str(exc):
+                    leaks.append(f"{script}: {str(exc).split('caught in')[0][-110:]}")
+        if leaks:
+            raise AssertionError(
+                "an omitted parameter is rendered as a Lua address:\n  "
+                + "\n  ".join(leaks))
+        print(f"ok no omitted parameter leaks a Lua address ({len(probes)} scripts probed)")
+
         execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(MODEL)})")
         print("named admin API verified")
         return 0

@@ -15,7 +15,12 @@ local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
 
+-- NULL arrives as userdata, and userdata is truthy, so `value or ""` would
+-- render it as an address. Every caller here wants an absent value to read as
+-- the empty string -- `missing("")` is true, and a comment built from it is
+-- simply omitted.
 local function trim(value)
+    if value == nil or value == null then return "" end
     return tostring(value):match("^%s*(.-)%s*$")
 end
 
@@ -61,7 +66,7 @@ local function sql_string(value)
 end
 
 local function utf8_prefix(value, max_bytes)
-    local text = tostring(value or "")
+    local text = trim(value)
     if #text <= max_bytes then
         return text
     end
@@ -205,7 +210,7 @@ for _, object_row in ipairs(object_rows or {}) do
     query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
         .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('SEMANTIC_OBJECT_DESCRIPTION', "
         .. sql_string(model.published_schema .. "." .. tostring(object_name) .. ": "
-            .. tostring(object_description or "")) .. ")")
+            .. trim(object_description)) .. ")")
     query("INSERT INTO " .. quote_qualified(model.published_schema, "SEMANTIC_DISCOVERY")
         .. " (ENTRY_NAME, ENTRY_VALUE) VALUES ('SEMANTIC_SELECT_EXAMPLE', "
         .. sql_string("SELECT * FROM " .. model.published_schema .. "." .. tostring(object_name) .. " LIMIT 10") .. ")")
@@ -285,7 +290,7 @@ for _, object_row in ipairs(object_rows or {}) do
             provenance = "Read from one of " .. tostring(source_count)
                 .. " representations of its entity."
         end
-        local comment_text = trim(description or "")
+        local comment_text = trim(description)
         if provenance ~= nil then
             comment_text = missing(comment_text) and provenance
                 or (comment_text .. " " .. provenance)

@@ -260,7 +260,10 @@ The reference model is in `sql/examples/`. Authoring order matters:
 1. `CREATE_MODEL` -> `ADD_ENTITY` x N -> `ADD_SEMANTIC_OBJECT`
 2. `ADD_UNIQUE_KEY_WITH_COLUMNS` -> `ADD_RELATIONSHIP` -> `ADD_RELATIONSHIP_KEY_MAPPING`
 3. `ADD_DIMENSION` -> `ADD_FACT` -> `ADD_METRIC`
-4. Optional representations, bindings, coverage, authority, and identity through complete or compound declarations
+4. Optional representations, bindings, coverage, authority, and identity — use
+   `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` and pass `{authority, coverage,
+   identity}` in one call; the one-dimensional `_WITH_AUTHORITY` / `_WITH_COVERAGE`
+   / `_WITH_IDENTITY_BINDING` forms remain for existing callers
 5. `VALIDATE_MODEL` -> `PUBLISH_MODEL`
 
 ### Two Authoring Surfaces, Neither Complete
@@ -289,6 +292,41 @@ So: bootstrap with the scripts, and maintain facts and metrics in DDL where it i
 the clearer record. Calling the scripts "compatibility APIs" would be misleading
 — for representations, identity, authority and materializations they are the only
 surface that exists.
+
+### SQL NULL Is Truthy Userdata in Lua
+
+Inside an Exasol Lua script, a SQL NULL parameter is not `nil` — it is a
+`userdata` value, and userdata is **truthy**. So the ordinary Lua idiom for a
+default is silently wrong here:
+
+```lua
+local name = tostring(MODEL_NAME or ""):match("^%s*(.-)%s*$")  -- WRONG
+if name == "" then error("SEMANTIC_ADMIN_001: MODEL_NAME is required") end
+```
+
+With `MODEL_NAME` omitted, `MODEL_NAME or ""` yields the userdata, `tostring`
+renders it as `userdata: 0xffff8c986a44`, the `== ""` check never fires, and the
+address is reported back to the caller as if it were the value they supplied.
+Concatenating the userdata directly is worse — `attempt to concatenate a
+userdata value` is a runtime crash, not a refusal. Guard explicitly:
+
+```lua
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+```
+
+`null` is Exasol's script-context global for the SQL NULL value; comparing
+against it is the only reliable test. The scripts' own `missing(value)` helper
+already does this (`value == nil or value == null or tostring(value) == ""`), so
+check `missing` *before* normalizing, not after.
+
+This matters most through `CALL_ADMIN_JSON`, which renders every omitted key as
+SQL NULL. Two tests hold the line: `NullNormalisationTest` in
+`tests/test_install.py` rejects the idiom statically, and
+`tools/verify_g02_named_admin_api.py` calls every model-scoped script with only
+`MODEL_NAME` set and fails if any refusal mentions `userdata`.
 
 ## Key Files
 

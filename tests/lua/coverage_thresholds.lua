@@ -20,6 +20,10 @@
 -- identity mapping columns through the shared resolver and covered the
 -- previously untested mapped-base rendering.
 --
+-- shared/identity_join.lua joined the gate when it was extracted 2026-08-25:
+-- one join that had been written out five times, and had already carried one bug
+-- in all five. It is fully covered, so the floor is 100.
+--
 -- shared/source_columns.lua joined the gate with that change. It was loaded and
 -- measured but ungated, which is a poor place for a blind spot: both runtimes
 -- embed it, and it is the single point where a declared column name becomes the
@@ -28,6 +32,7 @@ return {
     lines = {
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.6,
         ["lua/semantic_layer/shared/source_columns.lua"] = 92.5,
+        ["lua/semantic_layer/shared/identity_join.lua"] = 100,
         ["lua/semantic_layer/compiler/query_spec.lua"] = 96.7,
         ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 100,
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,

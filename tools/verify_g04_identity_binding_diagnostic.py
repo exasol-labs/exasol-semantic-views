@@ -40,6 +40,7 @@ from typing import Any
 
 MODEL = "g04_diag_verify"
 SCHEMA = "G04_DIAG_VERIFY"
+DECLARATIONS_FORM = "SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS"
 
 
 def connect():
@@ -98,6 +99,14 @@ def build(con: Any) -> None:
           ACCOUNT_ID VARCHAR(20), DISPLAY_NAME VARCHAR(100)
         )
     """)
+    # The published-model case needs the dimension to resolve on the alternate,
+    # so it uses a CRM source that carries CUSTOMER_NAME. The identity still
+    # differs -- it keys on ACCOUNT_ID -- which is what the mapping is for.
+    con.execute(f"""
+        CREATE TABLE {SCHEMA}.CUSTOMERS_CRM_FULL (
+          ACCOUNT_ID VARCHAR(20), CUSTOMER_NAME VARCHAR(100)
+        )
+    """)
     con.execute(f"""
         CREATE TABLE {SCHEMA}.CUSTOMER_XREF (
           ACCOUNT_ID VARCHAR(20), CUSTOMER_ID DECIMAL(18,0)
@@ -105,6 +114,7 @@ def build(con: Any) -> None:
     """)
     con.execute(f"INSERT INTO {SCHEMA}.CUSTOMERS_MDM VALUES (1,'Alice'),(2,'Bob')")
     con.execute(f"INSERT INTO {SCHEMA}.CUSTOMERS_CRM VALUES ('A-1','Alice'),('A-2','Bob')")
+    con.execute(f"INSERT INTO {SCHEMA}.CUSTOMERS_CRM_FULL VALUES ('A-1','Alice'),('A-2','Bob')")
     con.execute(f"INSERT INTO {SCHEMA}.CUSTOMER_XREF VALUES ('A-1',1),('A-2',2)")
 
     try:
@@ -146,19 +156,13 @@ def main() -> int:
         forms = {row[0] for row in execute(
             con, "SELECT DISTINCT SCRIPT_NAME FROM SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS"
                  " WHERE SCRIPT_NAME LIKE 'ADD_ENTITY_REPRESENTATION%'")}
-        combined = []
-        for form in sorted(forms):
-            names = {row[0] for row in execute(
-                con, "SELECT PARAMETER_NAME FROM SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS"
-                     f" WHERE SCRIPT_NAME = {literal(form)}")}
-            if any("AUTHORITY" in n for n in names) and any(
-                    "IDENTITY" in n or n == "BINDING_KIND" for n in names):
-                combined.append(form)
-        if combined:
-            print(f"note a compound authority+identity form now exists: {combined}")
-        else:
-            print("ok the documented F4-over-F5 path still needs two calls"
-                  " (no compound form takes both)")
+        if DECLARATIONS_FORM.split(".", 1)[1] not in forms:
+            raise AssertionError(
+                "the collapsed representation form is gone; authority x coverage x"
+                " identity is eight combinations and the one-dimensional forms"
+                " cover four of them")
+        print(f"ok one collapsed form covers the declaration space"
+              f" ({len(forms)} representation forms in total)")
 
         execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN."
                      f"ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY({literal(MODEL)},"
@@ -262,6 +266,115 @@ def main() -> int:
             raise AssertionError(
                 f"omitting MAPPING_JSON was refused: {omitted_message[:300]}")
         print("ok named form accepts MAPPING_JSON omitted, and renders it as NULL")
+
+        # ---- the collapsed form does it in one call ------------------------
+        # BUG-G04's combination. The two-call sequence above is still supported;
+        # this is the one that never passes through an invalid model.
+        execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(MODEL)})")
+        build(con)
+        declarations = json.dumps({
+            "authority": "AUTHORITATIVE",
+            "identity": {
+                "identity_name": "customer_identity",
+                "source_expression": "c.account_id",
+                "binding_kind": "MAPPED",
+                "mapping": {
+                    "source_schema": SCHEMA, "source_object": "CUSTOMER_XREF",
+                    "source_local_column": "ACCOUNT_ID",
+                    "semantic_key_column": "CUSTOMER_ID",
+                    "certification_status": "CERTIFIED",
+                },
+            },
+        })
+        rows = execute(
+            con, f"EXECUTE SCRIPT {DECLARATIONS_FORM}({literal(MODEL)},"
+                 f" 'customer', 'crm', 'RELATION', {literal(SCHEMA)},"
+                 f" 'CUSTOMERS_CRM', 20, 'MANUAL', {literal(declarations)})")
+        if not rows:
+            raise AssertionError("the collapsed form returned no row")
+        declared = str(rows[0][4] or "")
+        for aspect in ("identity", "authority"):
+            if aspect not in declared:
+                raise AssertionError(f"{aspect} was not declared: {rows[0]}")
+        if str(rows[0][5]) != "AUTHORITATIVE":
+            raise AssertionError(f"authority not applied: {rows[0]}")
+        print(f"ok one call declares both: DECLARED={declared!r}")
+
+        # It must not pass through the invalid state the two-call path does.
+        remaining = errors(con)
+        identity_errors = [row for row in remaining
+                           if str(row[3]) == "SEMANTIC_MODEL_047"]
+        if identity_errors:
+            raise AssertionError(
+                f"the collapsed form left the identity unbound: {identity_errors}")
+        print("ok no missing-binding error at any point in the single call")
+
+        # The combination that has no valid outcome is refused, not attempted.
+        accepted, detail = try_execute(
+            con, f"EXECUTE SCRIPT {DECLARATIONS_FORM}({literal(MODEL)},"
+                 f" 'customer', 'both', 'RELATION', {literal(SCHEMA)},"
+                 f" 'CUSTOMERS_CRM', 30, 'MANUAL',"
+                 f" {literal(json.dumps({'coverage': [{}], 'identity': {}}))})")
+        if accepted:
+            raise AssertionError("coverage + identity was accepted")
+        if "SEMANTIC_ADMIN_215" not in detail:
+            raise AssertionError(f"unexpected refusal: {detail[:200]}")
+        print("ok coverage + identity is refused, citing why it cannot be valid")
+
+        # A closed contract: a misspelled key must not be ignored.
+        accepted, detail = try_execute(
+            con, f"EXECUTE SCRIPT {DECLARATIONS_FORM}({literal(MODEL)},"
+                 f" 'customer', 'typo', 'RELATION', {literal(SCHEMA)},"
+                 f" 'CUSTOMERS_CRM', 31, 'MANUAL',"
+                 f" {literal(json.dumps({'authorityy': 'PREFER'}))})")
+        if accepted:
+            raise AssertionError("a misspelled declaration key was ignored")
+        if "SEMANTIC_ADMIN_214" not in detail:
+            raise AssertionError(f"unexpected refusal: {detail[:200]}")
+        print("ok a misspelled declaration key is refused by name")
+
+        # ---- and it works on a *published* model ---------------------------
+        # Compound declarations exist largely for this case: on a published model
+        # each separate call is validated on its own, so a multi-step declaration
+        # has to land atomically or not at all (BUG-27). The collapsed form is
+        # subject to the same requirement.
+        execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(MODEL)})")
+        build(con)
+        execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL({literal(MODEL)})")
+        published = execute(
+            con, "SELECT STATUS FROM SEMANTIC_CATALOG.MODELS"
+                 f" WHERE MODEL_NAME = {literal(MODEL)}")
+        if not published or str(published[0][0]).upper() != "PUBLISHED":
+            raise AssertionError(f"fixture did not publish: {published}")
+        accepted, detail = try_execute(
+            con, f"EXECUTE SCRIPT {DECLARATIONS_FORM}({literal(MODEL)},"
+                 f" 'customer', 'crm', 'RELATION', {literal(SCHEMA)},"
+                 f" 'CUSTOMERS_CRM_FULL', 20, 'MANUAL', {literal(declarations)})")
+        if not accepted:
+            raise AssertionError(
+                f"the collapsed form is unusable on a published model: {detail[:300]}")
+        if errors(con):
+            raise AssertionError(
+                f"published model left invalid by the collapsed form: {errors(con)}")
+        print("ok the collapsed form lands atomically on a published model")
+
+        # And the one-dimensional forms still work, so nothing broke for existing
+        # callers. On a draft model: a plain representation on a *published* model
+        # with an identity is correctly rejected, which is BUG-G04's whole point.
+        execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(MODEL)})")
+        build(con)
+        for form, tail in (
+            ("ADD_ENTITY_REPRESENTATION", "40, 'MANUAL'"),
+            ("ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY", "41, 'MANUAL', 'SUPPLEMENTAL'"),
+        ):
+            name = "legacy_" + form[-6:].lower()
+            accepted, detail = try_execute(
+                con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.{form}({literal(MODEL)},"
+                     f" 'customer', {literal(name)}, 'RELATION', {literal(SCHEMA)},"
+                     f" 'CUSTOMERS_CRM', {tail})")
+            if not accepted:
+                raise AssertionError(f"{form} regressed: {detail[:200]}")
+        print("ok the one-dimensional forms still work for existing callers")
 
         execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(MODEL)})")
         con.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")

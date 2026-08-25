@@ -478,7 +478,10 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(
   MODEL_NAME
 )
 RETURNS TABLE AS
-local model_name = tostring(MODEL_NAME or ""):match("^%s*(.-)%s*$")
+-- NULL arrives as userdata, and userdata is truthy: `MODEL_NAME or ""`
+-- would render an address and sail past the check below.
+local model_name = (MODEL_NAME == nil or MODEL_NAME == null) and ""
+    or tostring(MODEL_NAME):match("^%s*(.-)%s*$")
 if model_name == "" then
     error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
 end
@@ -729,7 +732,12 @@ RETURNS TABLE AS
 -- signature published in SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS.
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     if row == nil then return nil end
@@ -860,7 +868,12 @@ local function row_value(row, name, position)
     if row == nil then return nil end
     return row[name] or row[string.lower(name)] or row[position]
 end
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 
 local model_name = trim(MODEL_NAME)
@@ -948,7 +961,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY(
   MODEL_NAME, ENTITY_NAME, IDENTITY_NAME, IDENTITY_KIND, DATA_TYPE, DESCRIPTION
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
@@ -1094,7 +1112,12 @@ import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
@@ -1127,8 +1150,8 @@ end
 if identity_kind ~= "BUSINESS" and identity_kind ~= "GLOBAL" then
     error("SEMANTIC_ADMIN_003: IDENTITY_KIND must be BUSINESS or GLOBAL")
 end
-local decoded, bindings = pcall(
-    semantic_definition.decode_json, tostring(BINDINGS_JSON or ""))
+local decoded, bindings = pcall(semantic_definition.decode_json,
+    missing(BINDINGS_JSON) and "" or tostring(BINDINGS_JSON))
 if not decoded or type(bindings) ~= "table" or #bindings == 0 then
     error("SEMANTIC_ADMIN_063: BINDINGS_JSON must be a non-empty JSON array: "
         .. tostring(bindings))
@@ -1340,7 +1363,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
   MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME, SOURCE_EXPRESSION, BINDING_KIND
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
@@ -1430,7 +1458,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
   SOURCE_LOCAL_COLUMN, SEMANTIC_KEY_COLUMN, CERTIFICATION_STATUS
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
@@ -1503,7 +1536,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_MAPPING_RELATION(
   MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -1555,7 +1593,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING(
   MODEL_NAME, IDENTITY_NAME, REPRESENTATION_NAME
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -1617,7 +1660,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY(
   MODEL_NAME, ENTITY_NAME, IDENTITY_NAME
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -1678,7 +1726,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
   AUTHORITY_ROLE
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
@@ -1808,7 +1861,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY(
   FUSION_STRATEGY
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
@@ -2567,7 +2625,12 @@ import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function normalize_name(value, label)
     if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
@@ -2828,6 +2891,205 @@ exit({{representation_id, binding_id, mapping_id, model_name, entity_name,
 ]])
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS(
+  MODEL_NAME,
+  ENTITY_NAME,
+  REPRESENTATION_NAME,
+  SOURCE_KIND,
+  SOURCE_SCHEMA,
+  SOURCE_OBJECT,
+  PRIORITY,
+  FRESHNESS_POLICY,
+  DECLARATIONS_JSON
+)
+RETURNS TABLE AS
+-- One entry point for registering a representation with whatever has to be
+-- declared alongside it.
+--
+-- The four earlier forms are each one-dimensional -- plain, _WITH_AUTHORITY,
+-- _WITH_COVERAGE, _WITH_IDENTITY_BINDING -- while authority x coverage x
+-- identity is eight combinations. BUG-G04 was the report of a missing fifth: F5
+-- identity is what unlocks F4 authority across mismatched keys, so combining them
+-- is the documented use case and no single call did it. Adding a fifth script
+-- would have picked one more point in that space; this covers all of it.
+--
+-- DECLARATIONS_JSON is a closed object:
+--   {"authority": "AUTHORITATIVE" | "PREFER" | "SUPPLEMENTAL",
+--    "coverage":  [ ... as ADD_ENTITY_REPRESENTATION_WITH_COVERAGE's COVERAGE_JSON ... ],
+--    "identity":  {"identity_name": ..., "source_expression": ...,
+--                  "binding_kind": "DIRECT" | "MAPPED", "mapping": { ... }}}
+-- Every key is optional; an empty object registers a plain representation.
+--
+-- This *dispatches* to the existing forms instead of merging them, which is the
+-- whole point. _WITH_COVERAGE and _WITH_IDENTITY_BINDING deliberately stage their
+-- declaration before validating, because a representation is invalid until it
+-- carries one -- reimplementing that staging is how a half-declared model gets
+-- shipped. Authority is the one aspect that can be applied afterwards, because an
+-- undeclared authority defaults to PREFER and validates, so it composes onto any
+-- of them; if it is refused the representation is unwound, so the pair either
+-- both land or neither does.
+--
+-- coverage together with identity is refused rather than unimplemented:
+-- SEMANTIC_MODEL_047 already rejects an F5 identity combined with F3 coverage on
+-- the same entity, so every *valid* combination is reachable through this call.
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+-- NULL is userdata here, not nil, and it is truthy: `tostring(value or "")`
+-- renders it as "userdata: 0x..." and would forward that as a name. The
+-- one-dimensional forms report SEMANTIC_ADMIN_001 for an absent name, and
+-- passing "" on makes their own `missing` check produce exactly that.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+local function upper(value) return string.upper(trim(value)) end
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local model_name = trim(MODEL_NAME)
+local entity_name = trim(ENTITY_NAME)
+local representation_name = trim(REPRESENTATION_NAME)
+
+local declarations = {}
+if not missing(DECLARATIONS_JSON) and upper(DECLARATIONS_JSON) ~= "NULL" then
+    local decoded_ok, decoded = pcall(semantic_definition.decode_json,
+        tostring(DECLARATIONS_JSON))
+    if not decoded_ok or type(decoded) ~= "table" then
+        error("SEMANTIC_ADMIN_214: DECLARATIONS_JSON must be a JSON object with any"
+            .. " of the keys: authority, coverage, identity.")
+    end
+    -- A JSON array decodes to a table too, and would otherwise be reported as
+    -- an unknown key named "1".
+    if decoded[1] ~= nil then
+        error("SEMANTIC_ADMIN_214: DECLARATIONS_JSON must be a JSON object, not an"
+            .. " array. Allowed keys: authority, coverage, identity.")
+    end
+    declarations = decoded
+end
+
+-- Closed contract, like the compile request: a misspelled key must not be
+-- silently ignored, or the call reports success without doing what was asked.
+local allowed = {authority = true, coverage = true, identity = true}
+local unknown = {}
+for declaration_key, _ in pairs(declarations) do
+    if not allowed[tostring(declaration_key)] then
+        unknown[#unknown + 1] = tostring(declaration_key)
+    end
+end
+if #unknown > 0 then
+    table.sort(unknown)
+    error("SEMANTIC_ADMIN_214: unknown DECLARATIONS_JSON key(s): "
+        .. table.concat(unknown, ", ") .. ". Allowed keys: authority, coverage,"
+        .. " identity.")
+end
+
+local authority = declarations.authority
+local coverage = declarations.coverage
+local identity = declarations.identity
+local has_authority = not missing(authority)
+local has_coverage = type(coverage) == "table"
+local has_identity = type(identity) == "table"
+
+if has_coverage and has_identity then
+    error("SEMANTIC_ADMIN_215: coverage and identity cannot be declared on the"
+        .. " same representation. F3 temporal coverage and an F5 semantic identity"
+        .. " on one entity are rejected by SEMANTIC_MODEL_047, so this combination"
+        .. " has no valid outcome. Declare one of them.")
+end
+
+local declared = {}
+local added_row = nil
+if has_identity then
+    local mapping_json = null
+    if type(identity.mapping) == "table" then
+        mapping_json = semantic_definition.encode_json(identity.mapping)
+    end
+    local added = query([[
+        EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING(
+            :model_name, :entity_name, :representation_name, :source_kind,
+            :source_schema, :source_object, :priority, :freshness_policy,
+            :identity_name, :source_expression, :binding_kind, :mapping_json)
+    ]], {model_name = model_name, entity_name = entity_name,
+        representation_name = representation_name, source_kind = SOURCE_KIND,
+        source_schema = SOURCE_SCHEMA, source_object = SOURCE_OBJECT,
+        priority = PRIORITY, freshness_policy = FRESHNESS_POLICY,
+        identity_name = identity.identity_name,
+        source_expression = identity.source_expression,
+        binding_kind = identity.binding_kind, mapping_json = mapping_json})
+    added_row = added ~= nil and added[1] or nil
+    declared[#declared + 1] = "identity"
+elseif has_coverage then
+    local added = query([[
+        EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE(
+            :model_name, :entity_name, :representation_name, :source_kind,
+            :source_schema, :source_object, :priority, :freshness_policy,
+            :coverage_json)
+    ]], {model_name = model_name, entity_name = entity_name,
+        representation_name = representation_name, source_kind = SOURCE_KIND,
+        source_schema = SOURCE_SCHEMA, source_object = SOURCE_OBJECT,
+        priority = PRIORITY, freshness_policy = FRESHNESS_POLICY,
+        coverage_json = semantic_definition.encode_json(coverage)})
+    added_row = added ~= nil and added[1] or nil
+    declared[#declared + 1] = "coverage"
+else
+    local added = query([[
+        EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(
+            :model_name, :entity_name, :representation_name, :source_kind,
+            :source_schema, :source_object, :priority, :freshness_policy)
+    ]], {model_name = model_name, entity_name = entity_name,
+        representation_name = representation_name, source_kind = SOURCE_KIND,
+        source_schema = SOURCE_SCHEMA, source_object = SOURCE_OBJECT,
+        priority = PRIORITY, freshness_policy = FRESHNESS_POLICY})
+    added_row = added ~= nil and added[1] or nil
+end
+if added_row == nil then
+    error("SEMANTIC_ADMIN_046: representation was not registered: "
+        .. representation_name)
+end
+
+local authority_role = null
+if has_authority then
+    authority_role = upper(authority)
+    local applied, authority_error = pcall(query, [[
+        EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY(
+            :model_name, :entity_name, :representation_name, :authority_role)
+    ]], {model_name = model_name, entity_name = entity_name,
+        representation_name = representation_name, authority_role = authority_role})
+    if not applied then
+        -- Unwind, so a refused authority declaration does not leave a
+        -- representation the caller did not ask for on its own.
+        pcall(query, [[
+            EXECUTE SCRIPT SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION(
+                :model_name, :entity_name, :representation_name)
+        ]], {model_name = model_name, entity_name = entity_name,
+            representation_name = representation_name})
+        error("SEMANTIC_ADMIN_094: representation candidate rejected and restored;"
+            .. " the authority declaration failed: " .. tostring(authority_error))
+    end
+    declared[#declared + 1] = "authority"
+end
+
+exit({{
+    row_value(added_row, "REPRESENTATION_ID", 1),
+    model_name,
+    entity_name,
+    representation_name,
+    #declared > 0 and table.concat(declared, ",") or null,
+    authority_role,
+}}, [[
+  REPRESENTATION_ID DECIMAL(18,0),
+  MODEL_NAME VARCHAR(256),
+  ENTITY_NAME VARCHAR(256),
+  REPRESENTATION_NAME VARCHAR(256),
+  DECLARED VARCHAR(256),
+  AUTHORITY_ROLE VARCHAR(32)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION(
   MODEL_NAME,
   ENTITY_NAME,
@@ -2855,7 +3117,8 @@ local function scalar(sql_text, params)
     return scalar_rows[1][1]
 end
 local function direct_column(expression, source_alias)
-    local text = tostring(expression or ""):match("^%s*(.-)%s*$")
+    if expression == nil or expression == null then return nil end
+    local text = tostring(expression):match("^%s*(.-)%s*$")
     local alias, column = string.match(text,
         "^([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)$")
     if alias ~= nil and string.upper(alias) == string.upper(tostring(source_alias)) then
@@ -3911,7 +4174,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_RELATIONSHIP_KEY_MAPPING(
   ORDINAL_POSITION
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -4000,7 +4268,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_RELATIONSHIP(
   RELATIONSHIP_NAME
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -4092,7 +4365,12 @@ RETURNS TABLE AS
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -5208,7 +5486,12 @@ import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or string.match(tostring(value), "^%s*$") ~= nil
 end
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function upper(value) return string.upper(trim(value)) end
 local function normalized(value, label)
     if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required") end
@@ -5971,10 +6254,16 @@ local function scalar(sql_text, params)
     if rows == nil or #rows == 0 then return nil end
     return rows[1][1]
 end
-local model_name = string.match(tostring(MODEL_NAME or ""), "^%s*(.-)%s*$")
-local attribute_type = string.upper(string.match(tostring(ATTRIBUTE_TYPE or ""), "^%s*(.-)%s*$"))
-local attribute_name = string.match(tostring(ATTRIBUTE_NAME or ""), "^%s*(.-)%s*$")
-local representation_name = string.match(tostring(REPRESENTATION_NAME or ""), "^%s*(.-)%s*$")
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would
+-- render an address and report it back in the "not found" errors below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+local model_name = trim(MODEL_NAME)
+local attribute_type = string.upper(trim(ATTRIBUTE_TYPE))
+local attribute_name = trim(ATTRIBUTE_NAME)
+local representation_name = trim(REPRESENTATION_NAME)
 if attribute_type ~= "DIMENSION" and attribute_type ~= "FACT" then
     error("SEMANTIC_ADMIN_001: ATTRIBUTE_TYPE must be DIMENSION or FACT")
 end
@@ -7297,7 +7586,8 @@ if key_kind ~= "PRIMARY" and key_kind ~= "UNIQUE" and key_kind ~= "ALTERNATE" th
     error("SEMANTIC_ADMIN_003: invalid KEY_KIND: " .. tostring(KEY_KIND))
 end
 local source_format = missing(SOURCE_FORMAT) and "OSI" or upper(SOURCE_FORMAT)
-local decoded, columns = pcall(semantic_definition.decode_json, tostring(COLUMNS_JSON or ""))
+local decoded, columns = pcall(semantic_definition.decode_json,
+    missing(COLUMNS_JSON) and "" or tostring(COLUMNS_JSON))
 if not decoded or type(columns) ~= "table" or #columns == 0 then
     error("SEMANTIC_ADMIN_062: COLUMNS_JSON must be a non-empty JSON array: "
         .. tostring(columns))
@@ -7440,7 +7730,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_COLUMN(
   ORDINAL_POSITION
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -7528,7 +7823,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY(
   KEY_NAME
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -7614,7 +7914,12 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY_WITH_COLUMNS(
   KEY_NAME
 )
 RETURNS TABLE AS
-local function trim(value) return tostring(value or ""):match("^%s*(.-)%s*$") end
+-- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
+-- it as an address and defeat the required-parameter check below.
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
@@ -8972,6 +9277,101 @@ end
 
 ESV_SOURCE_COLUMNS = M
 
+-- Rendering of the F5 identity mapping join, shared by the validator's probes
+-- and the compiler's generated SQL. The packaging step embeds this source into
+-- both Exasol scripts so the installed runtime has no external dependency.
+--
+-- A MAPPED identity binding reaches its semantic key through a certified
+-- two-column mapping relation, and that one join used to be written out in five
+-- places: the compiler's base and alternate key expressions, and the validator's
+-- grouped-key query, mapping probes, and F4 conflict probe. BUG-G03 was a single
+-- defect -- a declared column name quoted verbatim, so a lower-case
+-- `account_id` rendered as `"account_id"` against a physical `ACCOUNT_ID` -- and
+-- it existed independently in every one of them. Fixing it meant finding and
+-- editing all five, and the last was found only by grepping after the fix looked
+-- complete.
+--
+-- This module owns the two things they were duplicating: the physical spelling of
+-- the mapping relation's declared columns, and the shape of the join onto it.
+-- Callers still assemble their own statement around those pieces, because a
+-- COUNT probe, a grouped key set and a compiled query legitimately want
+-- different shapes -- forcing one function to emit all of them would trade a
+-- duplication problem for a parameter problem.
+
+local source_columns = assert(ESV_SOURCE_COLUMNS,
+    "shared source column runtime is required")
+
+local M = {}
+
+-- Quoting is duplicated from the caller runtimes deliberately: three lines each,
+-- against a module that would otherwise have to receive them as arguments at
+-- every call. The alternative -- a shared SQL module -- is a bigger change than
+-- this one earns.
+local function quote_ident(name)
+    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
+end
+
+local function quote_qualified(schema_name, object_name)
+    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
+end
+
+-- The column a semantic-key view projects. Callers reference it through
+-- M.semantic_key_reference so the name is written once.
+M.SEMANTIC_KEY_COLUMN = "F5_SEMANTIC_KEY"
+
+-- The physical spelling of the mapping relation's two declared columns.
+--
+-- ADD_IDENTITY_MAPPING_RELATION stores what the modeler typed, and Exasol
+-- resolves an unquoted identifier case-insensitively but a quoted one exactly.
+-- Everything here quotes, so everything here has to resolve first.
+function M.columns(query_fn, mapping, cache)
+    return source_columns.resolve_pair(query_fn, mapping.source_schema,
+        mapping.source_object, mapping.local_column, mapping.semantic_column,
+        cache)
+end
+
+-- `"SCHEMA"."OBJECT"` for the mapping relation.
+function M.mapping_source(mapping)
+    return quote_qualified(mapping.source_schema, mapping.source_object)
+end
+
+-- The semantic key as read from the mapping relation: `alias."SEMANTIC_COLUMN"`.
+function M.key(map_alias, semantic_column)
+    return tostring(map_alias) .. "." .. quote_ident(semantic_column)
+end
+
+-- The join predicate onto the mapping relation:
+-- `<local expression> = alias."LOCAL_COLUMN"`.
+function M.predicate(local_expression, map_alias, local_column)
+    return tostring(local_expression) .. " = " .. tostring(map_alias) .. "."
+        .. quote_ident(local_column)
+end
+
+-- A representation projected alongside its resolved semantic key.
+--
+-- Used wherever a representation has to be joined *as if* it carried the
+-- canonical key: the compiler's alternate-representation source and the
+-- validator's F4 conflict probe were byte-identical here apart from their alias
+-- prefixes, which is the duplication this replaces.
+function M.semantic_key_view(query_fn, representation, mapping, source_alias,
+        map_alias, local_expression, cache)
+    local local_column, semantic_column = M.columns(query_fn, mapping, cache)
+    return "(SELECT " .. tostring(source_alias) .. ".*, "
+        .. M.key(map_alias, semantic_column) .. " AS "
+        .. quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
+        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. " " .. tostring(source_alias) .. " JOIN "
+        .. M.mapping_source(mapping) .. " " .. tostring(map_alias)
+        .. " ON " .. M.predicate(local_expression, map_alias, local_column) .. ")"
+end
+
+-- How a caller refers to the column M.semantic_key_view projected.
+function M.semantic_key_reference(alias)
+    return tostring(alias) .. "." .. quote_ident(M.SEMANTIC_KEY_COLUMN)
+end
+
+ESV_IDENTITY_JOIN = M
+
 -- Typed metric planning and strict grain-proof boundary.
 
 local M = {PLAN_VERSION = 10}
@@ -9838,6 +10238,8 @@ ESV_METRIC_PLAN = M
 
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local identity_join = assert(ESV_IDENTITY_JOIN,
+    "shared identity join runtime is required")
 local source_columns = assert(ESV_SOURCE_COLUMNS,
     "shared source-column runtime is required")
 local metric_plan = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
@@ -12185,16 +12587,12 @@ local function identity_grouped_key_query(representation, binding)
         semantic_expression = tostring(binding.expression)
     else
         local mapping = binding.mapping
-        -- BUG-G03: the declared spelling is the modeler's, not the database's.
-        local local_column, semantic_column = source_columns.resolve_pair(query,
-            mapping.source_schema, mapping.source_object, mapping.local_column,
-            mapping.semantic_column)
+        local local_column, semantic_column = identity_join.columns(query, mapping)
         local map_alias = "f5_map_" .. tostring(binding.id)
-        semantic_expression = map_alias .. "." .. quote_ident(semantic_column)
-        from_sql = from_sql .. " JOIN "
-            .. quote_qualified(mapping.source_schema, mapping.source_object)
-            .. " " .. map_alias .. " ON " .. tostring(binding.expression)
-            .. " = " .. map_alias .. "." .. quote_ident(local_column)
+        semantic_expression = identity_join.key(map_alias, semantic_column)
+        from_sql = from_sql .. " JOIN " .. identity_join.mapping_source(mapping)
+            .. " " .. map_alias .. " ON "
+            .. identity_join.predicate(binding.expression, map_alias, local_column)
     end
     return "SELECT " .. semantic_expression .. " FROM " .. from_sql
         .. " WHERE " .. semantic_expression .. " IS NOT NULL GROUP BY "
@@ -12233,10 +12631,9 @@ local function validate_semantic_identity_data(ctx)
                 end
                 if upper(binding.kind) == "MAPPED" then
                     local mapping = binding.mapping
-                    local map_local_column, map_semantic_column = source_columns.resolve_pair(query,
-                        mapping.source_schema, mapping.source_object, mapping.local_column,
-                        mapping.semantic_column)
-                    local map_source = quote_qualified(mapping.source_schema, mapping.source_object)
+                    local map_local_column, map_semantic_column =
+                        identity_join.columns(query, mapping)
+                    local map_source = identity_join.mapping_source(mapping)
                     local map_total, map_total_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
                     local map_local, map_local_error = probe_count(
@@ -13094,26 +13491,13 @@ local function identity_conflict_source(representation, identity_binding, alias)
                 representation.alias, alias)
     end
     local source_alias = "f5_conflict_src_" .. tostring(representation.id)
-    local map_alias = "f5_conflict_map_" .. tostring(identity_binding.id)
     local mapping = identity_binding.mapping
-    -- Same resolution as the mapping probes and the compiler's own rendering of
-    -- this join: the F4 conflict probe reaches the mapping relation through the
-    -- declared column names too, so leaving it verbatim would have kept a third
-    -- of BUG-G03 alive on the one path that only runs for COALESCE/RECONCILE.
-    local local_column, semantic_column = source_columns.resolve_pair(query,
-        mapping.source_schema, mapping.source_object, mapping.local_column,
-        mapping.semantic_column)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
-    local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(semantic_column) .. " AS "
-        .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
-        .. quote_qualified(representation.source_schema, representation.source_object)
-        .. " " .. source_alias .. " JOIN "
-        .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
-        .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(local_column) .. ")"
-    return source_sql, alias .. "." .. quote_ident("F5_SEMANTIC_KEY")
+    local source_sql = identity_join.semantic_key_view(query, representation,
+        mapping, source_alias,
+        "f5_conflict_map_" .. tostring(identity_binding.id), local_expression)
+    return source_sql, identity_join.semantic_key_reference(alias)
 end
 
 local function fusion_conflict_query(left_representation, left_binding,
@@ -15163,6 +15547,101 @@ function M.resolve(query_fn, source_schema, source_object, column_name, cache)
 end
 
 ESV_SOURCE_COLUMNS = M
+
+-- Rendering of the F5 identity mapping join, shared by the validator's probes
+-- and the compiler's generated SQL. The packaging step embeds this source into
+-- both Exasol scripts so the installed runtime has no external dependency.
+--
+-- A MAPPED identity binding reaches its semantic key through a certified
+-- two-column mapping relation, and that one join used to be written out in five
+-- places: the compiler's base and alternate key expressions, and the validator's
+-- grouped-key query, mapping probes, and F4 conflict probe. BUG-G03 was a single
+-- defect -- a declared column name quoted verbatim, so a lower-case
+-- `account_id` rendered as `"account_id"` against a physical `ACCOUNT_ID` -- and
+-- it existed independently in every one of them. Fixing it meant finding and
+-- editing all five, and the last was found only by grepping after the fix looked
+-- complete.
+--
+-- This module owns the two things they were duplicating: the physical spelling of
+-- the mapping relation's declared columns, and the shape of the join onto it.
+-- Callers still assemble their own statement around those pieces, because a
+-- COUNT probe, a grouped key set and a compiled query legitimately want
+-- different shapes -- forcing one function to emit all of them would trade a
+-- duplication problem for a parameter problem.
+
+local source_columns = assert(ESV_SOURCE_COLUMNS,
+    "shared source column runtime is required")
+
+local M = {}
+
+-- Quoting is duplicated from the caller runtimes deliberately: three lines each,
+-- against a module that would otherwise have to receive them as arguments at
+-- every call. The alternative -- a shared SQL module -- is a bigger change than
+-- this one earns.
+local function quote_ident(name)
+    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
+end
+
+local function quote_qualified(schema_name, object_name)
+    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
+end
+
+-- The column a semantic-key view projects. Callers reference it through
+-- M.semantic_key_reference so the name is written once.
+M.SEMANTIC_KEY_COLUMN = "F5_SEMANTIC_KEY"
+
+-- The physical spelling of the mapping relation's two declared columns.
+--
+-- ADD_IDENTITY_MAPPING_RELATION stores what the modeler typed, and Exasol
+-- resolves an unquoted identifier case-insensitively but a quoted one exactly.
+-- Everything here quotes, so everything here has to resolve first.
+function M.columns(query_fn, mapping, cache)
+    return source_columns.resolve_pair(query_fn, mapping.source_schema,
+        mapping.source_object, mapping.local_column, mapping.semantic_column,
+        cache)
+end
+
+-- `"SCHEMA"."OBJECT"` for the mapping relation.
+function M.mapping_source(mapping)
+    return quote_qualified(mapping.source_schema, mapping.source_object)
+end
+
+-- The semantic key as read from the mapping relation: `alias."SEMANTIC_COLUMN"`.
+function M.key(map_alias, semantic_column)
+    return tostring(map_alias) .. "." .. quote_ident(semantic_column)
+end
+
+-- The join predicate onto the mapping relation:
+-- `<local expression> = alias."LOCAL_COLUMN"`.
+function M.predicate(local_expression, map_alias, local_column)
+    return tostring(local_expression) .. " = " .. tostring(map_alias) .. "."
+        .. quote_ident(local_column)
+end
+
+-- A representation projected alongside its resolved semantic key.
+--
+-- Used wherever a representation has to be joined *as if* it carried the
+-- canonical key: the compiler's alternate-representation source and the
+-- validator's F4 conflict probe were byte-identical here apart from their alias
+-- prefixes, which is the duplication this replaces.
+function M.semantic_key_view(query_fn, representation, mapping, source_alias,
+        map_alias, local_expression, cache)
+    local local_column, semantic_column = M.columns(query_fn, mapping, cache)
+    return "(SELECT " .. tostring(source_alias) .. ".*, "
+        .. M.key(map_alias, semantic_column) .. " AS "
+        .. quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
+        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. " " .. tostring(source_alias) .. " JOIN "
+        .. M.mapping_source(mapping) .. " " .. tostring(map_alias)
+        .. " ON " .. M.predicate(local_expression, map_alias, local_column) .. ")"
+end
+
+-- How a caller refers to the column M.semantic_key_view projected.
+function M.semantic_key_reference(alias)
+    return tostring(alias) .. "." .. quote_ident(M.SEMANTIC_KEY_COLUMN)
+end
+
+ESV_IDENTITY_JOIN = M
 
 -- Canonical request boundary shared by JSON and Semantic SQL lowering.
 
@@ -17425,6 +17904,8 @@ ESV_GRAIN_SQL = M
 
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local identity_join = assert(ESV_IDENTITY_JOIN,
+    "shared identity join runtime is required")
 local source_columns = assert(ESV_SOURCE_COLUMNS,
     "shared source-column runtime is required")
 local query_spec_runtime = assert(ESV_QUERY_SPEC, "query spec runtime is required")
@@ -17825,350 +18306,369 @@ local function error_result(code, message, clarification)
     }
 end
 
-local function unchanged_result(sql_text)
-    return {
-        status = "UNCHANGED",
-        error_code = nil,
-        error_message = nil,
-        generated_sql = sql_text,
-        plan_json = nil,
-        clarification_json = nil,
-        validation_run_id = nil,
-        agent_request_id = nil,
-        query_log_id = nil,
-    }
-end
-
-local function recode_error_prefix(result, prefix)
-    if type(result) == "table" and type(result.error_code) == "string" then
-        result.error_code = string.gsub(result.error_code, "^SEMANTIC_REQUEST", prefix)
+-- Response shaping and the compile cache, behind two namespaces in a `do` block.
+--
+-- The block is load-bearing rather than stylistic. Exasol caps a Lua function at
+-- 200 locals; the packaged COMPILER_RUNTIME is every compiler source
+-- concatenated into one chunk, and this file alone declared 121 of those 200 --
+-- leaving no room to add a shared module at all. Locals declared inside a block
+-- are released at its `end`, so these eighteen helpers cost two slots instead of
+-- eighteen. tools/package_lua_scripts.py enforces the ceiling and prints the
+-- remaining headroom.
+--
+-- A block was the right shape because everything declared above it stays in
+-- scope inside it: the grouping needed no dependency untangling, where a
+-- separate module file would have had to duplicate the JSON codec and take
+-- error_result (79 call sites) with it.
+local envelope = {}
+local compile_cache = {}
+do
+    function envelope.unchanged_result(sql_text)
+        return {
+            status = "UNCHANGED",
+            error_code = nil,
+            error_message = nil,
+            generated_sql = sql_text,
+            plan_json = nil,
+            clarification_json = nil,
+            validation_run_id = nil,
+            agent_request_id = nil,
+            query_log_id = nil,
+        }
     end
-    return result
-end
 
-local function plan_materialization_name(plan)
-    if type(plan) ~= "table" then
-        return nil
-    end
-    if type(plan.selected_materializations) == "table"
-        and #plan.selected_materializations > 0 then
-        local names = {}
-        for _, selected in ipairs(plan.selected_materializations) do
-            names[#names + 1] = tostring(selected.materialization_name)
+    function envelope.recode_error_prefix(result, prefix)
+        if type(result) == "table" and type(result.error_code) == "string" then
+            result.error_code = string.gsub(result.error_code, "^SEMANTIC_REQUEST", prefix)
         end
-        return table.concat(names, ",")
+        return result
     end
-    if plan.selected_materialization == nil
-        or plan.selected_materialization == JSON_NULL then
-        return nil
-    elseif type(plan.selected_materialization) == "table" then
-        return plan.selected_materialization.materialization_name
-    end
-    return tostring(plan.selected_materialization)
-end
 
-local function typed_failure_message(failure)
-    local reason = failure.reason_code or "TYPED_PLANNING_FAILED"
-    if reason == "METRIC_STATE_UNSUPPORTED" then
-        local metric_name = tostring(failure.metric or failure.metric_id or "unknown")
-        local aggregate = tostring(failure.aggregation_function
-            or failure.state_class or "unknown aggregate")
-        if failure.entity_name ~= nil then
+    function envelope.plan_materialization_name(plan)
+        if type(plan) ~= "table" then
+            return nil
+        end
+        if type(plan.selected_materializations) == "table"
+            and #plan.selected_materializations > 0 then
+            local names = {}
+            for _, selected in ipairs(plan.selected_materializations) do
+                names[#names + 1] = tostring(selected.materialization_name)
+            end
+            return table.concat(names, ",")
+        end
+        if plan.selected_materialization == nil
+            or plan.selected_materialization == JSON_NULL then
+            return nil
+        elseif type(plan.selected_materialization) == "table" then
+            return plan.selected_materialization.materialization_name
+        end
+        return tostring(plan.selected_materialization)
+    end
+
+    function envelope.typed_failure_message(failure)
+        local reason = failure.reason_code or "TYPED_PLANNING_FAILED"
+        if reason == "METRIC_STATE_UNSUPPORTED" then
+            local metric_name = tostring(failure.metric or failure.metric_id or "unknown")
+            local aggregate = tostring(failure.aggregation_function
+                or failure.state_class or "unknown aggregate")
+            if failure.entity_name ~= nil then
+                return "Metric '" .. metric_name .. "' uses " .. aggregate
+                    .. ", which has no mergeable aggregate state; entity '"
+                    .. tostring(failure.entity_name)
+                    .. "' is partitioned (F3 supports SUM and COUNT). Remove the metric "
+                    .. "from this request or express it using mergeable SUM/COUNT states."
+            end
             return "Metric '" .. metric_name .. "' uses " .. aggregate
-                .. ", which has no mergeable aggregate state; entity '"
-                .. tostring(failure.entity_name)
-                .. "' is partitioned (F3 supports SUM and COUNT). Remove the metric "
-                .. "from this request or express it using mergeable SUM/COUNT states."
+                .. ", which has no mergeable aggregate state for strict typed planning."
         end
-        return "Metric '" .. metric_name .. "' uses " .. aggregate
-            .. ", which has no mergeable aggregate state for strict typed planning."
-    end
-    if reason == "FUSION_PARTITION_DIMENSION_UNSUPPORTED" then
-        local dimension_name = tostring(failure.dimension
-            or failure.dimension_id or "unknown")
-        local usage = failure.usage == "GLOBAL_FILTER"
-            and "Filter dimension" or "Dimension"
-        return usage .. " '" .. dimension_name
-            .. "' resolves to partitioned entity '"
-            .. tostring(failure.entity_name or failure.entity_id or "unknown")
-            .. "', which is used here only as a joined dimension. Partitioned joined "
-            .. "dimensions are not supported in F3."
-    end
-    if reason == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
-        local entity_name = tostring(failure.entity_name
-            or failure.entity_id or "unknown")
-        local via = failure.path == nil and ""
-            or " (join path: " .. tostring(failure.path) .. ")"
-        return "Entity '" .. entity_name
-            .. "' carries F3 temporal coverage and is traversed as an"
-            .. " intermediate join on the way to a requested field" .. via
-            .. ". F3 expands partitions only where the entity is a metric's own"
-            .. " leaf, so joining through it would read the primary partition"
-            .. " alone and silently omit the others. Request this field from a"
-            .. " semantic object rooted at '" .. entity_name
-            .. "', or remove the coverage declarations from that entity."
-    end
-    return "Typed planning failed: " .. tostring(reason) .. "."
-end
-
-local function ok_result(sql_text, plan, validation_run_id)
-    return {
-        status = "OK",
-        error_code = nil,
-        error_message = nil,
-        generated_sql = sql_text,
-        plan_json = json_encode(plan),
-        clarification_json = nil,
-        validation_run_id = validation_run_id,
-        agent_request_id = nil,
-        query_log_id = nil,
-        materialization_used = plan_materialization_name(plan),
-    }
-end
-
-local function monotonic_ms()
-    if os ~= nil and type(os.clock) == "function" then
-        return math.floor(os.clock() * 1000 + 0.5)
-    end
-    return nil
-end
-
-local function attach_planning_runtime(result, started_ms)
-    local finished_ms = monotonic_ms()
-    if result ~= nil and started_ms ~= nil and finished_ms ~= nil then
-        result.planning_runtime_ms = math.max(0, finished_ms - started_ms)
-    end
-    return result
-end
-
--- Compile-result cache (BUG-D-002). The compiler is deterministic per
--- (model_version_id, normalized request), so a successful compile is reused
--- until PUBLISH_MODEL drops cache entries for the model version. The parsed
--- request is canonicalized (strip logging-only fields, sort top-level keys)
--- and hashed with a 64-bit polynomial hash. Collisions in this space are
--- vanishingly improbable for any realistic dashboard workload.
-
-local CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
-    natural_language_text = true, natural_language = true, source = true}
-
--- COMPILE_REQUEST_JSON is a closed contract. Silently dropping misspelled or
--- future-looking keys is unsafe for autonomous callers: a request can return
--- STATUS=OK while not doing what the caller asked. Keep this list aligned with
--- SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT.
-local STRUCTURED_REQUEST_KEY_NAMES = {
-    "client", "dimensions", "filters", "having", "limit", "metrics",
-    "model", "natural_language_text", "object", "options", "order_by",
-    "proof_mode", "purpose",
-}
-
-local STRUCTURED_REQUEST_KEYS = {}
-for _, request_key in ipairs(STRUCTURED_REQUEST_KEY_NAMES) do
-    STRUCTURED_REQUEST_KEYS[request_key] = true
-end
-
--- Per-request planner safeguards. docs/data-fusion.md documented these as
--- overridable while the closed schema rejected the key outright. They are
--- accepted now, and they can only *tighten*: a request may ask to fail earlier
--- than the deployment's limit, never later, so a caller cannot talk the planner
--- out of a safeguard. (Declared inside the function on purpose: this chunk is
--- close to Lua's 200-local limit for a main chunk.)
-local function validate_structured_request_keys(request)
-    local option_names = {"max_branches", "max_bytes"}
-    local unknown = {}
-    for request_key, _ in pairs(request) do
-        if type(request_key) ~= "string" or not STRUCTURED_REQUEST_KEYS[request_key] then
-            unknown[#unknown + 1] = tostring(request_key)
+        if reason == "FUSION_PARTITION_DIMENSION_UNSUPPORTED" then
+            local dimension_name = tostring(failure.dimension
+                or failure.dimension_id or "unknown")
+            local usage = failure.usage == "GLOBAL_FILTER"
+                and "Filter dimension" or "Dimension"
+            return usage .. " '" .. dimension_name
+                .. "' resolves to partitioned entity '"
+                .. tostring(failure.entity_name or failure.entity_id or "unknown")
+                .. "', which is used here only as a joined dimension. Partitioned joined "
+                .. "dimensions are not supported in F3."
         end
-    end
-    if #unknown > 0 then
-        table.sort(unknown)
-        return error_result(
-            "SEMANTIC_REQUEST_004",
-            "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
-                .. ". Allowed keys: " .. table.concat(STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
-        )
+        if reason == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
+            local entity_name = tostring(failure.entity_name
+                or failure.entity_id or "unknown")
+            local via = failure.path == nil and ""
+                or " (join path: " .. tostring(failure.path) .. ")"
+            return "Entity '" .. entity_name
+                .. "' carries F3 temporal coverage and is traversed as an"
+                .. " intermediate join on the way to a requested field" .. via
+                .. ". F3 expands partitions only where the entity is a metric's own"
+                .. " leaf, so joining through it would read the primary partition"
+                .. " alone and silently omit the others. Request this field from a"
+                .. " semantic object rooted at '" .. entity_name
+                .. "', or remove the coverage declarations from that entity."
+        end
+        return "Typed planning failed: " .. tostring(reason) .. "."
     end
 
-    local options = request.options
-    if options == nil or options == null or options == JSON_NULL then
+    function envelope.ok_result(sql_text, plan, validation_run_id)
+        return {
+            status = "OK",
+            error_code = nil,
+            error_message = nil,
+            generated_sql = sql_text,
+            plan_json = json_encode(plan),
+            clarification_json = nil,
+            validation_run_id = validation_run_id,
+            agent_request_id = nil,
+            query_log_id = nil,
+            materialization_used = envelope.plan_materialization_name(plan),
+        }
+    end
+
+    function envelope.monotonic_ms()
+        if os ~= nil and type(os.clock) == "function" then
+            return math.floor(os.clock() * 1000 + 0.5)
+        end
         return nil
     end
-    if type(options) ~= "table" or is_array(options) then
-        return error_result("SEMANTIC_REQUEST_004",
-            "options must be an object with keys: "
-                .. table.concat(option_names, ", ") .. ".")
-    end
-    local allowed_options = {}
-    for _, option_key in ipairs(option_names) do allowed_options[option_key] = true end
-    local unknown_options = {}
-    for option_key, _ in pairs(options) do
-        if type(option_key) ~= "string" or not allowed_options[option_key] then
-            unknown_options[#unknown_options + 1] = tostring(option_key)
+
+    function envelope.attach_planning_runtime(result, started_ms)
+        local finished_ms = envelope.monotonic_ms()
+        if result ~= nil and started_ms ~= nil and finished_ms ~= nil then
+            result.planning_runtime_ms = math.max(0, finished_ms - started_ms)
         end
+        return result
     end
-    if #unknown_options > 0 then
-        table.sort(unknown_options)
-        return error_result("SEMANTIC_REQUEST_004",
-            "Unknown options key(s): " .. table.concat(unknown_options, ", ")
-                .. ". Allowed keys: " .. table.concat(option_names, ", ") .. ".")
+
+    -- Compile-result cache (BUG-D-002). The compiler is deterministic per
+    -- (model_version_id, normalized request), so a successful compile is reused
+    -- until PUBLISH_MODEL drops cache entries for the model version. The parsed
+    -- request is canonicalized (strip logging-only fields, sort top-level keys)
+    -- and hashed with a 64-bit polynomial hash. Collisions in this space are
+    -- vanishingly improbable for any realistic dashboard workload.
+
+    compile_cache.CACHE_IGNORED_REQUEST_KEYS = {client = true, purpose = true,
+        natural_language_text = true, natural_language = true, source = true}
+
+    -- COMPILE_REQUEST_JSON is a closed contract. Silently dropping misspelled or
+    -- future-looking keys is unsafe for autonomous callers: a request can return
+    -- STATUS=OK while not doing what the caller asked. Keep this list aligned with
+    -- SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT.
+    compile_cache.STRUCTURED_REQUEST_KEY_NAMES = {
+        "client", "dimensions", "filters", "having", "limit", "metrics",
+        "model", "natural_language_text", "object", "options", "order_by",
+        "proof_mode", "purpose",
+    }
+
+    compile_cache.STRUCTURED_REQUEST_KEYS = {}
+    for _, request_key in ipairs(compile_cache.STRUCTURED_REQUEST_KEY_NAMES) do
+        compile_cache.STRUCTURED_REQUEST_KEYS[request_key] = true
     end
-    for _, option_key in ipairs(option_names) do
-        local value = options[option_key]
-        if value ~= nil and value ~= null and value ~= JSON_NULL then
-            local number = tonumber(value)
-            if number == nil or number < 1 or number ~= math.floor(number) then
-                return error_result("SEMANTIC_REQUEST_004",
-                    "options." .. option_key .. " must be a positive integer.")
+
+    -- Per-request planner safeguards. docs/data-fusion.md documented these as
+    -- overridable while the closed schema rejected the key outright. They are
+    -- accepted now, and they can only *tighten*: a request may ask to fail earlier
+    -- than the deployment's limit, never later, so a caller cannot talk the planner
+    -- out of a safeguard. (Declared inside the function on purpose: this chunk is
+    -- close to Lua's 200-local limit for a main chunk.)
+    function compile_cache.validate_structured_request_keys(request)
+        local option_names = {"max_branches", "max_bytes"}
+        local unknown = {}
+        for request_key, _ in pairs(request) do
+            if type(request_key) ~= "string" or not compile_cache.STRUCTURED_REQUEST_KEYS[request_key] then
+                unknown[#unknown + 1] = tostring(request_key)
             end
         end
-    end
-    return nil
-end
+        if #unknown > 0 then
+            table.sort(unknown)
+            return error_result(
+                "SEMANTIC_REQUEST_004",
+                "Unknown top-level request key(s): " .. table.concat(unknown, ", ")
+                    .. ". Allowed keys: " .. table.concat(compile_cache.STRUCTURED_REQUEST_KEY_NAMES, ", ") .. "."
+            )
+        end
 
-local function canonical_value(value)
-    if value == nil or value == null or value == JSON_NULL then
-        return null
+        local options = request.options
+        if options == nil or options == null or options == JSON_NULL then
+            return nil
+        end
+        if type(options) ~= "table" or is_array(options) then
+            return error_result("SEMANTIC_REQUEST_004",
+                "options must be an object with keys: "
+                    .. table.concat(option_names, ", ") .. ".")
+        end
+        local allowed_options = {}
+        for _, option_key in ipairs(option_names) do allowed_options[option_key] = true end
+        local unknown_options = {}
+        for option_key, _ in pairs(options) do
+            if type(option_key) ~= "string" or not allowed_options[option_key] then
+                unknown_options[#unknown_options + 1] = tostring(option_key)
+            end
+        end
+        if #unknown_options > 0 then
+            table.sort(unknown_options)
+            return error_result("SEMANTIC_REQUEST_004",
+                "Unknown options key(s): " .. table.concat(unknown_options, ", ")
+                    .. ". Allowed keys: " .. table.concat(option_names, ", ") .. ".")
+        end
+        for _, option_key in ipairs(option_names) do
+            local value = options[option_key]
+            if value ~= nil and value ~= null and value ~= JSON_NULL then
+                local number = tonumber(value)
+                if number == nil or number < 1 or number ~= math.floor(number) then
+                    return error_result("SEMANTIC_REQUEST_004",
+                        "options." .. option_key .. " must be a positive integer.")
+                end
+            end
+        end
+        return nil
     end
-    if type(value) == "table" then
-        if is_array(value) then
+
+    function compile_cache.canonical_value(value)
+        if value == nil or value == null or value == JSON_NULL then
+            return null
+        end
+        if type(value) == "table" then
+            if is_array(value) then
+                local out = {}
+                for i = 1, #value do
+                    out[i] = compile_cache.canonical_value(value[i])
+                end
+                return out
+            end
+            local keys = {}
+            for k, _ in pairs(value) do
+                if type(k) == "string" then
+                    keys[#keys + 1] = k
+                end
+            end
+            table.sort(keys)
             local out = {}
-            for i = 1, #value do
-                out[i] = canonical_value(value[i])
+            for _, k in ipairs(keys) do
+                out[k] = compile_cache.canonical_value(value[k])
             end
             return out
         end
-        local keys = {}
-        for k, _ in pairs(value) do
-            if type(k) == "string" then
-                keys[#keys + 1] = k
+        return value
+    end
+
+    function compile_cache.canonical_request_text(request)
+        if type(request) ~= "table" then
+            return nil
+        end
+        local stripped = {}
+        for k, v in pairs(request) do
+            if type(k) == "string" and not compile_cache.CACHE_IGNORED_REQUEST_KEYS[string.lower(k)] then
+                stripped[k] = v
             end
         end
-        table.sort(keys)
-        local out = {}
-        for _, k in ipairs(keys) do
-            out[k] = canonical_value(value[k])
+        local ok, encoded = pcall(json_encode, compile_cache.canonical_value(stripped))
+        if not ok then
+            return nil
         end
-        return out
+        return "plan=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|" .. encoded
     end
-    return value
-end
 
-local function canonical_request_text(request)
-    if type(request) ~= "table" then
-        return nil
-    end
-    local stripped = {}
-    for k, v in pairs(request) do
-        if type(k) == "string" and not CACHE_IGNORED_REQUEST_KEYS[string.lower(k)] then
-            stripped[k] = v
+    -- 64-bit polynomial hash (two parallel 32-bit polynomials with different bases
+    -- and primes). Pure Lua 5.1 - no bitwise ops, all arithmetic stays under 2^53
+    -- so doubles are exact.
+    function compile_cache.compile_cache_key(canonical_text)
+        if type(canonical_text) ~= "string" or canonical_text == "" then
+            return nil
         end
+        local h1, h2 = 5381, 0
+        for i = 1, #canonical_text do
+            local b = string.byte(canonical_text, i)
+            h1 = (h1 * 33 + b) % 4294967296
+            h2 = (h2 * 31 + b) % 4294967296
+        end
+        return string.format("%08x%08x", h1, h2)
     end
-    local ok, encoded = pcall(json_encode, canonical_value(stripped))
-    if not ok then
-        return nil
+
+    function compile_cache.cache_lookup(model_version_id, cache_key)
+        if cache_key == nil or model_version_id == nil then
+            return nil
+        end
+        local rows = query([[
+            SELECT GENERATED_SQL, PLAN_JSON, VALIDATION_RUN_ID
+            FROM SYS_SEMANTIC.COMPILE_CACHE
+            WHERE MODEL_VERSION_ID = :model_version_id
+              AND CACHE_KEY = :cache_key
+        ]], {model_version_id = model_version_id, cache_key = cache_key})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local row = rows[1]
+        return {
+            generated_sql = row_value(row, "GENERATED_SQL", 1),
+            plan_json = row_value(row, "PLAN_JSON", 2),
+            validation_run_id = row_value(row, "VALIDATION_RUN_ID", 3),
+        }
     end
-    return "plan=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|" .. encoded
+
+    function compile_cache.cache_store(model_version_id, cache_key, result)
+        if cache_key == nil or model_version_id == nil or result == nil
+            or result.status ~= "OK" or missing(result.generated_sql) then
+            return
+        end
+        -- Best-effort insert. A PK collision (same model_version_id + cache_key)
+        -- means another concurrent compile already wrote this entry, so nothing
+        -- to do. A transient transaction collision is also swallowed - the caller
+        -- already has the compile result.
+        pcall(query, [[
+            INSERT INTO SYS_SEMANTIC.COMPILE_CACHE (
+              MODEL_VERSION_ID, CACHE_KEY, GENERATED_SQL, PLAN_JSON,
+              VALIDATION_RUN_ID, LAST_HIT_AT, HIT_COUNT
+            ) VALUES (
+              :model_version_id, :cache_key, :generated_sql, :plan_json,
+              :validation_run_id, NULL, 0
+            )
+        ]], {
+            model_version_id = model_version_id,
+            cache_key = cache_key,
+            generated_sql = null_if_missing(result.generated_sql),
+            plan_json = null_if_missing(result.plan_json),
+            validation_run_id = null_if_missing(result.validation_run_id),
+        })
+    end
+
+    function compile_cache.cache_touch(model_version_id, cache_key)
+        if cache_key == nil or model_version_id == nil then
+            return
+        end
+        pcall(query, [[
+            UPDATE SYS_SEMANTIC.COMPILE_CACHE
+            SET LAST_HIT_AT = CURRENT_TIMESTAMP,
+                HIT_COUNT = HIT_COUNT + 1
+            WHERE MODEL_VERSION_ID = :model_version_id
+              AND CACHE_KEY = :cache_key
+        ]], {model_version_id = model_version_id, cache_key = cache_key})
+    end
+
+    function compile_cache.cached_ok_result(cached)
+        -- Reconstruct an envelope.ok_result payload from the cached row. plan_json comes
+        -- straight from storage. materialization_used is recovered by decoding it.
+        local plan = nil
+        if not missing(cached.plan_json) then
+            local ok, decoded = pcall(json_decode, cached.plan_json)
+            if ok then plan = decoded end
+        end
+        return {
+            status = "OK",
+            error_code = nil,
+            error_message = nil,
+            generated_sql = cached.generated_sql,
+            plan_json = cached.plan_json,
+            clarification_json = nil,
+            validation_run_id = cached.validation_run_id,
+            agent_request_id = nil,
+            query_log_id = nil,
+            materialization_used = envelope.plan_materialization_name(plan),
+            cache_hit = true,
+            planning_runtime_ms = 0,
+        }
+    end
 end
 
--- 64-bit polynomial hash (two parallel 32-bit polynomials with different bases
--- and primes). Pure Lua 5.1 - no bitwise ops, all arithmetic stays under 2^53
--- so doubles are exact.
-local function compile_cache_key(canonical_text)
-    if type(canonical_text) ~= "string" or canonical_text == "" then
-        return nil
-    end
-    local h1, h2 = 5381, 0
-    for i = 1, #canonical_text do
-        local b = string.byte(canonical_text, i)
-        h1 = (h1 * 33 + b) % 4294967296
-        h2 = (h2 * 31 + b) % 4294967296
-    end
-    return string.format("%08x%08x", h1, h2)
-end
-
-local function cache_lookup(model_version_id, cache_key)
-    if cache_key == nil or model_version_id == nil then
-        return nil
-    end
-    local rows = query([[
-        SELECT GENERATED_SQL, PLAN_JSON, VALIDATION_RUN_ID
-        FROM SYS_SEMANTIC.COMPILE_CACHE
-        WHERE MODEL_VERSION_ID = :model_version_id
-          AND CACHE_KEY = :cache_key
-    ]], {model_version_id = model_version_id, cache_key = cache_key})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    local row = rows[1]
-    return {
-        generated_sql = row_value(row, "GENERATED_SQL", 1),
-        plan_json = row_value(row, "PLAN_JSON", 2),
-        validation_run_id = row_value(row, "VALIDATION_RUN_ID", 3),
-    }
-end
-
-local function cache_store(model_version_id, cache_key, result)
-    if cache_key == nil or model_version_id == nil or result == nil
-        or result.status ~= "OK" or missing(result.generated_sql) then
-        return
-    end
-    -- Best-effort insert. A PK collision (same model_version_id + cache_key)
-    -- means another concurrent compile already wrote this entry, so nothing
-    -- to do. A transient transaction collision is also swallowed - the caller
-    -- already has the compile result.
-    pcall(query, [[
-        INSERT INTO SYS_SEMANTIC.COMPILE_CACHE (
-          MODEL_VERSION_ID, CACHE_KEY, GENERATED_SQL, PLAN_JSON,
-          VALIDATION_RUN_ID, LAST_HIT_AT, HIT_COUNT
-        ) VALUES (
-          :model_version_id, :cache_key, :generated_sql, :plan_json,
-          :validation_run_id, NULL, 0
-        )
-    ]], {
-        model_version_id = model_version_id,
-        cache_key = cache_key,
-        generated_sql = null_if_missing(result.generated_sql),
-        plan_json = null_if_missing(result.plan_json),
-        validation_run_id = null_if_missing(result.validation_run_id),
-    })
-end
-
-local function cache_touch(model_version_id, cache_key)
-    if cache_key == nil or model_version_id == nil then
-        return
-    end
-    pcall(query, [[
-        UPDATE SYS_SEMANTIC.COMPILE_CACHE
-        SET LAST_HIT_AT = CURRENT_TIMESTAMP,
-            HIT_COUNT = HIT_COUNT + 1
-        WHERE MODEL_VERSION_ID = :model_version_id
-          AND CACHE_KEY = :cache_key
-    ]], {model_version_id = model_version_id, cache_key = cache_key})
-end
-
-local function cached_ok_result(cached)
-    -- Reconstruct an ok_result payload from the cached row. plan_json comes
-    -- straight from storage. materialization_used is recovered by decoding it.
-    local plan = nil
-    if not missing(cached.plan_json) then
-        local ok, decoded = pcall(json_decode, cached.plan_json)
-        if ok then plan = decoded end
-    end
-    return {
-        status = "OK",
-        error_code = nil,
-        error_message = nil,
-        generated_sql = cached.generated_sql,
-        plan_json = cached.plan_json,
-        clarification_json = nil,
-        validation_run_id = cached.validation_run_id,
-        agent_request_id = nil,
-        query_log_id = nil,
-        materialization_used = plan_materialization_name(plan),
-        cache_hit = true,
-        planning_runtime_ms = 0,
-    }
-end
 
 local function load_model(model_name)
     local rows = query([[
@@ -19290,24 +19790,23 @@ local function base_semantic_key_expression(ctx, entity, representation, identit
         return tostring(identity_binding.expression)
     end
     local mapping = identity_binding.mapping
-    local local_column, semantic_column = source_columns.resolve_pair(query,
-        mapping.source_schema, mapping.source_object, mapping.local_column,
-        mapping.semantic_column, ctx ~= nil and ctx._source_column_cache or nil)
+    local cache = ctx ~= nil and ctx._source_column_cache or nil
+    local local_column, semantic_column = identity_join.columns(query, mapping, cache)
     local map_alias = "f5_base_map_" .. tostring(identity_binding.id)
     entity.fusion_joins = entity.fusion_joins or {}
     entity.fusion_join_by_representation = entity.fusion_join_by_representation or {}
     local join_key = "MAP:" .. key(identity_binding.id)
     if not entity.fusion_join_by_representation[join_key] then
         entity.fusion_joins[#entity.fusion_joins + 1] = {
-            source_sql = quote_qualified(mapping.source_schema, mapping.source_object),
+            source_sql = identity_join.mapping_source(mapping),
             alias = map_alias,
-            predicates = {tostring(identity_binding.expression) .. " = "
-                .. map_alias .. "." .. quote_ident(local_column)},
+            predicates = {identity_join.predicate(identity_binding.expression,
+                map_alias, local_column)},
             identity_mapping = true,
         }
         entity.fusion_join_by_representation[join_key] = true
     end
-    return map_alias .. "." .. quote_ident(semantic_column)
+    return identity_join.key(map_alias, semantic_column)
 end
 
 local function alternate_identity_source(ctx, representation, identity_binding,
@@ -19319,22 +19818,13 @@ local function alternate_identity_source(ctx, representation, identity_binding,
                 representation.alias, lookup_alias), nil
     end
     local mapping = identity_binding.mapping
-    local local_column, semantic_column = source_columns.resolve_pair(query,
-        mapping.source_schema, mapping.source_object, mapping.local_column,
-        mapping.semantic_column, ctx ~= nil and ctx._source_column_cache or nil)
     local source_alias = "f5_src_" .. tostring(representation.id)
-    local map_alias = "f5_map_" .. tostring(identity_binding.id)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
-    local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(semantic_column) .. " AS "
-        .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
-        .. quote_qualified(representation.source_schema, representation.source_object)
-        .. " " .. source_alias .. " JOIN "
-        .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
-        .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(local_column) .. ")"
-    return source_sql, lookup_alias .. "." .. quote_ident("F5_SEMANTIC_KEY"), mapping
+    local source_sql = identity_join.semantic_key_view(query, representation,
+        mapping, source_alias, "f5_map_" .. tostring(identity_binding.id),
+        local_expression, ctx ~= nil and ctx._source_column_cache or nil)
+    return source_sql, identity_join.semantic_key_reference(lookup_alias), mapping
 end
 
 local function representation_by_id(ctx, representation_id)
@@ -20442,21 +20932,21 @@ local function compile_request_table(request, options)
     -- only when the full compile succeeded (so error results never get cached).
     local cache_key = nil
     if options.cache ~= false and not missing(model.version_id) then
-        cache_key = compile_cache_key(canonical_request_text(request))
+        cache_key = compile_cache.compile_cache_key(compile_cache.canonical_request_text(request))
         if cache_key ~= nil then
-            local cached = cache_lookup(model.version_id, cache_key)
+            local cached = compile_cache.cache_lookup(model.version_id, cache_key)
             if cached ~= nil then
-                cache_touch(model.version_id, cache_key)
-                local result = cached_ok_result(cached)
+                compile_cache.cache_touch(model.version_id, cache_key)
+                local result = compile_cache.cached_ok_result(cached)
                 if error_prefix ~= "SEMANTIC_REQUEST" then
-                    recode_error_prefix(result, error_prefix)
+                    envelope.recode_error_prefix(result, error_prefix)
                 end
                 return result, request, model
             end
         end
     end
 
-    local planning_started_ms = monotonic_ms()
+    local planning_started_ms = envelope.monotonic_ms()
     local ctx, load_code, load_message = load_catalog(model, object_name)
     if ctx == nil then
         return error_result(load_code, load_message)
@@ -20840,7 +21330,7 @@ local function compile_request_table(request, options)
         local reason = typed_plan.failure.reason_code or "TYPED_PLANNING_FAILED"
         local code = string.find(reason, "METRIC_", 1, true) == 1
             and "_070" or "_074"
-        return plan_error(code, typed_failure_message(typed_plan.failure))
+        return plan_error(code, envelope.typed_failure_message(typed_plan.failure))
     end
     if typed_plan.plan_kind == "MULTI_BRANCH" then
         if ctx.has_fact_fusion then
@@ -20909,10 +21399,10 @@ local function compile_request_table(request, options)
         typed_plan.execution = {status = "EXECUTABLE"}
         physical_plan.execution = {status = "EXECUTABLE"}
         local plan = plan_envelope(branch_decision)
-        local result = attach_planning_runtime(
-            ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
+        local result = envelope.attach_planning_runtime(
+            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
         if cache_key ~= nil then
-            cache_store(model.version_id, cache_key, result)
+            compile_cache.cache_store(model.version_id, cache_key, result)
         end
         return result, request, model
     end
@@ -20962,10 +21452,10 @@ local function compile_request_table(request, options)
 
     local plan = plan_envelope(materialization_decision, selected_materialization,
         relationship_paths)
-    local result = attach_planning_runtime(
-        ok_result(sql_text, plan, validation_run_id), planning_started_ms)
+    local result = envelope.attach_planning_runtime(
+        envelope.ok_result(sql_text, plan, validation_run_id), planning_started_ms)
     if cache_key ~= nil then
-        cache_store(model.version_id, cache_key, result)
+        compile_cache.cache_store(model.version_id, cache_key, result)
     end
     return result, request, model
 end
@@ -20978,7 +21468,7 @@ local function compile_internal(request_json)
     if type(request) ~= "table" or is_array(request) then
         return error_result("SEMANTIC_REQUEST_001", "Request JSON must be an object.")
     end
-    local request_key_error = validate_structured_request_keys(request)
+    local request_key_error = compile_cache.validate_structured_request_keys(request)
     if request_key_error ~= nil then
         return request_key_error, request, nil
     end
@@ -21458,7 +21948,7 @@ local function parse_having_filters(ctx, tokens, start_index, end_index)
         end
         local resolved, resolve_err = resolve_field(ctx, field, nil)
         if resolve_err ~= nil then
-            return nil, recode_error_prefix(resolve_err, "SEMANTIC_QUERY")
+            return nil, envelope.recode_error_prefix(resolve_err, "SEMANTIC_QUERY")
         end
         if resolved.kind ~= "METRIC" then
             return nil, error_result("SEMANTIC_QUERY_040", "HAVING supports metric predicates only. Use WHERE for dimension filters.")
@@ -21554,13 +22044,13 @@ local function parse_semantic_sql(sql_text, options)
     local tokens = sql_tokens(sql_text)
     if #tokens == 0 then
         if options.unchanged_nonsemantic then
-            return unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(sql_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_001", "SQL text is required.")
     end
     if token_upper(tokens[1]) ~= "SELECT" then
         if options.unchanged_nonsemantic then
-            return unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(sql_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_009", "Only top-level SELECT semantic SQL is supported.")
     end
@@ -21573,7 +22063,7 @@ local function parse_semantic_sql(sql_text, options)
     local from_tokens = token_slice(tokens, clauses.FROM + 1, from_end)
     if #from_tokens < 3 or from_tokens[2].text ~= "." then
         if options.unchanged_unknown_schema then
-            return unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(sql_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
@@ -21581,7 +22071,7 @@ local function parse_semantic_sql(sql_text, options)
     local object_name = token_identifier_value(from_tokens[3])
     if published_schema == nil or object_name == nil then
         if options.unchanged_unknown_schema then
-            return unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(sql_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
@@ -21603,12 +22093,12 @@ local function parse_semantic_sql(sql_text, options)
                         .. " and publish the model, or drop schema "
                         .. tostring(published_schema) .. ".")
             end
-            return unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(sql_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_004", "No semantic model is published to schema " .. tostring(published_schema) .. ".")
     end
     if options.unchanged_unknown_schema and upper(object_name) == "SEMANTIC_DISCOVERY" then
-        return unchanged_result(sql_text), nil, model
+        return envelope.unchanged_result(sql_text), nil, model
     end
     if #from_tokens > 3 then
         local alias_ok = #from_tokens == 4 and token_identifier_value(from_tokens[4]) ~= nil
@@ -21620,7 +22110,7 @@ local function parse_semantic_sql(sql_text, options)
 
     local ctx, load_code, load_message = load_catalog(model, object_name)
     if ctx == nil then
-        return nil, recode_error_prefix(error_result(load_code, load_message), "SEMANTIC_QUERY")
+        return nil, envelope.recode_error_prefix(error_result(load_code, load_message), "SEMANTIC_QUERY")
     end
 
     local request = {
@@ -21660,7 +22150,7 @@ local function parse_semantic_sql(sql_text, options)
         end
         local field, bind_err = resolve_field(ctx, field_name, nil)
         if bind_err ~= nil then
-            return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+            return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
         if measure_wrapped and field.kind ~= "METRIC" then
             return nil, error_result("SEMANTIC_QUERY_006", "MEASURE()/agg() may only wrap a metric, not '" .. tostring(field.name) .. "'.")
@@ -21728,7 +22218,7 @@ local function parse_semantic_sql(sql_text, options)
                 end
                 local field, bind_err = resolve_field(ctx, field_name, "DIMENSION")
                 if bind_err ~= nil then
-                    return nil, recode_error_prefix(bind_err, "SEMANTIC_QUERY")
+                    return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
                 end
                 grouped[upper(field.name)] = true
             end
@@ -21797,7 +22287,7 @@ local function compile_sql_internal(sql_text, options)
         source = "SEMANTIC_SQL",
     })
     if result ~= nil and result.status ~= "OK" then
-        recode_error_prefix(result, "SEMANTIC_QUERY")
+        envelope.recode_error_prefix(result, "SEMANTIC_QUERY")
     end
     return result, compiled_request, compiled_model
 end
@@ -22028,8 +22518,8 @@ if rawget(_G, "ESV_TEST_MODE") then
     ESV_COMPILER_TEST_API = {
         json_encode = json_encode,
         json_decode = json_decode,
-        canonical_request_text = canonical_request_text,
-        compile_cache_key = compile_cache_key,
+        canonical_request_text = compile_cache.canonical_request_text,
+        compile_cache_key = compile_cache.compile_cache_key,
         quote_ident = quote_ident,
         quote_qualified = quote_qualified,
         sql_literal = sql_literal,
@@ -22045,7 +22535,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_filters = build_filters,
         plan_joins = plan_joins,
         relationship_path_warnings = relationship_path_warnings,
-        validate_structured_request_keys = validate_structured_request_keys,
+        validate_structured_request_keys = compile_cache.validate_structured_request_keys,
         build_order_by = build_order_by,
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,
@@ -22061,7 +22551,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         parse_having_filters = parse_having_filters,
         parse_order_by = parse_order_by,
         collision_error = collision_error,
-        typed_failure_message = typed_failure_message,
+        typed_failure_message = envelope.typed_failure_message,
     }
 end
 /
@@ -24945,7 +25435,18 @@ local function parse_metric_ref(ref)
     return normalize_name(parts[1], "MODEL_NAME"), normalize_name(parts[2], "OBJECT_NAME"), normalize_name(parts[3], "METRIC_NAME")
 end
 
+-- Returns the row *and* the three normalized names.
+--
+-- The three-argument entrypoints are called straight from the script wrappers,
+-- so an omitted parameter arrives as SQL NULL -- userdata, not nil -- and
+-- concatenating it into a message or a reference is a Lua runtime error, not a
+-- refusal. `parse_metric_ref` already normalizes the dotted form; this is the
+-- same guarantee for the positional one, and the callers use what comes back so
+-- their own concatenations are safe too.
 local function load_metric(model_name, object_name, metric_name)
+    model_name = normalize_name(model_name, "MODEL_NAME")
+    object_name = normalize_name(object_name, "OBJECT_NAME")
+    metric_name = normalize_name(metric_name, "METRIC_NAME")
     local rows = query([[
         SELECT mo.MODEL_NAME, mo.OBJECT_NAME, mo.METRIC_ID, mo.METRIC_NAME,
                mo.DISPLAY_NAME, mo.METRIC_KIND, mo.METRIC_TYPE, mo.BASE_ENTITY_NAME,
@@ -24972,7 +25473,7 @@ local function load_metric(model_name, object_name, metric_name)
     if rows == nil or #rows == 0 then
         error("SEMANTIC_DDL_051: metric not found: " .. model_name .. "." .. object_name .. "." .. metric_name)
     end
-    return rows[1]
+    return rows[1], model_name, object_name, metric_name
 end
 
 function M.describe_semantic_metric(model_name, object_name, metric_name)
@@ -25002,7 +25503,9 @@ function M.describe_semantic_metric(model_name, object_name, metric_name)
 end
 
 function M.explain_semantic_metric(model_name, object_name, metric_name)
-    local metric = load_metric(model_name, object_name, metric_name)
+    -- model_name is rebound because the validation-status query below binds it.
+    local metric
+    metric, model_name = load_metric(model_name, object_name, metric_name)
     local metric_id = row_value(metric, "METRIC_ID", 3)
     local rows = {}
     local function add(section, item, detail)
@@ -25042,7 +25545,9 @@ function M.explain_semantic_metric(model_name, object_name, metric_name)
 end
 
 local function canonical_metric_sql(model_name, object_name, metric_name)
-    local row = load_metric(model_name, object_name, metric_name)
+    -- Rebound because the ALTER SEMANTIC VIEW header below concatenates them.
+    local row
+    row, model_name, object_name = load_metric(model_name, object_name, metric_name)
     local lines = {}
     lines[#lines + 1] = "ALTER SEMANTIC VIEW " .. model_name .. "." .. object_name
     lines[#lines + 1] = "  ADD OR REPLACE METRIC " .. tostring(row_value(row, "METRIC_NAME", 4))
@@ -25158,7 +25663,12 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
         end
     end
     if not missing(metric_name) and filter_kind == nil then
-        return {{"METRIC", model_name .. "." .. object_name .. "." .. metric_name, canonical_metric_sql(model_name, object_name, metric_name)}}
+        -- Normalized before the concatenation, for the same reason load_metric
+        -- normalizes: an omitted MODEL_NAME or OBJECT_NAME is NULL userdata here.
+        local definition_sql = canonical_metric_sql(model_name, object_name, metric_name)
+        return {{"METRIC", normalize_name(model_name, "MODEL_NAME") .. "."
+            .. normalize_name(object_name, "OBJECT_NAME") .. "."
+            .. normalize_name(metric_name, "METRIC_NAME"), definition_sql}}
     end
     local rows = {}
     local function add_export(kind, ref, definition_sql)

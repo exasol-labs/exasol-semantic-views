@@ -1,5 +1,7 @@
 local M = {}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
+local identity_join = assert(ESV_IDENTITY_JOIN,
+    "shared identity join runtime is required")
 local source_columns = assert(ESV_SOURCE_COLUMNS,
     "shared source-column runtime is required")
 local metric_plan = assert(ESV_METRIC_PLAN, "metric plan runtime is required")
@@ -2347,16 +2349,12 @@ local function identity_grouped_key_query(representation, binding)
         semantic_expression = tostring(binding.expression)
     else
         local mapping = binding.mapping
-        -- BUG-G03: the declared spelling is the modeler's, not the database's.
-        local local_column, semantic_column = source_columns.resolve_pair(query,
-            mapping.source_schema, mapping.source_object, mapping.local_column,
-            mapping.semantic_column)
+        local local_column, semantic_column = identity_join.columns(query, mapping)
         local map_alias = "f5_map_" .. tostring(binding.id)
-        semantic_expression = map_alias .. "." .. quote_ident(semantic_column)
-        from_sql = from_sql .. " JOIN "
-            .. quote_qualified(mapping.source_schema, mapping.source_object)
-            .. " " .. map_alias .. " ON " .. tostring(binding.expression)
-            .. " = " .. map_alias .. "." .. quote_ident(local_column)
+        semantic_expression = identity_join.key(map_alias, semantic_column)
+        from_sql = from_sql .. " JOIN " .. identity_join.mapping_source(mapping)
+            .. " " .. map_alias .. " ON "
+            .. identity_join.predicate(binding.expression, map_alias, local_column)
     end
     return "SELECT " .. semantic_expression .. " FROM " .. from_sql
         .. " WHERE " .. semantic_expression .. " IS NOT NULL GROUP BY "
@@ -2395,10 +2393,9 @@ local function validate_semantic_identity_data(ctx)
                 end
                 if upper(binding.kind) == "MAPPED" then
                     local mapping = binding.mapping
-                    local map_local_column, map_semantic_column = source_columns.resolve_pair(query,
-                        mapping.source_schema, mapping.source_object, mapping.local_column,
-                        mapping.semantic_column)
-                    local map_source = quote_qualified(mapping.source_schema, mapping.source_object)
+                    local map_local_column, map_semantic_column =
+                        identity_join.columns(query, mapping)
+                    local map_source = identity_join.mapping_source(mapping)
                     local map_total, map_total_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
                     local map_local, map_local_error = probe_count(
@@ -3256,26 +3253,13 @@ local function identity_conflict_source(representation, identity_binding, alias)
                 representation.alias, alias)
     end
     local source_alias = "f5_conflict_src_" .. tostring(representation.id)
-    local map_alias = "f5_conflict_map_" .. tostring(identity_binding.id)
     local mapping = identity_binding.mapping
-    -- Same resolution as the mapping probes and the compiler's own rendering of
-    -- this join: the F4 conflict probe reaches the mapping relation through the
-    -- declared column names too, so leaving it verbatim would have kept a third
-    -- of BUG-G03 alive on the one path that only runs for COALESCE/RECONCILE.
-    local local_column, semantic_column = source_columns.resolve_pair(query,
-        mapping.source_schema, mapping.source_object, mapping.local_column,
-        mapping.semantic_column)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
-    local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(semantic_column) .. " AS "
-        .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
-        .. quote_qualified(representation.source_schema, representation.source_object)
-        .. " " .. source_alias .. " JOIN "
-        .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
-        .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(local_column) .. ")"
-    return source_sql, alias .. "." .. quote_ident("F5_SEMANTIC_KEY")
+    local source_sql = identity_join.semantic_key_view(query, representation,
+        mapping, source_alias,
+        "f5_conflict_map_" .. tostring(identity_binding.id), local_expression)
+    return source_sql, identity_join.semantic_key_reference(alias)
 end
 
 local function fusion_conflict_query(left_representation, left_binding,

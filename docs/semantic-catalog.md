@@ -93,6 +93,8 @@ Manage the F1 lifecycle through:
 
 ```text
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
+SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS
+SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE
 SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
@@ -100,6 +102,19 @@ SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH
 SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
 SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 ```
+
+`ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` is the general form: the same eight
+positional arguments as `ADD_ENTITY_REPRESENTATION`, plus a `DECLARATIONS_JSON`
+block carrying any of `authority`, `coverage`, and `identity`. The three
+one-dimensional `_WITH_*` calls remain supported and are equivalent to passing
+the corresponding single key. Reach for the collapsed form when a published
+entity needs more than one of them at once — most often `authority` together
+with `identity`, which no single-purpose call covers. Unknown keys are refused
+(`SEMANTIC_ADMIN_214`), as is `coverage` together with `identity`
+(`SEMANTIC_ADMIN_215`) — `SEMANTIC_MODEL_047` rejects F3 temporal coverage and an
+F5 semantic identity on the same entity, so that pair has no valid outcome to
+reach. Whatever the block declares lands as one candidate, so a validation
+failure removes the representation and everything the call generated.
 
 Representations support `RELATION` and `VIRTUAL_SCHEMA` sources. All active representations
 must expose the same semantic alias and every column used by attributes that
@@ -417,8 +432,11 @@ binding, and identity rows before re-certifying the previous surface.
 
 When a published entity already has an F5 identity, use
 `ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING` to register a heterogeneous
-source together with its `DIRECT` or `MAPPED` binding. `MAPPED` registration
-takes the same certified relation fields in `MAPPING_JSON`. The complete
+source together with its `DIRECT` or `MAPPED` binding — or
+`ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` with an `identity` key, which
+accepts the same fields and can declare an authority role in the same call.
+`MAPPED` registration takes the same certified relation fields in
+`MAPPING_JSON`. The complete
 candidate also seeds explicit dimension and fact bindings from the governed
 expressions, then validates once. If validation fails, the error lists every
 failing object and the operation removes the generated attribute bindings,

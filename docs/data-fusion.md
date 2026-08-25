@@ -192,11 +192,35 @@ dimension unresolvable on the alternate. Use
 `ADD_DIMENSION_WITH_BINDINGS`/`ADD_FACT_WITH_BINDINGS` whenever a representation
 either computes the attribute differently *or* does not carry it at all.
 
-**Registering an F4 alternate on an entity that already has an F5 identity takes
-two calls.** The compound forms are one-dimensional —
-`ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY`, `_WITH_COVERAGE`,
-`_WITH_IDENTITY_BINDING` — and none combines authority with identity, so the
-sequence is:
+**Registering an F4 alternate on an entity that already has an F5 identity is one
+call.** `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` takes whatever has to be
+declared alongside the representation as one closed JSON object:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS(
+  'sales', 'customer', 'crm', 'RELATION', 'CRM', 'CUSTOMERS_CRM', 20, 'MANUAL',
+  '{"authority": "AUTHORITATIVE",
+    "identity": {"identity_name": "customer_identity",
+                 "source_expression": "c.account_id",
+                 "binding_kind": "MAPPED",
+                 "mapping": {"source_schema": "CRM",
+                             "source_object": "CUSTOMER_XREF",
+                             "source_local_column": "ACCOUNT_ID",
+                             "semantic_key_column": "CUSTOMER_ID",
+                             "certification_status": "CERTIFIED"}}}');
+```
+
+`authority`, `coverage` and `identity` are each optional, and an unknown key is
+refused by name (`SEMANTIC_ADMIN_214`) rather than ignored. Declaring `coverage`
+and `identity` together is refused (`SEMANTIC_ADMIN_215`): an F5 identity combined
+with F3 coverage on one entity is rejected by `SEMANTIC_MODEL_047` anyway, so
+every valid combination is reachable through this one call. The model is never
+left in a half-declared state — if the authority declaration is refused the
+representation is unwound with it.
+
+The one-dimensional forms — `ADD_ENTITY_REPRESENTATION`, `_WITH_AUTHORITY`,
+`_WITH_COVERAGE`, `_WITH_IDENTITY_BINDING` — still work, and the collapsed form
+dispatches to them. The equivalent long-hand sequence is:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY(
@@ -211,7 +235,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
 
 Between the first call and the second the entity is invalid, and the
 representation is unusable — which makes its every key, expression and attribute
-check fail too. Validation leads with the actionable cause,
+check fail too. That is the reason to prefer the single call, and it is also what
+explains the diagnostics you see if you take the long way round. Validation leads
+with the actionable cause,
 `SEMANTIC_MODEL_047: Semantic identity has no binding for active
 representation: <name>`, and each consequence names `ADD_IDENTITY_BINDING` as the
 remedy rather than the generic "complete the declaration" list, so a refused

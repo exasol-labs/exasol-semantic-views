@@ -45,6 +45,9 @@ end)
 load_runtime("lua/semantic_layer/shared/source_columns.lua", function()
     return {ESV_SOURCE_COLUMNS}
 end)
+load_runtime("lua/semantic_layer/shared/identity_join.lua", function()
+    return {ESV_IDENTITY_JOIN}
+end)
 load_runtime("lua/semantic_layer/compiler/query_spec.lua", function()
     return {ESV_QUERY_SPEC}
 end)

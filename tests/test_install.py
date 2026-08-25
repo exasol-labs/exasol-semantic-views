@@ -590,6 +590,9 @@ class InstallerResetTest(unittest.TestCase):
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING": "REMOVE_ENTITY_REPRESENTATION",
+            # The collapsed form registers one representation whatever it declares
+            # alongside it, so removing that representation undoes all of it.
+            "ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS": "REMOVE_ENTITY_REPRESENTATION",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_OR_REPLACE_DIMENSION": "REMOVE_DIMENSION",
             "ADD_DIMENSION_WITH_BINDINGS": "REMOVE_DIMENSION",
@@ -655,6 +658,8 @@ class InstallerResetTest(unittest.TestCase):
                 "tools/verify_bug30_published_identity_setup.py",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING":
                 "tools/verify_bug31_representation_with_identity.py",
+            "ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS":
+                "tools/verify_g04_identity_binding_diagnostic.py",
             "ADD_DIMENSION_WITH_BINDINGS":
                 "tools/verify_bug37_attribute_with_bindings.py",
             "ADD_FACT_WITH_BINDINGS":
@@ -928,6 +933,68 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
         self.assertTrue(
             PACKAGER.admin_script_parameters_block().startswith(
                 PACKAGER.SCRIPT_PARAMETERS_BEGIN))
+
+
+class NullNormalisationTest(unittest.TestCase):
+    """An omitted parameter must not be normalised into a Lua address.
+
+    `CALL_ADMIN_JSON` renders an absent key as SQL NULL, and SQL NULL reaches an
+    Exasol Lua script as *userdata* rather than nil. Userdata is truthy, so the
+    idiom `tostring(value or "")` yields "userdata: 0x..." -- a non-empty string
+    that sails past the script's own `missing()` check and then gets reported to
+    the caller as if it were the value the caller supplied.
+
+    The idiom shipped in 19 hand-written scripts. Most were harmless because a
+    different check fired first, but `REMOVE_RELATIONSHIP`, `REMOVE_UNIQUE_KEY`,
+    `REMOVE_UNIQUE_KEY_WITH_COLUMNS` and `REMOVE_ATTRIBUTE_BINDING` answered an
+    omitted name with "... not found: userdata: 0xffff..." instead of the
+    SEMANTIC_ADMIN_001 each had already written the check for, and
+    `RECERTIFY_MODEL_IF_PUBLISHED` reported "model not found" for the same
+    reason. `DESCRIBE_SEMANTIC_METRIC` and `EXPLAIN_SEMANTIC_METRIC` were worse
+    still: they concatenated the userdata and crashed.
+
+    `tools/verify_g02_named_admin_api.py` probes this live against every
+    model-scoped script; this is the cheap static half, because the idiom is
+    short enough to be retyped from memory.
+    """
+
+    # `tostring(X or "")` for any bare name X. Comments are stripped first, so
+    # the explanations of why this is wrong do not count as instances of it.
+    BAD_IDIOM = re.compile(r'tostring\(\s*[A-Za-z_][A-Za-z0-9_.]*\s+or\s+""\s*\)')
+
+    def setUp(self) -> None:
+        self.hand_written: dict[str, list[tuple[int, str]]] = {}
+        for path in sorted((ROOT / "sql/install").glob("*.sql")):
+            # Generated blocks come from `lua/`, which the Lua suite covers and
+            # which does not receive Exasol script parameters.
+            head, _, _ = path.read_text(encoding="utf-8").partition("-- BEGIN GENERATED")
+            self.hand_written[path.name] = [
+                (number, line) for number, line in enumerate(head.split("\n"), 1)
+                if not line.lstrip().startswith("--")]
+
+    def test_no_hand_written_script_normalises_null_by_truthiness(self):
+        offenders = [f"{name}:{number}: {line.strip()}"
+                     for name, lines in self.hand_written.items()
+                     for number, line in lines if self.BAD_IDIOM.search(line)]
+        self.assertEqual(
+            [], offenders,
+            "`X or \"\"` treats SQL NULL as a value, because NULL is truthy "
+            "userdata; guard on `X == nil or X == null` first")
+
+    def test_the_idiom_is_what_the_guard_thinks_it_is(self):
+        """The regex must match the shape that shipped, and not its explanation."""
+        self.assertRegex('local text = tostring(value or "")', self.BAD_IDIOM)
+        self.assertRegex('tostring( MODEL_NAME  or  "" )', self.BAD_IDIOM)
+        self.assertNotRegex('local text = tostring(value)', self.BAD_IDIOM)
+        self.assertNotRegex('missing(value) and "" or tostring(value)', self.BAD_IDIOM)
+
+    def test_the_replacement_names_null_where_it_is_used(self):
+        """Avoiding the idiom is not enough; the guard has to test for `null`."""
+        for name in ("003_create_semantic_admin_scripts.sql",
+                     "005_create_semantic_surface_helpers.sql"):
+            text = "\n".join(line for _, line in self.hand_written[name])
+            self.assertIn('if value == nil or value == null then return "" end', text,
+                          f"{name} has no null-guarded normaliser left")
 
 
 class PackagerOutputFormattingTest(unittest.TestCase):

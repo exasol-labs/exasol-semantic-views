@@ -2758,7 +2758,18 @@ local function parse_metric_ref(ref)
     return normalize_name(parts[1], "MODEL_NAME"), normalize_name(parts[2], "OBJECT_NAME"), normalize_name(parts[3], "METRIC_NAME")
 end
 
+-- Returns the row *and* the three normalized names.
+--
+-- The three-argument entrypoints are called straight from the script wrappers,
+-- so an omitted parameter arrives as SQL NULL -- userdata, not nil -- and
+-- concatenating it into a message or a reference is a Lua runtime error, not a
+-- refusal. `parse_metric_ref` already normalizes the dotted form; this is the
+-- same guarantee for the positional one, and the callers use what comes back so
+-- their own concatenations are safe too.
 local function load_metric(model_name, object_name, metric_name)
+    model_name = normalize_name(model_name, "MODEL_NAME")
+    object_name = normalize_name(object_name, "OBJECT_NAME")
+    metric_name = normalize_name(metric_name, "METRIC_NAME")
     local rows = query([[
         SELECT mo.MODEL_NAME, mo.OBJECT_NAME, mo.METRIC_ID, mo.METRIC_NAME,
                mo.DISPLAY_NAME, mo.METRIC_KIND, mo.METRIC_TYPE, mo.BASE_ENTITY_NAME,
@@ -2785,7 +2796,7 @@ local function load_metric(model_name, object_name, metric_name)
     if rows == nil or #rows == 0 then
         error("SEMANTIC_DDL_051: metric not found: " .. model_name .. "." .. object_name .. "." .. metric_name)
     end
-    return rows[1]
+    return rows[1], model_name, object_name, metric_name
 end
 
 function M.describe_semantic_metric(model_name, object_name, metric_name)
@@ -2815,7 +2826,9 @@ function M.describe_semantic_metric(model_name, object_name, metric_name)
 end
 
 function M.explain_semantic_metric(model_name, object_name, metric_name)
-    local metric = load_metric(model_name, object_name, metric_name)
+    -- model_name is rebound because the validation-status query below binds it.
+    local metric
+    metric, model_name = load_metric(model_name, object_name, metric_name)
     local metric_id = row_value(metric, "METRIC_ID", 3)
     local rows = {}
     local function add(section, item, detail)
@@ -2855,7 +2868,9 @@ function M.explain_semantic_metric(model_name, object_name, metric_name)
 end
 
 local function canonical_metric_sql(model_name, object_name, metric_name)
-    local row = load_metric(model_name, object_name, metric_name)
+    -- Rebound because the ALTER SEMANTIC VIEW header below concatenates them.
+    local row
+    row, model_name, object_name = load_metric(model_name, object_name, metric_name)
     local lines = {}
     lines[#lines + 1] = "ALTER SEMANTIC VIEW " .. model_name .. "." .. object_name
     lines[#lines + 1] = "  ADD OR REPLACE METRIC " .. tostring(row_value(row, "METRIC_NAME", 4))
@@ -2971,7 +2986,12 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
         end
     end
     if not missing(metric_name) and filter_kind == nil then
-        return {{"METRIC", model_name .. "." .. object_name .. "." .. metric_name, canonical_metric_sql(model_name, object_name, metric_name)}}
+        -- Normalized before the concatenation, for the same reason load_metric
+        -- normalizes: an omitted MODEL_NAME or OBJECT_NAME is NULL userdata here.
+        local definition_sql = canonical_metric_sql(model_name, object_name, metric_name)
+        return {{"METRIC", normalize_name(model_name, "MODEL_NAME") .. "."
+            .. normalize_name(object_name, "OBJECT_NAME") .. "."
+            .. normalize_name(metric_name, "METRIC_NAME"), definition_sql}}
     end
     local rows = {}
     local function add_export(kind, ref, definition_sql)
