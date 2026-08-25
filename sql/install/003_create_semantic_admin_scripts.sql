@@ -3494,6 +3494,15 @@ end
 --     for the F0 compatibility row. Promoting anything else leaves a
 --     representation *named* primary holding role ALTERNATE, which reads as a
 --     catalog inconsistency to everyone who meets it later.
+--
+-- Both are advisory, and they say so by arriving in the WARNINGS column of the
+-- result row rather than as a raised error. That is the only thing that marks
+-- them advisory: the codes are ordinary SEMANTIC_ADMIN_NNN, because severity is
+-- carried by the channel here exactly as VALIDATE_MODEL carries it in its
+-- SEVERITY column. They were briefly SEMANTIC_ADMIN_W060/W061 -- a 'W' prefix
+-- invented for advisory codes -- which put two numbering conventions in one
+-- namespace to express what the column already said. 060 and 061 were taken by
+-- refusals, hence 220.
 local warnings = {}
 if changed then
     local valid_from = row_value(row, "VALID_FROM", 10)
@@ -3512,7 +3521,7 @@ if changed then
             window[#window + 1] = "COVERAGE_PREDICATE "
                 .. tostring(coverage_predicate)
         end
-        warnings[#warnings + 1] = "SEMANTIC_ADMIN_W060: representation '"
+        warnings[#warnings + 1] = "SEMANTIC_ADMIN_220: representation '"
             .. representation_name .. "' is now PRIMARY for entity '"
             .. entity_name .. "' but its coverage is bounded ("
             .. table.concat(window, ", ")
@@ -3523,7 +3532,7 @@ if changed then
     if previous_name ~= null
         and string.upper(tostring(previous_name)) == "PRIMARY"
         and string.upper(representation_name) ~= "PRIMARY" then
-        warnings[#warnings + 1] = "SEMANTIC_ADMIN_W061: representation named '"
+        warnings[#warnings + 1] = "SEMANTIC_ADMIN_221: representation named '"
             .. tostring(previous_name) .. "' now holds role ALTERNATE, because '"
             .. representation_name .. "' took role PRIMARY. The name and the role"
             .. " disagree from here on; rename either representation to keep"

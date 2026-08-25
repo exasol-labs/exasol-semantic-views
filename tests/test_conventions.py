@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """The conventions this codebase holds itself to.
 
-Three rules that cost nothing to follow and compound if they are not. None is a
+Four rules that cost nothing to follow and compound if they are not. None is a
 correctness property, so nothing else will ever fail because one was broken --
 which is exactly why they need a test. Each is a *ratchet*: the current state is
 pinned, the pinned state may shrink, and it may not grow. Same discipline as
 `tests/python_coverage_thresholds.py` and the Lua coverage floors.
 
   1. One condition, one rule code.
-  2. Verifiers are named for the invariant they protect, not the ticket that
+  2. Severity is carried by the channel, never by a code's spelling.
+  3. Verifiers are named for the invariant they protect, not the ticket that
      prompted them.
-  3. A catalog surface derives what it can look up instead of restating it.
+  4. A catalog surface derives what it can look up instead of restating it.
 
 Each rule records what it cost when it was broken, because a convention with no
 story attached is the first thing dropped under deadline.
@@ -109,6 +110,27 @@ OVERLOADED_RULE_CODES = {
 # The one string-match this rule was written to delete.
 RETIRED_MESSAGE_MATCH = "no binding for active representation"
 
+# A code carrying a severity letter -- SEMANTIC_ADMIN_W060 for an advisory --
+# puts two numbering conventions in one namespace. Severity belongs to the
+# channel: a refusal is raised, an advisory arrives in a column
+# (`VALIDATE_MODEL`.SEVERITY, `SET_PRIMARY_REPRESENTATION`.WARNINGS). Nine
+# SEMANTIC_MODEL_* codes are warnings and none is spelled with a W.
+SEVERITY_PREFIXED_CODE = re.compile(r"SEMANTIC_[A-Z]+_[A-Z]\d+")
+
+# The overloading pins above are scoped to `lua/`, which is where the validator,
+# compiler and agent runtimes emit from. The severity rule cannot be: the two
+# codes that broke it lived in a *hand-written* admin script in the install SQL,
+# so a scan of `lua/` alone would have passed them. Generated blocks are skipped
+# because they are copies of `lua/`.
+def codes_everywhere() -> set[str]:
+    text = "\n".join(
+        [path.read_text(encoding="utf-8") for path in sorted((ROOT / "lua").rglob("*.lua"))]
+        + [path.read_text(encoding="utf-8").partition("-- BEGIN GENERATED")[0]
+           for path in sorted((ROOT / "sql/install").glob("*.sql"))])
+    # Comments explain the retired spelling, so they must not count as uses.
+    lines = [line for line in text.split("\n") if not line.lstrip().startswith("--")]
+    return set(re.findall(r"SEMANTIC_[A-Z]+_[A-Z]?\d+", "\n".join(lines)))
+
 
 class OneConditionOneRuleCode(unittest.TestCase):
     """A new condition gets a new code; overloaded codes only get better."""
@@ -156,6 +178,33 @@ class OneConditionOneRuleCode(unittest.TestCase):
             1, len(self.messages.get("SEMANTIC_MODEL_060", ())),
             "SEMANTIC_MODEL_060 is the worked example of this rule; it carries "
             "one condition and must keep carrying one")
+
+    def test_no_code_spells_its_severity(self):
+        """Severity is the channel, not a letter in the code."""
+        everywhere = codes_everywhere()
+        self.assertGreater(len(everywhere), 150, "the whole-tree code scan broke")
+        offenders = sorted(code for code in everywhere
+                           if SEVERITY_PREFIXED_CODE.fullmatch(code))
+        self.assertEqual(
+            [], offenders,
+            "these codes carry a severity letter; drop it and take a free "
+            "number in the family (the plain number may already be a refusal, "
+            "as SEMANTIC_ADMIN_060 was)")
+
+    def test_the_advisory_pair_kept_its_meaning_after_renumbering(self):
+        """The rename had to move numbers, so pin where they landed."""
+        admin = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
+            encoding="utf-8")
+        for code in ("SEMANTIC_ADMIN_220", "SEMANTIC_ADMIN_221"):
+            self.assertIn(f'"{code}: representation', admin, code)
+        self.assertNotIn("SEMANTIC_ADMIN_W06", admin.replace(
+            "SEMANTIC_ADMIN_W060/W061", ""), "the W-prefixed codes are back")
+
+    def test_the_severity_pattern_is_what_it_claims(self):
+        for code in ("SEMANTIC_ADMIN_W060", "SEMANTIC_MODEL_E001"):
+            self.assertRegex(code, SEVERITY_PREFIXED_CODE, code)
+        for code in ("SEMANTIC_ADMIN_220", "SEMANTIC_MODEL_060"):
+            self.assertNotRegex(code, SEVERITY_PREFIXED_CODE, code)
 
     def test_the_promotion_is_a_comparison_not_a_string_search(self):
         validator = (ROOT / "lua/semantic_layer/admin/validator.lua").read_text(

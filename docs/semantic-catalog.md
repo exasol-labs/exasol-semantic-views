@@ -137,10 +137,21 @@ conclusion. Both are advisory — the promotion happened and the numbers stay
 correct — and nothing else reports them, because `VALIDATE_MODEL` sees a legal
 model afterwards:
 
-| Code | Raised when |
+| Code | Reported when |
 |---|---|
-| `SEMANTIC_ADMIN_W060` | The promoted representation has a `VALID_TO`, so it is not the open-ended partition and rows past that bound are answered by an `ALTERNATE`. Deliberate during an F3 rebuild, a mistake otherwise; only the caller knows which. A representation with only a `VALID_FROM` is still open-ended and does not warn. |
-| `SEMANTIC_ADMIN_W061` | The representation that lost the role is *named* `primary` — the conventional name for the F0 compatibility row — so its name and its role now disagree in `ENTITY_REPRESENTATIONS`. |
+| `SEMANTIC_ADMIN_220` | The promoted representation has a `VALID_TO`, so it is not the open-ended partition and rows past that bound are answered by an `ALTERNATE`. Deliberate during an F3 rebuild, a mistake otherwise; only the caller knows which. A representation with only a `VALID_FROM` is still open-ended and does not warn. |
+| `SEMANTIC_ADMIN_221` | The representation that lost the role is *named* `primary` — the conventional name for the F0 compatibility row — so its name and its role now disagree in `ENTITY_REPRESENTATIONS`. |
+
+Neither is raised. They arrive as text in the `WARNINGS` column of the result
+row, and that column is the only thing marking them advisory — the codes
+themselves are ordinary `SEMANTIC_ADMIN_NNN`. **Severity is carried by the
+channel, never by a code's spelling**, the same way `VALIDATE_MODEL` reports
+`ERROR`, `WARNING` and `PRECONDITION` under one `SEMANTIC_MODEL_NNN` numbering
+with a `SEVERITY` column. These two were briefly `SEMANTIC_ADMIN_W060` /
+`W061`; the `W` put a second numbering convention into one namespace to express
+what the column already said. `SEMANTIC_ADMIN_060` and `_061` are refusals, so
+dropping the prefix meant renumbering, not just deleting a letter.
+
 Validation executes data probes for every declared unique key: each
 representation must preserve key uniqueness, and every alternate must have the
 same key cardinality and bidirectional key set as the primary. Multiple

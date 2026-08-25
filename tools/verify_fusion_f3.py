@@ -149,15 +149,15 @@ def main() -> int:
         warnings = str(promotion["warnings"] or "")
         # The cold partition closes at 2026-01-01, so it is not the partition
         # new rows land in.
-        if "SEMANTIC_ADMIN_W060" not in warnings:
+        if "SEMANTIC_ADMIN_220" not in warnings:
             raise AssertionError(
-                f"promoting the closed partition did not warn W060: {warnings!r}")
+                f"promoting the closed partition did not warn 220: {warnings!r}")
         # The demoted representation is *named* primary, so name and role now
         # disagree in ENTITY_REPRESENTATIONS.
-        if "SEMANTIC_ADMIN_W061" not in warnings:
+        if "SEMANTIC_ADMIN_221" not in warnings:
             raise AssertionError(
-                f"name/role divergence did not warn W061: {warnings!r}")
-        print("ok F17 promotion warnings: W060 bounded coverage, W061 name/role")
+                f"name/role divergence did not warn 221: {warnings!r}")
+        print("ok F17 promotion warnings: 220 bounded coverage, 221 name/role")
 
         # Numbers must be unaffected: these are advisories, not a behavior change.
         execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f3_verify')")

@@ -330,18 +330,27 @@ SQL NULL. Two tests hold the line: `NullNormalisationTest` in
 
 ## Conventions
 
-Three rules with no correctness consequence, so nothing else fails when one is
+Four rules with no correctness consequence, so nothing else fails when one is
 broken. `tests/test_conventions.py` enforces each as a ratchet — the current
-state is pinned, may shrink, and may not grow.
+state is pinned, may shrink, and may not grow. The first two both govern the
+error-code namespace.
 
 **One condition, one rule code.** A new condition gets a new code unless it is
 genuinely the same defect from another angle. There are three digits in every
 family and no cost to using them. `SEMANTIC_MODEL_047` reached fourteen distinct
 meanings, and one of them was the *cause* of the others — so promoting it to the
 head of the report had to search the message text, because the code could not
-tell it apart. It is now `SEMANTIC_MODEL_060` and the promotion is a comparison. When you
-next touch an overloaded code, split it; `docs/validation-rules.md` carries one
+tell it apart. It is now `SEMANTIC_MODEL_060` and the promotion is a comparison. When
+you next touch an overloaded code, split it; `docs/validation-rules.md` carries one
 row per code, so the drift is visible.
+
+**Severity is carried by the channel, never by a code's spelling.** A refusal is
+raised; an advisory arrives in a column — `VALIDATE_MODEL`'s `SEVERITY`, or
+`SET_PRIMARY_REPRESENTATION`'s `WARNINGS`. Every family therefore has one
+numbering: nine `SEMANTIC_MODEL_*` codes are warnings and none is spelled
+`SEMANTIC_MODEL_W0NN`. Two advisory codes were briefly `SEMANTIC_ADMIN_W060` /
+`W061`; they are now `SEMANTIC_ADMIN_220` / `_221`, because a `W` prefix put a
+second convention into one namespace to say what the column already said.
 
 **Name a verifier for the invariant, not the ticket.** `verify_fanout_guardrails.py`,
 not `verify_bug26_published_f3_batch.py`. 24 of 58 verifiers are named after bug
