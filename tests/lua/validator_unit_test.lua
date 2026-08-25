@@ -2387,3 +2387,115 @@ test("validator public entry point reports missing model contracts", function()
         assert_branch("validator.model.valid", #missing_model == 0, false)
     end)
 end)
+
+test("metric grain is proven against the object root in both directions", function()
+    -- F18. compute_metric_dimension_matrix proves root -> base, which is what a
+    -- dimension needs. Aggregation needs base -> root, and for a MANY_TO_ONE
+    -- those are opposite: order_line -> order is safe, order -> order_line is
+    -- not. Aggregating at order grain in a line-rooted view therefore repeats
+    -- each order once per line, and nothing caught it -- the matrix reports only
+    -- through a metric/dimension pair, so a view with no dimension on the
+    -- offending branch validated clean and returned an inflated number.
+    local order = {id = 1, name = "order"}
+    local line = {id = 2, name = "order_line"}
+    local freight = {id = 30, name = "total_freight", base_entity_id = 1,
+        expression = "SUM(freight)", metric_type = "ADDITIVE",
+        aggregation_function = "SUM",
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 20,
+            ordinal_position = 1}}}
+    local facts = {{id = 20, name = "freight", entity_id = 1,
+        data_type = "DECIMAL(18,2)"}}
+    -- order_line reaches order safely; the reverse edge exists only in the
+    -- complete graph, which is what the diagnostic path is drawn from.
+    local safe = {['2'] = {{from_id = 2, to_id = 1, name = "ol_to_o",
+        safe = true, reason = "OK"}}}
+    local all = {
+        ['2'] = {{from_id = 2, to_id = 1, name = "ol_to_o", safe = true,
+            reason = "OK"}},
+        ['1'] = {{from_id = 1, to_id = 2, name = "ol_to_o", safe = false,
+            reason = "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED"}},
+    }
+
+    local function context_rooted_at(root_entity_id, object_name)
+        local object = {object_id = 50, name = object_name,
+            root_entity_id = root_entity_id}
+        return validation_context({
+            version_id = 2,
+            semantic_objects = {object},
+            semantic_object_by_id = {['50'] = object},
+            entities = {order, line},
+            entity_by_id = {['1'] = order, ['2'] = line},
+            entity_name_by_id = {['1'] = "order", ['2'] = "order_line"},
+            metrics = {freight},
+            metric_by_id = {['30'] = freight},
+            facts = facts,
+        })
+    end
+    local function run(ctx)
+        with_query(function(sql)
+            if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+                return {{ctx.semantic_objects[1].name, 50, 30, "total_freight"}}
+            end
+            return {}
+        end, function() api.validate_visible_metric_grain(ctx, safe, all) end)
+        return ctx
+    end
+
+    -- Coarser than the root: the F18 shape, now refused.
+    local fanning = run(context_rooted_at(2, "LINES"))
+    local issue = issue_for_rule(fanning, "SEMANTIC_MODEL_059")
+    assert_equal(issue.severity, "ERROR")
+    assert_contains(issue.message, "total_freight")
+    assert_contains(issue.message, "aggregates at entity 'order'")
+    assert_contains(issue.message, "coarser than the root 'order_line'")
+    assert_contains(issue.message, "multiplied by the fan-out")
+    -- The diagnostic names the edge that blocks the walk, and the remedy is
+    -- object membership rather than a FANOUT_POLICY that cannot help.
+    assert_contains(issue.message, "ol_to_o")
+    assert_contains(issue.message, "rooted at 'order'")
+    assert_branch("validator.metric_grain.fans_out", has_rule(fanning, "SEMANTIC_MODEL_059"), true)
+
+    -- Base == root: nothing to prove, and the guard must stay quiet or every
+    -- ordinary metric in the reference model would fail.
+    local aligned = run(context_rooted_at(1, "ORDERS"))
+    assert_true(not has_rule(aligned, "SEMANTIC_MODEL_059"))
+    assert_branch("validator.metric_grain.fans_out", has_rule(aligned, "SEMANTIC_MODEL_059"), false)
+
+    -- The multi-fact pattern must survive. A public DERIVED metric based at the
+    -- root composes a private state metric based at a sibling fact's own grain;
+    -- the planner aggregates that state in its own branch, so nothing fans out
+    -- even though the DAG bottoms out on the far side of an unsafe edge. Testing
+    -- the DAG's leaves instead of the base entity would refuse this, and it is
+    -- how grain_d1 avoids fan-out in the first place.
+    local state = {id = 32, name = "ticket_count_state", base_entity_id = 2,
+        expression = "COUNT(ticket_row)", metric_type = "ADDITIVE",
+        aggregation_function = "COUNT",
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 21,
+            ordinal_position = 1}}}
+    local derived = {id = 33, name = "ticket_count", base_entity_id = 1,
+        expression = "ticket_count_state + 0", metric_type = "DERIVED",
+        inputs = {{role = "OPERAND", object_type = "METRIC", object_id = 32,
+            ordinal_position = 1}}}
+    local object = {object_id = 51, name = "D1", root_entity_id = 1}
+    local composed = validation_context({
+        version_id = 2,
+        semantic_objects = {object},
+        semantic_object_by_id = {['51'] = object},
+        entities = {order, line},
+        entity_by_id = {['1'] = order, ['2'] = line},
+        entity_name_by_id = {['1'] = "order", ['2'] = "order_line"},
+        metrics = {state, derived},
+        metric_by_id = {['32'] = state, ['33'] = derived},
+        facts = {{id = 21, name = "ticket_row", entity_id = 2,
+            data_type = "DECIMAL(18,0)"}},
+    })
+    -- Only the public DERIVED metric is an exposed column; the private state
+    -- metric is not checked, which is what lets it aggregate off-root.
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+            return {{"D1", 51, 33, "ticket_count"}}
+        end
+        return {}
+    end, function() api.validate_visible_metric_grain(composed, safe, all) end)
+    assert_true(not has_rule(composed, "SEMANTIC_MODEL_059"))
+end)

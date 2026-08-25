@@ -133,6 +133,61 @@ def main() -> int:
         print("ok F3 validation: 0 errors")
         print("ok F3 plan: 2 covered representation partitions")
         print(f"ok F3 rows: {actual}")
+
+        # F17: promoting a partition is legal and the numbers stay correct, but
+        # two of its outcomes leave a catalog state whose next reader draws the
+        # wrong conclusion, and nothing else reports them -- the role flip is
+        # silent and VALIDATE_MODEL sees a legal model afterwards. Both are
+        # advisory, on the WARNINGS column.
+        statement = con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
+            "'f3_verify', 'orders', 'cold')")
+        names = [column.lower() for column in statement.columns().keys()]
+        promotion = dict(zip(names, statement.fetchone()))
+        if "warnings" not in promotion:
+            raise AssertionError(f"SET_PRIMARY_REPRESENTATION has no WARNINGS column: {names}")
+        warnings = str(promotion["warnings"] or "")
+        # The cold partition closes at 2026-01-01, so it is not the partition
+        # new rows land in.
+        if "SEMANTIC_ADMIN_W060" not in warnings:
+            raise AssertionError(
+                f"promoting the closed partition did not warn W060: {warnings!r}")
+        # The demoted representation is *named* primary, so name and role now
+        # disagree in ENTITY_REPRESENTATIONS.
+        if "SEMANTIC_ADMIN_W061" not in warnings:
+            raise AssertionError(
+                f"name/role divergence did not warn W061: {warnings!r}")
+        print("ok F17 promotion warnings: W060 bounded coverage, W061 name/role")
+
+        # Numbers must be unaffected: these are advisories, not a behavior change.
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f3_verify')")
+        promoted = execute(
+            con,
+            f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({literal(payload)})",
+        )[0]
+        if promoted[0] != "OK":
+            raise AssertionError(f"F3 compile after promotion failed: {promoted}")
+        promoted_rows = {str(status): float(amount)
+                         for status, amount in execute(con, str(promoted[4]))}
+        if promoted_rows != expected:
+            raise AssertionError(
+                f"promotion changed the numbers: expected {expected}, got {promoted_rows}")
+        print(f"ok F17 numbers unchanged after promotion: {promoted_rows}")
+
+        # Promoting the open-ended partition back must be silent. A VALID_FROM
+        # alone does not make a representation bounded, and warning here would
+        # fire on the ordinary act of restoring the hot partition -- which would
+        # train the reader to ignore the column.
+        statement = con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
+            "'f3_verify', 'orders', 'primary')")
+        names = [column.lower() for column in statement.columns().keys()]
+        restored = dict(zip(names, statement.fetchone()))
+        if restored["warnings"] is not None:
+            raise AssertionError(
+                "restoring the open-ended partition warned: "
+                f"{restored['warnings']!r}")
+        print("ok F17 restoring the open-ended partition is silent")
         return 0
     finally:
         try:

@@ -106,7 +106,13 @@ requirement, and validate again.
 - `SEMANTIC_ADMIN.COMPILE_SQL_DEBUG`
 - `SEMANTIC_ADMIN.VALIDATE_MODEL`
 - `SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION`
-- `SEMANTIC_ADMIN.ADD_VERIFIED_QUERY`
+- `SEMANTIC_ADMIN.ADD_VERIFIED_QUERY` — takes the model and object as
+  parameters 1 and 2 and injects them into `REQUEST_JSON` before compiling, so
+  the request body carries only the query. Supplying `model` or `object` in the
+  JSON as well is allowed while it agrees with those parameters; a disagreement
+  is refused with `SEMANTIC_AGENT_021` rather than compiled against one and
+  filed under the other. The stored `REQUEST_JSON` is the scoped form, so a
+  verified query replays on its own.
 - `SEMANTIC_ADMIN.SEARCH_SEMANTIC_OBJECTS`
 - `SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_OBJECT`
 - `SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY`

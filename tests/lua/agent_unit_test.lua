@@ -451,3 +451,66 @@ test("agent handles reject invalid identifiers and missing rows", function()
             "SEMANTIC_AGENT_030")
     end)
 end)
+
+-- ADD_VERIFIED_QUERY takes the model and object as parameters and has to put
+-- them into the request before compiling it. The scan behind that has to tell a
+-- top-level "model" key from the word "model" anywhere else in the JSON: a
+-- false negative writes a duplicate key, and duplicate keys are ambiguous.
+test("agent top-level field scan ignores nested and quoted keys", function()
+    local fields = api.top_level_fields(
+        '{"model":"sales","options":{"model":"nested"},'
+        .. '"filters":[{"field":"status","value":"model"}],"metrics":["a"]}')
+    assert_equal(fields["model"], "sales")
+    -- Present as a key, but its value is not a plain string.
+    assert_branch("agent.scope_field_string", type(fields["options"]) == "string", false)
+    assert_branch("agent.scope_field_string", type(fields["model"]) == "string", true)
+    -- "model" inside the nested object and inside the array element is neither
+    -- the request's model nor a top-level key of its own.
+    assert_equal(fields["field"], nil)
+    assert_equal(fields["value"], nil)
+    -- An escaped quote must not end the string early and shift the depth.
+    local escaped = api.top_level_fields('{"note":"a \\" b","model":"sales"}')
+    assert_equal(escaped["model"], "sales")
+end)
+
+test("agent scopes a verified query request to its model and object", function()
+    local scoped = api.scope_request_json(
+        '{"metrics": ["total_revenue"]}', "sales", "SALES")
+    assert_contains(scoped, '"model":"sales"')
+    assert_contains(scoped, '"object":"SALES"')
+    assert_contains(scoped, '"metrics": ["total_revenue"]')
+
+    -- An empty request still becomes a well-formed scoped object rather than
+    -- gaining a trailing comma.
+    local empty = api.scope_request_json("{}", "sales", "SALES")
+    assert_equal(empty, '{"model":"sales","object":"SALES"}')
+
+    -- Already scoped and in agreement: unchanged, so no duplicate key and no
+    -- churn in the stored text that would defeat the compile cache.
+    local already = '{"model":"sales","object":"SALES","metrics":["x"]}'
+    assert_equal(api.scope_request_json(already, "sales", "SALES"), already)
+    assert_branch("agent.scope_additions",
+        api.scope_request_json(already, "sales", "SALES") == already, true)
+    assert_branch("agent.scope_additions",
+        api.scope_request_json('{"metrics":["x"]}', "sales", "SALES") == '{"metrics":["x"]}',
+        false)
+
+    -- Agreement is case-insensitive, matching how the admin surface matches
+    -- model names everywhere else.
+    local mixed = '{"model":"SALES","object":"sales"}'
+    assert_equal(api.scope_request_json(mixed, "sales", "SALES"), mixed)
+
+    -- Disagreement is refused rather than compiled against one and filed under
+    -- the other.
+    assert_error(function()
+        api.scope_request_json('{"model":"other"}', "sales", "SALES")
+    end, "SEMANTIC_AGENT_021")
+    assert_error(function()
+        api.scope_request_json('{"object":"OTHER"}', "sales", "SALES")
+    end, "SEMANTIC_AGENT_021")
+
+    -- The shape guard still applies.
+    assert_error(function()
+        api.scope_request_json('["total_revenue"]', "sales", "SALES")
+    end, "SEMANTIC_AGENT_040")
+end)

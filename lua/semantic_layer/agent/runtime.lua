@@ -138,6 +138,109 @@ local function json_encode(value)
     return json_encode(tostring(value))
 end
 
+-- Top-level fields of a JSON object, without carrying a full parser.
+--
+-- Only depth and string state are tracked, which is all that is needed to tell
+-- the request's own "model" key from a "model" that appears inside a filter
+-- expression or a nested options object. A key is a string at depth 1 followed
+-- by a colon; its value is captured only when it is a plain string, which is
+-- the only case the caller compares. Anything else records presence alone.
+local function top_level_fields(text)
+    local fields = {}
+    local depth = 0
+    local index = 1
+    local length = #text
+    local function read_string(from)
+        local cursor = from + 1
+        local parts = {}
+        while cursor <= length do
+            local char = string.sub(text, cursor, cursor)
+            if char == "\\" then
+                parts[#parts + 1] = string.sub(text, cursor + 1, cursor + 1)
+                cursor = cursor + 2
+            elseif char == '"' then
+                return table.concat(parts), cursor + 1
+            else
+                parts[#parts + 1] = char
+                cursor = cursor + 1
+            end
+        end
+        return table.concat(parts), cursor
+    end
+    while index <= length do
+        local char = string.sub(text, index, index)
+        if char == '"' then
+            local literal, after = read_string(index)
+            index = after
+            if depth == 1 then
+                local colon = string.find(text, "^%s*:", index)
+                if colon ~= nil then
+                    local value_start = string.find(text, "[^%s]", index + 1)
+                    local value = true
+                    if value_start ~= nil
+                        and string.sub(text, value_start, value_start) == '"' then
+                        value = (read_string(value_start))
+                    end
+                    fields[string.lower(literal)] = value
+                end
+            end
+        elseif char == "{" or char == "[" then
+            depth = depth + 1
+            index = index + 1
+        elseif char == "}" or char == "]" then
+            depth = depth - 1
+            index = index + 1
+        else
+            index = index + 1
+        end
+    end
+    return fields
+end
+
+-- COMPILE_REQUEST_JSON resolves a request against a model and an object named
+-- inside the request. ADD_VERIFIED_QUERY already takes both as parameters 1 and
+-- 2, so requiring the caller to repeat them in the JSON was a trap: omitting
+-- them failed with SEMANTIC_REQUEST_002 "model is required", which names
+-- neither this script nor the fix, and the two could silently disagree when
+-- they were supplied.
+--
+-- The scoped text is what gets compiled *and* what gets stored, so a stored
+-- verified query is replayable on its own rather than only in the context of
+-- the call that created it.
+local function scope_request_json(request_json, model_name, object_name)
+    local text = trim(request_json)
+    if string.sub(text, 1, 1) ~= "{" or string.sub(text, -1) ~= "}" then
+        error("SEMANTIC_AGENT_040: REQUEST_JSON must be a JSON object")
+    end
+    local fields = top_level_fields(text)
+    local scope = {model = model_name, object = object_name}
+    local additions = {}
+    -- Sorted for a stable stored form; two identical requests must not differ
+    -- by key order and defeat the compile cache.
+    for _, field in ipairs({"model", "object"}) do
+        local present = fields[field]
+        if present == nil then
+            additions[#additions + 1] = '"' .. field .. '":'
+                .. json_encode(scope[field])
+        elseif type(present) == "string"
+            and string.upper(present) ~= string.upper(scope[field]) then
+            error("SEMANTIC_AGENT_021: REQUEST_JSON " .. field .. " '"
+                .. present .. "' does not match " .. string.upper(field)
+                .. "_NAME '" .. scope[field] .. "'. Omit " .. field
+                .. " from REQUEST_JSON -- parameters 1 and 2 supply it -- or"
+                .. " pass the same value in both places.")
+        end
+    end
+    if #additions == 0 then
+        return text
+    end
+    local body = trim(string.sub(text, 2, -2))
+    if body == "" then
+        return "{" .. table.concat(additions, ",") .. "}"
+    end
+    return "{" .. table.concat(additions, ",") .. "," .. body .. "}"
+end
+
 local function rows_to_objects(rows, columns)
     local out = {}
     for _, row in ipairs(rows or {}) do
@@ -596,9 +699,11 @@ function M.add_verified_query(model_name_arg, object_name_arg, query_name_arg, n
     end
     local model = model_row(model_name)
     local object = object_row(model, object_name)
+    local scoped_request_json = scope_request_json(
+        tostring(request_json_arg), model.model_name, object.object_name)
     local compiled = query([[
         EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON(:request_json)
-    ]], {request_json = tostring(request_json_arg)})
+    ]], {request_json = scoped_request_json})
     if compiled == nil or #compiled == 0 or row_value(compiled[1], "STATUS", 1) ~= "OK" then
         local code = compiled and compiled[1] and row_value(compiled[1], "ERROR_CODE", 2) or "SEMANTIC_AGENT_020"
         local message = compiled and compiled[1] and row_value(compiled[1], "ERROR_MESSAGE", 3) or "verified query did not compile"
@@ -621,7 +726,7 @@ function M.add_verified_query(model_name_arg, object_name_arg, query_name_arg, n
         object_id = object.object_id,
         query_name = tostring(query_name_arg),
         natural_language_text = tostring(natural_language_text_arg),
-        request_json = tostring(request_json_arg),
+        request_json = scoped_request_json,
         generated_sql = generated_sql,
         expected_result_shape = optional_text(expected_result_shape_arg),
         is_onboarding_example = bool_value(is_onboarding_example_arg, false),
@@ -1101,5 +1206,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         json_unescape = json_unescape,
         extract_selected_materialization = extract_selected_materialization,
         extract_json_array_text = extract_json_array_text,
+        top_level_fields = top_level_fields,
+        scope_request_json = scope_request_json,
     }
 end

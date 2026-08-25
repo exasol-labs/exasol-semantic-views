@@ -2876,7 +2876,8 @@ local rows = query([[
     SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, e.ENTITY_ID,
            er.REPRESENTATION_ID, er.SOURCE_SCHEMA, er.SOURCE_OBJECT,
            er.SOURCE_ALIAS, e.SOURCE_ALIAS AS ENTITY_SOURCE_ALIAS,
-           er.REPRESENTATION_ROLE
+           er.REPRESENTATION_ROLE, er.VALID_FROM, er.VALID_TO,
+           er.COVERAGE_PREDICATE
     FROM SYS_SEMANTIC.MODELS m
     JOIN SYS_SEMANTIC.ENTITIES e
       ON e.MODEL_ID = m.MODEL_ID
@@ -3217,8 +3218,62 @@ if changed then
     ]], {model_id = model_id, version_id = version_id})
 end
 
+-- Promotion is accepted on a valid model and the numbers stay correct, so
+-- neither of these is an error. Both leave a catalog state whose next reader
+-- draws the wrong conclusion, and nothing else reports them: the role flip is
+-- silent, and VALIDATE_MODEL sees a legal model afterwards.
+--
+--   * A representation whose coverage is a closed window or a predicate is now
+--     the entity's PRIMARY, so the representation that answers for uncovered
+--     rows is an ALTERNATE. Under F3 that is a deliberate shape for a rebuild
+--     and a mistake the rest of the time, and only the caller knows which.
+--   * REPRESENTATION_NAME is free text and 'primary' is the conventional name
+--     for the F0 compatibility row. Promoting anything else leaves a
+--     representation *named* primary holding role ALTERNATE, which reads as a
+--     catalog inconsistency to everyone who meets it later.
+local warnings = {}
+if changed then
+    local valid_from = row_value(row, "VALID_FROM", 10)
+    local valid_to = row_value(row, "VALID_TO", 11)
+    local coverage_predicate = row_value(row, "COVERAGE_PREDICATE", 12)
+    -- VALID_TO is the whole test. A representation with only a VALID_FROM is
+    -- still the open-ended one -- it is the partition new rows land in -- and
+    -- warning on it would fire on the ordinary act of promoting the hot
+    -- partition back, training the reader to ignore the column.
+    if not missing(valid_to) then
+        local window = {"VALID_TO " .. tostring(valid_to)}
+        if not missing(valid_from) then
+            window[#window + 1] = "VALID_FROM " .. tostring(valid_from)
+        end
+        if not missing(coverage_predicate) then
+            window[#window + 1] = "COVERAGE_PREDICATE "
+                .. tostring(coverage_predicate)
+        end
+        warnings[#warnings + 1] = "SEMANTIC_ADMIN_W060: representation '"
+            .. representation_name .. "' is now PRIMARY for entity '"
+            .. entity_name .. "' but its coverage is bounded ("
+            .. table.concat(window, ", ")
+            .. "), so rows outside that window are answered by an ALTERNATE."
+            .. " Promote the open-ended representation instead, or widen this"
+            .. " one's coverage, unless a bounded primary is intended."
+    end
+    if previous_name ~= null
+        and string.upper(tostring(previous_name)) == "PRIMARY"
+        and string.upper(representation_name) ~= "PRIMARY" then
+        warnings[#warnings + 1] = "SEMANTIC_ADMIN_W061: representation named '"
+            .. tostring(previous_name) .. "' now holds role ALTERNATE, because '"
+            .. representation_name .. "' took role PRIMARY. The name and the role"
+            .. " disagree from here on; rename either representation to keep"
+            .. " SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS readable."
+    end
+end
+local warning_text = null
+if #warnings > 0 then
+    warning_text = table.concat(warnings, " ")
+end
+
 exit({{representation_id, model_name, entity_name, previous_name,
-    representation_name, source_schema, source_object, changed}}, [[
+    representation_name, source_schema, source_object, changed, warning_text}}, [[
   REPRESENTATION_ID DECIMAL(18,0),
   MODEL_NAME VARCHAR(256),
   ENTITY_NAME VARCHAR(256),
@@ -3226,7 +3281,8 @@ exit({{representation_id, model_name, entity_name, previous_name,
   PRIMARY_REPRESENTATION VARCHAR(256),
   SOURCE_SCHEMA VARCHAR(256),
   SOURCE_OBJECT VARCHAR(256),
-  CHANGED BOOLEAN
+  CHANGED BOOLEAN,
+  WARNINGS VARCHAR(2000000)
 ]])
 /
 
@@ -13580,6 +13636,97 @@ local function validate_object_dimension_coverage(ctx)
     end
 end
 
+-- A metric aggregates at its base entity's grain; the object root decides the
+-- grain the aggregate is evaluated at. compute_metric_dimension_matrix proves
+-- the root can *reach* the base, which is the attribution question a dimension
+-- asks. Aggregation asks the opposite question, and for a MANY_TO_ONE the
+-- answers differ: when several root rows share one base row, the join repeats
+-- that row and every additive aggregate is multiplied by the fan-out.
+--
+-- Nothing checked that direction. The matrix reports only through a
+-- metric/dimension pair, so a view whose dimensions all sit on safe branches --
+-- or which has no dimensions at all -- validated clean, published, and returned
+-- an inflated number through both query paths, with every agent surface calling
+-- the metric valid. An order-grain freight metric in a line-grain view returns
+-- 149 against a truth of 105.25.
+--
+-- The test is the metric's own base entity, not the fact entities its DAG
+-- bottoms out in. Those are different for the multi-fact pattern: a public
+-- DERIVED metric based at the root composes private state metrics based at each
+-- sibling fact's own grain, and the planner aggregates each in its own branch
+-- before joining, so nothing fans out. Walking to the DAG's leaves would refuse
+-- that shape -- grain_d1's ticket_count and payment_total reach ticket_fact and
+-- payment_fact through the conformed customer dimension -- while the shape is
+-- exactly how fan-out is meant to be avoided. The private state metrics are not
+-- checked at all: they are not exposed columns, and their whole purpose is to
+-- aggregate off-root in a branch of their own.
+--
+-- The remedy is object membership, not a relationship declaration: FANOUT_POLICY
+-- records intent for a many-to-many traversal and is explicitly not an
+-- allocation proof (SEMANTIC_MODEL_053 says so for the mirror-image case), so
+-- the message points at the root instead of implying a declaration would help.
+--
+-- The walk is the shared graph's, base -> root, so this cannot drift from the
+-- edge-safety rules the compiler plans with.
+local function validate_visible_metric_grain(ctx, safe_edges, all_edges)
+    local rows = query([[
+        SELECT
+          so.OBJECT_NAME,
+          so.OBJECT_ID,
+          mt.METRIC_ID,
+          mt.METRIC_NAME
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so
+        JOIN SYS_SEMANTIC.OBJECT_COLUMNS metric_col
+          ON metric_col.OBJECT_ID = so.OBJECT_ID
+         AND metric_col.COLUMN_KIND = 'METRIC'
+         AND metric_col.IS_VISIBLE = TRUE
+        JOIN SYS_SEMANTIC.METRICS mt
+          ON mt.METRIC_ID = metric_col.OBJECT_REF_ID
+         AND mt.STATUS = 'ACTIVE'
+        WHERE so.MODEL_ID = :model_id
+          AND so.VERSION_ID = :version_id
+          AND so.STATUS = 'ACTIVE'
+        ORDER BY so.OBJECT_NAME, mt.METRIC_NAME
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+
+    for _, row in ipairs(rows or {}) do
+        local object = ctx.semantic_object_by_id[key(row_value(row, "OBJECT_ID", 2))]
+        local metric = ctx.metric_by_id[key(row_value(row, "METRIC_ID", 3))]
+        if object ~= nil and metric ~= nil
+            and not missing(object.root_entity_id) then
+            local root_key = key(object.root_entity_id)
+            local root_name = ctx.entity_name_by_id[root_key]
+                or tostring(object.root_entity_id)
+            local base_key = key(metric.base_entity_id)
+            if not missing(metric.base_entity_id) and base_key ~= root_key
+                and not find_path(safe_edges, metric.base_entity_id,
+                    object.root_entity_id, true) then
+                local base_name = ctx.entity_name_by_id[base_key] or base_key
+                local attempted = attempted_path(all_edges, metric.base_entity_id,
+                    object.root_entity_id)
+                local detail = missing(attempted) and ""
+                    or " via " .. tostring(attempted)
+                add_issue(ctx, "ERROR", "SEMANTIC_OBJECT", object.name,
+                    "SEMANTIC_MODEL_059",
+                    "Visible metric " .. tostring(metric.name)
+                        .. " aggregates at entity '" .. base_name
+                        .. "', which is coarser than the root '" .. root_name
+                        .. "' of object '" .. tostring(object.name)
+                        .. "'" .. detail .. ". Several '" .. root_name
+                        .. "' rows share one '" .. base_name .. "' row, so the"
+                        .. " join repeats that row and the aggregate is"
+                        .. " multiplied by the fan-out -- the number is"
+                        .. " silently too high, not merely unprovable. No"
+                        .. " relationship declaration makes a fanning"
+                        .. " aggregation safe. Expose this metric in a"
+                        .. " semantic object rooted at '" .. base_name
+                        .. "', or remove it from object '"
+                        .. tostring(object.name) .. "'.")
+            end
+        end
+    end
+end
+
 local function validate_visible_metric_dimension_pairs(ctx)
     local pairs = query([[
         SELECT
@@ -13713,6 +13860,7 @@ function M.validate_model(model_name_arg)
         validate_metric_plannability(ctx)
         validate_object_dimension_coverage(ctx)
         compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
+        validate_visible_metric_grain(ctx, safe_edges, all_edges)
         validate_visible_metric_dimension_pairs(ctx)
         -- Remote equivalence proofs are full data scans. Do not launch them
         -- for a model that is already invalid on local catalog metadata.
@@ -13777,6 +13925,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         alternate_representation_remedy = alternate_representation_remedy,
         compute_metric_dimension_matrix = compute_metric_dimension_matrix,
         validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,
+        validate_visible_metric_grain = validate_visible_metric_grain,
     }
 end
 /

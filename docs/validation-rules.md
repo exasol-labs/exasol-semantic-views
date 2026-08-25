@@ -97,6 +97,59 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_055` | warning | Two entities are connected by more than one safe relationship path of differing length. Compilation selects the shortest; the alternative can attribute a row differently. See [Path ambiguity](#path-ambiguity). |
 | `SEMANTIC_MODEL_056` | error | The planner cannot determine the metric's input grain: it aggregates no fact (`COUNT(*)`), or aggregates facts from several entities in one state. The metric could never be compiled. |
 | `SEMANTIC_MODEL_057` | error | The metric's aggregate has no mergeable state (`AVG`, `MIN`, `MAX`, `COUNT DISTINCT`) and its leaves force state merging — a partitioned (F3) entity, or facts from several entities. The metric could never be compiled. |
+| `SEMANTIC_MODEL_058` | warning | A semantic view exposes metrics and no dimensions, so it publishes as a single grand-total column that can only be grouped by nothing. |
+| `SEMANTIC_MODEL_059` | error | A visible metric aggregates at an entity **coarser** than its object's root, so the join repeats each row and the aggregate is multiplied by the fan-out. See [Metric grain versus object root](#metric-grain-versus-object-root). |
+
+## Metric Grain Versus Object Root
+
+A metric aggregates at its **base entity's** grain. The object root decides the
+grain that aggregate is evaluated at. Those are two different questions, and
+passing one does not settle the other:
+
+| Question | Direction proven | Rule |
+|---|---|---|
+| Can the root read an attribute on that entity? | root → entity | `SEMANTIC_MODEL_030` |
+| Can an aggregate at that entity be evaluated at the root's grain? | entity → root | `SEMANTIC_MODEL_059` |
+
+Consider a view rooted at `order_line` with a `freight` fact on `order`
+(`order_line → order` is `MANY_TO_ONE`):
+
+- **root → leaf is safe.** Each line has exactly one order, so `order`'s columns
+  are legitimate line attributes. A dimension on `order` is fine.
+- **leaf → root is not.** Several lines share one order, so joining lines to
+  orders repeats each order's freight once per line. `SUM(freight)` returns the
+  freight multiplied by the line count.
+
+Only the first direction used to be checked, and it was checked through the
+metric/dimension matrix — which reports only when some dimension is
+incompatible. A view whose dimensions all sat on safe branches, or which had no
+dimensions at all, validated clean, published, and returned an inflated number
+through both query paths while every agent surface called the metric valid. On
+the reference data that is `149` against a truth of `105.25`.
+
+`SEMANTIC_MODEL_059` closes that direction. The remedy is object membership, not
+a declaration: `FANOUT_POLICY` records intent for a many-to-many traversal and is
+explicitly not an allocation proof, so no relationship declaration makes a
+fanning aggregation safe. Expose the metric in a semantic object rooted at the
+fact's own entity, or remove it from the object where it fans out.
+
+The mirror-image shape — a metric on a **finer** entity than the root, such as
+line revenue in an order-rooted view — is refused by `SEMANTIC_MODEL_030`
+instead, because the root cannot safely reach the base at all.
+
+### Why the base entity and not the fact's entity
+
+The test is the metric's own base entity, not the fact entities its dependency
+graph bottoms out in. For the **multi-fact** pattern those differ, and testing
+the graph's leaves would refuse the very shape that avoids fan-out: a public
+`DERIVED` metric based at the root composes private state metrics based at each
+sibling fact's own grain, and the planner aggregates each state in its own branch
+before joining. `grain_d1`'s `ticket_count` and `payment_total` reach
+`ticket_fact` and `payment_fact` across an unsafe edge through the conformed
+`customer` dimension, and are correct precisely because nothing is aggregated at
+the root's grain. The private state metrics are not checked at all — they are not
+exposed columns, and aggregating off-root in a branch of their own is their
+purpose.
 
 ## Expression Validation Boundary
 

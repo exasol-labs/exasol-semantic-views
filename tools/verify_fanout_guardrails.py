@@ -146,9 +146,18 @@ def main() -> None:
     # ------------------------------------------------------------------
     section("3. and it cannot be authored into SALES either")
     # ------------------------------------------------------------------
-    # SALES exposes product_category, so an order-grain metric there would be
-    # groupable along a fan-out path. Validation refuses the metric at
-    # definition time -- not at query time -- and restores the catalog.
+    # An order-grain metric in the line-grain SALES object is refused at
+    # definition time -- not at query time -- and the catalog is restored.
+    #
+    # This used to be reported as SEMANTIC_MODEL_030, "cannot be grouped by
+    # product_category", because the metric/dimension matrix was the only thing
+    # looking. That diagnosis was true but misleading: it reads as though
+    # dropping product_category would make the metric sound, when in fact
+    # SUM over an order-grain fact at line grain is multiplied by the line count
+    # whatever dimensions the object exposes. SEMANTIC_MODEL_059 proves the
+    # aggregation direction (leaf -> root) directly and leads instead. The
+    # metric/dimension rule is still asserted for the shapes it owns, in
+    # tools/verify_f18_metric_grain_positions.py and the validator unit tests.
     before = con.execute(
         "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'"
     ).fetchall()[0][0]
@@ -172,15 +181,23 @@ def main() -> None:
         message.strip(),
     )
     print(f"   {refusal}")
-    assert_contains("refusal names the rule", message, "SEMANTIC_MODEL_030")
+    assert_contains("refusal names the rule", message, "SEMANTIC_MODEL_059")
     assert_contains("refusal names the reason", message,
                     "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED")
     assert_contains("refusal names the offending path", message, "order_line_to_order")
-    assert_contains("refusal names the dimension", message, "product_category")
+    # Both grains are named, so the reader can see which way the fan-out runs.
+    assert_contains("refusal names the fact's entity", message, "'order'")
+    assert_contains("refusal names the object root", message, "'order_line'")
+    # It must say the number would be wrong, not merely unprovable -- that is
+    # the difference between this and a path-safety complaint.
+    assert_contains("refusal says the number is wrong", message,
+                    "multiplied by the fan-out")
     # The remedy named must be one that exists: no relationship declaration can
-    # make a fanning traversal safe, so the message points at object membership.
+    # make a fanning aggregation safe, so the message points at object membership.
     assert_contains("refusal names a remedy that exists", message,
-                    "No relationship declaration makes a fanning traversal safe")
+                    "No relationship declaration makes a fanning aggregation safe")
+    assert_contains("refusal names the object to root at", message,
+                    "rooted at 'order'")
 
     after = con.execute(
         "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'"

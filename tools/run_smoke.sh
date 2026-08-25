@@ -159,6 +159,13 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 "$PYTHON_BIN" tools/verify_fusion_f51.py
 "$PYTHON_BIN" tools/verify_fusion_f7.py
 
+# Open findings from the fusion evaluations, each closed and pinned here.
+# F18 is the structural one: the earlier suites only ever placed a metric's
+# facts *on* the object root, which is the position that works. The other three
+# positions had no test, and one of them returned a silently inflated number.
+"$PYTHON_BIN" tools/verify_f13_verified_query_scope.py
+"$PYTHON_BIN" tools/verify_f18_metric_grain_positions.py
+
 # Feedback-driven behavior tests.
 "$PYTHON_BIN" tools/verify_fb015_replace_attribute_binding.py
 "$PYTHON_BIN" tools/verify_fb018_agent_session_instructions.py

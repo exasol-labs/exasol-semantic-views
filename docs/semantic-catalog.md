@@ -115,6 +115,17 @@ routing but is rejected as primary with `SEMANTIC_ADMIN_058`. A prior clean run
 marked `STALE` remains valid recovery evidence only while the current primary
 fails those canonical-anchor checks, so an older trapped promotion can be
 reversed without allowing unrelated stale state to authorize promotion.
+
+`SET_PRIMARY_REPRESENTATION` returns a `WARNINGS` column for the outcomes that
+are legal but leave a catalog state whose next reader draws the wrong
+conclusion. Both are advisory — the promotion happened and the numbers stay
+correct — and nothing else reports them, because `VALIDATE_MODEL` sees a legal
+model afterwards:
+
+| Code | Raised when |
+|---|---|
+| `SEMANTIC_ADMIN_W060` | The promoted representation has a `VALID_TO`, so it is not the open-ended partition and rows past that bound are answered by an `ALTERNATE`. Deliberate during an F3 rebuild, a mistake otherwise; only the caller knows which. A representation with only a `VALID_FROM` is still open-ended and does not warn. |
+| `SEMANTIC_ADMIN_W061` | The representation that lost the role is *named* `primary` — the conventional name for the F0 compatibility row — so its name and its role now disagree in `ENTITY_REPRESENTATIONS`. |
 Validation executes data probes for every declared unique key: each
 representation must preserve key uniqueness, and every alternate must have the
 same key cardinality and bidirectional key set as the primary. Multiple
