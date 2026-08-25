@@ -238,7 +238,7 @@ representation is unusable — which makes its every key, expression and attribu
 check fail too. That is the reason to prefer the single call, and it is also what
 explains the diagnostics you see if you take the long way round. Validation leads
 with the actionable cause,
-`SEMANTIC_MODEL_047: Semantic identity has no binding for active
+`SEMANTIC_MODEL_060: Semantic identity has no binding for active
 representation: <name>`, and each consequence names `ADD_IDENTITY_BINDING` as the
 remedy rather than the generic "complete the declaration" list, so a refused
 authoring call in the middle of the sequence says what is actually missing.

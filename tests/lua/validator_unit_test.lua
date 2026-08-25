@@ -2076,7 +2076,7 @@ test("validator names the alternate representation blocking unrelated authoring"
     })
     local specific = api.alternate_representation_remedy(with_identity, {"crm"})
     assert_contains(specific, "no binding for semantic identity 'customer_identity'")
-    assert_contains(specific, "SEMANTIC_MODEL_047")
+    assert_contains(specific, "SEMANTIC_MODEL_060")
     assert_contains(specific, "ADD_IDENTITY_BINDING")
     assert_contains(specific, "ADD_IDENTITY_MAPPING_RELATION")
     assert_contains(specific, "REMOVE_ENTITY_REPRESENTATION")
@@ -2639,22 +2639,22 @@ test("validation issues lead with the cause, not its consequences", function()
     -- representation registered without its identity binding makes the entity's
     -- key, expression and attribute checks all fail against it -- and those
     -- rules run earlier, so the caller was told to fix a dimension that was
-    -- never wrong while the actionable SEMANTIC_MODEL_047 sat underneath.
+    -- never wrong while the actionable error sat underneath.
     local knock_on_key = {rule_code = "SEMANTIC_MODEL_029", message = "unknown source column"}
     local knock_on_pk = {rule_code = "SEMANTIC_MODEL_036", message = "unknown source column"}
-    local cause = {rule_code = "SEMANTIC_MODEL_047",
+    local cause = {rule_code = "SEMANTIC_MODEL_060",
         message = "Semantic identity has no binding for active representation: crm."}
     local knock_on_dim = {rule_code = "SEMANTIC_MODEL_017", message = "unknown source column"}
 
     local ordered = api.order_root_cause_first({knock_on_pk, cause, knock_on_key, knock_on_dim})
-    assert_equal(ordered[1].rule_code, "SEMANTIC_MODEL_047")
+    assert_equal(ordered[1].rule_code, "SEMANTIC_MODEL_060")
     -- The consequences keep their relative order behind it.
     assert_equal(ordered[2].rule_code, "SEMANTIC_MODEL_036")
     assert_equal(ordered[3].rule_code, "SEMANTIC_MODEL_029")
     assert_equal(ordered[4].rule_code, "SEMANTIC_MODEL_017")
     assert_equal(#ordered, 4)
     assert_branch("validator.issues.root_cause_first",
-        ordered[1].rule_code == "SEMANTIC_MODEL_047", true)
+        ordered[1].rule_code == "SEMANTIC_MODEL_060", true)
 
     -- A model with no missing binding is left exactly as it was, so this cannot
     -- quietly reshuffle unrelated reports.
@@ -2662,15 +2662,22 @@ test("validation issues lead with the cause, not its consequences", function()
     local same = api.order_root_cause_first(untouched)
     assert_equal(same, untouched)
     assert_branch("validator.issues.root_cause_first",
-        same[1].rule_code == "SEMANTIC_MODEL_047", false)
+        same[1].rule_code == "SEMANTIC_MODEL_060", false)
 
-    -- SEMANTIC_MODEL_047 also reports naming and kind defects. Those are causes
-    -- in their own right but not causes *of other issues*, so they are not
-    -- promoted ahead of whatever else the run found.
+    -- The promotion is now a code comparison, so the seventeen other identity
+    -- defects still under SEMANTIC_MODEL_047 cannot be promoted by accident --
+    -- they are causes in their own right but not causes *of other issues*. This
+    -- used to depend on the exact wording of the message.
     local other_047 = {rule_code = "SEMANTIC_MODEL_047",
         message = "Identity kind must be BUSINESS or GLOBAL."}
     local unpromoted = api.order_root_cause_first({knock_on_pk, other_047})
     assert_equal(unpromoted[1].rule_code, "SEMANTIC_MODEL_036")
+
+    -- And a _060 is promoted whatever its message says, which is the point of
+    -- splitting the code out.
+    local reworded = {rule_code = "SEMANTIC_MODEL_060", message = "reworded entirely"}
+    assert_equal(api.order_root_cause_first({knock_on_pk, reworded})[1].rule_code,
+        "SEMANTIC_MODEL_060")
 
     assert_equal(#api.order_root_cause_first({}), 0)
 end)

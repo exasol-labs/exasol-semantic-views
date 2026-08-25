@@ -12038,7 +12038,7 @@ local function alternate_representation_remedy(ctx, names)
     if identity_name ~= nil then
         return " " .. subject .. " has no binding for semantic identity '"
             .. tostring(identity_name) .. "', which is why it is not yet usable"
-            .. " (SEMANTIC_MODEL_047). Add it with ADD_IDENTITY_BINDING -- plus"
+            .. " (SEMANTIC_MODEL_060). Add it with ADD_IDENTITY_BINDING -- plus"
             .. " ADD_IDENTITY_MAPPING_RELATION for a MAPPED binding -- or remove"
             .. " the representation with REMOVE_ENTITY_REPRESENTATION."
     end
@@ -12571,7 +12571,7 @@ local function validate_semantic_identities(ctx)
             for _, representation in ipairs(representations_for_entity(ctx, entity)) do
                 if not seen_representations[key(representation.id)] then
                     add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
-                        "SEMANTIC_MODEL_047", "Semantic identity has no binding for active representation: "
+                        "SEMANTIC_MODEL_060", "Semantic identity has no binding for active representation: "
                             .. tostring(representation.name) .. ".")
                 end
             end
@@ -14408,19 +14408,21 @@ end
 -- which single sentence a refused authoring call shows. A representation
 -- registered without its identity binding makes every attribute, key and
 -- expression check fail against it, and those knock-ons come from rules that run
--- earlier -- so the actionable SEMANTIC_MODEL_047 sat second or later and the
--- caller was pointed at a dimension that was never wrong (BUG-G04).
+-- earlier -- so the actionable error sat second or later and the caller was
+-- pointed at a dimension that was never wrong (BUG-G04).
 --
--- Only that one rule is promoted, and only for the missing-binding message:
--- SEMANTIC_MODEL_047 also covers naming and kind defects that are causes in
--- their own right but not causes *of other issues*. Stable within each group, so
--- a model without a missing binding keeps its order exactly.
+-- Only that one condition is promoted. It used to live under
+-- SEMANTIC_MODEL_047, alongside thirteen other identity defects that are causes
+-- in their own right but not causes *of other issues* -- so this function had to
+-- find it by searching the message text for "no binding for active
+-- representation", which is a sentence anyone could reword. Giving the condition
+-- its own code, SEMANTIC_MODEL_060, is what lets the test below be a comparison.
+-- Stable within each group, so a model without a missing binding keeps its order
+-- exactly.
 local function order_root_cause_first(issues)
     local leading, trailing = {}, {}
     for _, issue in ipairs(issues or {}) do
-        if issue.rule_code == "SEMANTIC_MODEL_047"
-            and string.find(tostring(issue.message),
-                "no binding for active representation", 1, true) ~= nil then
+        if issue.rule_code == "SEMANTIC_MODEL_060" then
             leading[#leading + 1] = issue
         else
             trailing[#trailing + 1] = issue

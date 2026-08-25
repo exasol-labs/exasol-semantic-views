@@ -40,6 +40,22 @@ validation views show the restored model state.
 
 ## Rule Codes
 
+**Adding one.** A new condition gets a new code unless it is genuinely the same
+defect seen from another angle. Every family has three digits and there is no
+cost to using them; the cost runs the other way. `SEMANTIC_MODEL_047` accumulated
+fourteen distinct meanings — duplicate identity name, unknown entity, bad kind, missing
+data type, unsupported function, alias escape, and "no binding for active
+representation" among them — and once a code means fourteen things, neither a
+caller nor the code itself can branch on it. That last condition is the *cause*
+of the key, expression and attribute failures reported against the same
+representation, so leading the report with it meant searching the message text
+for a sentence any edit could have reworded. It is now `SEMANTIC_MODEL_060`, and
+the check is a comparison.
+
+So: when a rule you are touching already carries several meanings, split out the
+one you came for. `tests/test_conventions.py` pins the per-code count of distinct
+messages — it may fall, and it may not rise.
+
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | `SEMANTIC_MODEL_000` | error | Model name is missing or the model does not exist. |
@@ -86,7 +102,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_044` | error | F4 authority or attribute-fusion metadata is malformed, lacks two contributors or a physical unique key/complete semantic identity, has no single authority for `RECONCILE`, or conflicts with F3 partition fusion. |
 | `SEMANTIC_MODEL_045` | error | `COALESCE` contributors have conflicting non-null values for one or more overlapping entity keys. |
 | `SEMANTIC_MODEL_046` | warning | `RECONCILE` observed conflicting non-null values and deterministically selected the declared `AUTHORITATIVE` representation. |
-| `SEMANTIC_MODEL_047` | error | F5 semantic identity or source-local binding metadata is malformed, ambiguous, incomplete, or uses an unsupported expression. |
+| `SEMANTIC_MODEL_047` | error | F5 semantic identity or source-local binding metadata is malformed, ambiguous, incomplete, or uses an unsupported expression. Covers the identity's own declaration and each binding's expression; a representation with *no* binding at all is `SEMANTIC_MODEL_060`. |
 | `SEMANTIC_MODEL_048` | error | A `DIRECT` binding incorrectly has a mapping, or a `MAPPED` binding lacks one visible `CERTIFIED` mapping relation. |
 | `SEMANTIC_MODEL_049` | error | F5 data probes could not prove local uniqueness, mapping totality and bijection, or exact canonical semantic-key equivalence. |
 | `SEMANTIC_MODEL_050` | warning | A relationship remains usable, but one or more endpoint representations lack the physical key and an anchored scalar `DIRECT` F5.1 remap, so joined requests exclude those candidates. |
@@ -99,6 +115,7 @@ validation views show the restored model state.
 | `SEMANTIC_MODEL_057` | error | The metric's aggregate has no mergeable state (`AVG`, `MIN`, `MAX`, `COUNT DISTINCT`) and its leaves force state merging — a partitioned (F3) entity, or facts from several entities. The metric could never be compiled. |
 | `SEMANTIC_MODEL_058` | warning | A semantic view exposes metrics and no dimensions, so it publishes as a single grand-total column that can only be grouped by nothing. |
 | `SEMANTIC_MODEL_059` | error | A visible metric aggregates at an entity **coarser** than its object's root, so the join repeats each row and the aggregate is multiplied by the fan-out. See [Metric grain versus object root](#metric-grain-versus-object-root). |
+| `SEMANTIC_MODEL_060` | error | An active representation of an entity that has an F5 semantic identity carries no identity binding, so the representation cannot be joined on the canonical key and is unusable. Split out of `SEMANTIC_MODEL_047` because it is the *cause* of the key, expression and attribute failures reported against that representation, and validation promotes it to the head of the report. |
 
 ## Metric Grain Versus Object Root
 

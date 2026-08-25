@@ -328,6 +328,35 @@ SQL NULL. Two tests hold the line: `NullNormalisationTest` in
 `tools/verify_g02_named_admin_api.py` calls every model-scoped script with only
 `MODEL_NAME` set and fails if any refusal mentions `userdata`.
 
+## Conventions
+
+Three rules with no correctness consequence, so nothing else fails when one is
+broken. `tests/test_conventions.py` enforces each as a ratchet — the current
+state is pinned, may shrink, and may not grow.
+
+**One condition, one rule code.** A new condition gets a new code unless it is
+genuinely the same defect from another angle. There are three digits in every
+family and no cost to using them. `SEMANTIC_MODEL_047` reached fourteen distinct
+meanings, and one of them was the *cause* of the others — so promoting it to the
+head of the report had to search the message text, because the code could not
+tell it apart. It is now `SEMANTIC_MODEL_060` and the promotion is a comparison. When you
+next touch an overloaded code, split it; `docs/validation-rules.md` carries one
+row per code, so the drift is visible.
+
+**Name a verifier for the invariant, not the ticket.** `verify_fanout_guardrails.py`,
+not `verify_bug26_published_f3_batch.py`. 24 of 58 verifiers are named after bug
+IDs and are grandfathered in the test; adding a 25th fails. Fold a bug-specific
+case into the file that owns the behaviour — `verify_fusion_f5.py` absorbed
+BUG-G03's lower-case mapping column rather than growing a `verify_g03_*.py`.
+
+**Derive a surface, do not restate it.** `CATALOG_COLUMNS`,
+`ADMIN_SCRIPT_PARAMETERS` and `CATALOG_RELATIONSHIPS` read `EXA_ALL_*`, so they
+cannot drift from what the install actually created. Where SQL genuinely cannot
+declare something — `CATALOG_RELATIONSHIPS`' discriminated edges — declare it
+**once** and have everything else read it: that view's polymorphic-column
+exclusion is a subquery over its own `discriminated` CTE, not a second copy of
+the six names.
+
 ## Key Files
 
 | File | Purpose |

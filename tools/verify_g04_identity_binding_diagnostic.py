@@ -11,13 +11,13 @@ and forgetting the second one leaves the entity invalid.
 That much is ergonomics. The reportable defect was what validation then said: the
 representation is unusable, so every key, expression and attribute check fails
 against it, and those rules run *before* the identity rules. The actionable
-`SEMANTIC_MODEL_047` sat second or later, and because every admin DDL wrapper
+`SEMANTIC_MODEL_060` sat second or later, and because every admin DDL wrapper
 reports `validation_errors[1]`, a refused authoring call pointed at a dimension
 that was never wrong (BUG-G04).
 
 Asserted here:
 
-  1. `SEMANTIC_MODEL_047` is the *first* error, so the DDL wrappers quote it;
+  1. `SEMANTIC_MODEL_060` is the *first* error, so the DDL wrappers quote it;
   2. a refused authoring call really does name it, not a consequence;
   3. the consequences name the specific remedy (`ADD_IDENTITY_BINDING`) instead
      of the generic "complete the declaration" list, because when the entity has
@@ -172,13 +172,13 @@ def main() -> int:
         reported = errors(con)
         if not reported:
             raise AssertionError("a representation with no identity binding validated clean")
-        if str(reported[0][3]) != "SEMANTIC_MODEL_047":
+        if str(reported[0][3]) != "SEMANTIC_MODEL_060":
             raise AssertionError(
                 "validation leads with a consequence, not the cause: "
                 + ", ".join(f"{row[3]}" for row in reported))
         if "crm" not in str(reported[0][4]):
             raise AssertionError(f"the leading error does not name crm: {reported[0]}")
-        print(f"ok SEMANTIC_MODEL_047 leads the report ({len(reported)} errors total)")
+        print(f"ok SEMANTIC_MODEL_060 leads the report ({len(reported)} errors total)")
 
         # The wrappers quote validation_errors[1], so this is what a refused
         # authoring call actually shows.
@@ -188,13 +188,13 @@ def main() -> int:
                  " 'c.customer_name', 'VARCHAR(100)', 'Probe', 'Probe', NULL, TRUE)")
         if accepted:
             raise AssertionError("authoring succeeded on an invalid model")
-        if "SEMANTIC_MODEL_047" not in message:
+        if "SEMANTIC_MODEL_060" not in message:
             raise AssertionError(
                 f"a refused call still quotes a consequence: {message[:400]}")
         print("ok a refused authoring call quotes the cause, not a consequence")
 
         # And the consequences point at the one call that fixes it.
-        knock_ons = [row for row in reported if str(row[3]) != "SEMANTIC_MODEL_047"]
+        knock_ons = [row for row in reported if str(row[3]) != "SEMANTIC_MODEL_060"]
         if not knock_ons:
             raise AssertionError("fixture no longer produces the knock-on errors")
         for row in knock_ons:
@@ -303,7 +303,7 @@ def main() -> int:
         # It must not pass through the invalid state the two-call path does.
         remaining = errors(con)
         identity_errors = [row for row in remaining
-                           if str(row[3]) == "SEMANTIC_MODEL_047"]
+                           if str(row[3]) == "SEMANTIC_MODEL_060"]
         if identity_errors:
             raise AssertionError(
                 f"the collapsed form left the identity unbound: {identity_errors}")

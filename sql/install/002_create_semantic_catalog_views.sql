@@ -1571,25 +1571,6 @@ WITH fk_edges AS (
   WHERE cc.CONSTRAINT_TYPE = 'FOREIGN KEY'
     AND cc.REFERENCED_TABLE IS NOT NULL
 ),
--- Column name -> parent, taken from the declared constraints rather than from
--- a naming rule, so the view inherits whatever 001 declared. Names that are
--- polymorphic anywhere in the catalog are excluded: OBJECT_ID means
--- SEMANTIC_OBJECTS in OBJECT_COLUMNS but is discriminated in
--- OBJECT_PRIVILEGES, and inferring one parent for it on a view would assert an
--- edge that is wrong half the time. Those cases are covered by DISCRIMINATED.
-key_columns AS (
-  SELECT
-    e.CHILD_COLUMN AS KEY_COLUMN,
-    MIN(e.PARENT_SURFACE) AS PARENT_SURFACE,
-    MIN(e.PARENT_COLUMN)  AS PARENT_COLUMN
-  FROM fk_edges e
-  WHERE e.CHILD_SCHEMA = 'SYS_SEMANTIC'
-    AND e.CHILD_COLUMN NOT IN (
-      'OBJECT_ID', 'OBJECT_REF_ID', 'DEPENDS_ON_OBJECT_ID',
-      'INPUT_OBJECT_ID', 'ATTRIBUTE_ID', 'SCOPE_ID')
-  GROUP BY e.CHILD_COLUMN
-  HAVING COUNT(DISTINCT e.PARENT_SURFACE) = 1
-),
 discriminated AS (
   SELECT * FROM (VALUES
   ('OBJECT_COLUMNS', 'OBJECT_REF_ID', 'COLUMN_KIND', 'DIMENSION', 'DIMENSIONS', 'DIMENSION_ID'),
@@ -1632,6 +1613,29 @@ discriminated AS (
   ('OBJECT_PRIVILEGES', 'OBJECT_ID', 'OBJECT_TYPE', 'SEMANTIC_OBJECT', 'SEMANTIC_OBJECTS', 'OBJECT_ID')
   ) AS d (CHILD_SURFACE, CHILD_COLUMN, DISCRIMINATOR_COLUMN, DISCRIMINATOR_VALUE,
           PARENT_SURFACE, PARENT_COLUMN)
+),
+-- Column name -> parent, taken from the declared constraints rather than from
+-- a naming rule, so the view inherits whatever 001 declared. Names that are
+-- polymorphic anywhere in the catalog have to be excluded: OBJECT_ID means
+-- SEMANTIC_OBJECTS in OBJECT_COLUMNS but is discriminated in
+-- OBJECT_PRIVILEGES, and inferring one parent for it on a view would assert an
+-- edge that is wrong half the time.
+--
+-- The exclusion is read out of `discriminated` above rather than restated as a
+-- literal list. It used to be one, and a literal list is a second place to
+-- remember: adding a discriminated column would have left its name inferring a
+-- single bogus parent on every view that exposes it, silently, until someone
+-- followed the edge. Derived, the two cannot disagree.
+key_columns AS (
+  SELECT
+    e.CHILD_COLUMN AS KEY_COLUMN,
+    MIN(e.PARENT_SURFACE) AS PARENT_SURFACE,
+    MIN(e.PARENT_COLUMN)  AS PARENT_COLUMN
+  FROM fk_edges e
+  WHERE e.CHILD_SCHEMA = 'SYS_SEMANTIC'
+    AND e.CHILD_COLUMN NOT IN (SELECT d.CHILD_COLUMN FROM discriminated d)
+  GROUP BY e.CHILD_COLUMN
+  HAVING COUNT(DISTINCT e.PARENT_SURFACE) = 1
 ),
 view_columns AS (
   SELECT

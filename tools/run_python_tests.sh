@@ -22,6 +22,7 @@ TESTS="tests/test_osi_tool.py \
        tests/test_property.py \
        tests/test_admin_invariants.py \
        tests/test_catalog_references.py \
+       tests/test_conventions.py \
        tests/test_semantic_client.py"
 
 # Discard any prior .coverage file so a stale run does not lower thresholds
