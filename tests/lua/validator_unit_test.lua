@@ -2058,6 +2058,51 @@ test("validator names the alternate representation blocking unrelated authoring"
     assert_equal(api.alternate_representation_remedy(ctx, {"unknown"}), "")
     assert_branch("validator.representation.remedy",
         api.alternate_representation_remedy(ctx, {"primary"}) ~= "", false)
+
+    -- BUG-G04: when the entity carries an F5 identity and this representation
+    -- has no binding for it, the missing piece is knowable, so offering three
+    -- ways to "complete the declaration" sends the reader looking. The
+    -- documented F4-over-F5 use case reaches this every time, because
+    -- ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY registers the representation and
+    -- no compound form also binds the identity.
+    local identity = {id = 90, name = "customer_identity", entity_id = 1,
+        binding_by_representation = {['5'] = {id = 70, kind = "DIRECT"}}}
+    local with_identity = validation_context({
+        representations = {
+            {id = 5, name = "primary", role = "PRIMARY", entity_id = 1},
+            {id = 6, name = "crm", role = "ALTERNATE", entity_id = 1},
+        },
+        identities_by_entity = {['1'] = {identity}},
+    })
+    local specific = api.alternate_representation_remedy(with_identity, {"crm"})
+    assert_contains(specific, "no binding for semantic identity 'customer_identity'")
+    assert_contains(specific, "SEMANTIC_MODEL_047")
+    assert_contains(specific, "ADD_IDENTITY_BINDING")
+    assert_contains(specific, "ADD_IDENTITY_MAPPING_RELATION")
+    assert_contains(specific, "REMOVE_ENTITY_REPRESENTATION")
+    -- The generic three-option text must give way, not accumulate.
+    if string.find(specific, "SET_REPRESENTATION_COVERAGE_BATCH", 1, true) ~= nil then
+        error("specific remedy still offers the generic options: " .. specific)
+    end
+    assert_branch("validator.representation.identity_remedy",
+        string.find(specific, "ADD_IDENTITY_BINDING", 1, true) ~= nil, true)
+
+    -- The representation that *does* have a binding falls back to the generic
+    -- remedy, so the specific one cannot fire on a complete identity.
+    local bound = api.alternate_representation_remedy(
+        validation_context({
+            representations = {
+                {id = 5, name = "primary", role = "PRIMARY", entity_id = 1},
+                {id = 6, name = "crm", role = "ALTERNATE", entity_id = 1},
+            },
+            identities_by_entity = {['1'] = {{id = 90, name = "customer_identity",
+                entity_id = 1,
+                binding_by_representation = {['5'] = {id = 70, kind = "DIRECT"},
+                    ['6'] = {id = 71, kind = "DIRECT"}}}}},
+        }), {"crm"})
+    assert_contains(bound, "SET_REPRESENTATION_COVERAGE_BATCH")
+    assert_branch("validator.representation.identity_remedy",
+        string.find(bound, "ADD_IDENTITY_BINDING", 1, true) ~= nil, false)
 end)
 
 test("validator computes safe fanout and missing-entity matrix outcomes", function()
@@ -2586,4 +2631,46 @@ test("matrix refuses a partitioned entity on the join path, not just under the d
     assert_true(clean.matrix['30']['40'].is_valid)
     assert_branch("validator.matrix.partition_join_hop",
         clean.matrix['30']['40'].is_valid, true)
+end)
+
+test("validation issues lead with the cause, not its consequences", function()
+    -- BUG-G04. Every admin DDL wrapper reports validation_errors[1], so this
+    -- order decides which sentence a refused authoring call shows. A
+    -- representation registered without its identity binding makes the entity's
+    -- key, expression and attribute checks all fail against it -- and those
+    -- rules run earlier, so the caller was told to fix a dimension that was
+    -- never wrong while the actionable SEMANTIC_MODEL_047 sat underneath.
+    local knock_on_key = {rule_code = "SEMANTIC_MODEL_029", message = "unknown source column"}
+    local knock_on_pk = {rule_code = "SEMANTIC_MODEL_036", message = "unknown source column"}
+    local cause = {rule_code = "SEMANTIC_MODEL_047",
+        message = "Semantic identity has no binding for active representation: crm."}
+    local knock_on_dim = {rule_code = "SEMANTIC_MODEL_017", message = "unknown source column"}
+
+    local ordered = api.order_root_cause_first({knock_on_pk, cause, knock_on_key, knock_on_dim})
+    assert_equal(ordered[1].rule_code, "SEMANTIC_MODEL_047")
+    -- The consequences keep their relative order behind it.
+    assert_equal(ordered[2].rule_code, "SEMANTIC_MODEL_036")
+    assert_equal(ordered[3].rule_code, "SEMANTIC_MODEL_029")
+    assert_equal(ordered[4].rule_code, "SEMANTIC_MODEL_017")
+    assert_equal(#ordered, 4)
+    assert_branch("validator.issues.root_cause_first",
+        ordered[1].rule_code == "SEMANTIC_MODEL_047", true)
+
+    -- A model with no missing binding is left exactly as it was, so this cannot
+    -- quietly reshuffle unrelated reports.
+    local untouched = {knock_on_pk, knock_on_key}
+    local same = api.order_root_cause_first(untouched)
+    assert_equal(same, untouched)
+    assert_branch("validator.issues.root_cause_first",
+        same[1].rule_code == "SEMANTIC_MODEL_047", false)
+
+    -- SEMANTIC_MODEL_047 also reports naming and kind defects. Those are causes
+    -- in their own right but not causes *of other issues*, so they are not
+    -- promoted ahead of whatever else the run found.
+    local other_047 = {rule_code = "SEMANTIC_MODEL_047",
+        message = "Identity kind must be BUSINESS or GLOBAL."}
+    local unpromoted = api.order_root_cause_first({knock_on_pk, other_047})
+    assert_equal(unpromoted[1].rule_code, "SEMANTIC_MODEL_036")
+
+    assert_equal(#api.order_root_cause_first({}), 0)
 end)

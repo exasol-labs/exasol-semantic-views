@@ -167,6 +167,7 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 "$PYTHON_BIN" tools/verify_f18_metric_grain_positions.py
 "$PYTHON_BIN" tools/verify_g01_partitioned_join_hop.py
 "$PYTHON_BIN" tools/verify_g02_named_admin_api.py
+"$PYTHON_BIN" tools/verify_g04_identity_binding_diagnostic.py
 
 # Feedback-driven behavior tests.
 "$PYTHON_BIN" tools/verify_fb015_replace_attribute_binding.py

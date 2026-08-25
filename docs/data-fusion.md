@@ -192,6 +192,31 @@ dimension unresolvable on the alternate. Use
 `ADD_DIMENSION_WITH_BINDINGS`/`ADD_FACT_WITH_BINDINGS` whenever a representation
 either computes the attribute differently *or* does not carry it at all.
 
+**Registering an F4 alternate on an entity that already has an F5 identity takes
+two calls.** The compound forms are one-dimensional —
+`ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY`, `_WITH_COVERAGE`,
+`_WITH_IDENTITY_BINDING` — and none combines authority with identity, so the
+sequence is:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY(
+  'sales', 'customer', 'crm', 'RELATION', 'CRM', 'CUSTOMERS_CRM', 20,
+  'MANUAL', 'AUTHORITATIVE');
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING(
+  'sales', 'customer_identity', 'crm', 'c.account_id', 'MAPPED');
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION(
+  'sales', 'customer_identity', 'crm', 'CRM', 'CUSTOMER_XREF',
+  'ACCOUNT_ID', 'CUSTOMER_ID', 'CERTIFIED');
+```
+
+Between the first call and the second the entity is invalid, and the
+representation is unusable — which makes its every key, expression and attribute
+check fail too. Validation leads with the actionable cause,
+`SEMANTIC_MODEL_047: Semantic identity has no binding for active
+representation: <name>`, and each consequence names `ADD_IDENTITY_BINDING` as the
+remedy rather than the generic "complete the declaration" list, so a refused
+authoring call in the middle of the sequence says what is actually missing.
+
 ### Semantic Identity
 
 Unlocks Attribute Reconciliation — and cross-source joins in general —

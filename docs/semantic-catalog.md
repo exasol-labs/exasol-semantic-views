@@ -846,8 +846,10 @@ refused with `SEMANTIC_ADMIN_100`. The call returns `STATUS`, `SCRIPT_NAME`,
 **Omit an optional parameter; do not pass `null` for it.** Omission becomes SQL
 `NULL`, which is what the positional form wants, but an explicit JSON `null`
 reaches the script as the text `null` and is rejected on its own terms — for
-example `SEMANTIC_ADMIN_003: invalid FANOUT_POLICY: null`. The two forms are not
-interchangeable here.
+example `SEMANTIC_ADMIN_003: invalid FANOUT_POLICY: null`, or
+`SEMANTIC_ADMIN_064: DIRECT binding must not include MAPPING_JSON` for a
+`DIRECT` identity binding, where the positional form wants exactly `NULL` in that
+slot. The two conventions are not interchangeable.
 
 A script that completes without returning rows is not a special case for the
 caller: it comes back `STATUS = OK` with `ROW_COUNT = 0` and an empty

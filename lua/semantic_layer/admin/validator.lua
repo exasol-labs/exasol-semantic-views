@@ -1732,6 +1732,36 @@ local function missing_unique_key_columns(ctx, entity, column_name)
     return {}
 end
 
+-- The semantic identity a named representation has no binding for, when that is
+-- why the representation is unusable.
+--
+-- alternate_representation_remedy below lists all three ways to complete a
+-- declaration because it usually cannot tell which one is missing. When the
+-- entity carries an F5 identity and this representation has no binding for it,
+-- it can tell: that is the only completion that will help. BUG-G04 hit exactly
+-- this -- ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY registers an F4
+-- representation and there is no compound form that also binds the identity, so
+-- the generic three-option remedy was what a modeller following the documented
+-- F4-over-F5 use case got.
+local function missing_identity_binding_for(ctx, representation_name)
+    -- Representation-scoped names arrive as "entity.representation".
+    local bare = tostring(representation_name):match("([^%.]+)$")
+        or tostring(representation_name)
+    for _, representation in ipairs(ctx.representations or {}) do
+        if upper(representation.name) == upper(bare) then
+            for _, identity in ipairs((ctx.identities_by_entity or {})[
+                    key(representation.entity_id)] or {}) do
+                local binding = identity.binding_by_representation
+                    and identity.binding_by_representation[key(representation.id)]
+                    or nil
+                if binding == nil then return identity end
+            end
+            return nil
+        end
+    end
+    return nil
+end
+
 -- Name the remedy for a defect that lives in an alternate representation.
 --
 -- Registering an alternate is accepted on a draft and leaves the model invalid
@@ -1754,6 +1784,24 @@ local function alternate_representation_remedy(ctx, names)
     end
     local subject = #names == 1 and ("Representation " .. tostring(names[1]))
         or ("Representations " .. table.concat(names, ", "))
+    -- When every named representation is unusable for the same, knowable
+    -- reason, say which call fixes it instead of offering three.
+    local identity_name = nil
+    for _, name in ipairs(names) do
+        local identity = missing_identity_binding_for(ctx, name)
+        if identity == nil then
+            identity_name = nil
+            break
+        end
+        identity_name = identity.name
+    end
+    if identity_name ~= nil then
+        return " " .. subject .. " has no binding for semantic identity '"
+            .. tostring(identity_name) .. "', which is why it is not yet usable"
+            .. " (SEMANTIC_MODEL_047). Add it with ADD_IDENTITY_BINDING -- plus"
+            .. " ADD_IDENTITY_MAPPING_RELATION for a MAPPED binding -- or remove"
+            .. " the representation with REMOVE_ENTITY_REPRESENTATION."
+    end
     return " " .. subject .. " is registered but not yet usable, and blocks"
         .. " unrelated authoring until it is. Complete the declaration (F3"
         .. " coverage with SET_REPRESENTATION_COVERAGE_BATCH, attribute bindings"
@@ -4132,6 +4180,35 @@ local function validate_visible_metric_dimension_pairs(ctx)
     end
 end
 
+-- Lead with the cause, not a consequence.
+--
+-- Every admin DDL wrapper reports validation_errors[1], so this order decides
+-- which single sentence a refused authoring call shows. A representation
+-- registered without its identity binding makes every attribute, key and
+-- expression check fail against it, and those knock-ons come from rules that run
+-- earlier -- so the actionable SEMANTIC_MODEL_047 sat second or later and the
+-- caller was pointed at a dimension that was never wrong (BUG-G04).
+--
+-- Only that one rule is promoted, and only for the missing-binding message:
+-- SEMANTIC_MODEL_047 also covers naming and kind defects that are causes in
+-- their own right but not causes *of other issues*. Stable within each group, so
+-- a model without a missing binding keeps its order exactly.
+local function order_root_cause_first(issues)
+    local leading, trailing = {}, {}
+    for _, issue in ipairs(issues or {}) do
+        if issue.rule_code == "SEMANTIC_MODEL_047"
+            and string.find(tostring(issue.message),
+                "no binding for active representation", 1, true) ~= nil then
+            leading[#leading + 1] = issue
+        else
+            trailing[#trailing + 1] = issue
+        end
+    end
+    if #leading == 0 then return issues end
+    for _, issue in ipairs(trailing) do leading[#leading + 1] = issue end
+    return leading
+end
+
 function M.validate_model(model_name_arg)
     local ctx = {
         issues = {},
@@ -4177,6 +4254,7 @@ function M.validate_model(model_name_arg)
         ]], {version_id = ctx.version_id})
     end
 
+    ctx.issues = order_root_cause_first(ctx.issues)
     finish_validation_run(ctx)
     return ctx.issues
 end
@@ -4221,6 +4299,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_metric_plannability = validate_metric_plannability,
         validate_object_dimension_coverage = validate_object_dimension_coverage,
         alternate_representation_remedy = alternate_representation_remedy,
+        order_root_cause_first = order_root_cause_first,
         compute_metric_dimension_matrix = compute_metric_dimension_matrix,
         validate_visible_metric_dimension_pairs = validate_visible_metric_dimension_pairs,
         validate_visible_metric_grain = validate_visible_metric_grain,
