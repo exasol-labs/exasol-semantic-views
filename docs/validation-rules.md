@@ -344,6 +344,24 @@ entity has no defined attribution, and the compiler refuses every such request
 reaches this way used to leave that object's published dimensions permanently
 unqueryable with no validation error at all.
 
+The same rejection applies when the partitioned entity is not where the
+dimension lives but somewhere on the **proven join path** to it
+(`FUSION_PARTITION_JOIN_UNSUPPORTED`). That case was invisible for as long as the
+rule was keyed on the dimension's own entity: for
+
+```
+order_line --INNER--> order (F3 hot/cold) --LEFT--> customer
+```
+
+a line-grain metric grouped by a customer attribute validated clean, published,
+and returned the primary partition's subtotal as the whole — 43 700.32 of a true
+412 907.22 on the study fixture — because F3 expands partitions for a metric leaf
+only and `order` is merely traversed here. The plan recorded
+`fusion_strategy = UNION` with two partitions next to SQL that read one table.
+Keying on the path covers both shapes, since a dimension's own entity is the last
+node of its path. The remedy is the same: expose the dimension alongside metrics
+based at the partitioned entity, or drop the coverage declarations.
+
 Validation accepts same-entity pairs and non-fanout relationship paths. It
 rejects paths that fan out: traversing from the one-side to the many-side of a
 relationship (`ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED`), and any many-to-many

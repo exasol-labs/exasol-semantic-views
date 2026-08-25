@@ -118,7 +118,14 @@ merges `SUM`/`COUNT` states after `UNION ALL`.
 `PLAN_JSON.logical_plan.physical_plan.fusion_plan` records every partition.
 Non-mergeable metrics fail with `METRIC_STATE_UNSUPPORTED`. Partitioned entities
 used only as joined dimensions fail with
-`FUSION_PARTITION_DIMENSION_UNSUPPORTED`.
+`FUSION_PARTITION_DIMENSION_UNSUPPORTED`, and a partitioned entity that is merely
+**traversed** on the join path to a field beyond it fails with
+`FUSION_PARTITION_JOIN_UNSUPPORTED` — expanding partitions is a metric-leaf
+operation, so joining through one would read its primary partition alone. The
+physical renderer refuses the same shape independently
+(`branch_joins`): it must not be able to emit a single source for an entity whose
+own plan entry carries partitions, whatever route reached it, because that
+failure mode is a plausible number rather than an error.
 The public `_070`/`_074` diagnostics retain the metric, aggregate, entity,
 dimension or filter usage from the typed failure and state the supported F3
 remedy. `_080` names the first missing attribute and partition and points to

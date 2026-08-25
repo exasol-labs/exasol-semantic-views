@@ -165,6 +165,7 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # positions had no test, and one of them returned a silently inflated number.
 "$PYTHON_BIN" tools/verify_f13_verified_query_scope.py
 "$PYTHON_BIN" tools/verify_f18_metric_grain_positions.py
+"$PYTHON_BIN" tools/verify_g01_partitioned_join_hop.py
 
 # Feedback-driven behavior tests.
 "$PYTHON_BIN" tools/verify_fb015_replace_attribute_binding.py

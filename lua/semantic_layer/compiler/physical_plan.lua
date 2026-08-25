@@ -373,6 +373,29 @@ local function branch_joins(branch, snapshot)
                         relationship_id = relationship.id,
                     })
                 end
+                -- source_sql renders one relation: the target's PRIMARY
+                -- representation. For a partitioned entity that is the primary
+                -- partition alone, so joining to it here would drop every other
+                -- partition's rows. apply_partitioned_sources expands partitions
+                -- for a branch *leaf* only, and a join target is by definition
+                -- not the leaf.
+                --
+                -- The planner refuses this earlier and with a better message
+                -- (FUSION_PARTITION_JOIN_UNSUPPORTED). This is the backstop at
+                -- the point where the wrong SQL would actually be written: the
+                -- renderer must not be able to emit a single source for an
+                -- entity whose own plan entry says it has partitions, whatever
+                -- route reached it. BUG-G01 shipped a plan claiming
+                -- fusion_strategy=UNION with two partitions next to SQL that
+                -- read one table.
+                if upper(target.fusion_strategy) == "UNION" then
+                    return fail("FUSION_PARTITION_JOIN_UNSUPPORTED", {
+                        entity_id = target.id,
+                        entity_name = target.name,
+                        branch_id = branch.branch_id,
+                        relationship_id = relationship.id,
+                    })
+                end
                 joins[#joins + 1] = {
                     join_id = "join:relationship:" .. key(relationship.id),
                     relationship_id = relationship.id,

@@ -469,6 +469,20 @@ local function typed_failure_message(failure)
             .. "', which is used here only as a joined dimension. Partitioned joined "
             .. "dimensions are not supported in F3."
     end
+    if reason == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
+        local entity_name = tostring(failure.entity_name
+            or failure.entity_id or "unknown")
+        local via = failure.path == nil and ""
+            or " (join path: " .. tostring(failure.path) .. ")"
+        return "Entity '" .. entity_name
+            .. "' carries F3 temporal coverage and is traversed as an"
+            .. " intermediate join on the way to a requested field" .. via
+            .. ". F3 expands partitions only where the entity is a metric's own"
+            .. " leaf, so joining through it would read the primary partition"
+            .. " alone and silently omit the others. Request this field from a"
+            .. " semantic object rooted at '" .. entity_name
+            .. "', or remove the coverage declarations from that entity."
+    end
     return "Typed planning failed: " .. tostring(reason) .. "."
 end
 

@@ -9764,6 +9764,51 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
             plan.relationship_proofs[#plan.relationship_proofs + 1] = proof
         end
     end
+
+    -- F3 expands a partitioned entity only where it is a metric's own leaf: the
+    -- branch is duplicated per partition and the mergeable aggregate states are
+    -- combined. Anywhere else the entity appears it is rendered from its PRIMARY
+    -- representation alone, which drops every other partition's rows.
+    --
+    -- The two checks above catch that only when the partitioned entity is where
+    -- a *dimension or filter resolves*. They miss it when the entity is merely
+    -- traversed to reach a dimension on the far side, and that is the more
+    -- dangerous shape: order_line -> order(F3) -> customer, grouping by a
+    -- customer attribute, dropped 89% of revenue on a validated and published
+    -- model while the plan recorded fusion_strategy=UNION with two partitions
+    -- and rendered one source (BUG-G01). Keying on the proven path instead of on
+    -- where the dimension lives covers both, since the dimension's own entity is
+    -- the last node of its path.
+    if plan.failure == nil then
+        for _, proof in ipairs(plan.relationship_proofs or {}) do
+            if proof.status == "PROVEN" and plan.failure == nil then
+                local traversed = {}
+                local relationship_names = {}
+                for _, edge in ipairs(proof.edges or {}) do
+                    traversed[#traversed + 1] = edge.from_entity_id
+                    traversed[#traversed + 1] = edge.to_entity_id
+                    relationship_names[#relationship_names + 1] =
+                        tostring(edge.relationship_name)
+                end
+                for _, entity_id in ipairs(traversed) do
+                    local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+                    if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+                        and not leaf_lookup[key(entity_id)]
+                        and plan.failure == nil then
+                        plan.failure = {
+                            reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED",
+                            entity_id = entity.id,
+                            entity_name = entity.name,
+                            proof_id = proof.proof_id,
+                            path = #relationship_names > 0
+                                and table.concat(relationship_names, " > ") or nil,
+                            usage = "JOIN_PATH",
+                        }
+                    end
+                end
+            end
+        end
+    end
     return plan, nil
 end
 
@@ -13515,6 +13560,38 @@ local function validate_metric_plannability(ctx)
     end
 end
 
+-- The partitioned entity a metric/dimension pair would have to join *through*.
+--
+-- F3 expands partitions only where the entity is a metric's own leaf: that
+-- branch is duplicated per partition and the mergeable states are merged.
+-- Everywhere else the entity is rendered from its PRIMARY representation, which
+-- silently drops the other partitions' rows. The pair-level guard above is keyed
+-- on the dimension's own entity, so it never saw an entity that is merely a hop
+-- on the way to a dimension beyond it -- and neither did the query-time guard.
+-- That is BUG-G01: order_line -> order(F3) -> customer, grouped by a customer
+-- attribute, returned 43 700.32 of a true 412 907.22 on a validated, published
+-- model.
+--
+-- The dimension's own entity is excluded here because the caller reports that
+-- case separately, with a message about the dimension rather than the traversal.
+local function partitioned_join_hop(ctx, metric, proof, dimension_entity_id)
+    if proof == nil then return nil end
+    local leaves = metric_leaf_entities(ctx, metric)
+    for _, edge in ipairs(proof.edges or {}) do
+        for _, entity_id in ipairs({edge.from_id, edge.to_id}) do
+            local entity_key = key(entity_id)
+            if entity_key ~= key(dimension_entity_id)
+                and not leaves[entity_key] then
+                local entity = ctx.entity_by_id[entity_key]
+                if entity ~= nil and entity_is_partitioned(ctx, entity) then
+                    return entity
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -13535,6 +13612,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             local reason_code = "OK"
             local path = nil
             local alternates = nil
+            local partition_hop_name = nil
             if not root_can_reach_metric then
                 reason_code = "NO_SAFE_JOIN_PATH"
                 path = root_path
@@ -13543,8 +13621,11 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             elseif ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
                 reason_code = "MISSING_DIMENSION_ENTITY"
             else
-                local ok, reason, relationship_path = find_path(safe_edges, metric.base_entity_id, dimension.entity_id, true)
+                local ok, reason, relationship_path, proof = find_path(safe_edges, metric.base_entity_id, dimension.entity_id, true)
                 local dimension_entity = ctx.entity_by_id[key(dimension.entity_id)]
+                local hop_entity = ok
+                    and partitioned_join_hop(ctx, metric, proof, dimension.entity_id)
+                    or nil
                 if ok and dimension_entity ~= nil
                     and entity_is_partitioned(ctx, dimension_entity)
                     and not metric_leaf_entities(ctx, metric)[key(dimension.entity_id)] then
@@ -13557,6 +13638,13 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                     -- published dimensions silently.
                     reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED"
                     path = relationship_path
+                elseif hop_entity ~= nil then
+                    -- BUG-G01: the entity is not where the dimension lives, it
+                    -- is on the way there. Same defect, and the one the
+                    -- dimension-keyed check above cannot see.
+                    reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED"
+                    path = relationship_path
+                    partition_hop_name = hop_entity.name
                 elseif ok then
                     is_valid = true
                     reason_code = "OK"
@@ -13574,6 +13662,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 is_valid = is_valid,
                 reason_code = reason_code,
                 path = path,
+                partition_hop_name = partition_hop_name,
                 alternate_paths = alternates ~= nil
                     and #alternates.alternates > 0 and alternates.alternates or nil,
             }
@@ -13811,6 +13900,17 @@ local function validate_visible_metric_dimension_pairs(ctx)
                         .. base_name .. "', or remove this metric from object '"
                         .. tostring(object_name) .. "'."
                 end
+            elseif matrix_row.reason_code == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
+                local hop = matrix_row.partition_hop_name or "an intermediate entity"
+                message = message .. " Entity '" .. tostring(hop)
+                    .. "' carries F3 temporal coverage and sits on the join path"
+                    .. " between them. F3 expands partitions only where the"
+                    .. " entity is a metric's own leaf, so joining through it"
+                    .. " would read its primary partition alone and silently omit"
+                    .. " the others. Expose this dimension alongside metrics"
+                    .. " based at '" .. tostring(hop) .. "', in this or a"
+                    .. " separate semantic object, or remove the coverage"
+                    .. " declarations from that entity."
             elseif matrix_row.reason_code == "FUSION_PARTITION_DIMENSION_UNSUPPORTED" then
                 local dimension_entity_name = dimension ~= nil
                     and (ctx.entity_name_by_id[key(dimension.entity_id)]
@@ -15951,6 +16051,51 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
             plan.relationship_proofs[#plan.relationship_proofs + 1] = proof
         end
     end
+
+    -- F3 expands a partitioned entity only where it is a metric's own leaf: the
+    -- branch is duplicated per partition and the mergeable aggregate states are
+    -- combined. Anywhere else the entity appears it is rendered from its PRIMARY
+    -- representation alone, which drops every other partition's rows.
+    --
+    -- The two checks above catch that only when the partitioned entity is where
+    -- a *dimension or filter resolves*. They miss it when the entity is merely
+    -- traversed to reach a dimension on the far side, and that is the more
+    -- dangerous shape: order_line -> order(F3) -> customer, grouping by a
+    -- customer attribute, dropped 89% of revenue on a validated and published
+    -- model while the plan recorded fusion_strategy=UNION with two partitions
+    -- and rendered one source (BUG-G01). Keying on the proven path instead of on
+    -- where the dimension lives covers both, since the dimension's own entity is
+    -- the last node of its path.
+    if plan.failure == nil then
+        for _, proof in ipairs(plan.relationship_proofs or {}) do
+            if proof.status == "PROVEN" and plan.failure == nil then
+                local traversed = {}
+                local relationship_names = {}
+                for _, edge in ipairs(proof.edges or {}) do
+                    traversed[#traversed + 1] = edge.from_entity_id
+                    traversed[#traversed + 1] = edge.to_entity_id
+                    relationship_names[#relationship_names + 1] =
+                        tostring(edge.relationship_name)
+                end
+                for _, entity_id in ipairs(traversed) do
+                    local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+                    if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+                        and not leaf_lookup[key(entity_id)]
+                        and plan.failure == nil then
+                        plan.failure = {
+                            reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED",
+                            entity_id = entity.id,
+                            entity_name = entity.name,
+                            proof_id = proof.proof_id,
+                            path = #relationship_names > 0
+                                and table.concat(relationship_names, " > ") or nil,
+                            usage = "JOIN_PATH",
+                        }
+                    end
+                end
+            end
+        end
+    end
     return plan, nil
 end
 
@@ -16327,6 +16472,29 @@ local function branch_joins(branch, snapshot)
                 if target_sql == nil or missing(relationship.join_condition) then
                     return fail("PHYSICAL_BINDING_INCOMPLETE", {
                         binding_kind = "RELATIONSHIP_JOIN",
+                        branch_id = branch.branch_id,
+                        relationship_id = relationship.id,
+                    })
+                end
+                -- source_sql renders one relation: the target's PRIMARY
+                -- representation. For a partitioned entity that is the primary
+                -- partition alone, so joining to it here would drop every other
+                -- partition's rows. apply_partitioned_sources expands partitions
+                -- for a branch *leaf* only, and a join target is by definition
+                -- not the leaf.
+                --
+                -- The planner refuses this earlier and with a better message
+                -- (FUSION_PARTITION_JOIN_UNSUPPORTED). This is the backstop at
+                -- the point where the wrong SQL would actually be written: the
+                -- renderer must not be able to emit a single source for an
+                -- entity whose own plan entry says it has partitions, whatever
+                -- route reached it. BUG-G01 shipped a plan claiming
+                -- fusion_strategy=UNION with two partitions next to SQL that
+                -- read one table.
+                if upper(target.fusion_strategy) == "UNION" then
+                    return fail("FUSION_PARTITION_JOIN_UNSUPPORTED", {
+                        entity_id = target.id,
+                        entity_name = target.name,
                         branch_id = branch.branch_id,
                         relationship_id = relationship.id,
                     })
@@ -17588,6 +17756,20 @@ local function typed_failure_message(failure)
             .. tostring(failure.entity_name or failure.entity_id or "unknown")
             .. "', which is used here only as a joined dimension. Partitioned joined "
             .. "dimensions are not supported in F3."
+    end
+    if reason == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
+        local entity_name = tostring(failure.entity_name
+            or failure.entity_id or "unknown")
+        local via = failure.path == nil and ""
+            or " (join path: " .. tostring(failure.path) .. ")"
+        return "Entity '" .. entity_name
+            .. "' carries F3 temporal coverage and is traversed as an"
+            .. " intermediate join on the way to a requested field" .. via
+            .. ". F3 expands partitions only where the entity is a metric's own"
+            .. " leaf, so joining through it would read the primary partition"
+            .. " alone and silently omit the others. Request this field from a"
+            .. " semantic object rooted at '" .. entity_name
+            .. "', or remove the coverage declarations from that entity."
     end
     return "Typed planning failed: " .. tostring(reason) .. "."
 end

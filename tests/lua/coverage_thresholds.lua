@@ -14,17 +14,19 @@
 -- (plannability gate, request options, unknown-field clarification), and again
 -- 2026-08-25 after closing F13/F17/F18 -- the verified-query request scope in
 -- the agent runtime, and the metric-grain proof against the object root in the
--- validator.
+-- validator -- and again the same day for BUG-G01, which added the
+-- partitioned-join-hop refusal to the matrix, the logical planner, and the
+-- physical renderer's backstop.
 return {
     lines = {
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.6,
         ["lua/semantic_layer/compiler/query_spec.lua"] = 96.7,
         ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 100,
-        ["lua/semantic_layer/compiler/metric_plan.lua"] = 93.7,
-        ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.2,
+        ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
+        ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.3,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 86.5,
-        ["lua/semantic_layer/admin/validator.lua"] = 93.4,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 86.6,
+        ["lua/semantic_layer/admin/validator.lua"] = 93.5,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.0,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 71.7,
         ["lua/semantic_layer/agent/runtime.lua"] = 93.4,

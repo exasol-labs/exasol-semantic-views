@@ -549,6 +549,96 @@ test("F3 rejects partition fusion on a joined dimension entity", function()
     assert_equal(logical.failure.usage, "SELECTED_DIMENSION")
 end)
 
+test("F3 rejects a partitioned entity traversed as an intermediate join hop", function()
+    -- BUG-G01. The dimension-keyed check above only sees a partitioned entity
+    -- that a dimension *resolves to*. Here the dimension is on regions and the
+    -- partitioned entity is customers, one hop earlier on the way there. F3
+    -- expands partitions for a branch leaf only, so the renderer would join
+    -- customers' primary partition alone and silently drop the rest -- which on
+    -- the study fixture lost 89% of revenue on a validated, published model.
+    local ctx, public = base_context()
+    ctx.entities[2].fusion_strategy = "UNION"
+    ctx.dimensions = {{id = 30, name = "region", entity_id = 3}}
+    ctx.relationships = {
+        {
+            id = 40, name = "orders_customer", from_entity_id = 1, to_entity_id = 2,
+            cardinality = "MANY_TO_ONE", join_type = "INNER",
+            key_mappings = {{ordinal_position = 1, from_column_name = "customer_id",
+                to_column_name = "customer_id"}},
+        },
+        {
+            id = 41, name = "customers_region", from_entity_id = 2, to_entity_id = 3,
+            cardinality = "MANY_TO_ONE", join_type = "LEFT",
+            key_mappings = {{ordinal_position = 1, from_column_name = "region_id",
+                to_column_name = "region_id"}},
+        },
+    }
+    ctx.unique_keys = {
+        {id = 50, entity_id = 2, name = "customer_pk", kind = "PRIMARY",
+            columns = {{ordinal_position = 1, column_name = "customer_id"}}},
+        {id = 51, entity_id = 3, name = "region_pk", kind = "PRIMARY",
+            columns = {{ordinal_position = 1, column_name = "region_id"}}},
+    }
+    local snapshot = snapshots.from_context(ctx, {public})
+    local spec = assert(query_spec.new({
+        model = "sales", object = "sales", metrics = {"margin"},
+        dimensions = {"region"},
+    }))
+    -- request_json derives one target per needed non-root entity; the proof for
+    -- regions is what carries the customers hop.
+    local targets = {{target_entity_id = 2}, {target_entity_id = 3}}
+    local bound = planner.bind_query(spec, {ctx.dimensions[1]}, {public}, {}, {}, targets)
+    local logical = assert(planner.logical_plan(spec, snapshot, bound, {public}))
+    assert_equal(logical.failure.reason_code, "FUSION_PARTITION_JOIN_UNSUPPORTED")
+    -- The entity named must be the hop, not the dimension's own entity.
+    assert_equal(logical.failure.entity_name, "customers")
+    assert_equal(logical.failure.usage, "JOIN_PATH")
+    assert_contains(tostring(logical.failure.path), "orders_customer")
+
+    -- Same graph, partition moved off the path: the request must still plan, or
+    -- the guard would refuse every model that merely contains a partition.
+    local clean_ctx, clean_public = base_context()
+    clean_ctx.dimensions = {{id = 30, name = "region", entity_id = 3}}
+    clean_ctx.relationships = ctx.relationships
+    clean_ctx.unique_keys = ctx.unique_keys
+    local clean_snapshot = snapshots.from_context(clean_ctx, {clean_public})
+    local clean_bound = planner.bind_query(spec, {clean_ctx.dimensions[1]},
+        {clean_public}, {}, {}, targets)
+    local clean_logical = assert(planner.logical_plan(spec, clean_snapshot,
+        clean_bound, {clean_public}))
+    assert_equal(clean_logical.failure, nil)
+    assert_branch("planner.partition_join_hop",
+        logical.failure ~= nil, true)
+    assert_branch("planner.partition_join_hop",
+        clean_logical.failure ~= nil, false)
+end)
+
+test("physical planner refuses to render a partitioned join target", function()
+    -- The backstop for BUG-G01, at the point where the wrong SQL would be
+    -- written. source_sql renders one relation -- the target's PRIMARY
+    -- representation -- and apply_partitioned_sources expands partitions for a
+    -- branch *leaf* only, so a partitioned join target would silently contribute
+    -- its primary partition alone. The logical planner refuses this earlier with
+    -- a better message; the renderer must not be able to do it whatever route
+    -- reached it, because the failure mode is a plausible number rather than an
+    -- error.
+    local snapshot, logical = multi_physical_fixture()
+    local baseline = physical_planner.build(logical, snapshot)
+    assert_true(baseline ~= nil, "fixture must build before the guard is armed")
+
+    local regions = snapshot.entity_by_id["3"]
+    regions.fusion_strategy = "UNION"
+    local rejected, reason = physical_planner.build(logical, snapshot)
+    assert_equal(rejected, nil)
+    assert_equal(reason.reason_code, "FUSION_PARTITION_JOIN_UNSUPPORTED")
+    assert_equal(reason.entity_name, "regions")
+    assert_branch("physical.partition_join_target",
+        physical_planner.build(logical, snapshot) == nil, true)
+    regions.fusion_strategy = nil
+    assert_branch("physical.partition_join_target",
+        physical_planner.build(logical, snapshot) == nil, false)
+end)
+
 test("F3 physical planner expands disjoint representation partitions", function()
     local snapshot, logical = multi_physical_fixture()
     local orders = snapshot.entity_by_id["1"]

@@ -2499,3 +2499,91 @@ test("metric grain is proven against the object root in both directions", functi
     end, function() api.validate_visible_metric_grain(composed, safe, all) end)
     assert_true(not has_rule(composed, "SEMANTIC_MODEL_059"))
 end)
+
+test("matrix refuses a partitioned entity on the join path, not just under the dimension", function()
+    -- BUG-G01. The existing rule is keyed on the dimension's own entity, so a
+    -- partitioned entity that is merely traversed to reach a dimension beyond it
+    -- was invisible: the pair validated OK, the model published, and the
+    -- compiler joined the primary partition alone. Keying on the proven path
+    -- covers both, because the dimension's entity is that path's last node.
+    local order_line = {id = 1, name = "order_line"}
+    local order = {id = 2, name = "order"}
+    local customer = {id = 3, name = "customer"}
+    local revenue = {id = 30, name = "total_revenue", base_entity_id = 1,
+        expression = "SUM(net_revenue)", metric_type = "ADDITIVE",
+        aggregation_function = "SUM",
+        inputs = {{role = "MEASURE", object_type = "FACT", object_id = 20,
+            ordinal_position = 1}}}
+    local region = {id = 40, name = "customer_region", entity_id = 3}
+    local object = {object_id = 60, name = "SALES", root_entity_id = 1}
+    -- `order` carries F3 coverage; order_line and customer do not.
+    local partitions = {
+        {id = 201, name = "primary", role = "PRIMARY", valid_from = "2026-07-01"},
+        {id = 202, name = "cold", role = "ALTERNATE", valid_to = "2026-07-01"},
+    }
+    local ctx = validation_context({
+        version_id = 2,
+        semantic_objects = {object},
+        semantic_object_by_id = {['60'] = object},
+        entities = {order_line, order, customer},
+        entity_by_id = {['1'] = order_line, ['2'] = order, ['3'] = customer},
+        entity_name_by_id = {['1'] = "order_line", ['2'] = "order", ['3'] = "customer"},
+        representations_by_entity = {['2'] = partitions},
+        metrics = {revenue},
+        metric_by_id = {['30'] = revenue},
+        dimensions = {region},
+        dimension_by_id = {['40'] = region},
+        facts = {{id = 20, name = "net_revenue", entity_id = 1,
+            data_type = "DECIMAL(18,2)"}},
+    })
+    -- order_line -> order -> customer, both hops safe.
+    local safe = {
+        ['1'] = {{from_id = 1, to_id = 2, name = "ol_to_o", safe = true, reason = "OK"}},
+        ['2'] = {{from_id = 2, to_id = 3, name = "o_to_c", safe = true, reason = "OK"}},
+    }
+    with_query(function() return {} end, function()
+        api.compute_metric_dimension_matrix(ctx, safe, safe)
+    end)
+    local row = ctx.matrix['30']['40']
+    assert_true(not row.is_valid)
+    assert_equal(row.reason_code, "FUSION_PARTITION_JOIN_UNSUPPORTED")
+    -- The hop is reported, not the dimension's entity.
+    assert_equal(row.partition_hop_name, "order")
+    assert_branch("validator.matrix.partition_join_hop", row.is_valid, false)
+
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
+            return {{"SALES", 30, "total_revenue", 40, "customer_region"}}
+        end
+        return {}
+    end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_030")
+    assert_contains(issue.message, "FUSION_PARTITION_JOIN_UNSUPPORTED")
+    assert_contains(issue.message, "Entity 'order'")
+    assert_contains(issue.message, "sits on the join path")
+    assert_contains(issue.message, "silently omit")
+
+    -- Move the coverage off the path: the pair must go back to valid, or the
+    -- guard would refuse every model that contains a partition anywhere.
+    local clean = validation_context({
+        version_id = 2,
+        semantic_objects = {object},
+        semantic_object_by_id = {['60'] = object},
+        entities = {order_line, order, customer},
+        entity_by_id = {['1'] = order_line, ['2'] = order, ['3'] = customer},
+        entity_name_by_id = {['1'] = "order_line", ['2'] = "order", ['3'] = "customer"},
+        representations_by_entity = {},
+        metrics = {revenue},
+        metric_by_id = {['30'] = revenue},
+        dimensions = {region},
+        dimension_by_id = {['40'] = region},
+        facts = {{id = 20, name = "net_revenue", entity_id = 1,
+            data_type = "DECIMAL(18,2)"}},
+    })
+    with_query(function() return {} end, function()
+        api.compute_metric_dimension_matrix(clean, safe, safe)
+    end)
+    assert_true(clean.matrix['30']['40'].is_valid)
+    assert_branch("validator.matrix.partition_join_hop",
+        clean.matrix['30']['40'].is_valid, true)
+end)

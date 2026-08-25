@@ -812,6 +812,51 @@ function M.logical_plan(spec, snapshot, bound_query, selected_metrics, relations
             plan.relationship_proofs[#plan.relationship_proofs + 1] = proof
         end
     end
+
+    -- F3 expands a partitioned entity only where it is a metric's own leaf: the
+    -- branch is duplicated per partition and the mergeable aggregate states are
+    -- combined. Anywhere else the entity appears it is rendered from its PRIMARY
+    -- representation alone, which drops every other partition's rows.
+    --
+    -- The two checks above catch that only when the partitioned entity is where
+    -- a *dimension or filter resolves*. They miss it when the entity is merely
+    -- traversed to reach a dimension on the far side, and that is the more
+    -- dangerous shape: order_line -> order(F3) -> customer, grouping by a
+    -- customer attribute, dropped 89% of revenue on a validated and published
+    -- model while the plan recorded fusion_strategy=UNION with two partitions
+    -- and rendered one source (BUG-G01). Keying on the proven path instead of on
+    -- where the dimension lives covers both, since the dimension's own entity is
+    -- the last node of its path.
+    if plan.failure == nil then
+        for _, proof in ipairs(plan.relationship_proofs or {}) do
+            if proof.status == "PROVEN" and plan.failure == nil then
+                local traversed = {}
+                local relationship_names = {}
+                for _, edge in ipairs(proof.edges or {}) do
+                    traversed[#traversed + 1] = edge.from_entity_id
+                    traversed[#traversed + 1] = edge.to_entity_id
+                    relationship_names[#relationship_names + 1] =
+                        tostring(edge.relationship_name)
+                end
+                for _, entity_id in ipairs(traversed) do
+                    local entity = (snapshot.entity_by_id or {})[key(entity_id)]
+                    if entity ~= nil and upper(entity.fusion_strategy) == "UNION"
+                        and not leaf_lookup[key(entity_id)]
+                        and plan.failure == nil then
+                        plan.failure = {
+                            reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED",
+                            entity_id = entity.id,
+                            entity_name = entity.name,
+                            proof_id = proof.proof_id,
+                            path = #relationship_names > 0
+                                and table.concat(relationship_names, " > ") or nil,
+                            usage = "JOIN_PATH",
+                        }
+                    end
+                end
+            end
+        end
+    end
     return plan, nil
 end
 

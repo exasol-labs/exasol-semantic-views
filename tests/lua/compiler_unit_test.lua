@@ -1198,6 +1198,31 @@ test("F3 compiler diagnostics name failing model objects", function()
     })
     assert_contains(dimension_message, "Dimension 'web_campaign_channel'")
     assert_contains(dimension_message, "partitioned entity 'campaign'")
+
+    -- BUG-G01: the entity is on the join path rather than under the dimension,
+    -- so the message names the traversal and the hop, not a dimension that
+    -- resolves to it. Both map to _074.
+    local join_message = api.typed_failure_message({
+        reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED",
+        entity_name = "order",
+        path = "ol_to_o > o_to_c",
+        usage = "JOIN_PATH",
+    })
+    assert_contains(join_message, "Entity 'order'")
+    assert_contains(join_message, "traversed as an intermediate join")
+    assert_contains(join_message, "ol_to_o > o_to_c")
+    assert_contains(join_message, "silently omit the others")
+    assert_contains(join_message, "rooted at 'order'")
+    -- Without a recorded path the message must still read as a sentence.
+    local no_path = api.typed_failure_message({
+        reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED",
+        entity_name = "order",
+    })
+    assert_contains(no_path, "Entity 'order'")
+    assert_branch("compiler.partition_join_path", string.find(
+        join_message, "join path:", 1, true) ~= nil, true)
+    assert_branch("compiler.partition_join_path", string.find(
+        no_path, "join path:", 1, true) ~= nil, false)
     assert_contains(dimension_message, "joined dimensions are not supported")
 end)
 

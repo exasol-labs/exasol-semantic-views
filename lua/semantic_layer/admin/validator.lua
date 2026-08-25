@@ -3744,6 +3744,38 @@ local function validate_metric_plannability(ctx)
     end
 end
 
+-- The partitioned entity a metric/dimension pair would have to join *through*.
+--
+-- F3 expands partitions only where the entity is a metric's own leaf: that
+-- branch is duplicated per partition and the mergeable states are merged.
+-- Everywhere else the entity is rendered from its PRIMARY representation, which
+-- silently drops the other partitions' rows. The pair-level guard above is keyed
+-- on the dimension's own entity, so it never saw an entity that is merely a hop
+-- on the way to a dimension beyond it -- and neither did the query-time guard.
+-- That is BUG-G01: order_line -> order(F3) -> customer, grouped by a customer
+-- attribute, returned 43 700.32 of a true 412 907.22 on a validated, published
+-- model.
+--
+-- The dimension's own entity is excluded here because the caller reports that
+-- case separately, with a message about the dimension rather than the traversal.
+local function partitioned_join_hop(ctx, metric, proof, dimension_entity_id)
+    if proof == nil then return nil end
+    local leaves = metric_leaf_entities(ctx, metric)
+    for _, edge in ipairs(proof.edges or {}) do
+        for _, entity_id in ipairs({edge.from_id, edge.to_id}) do
+            local entity_key = key(entity_id)
+            if entity_key ~= key(dimension_entity_id)
+                and not leaves[entity_key] then
+                local entity = ctx.entity_by_id[entity_key]
+                if entity ~= nil and entity_is_partitioned(ctx, entity) then
+                    return entity
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
@@ -3764,6 +3796,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             local reason_code = "OK"
             local path = nil
             local alternates = nil
+            local partition_hop_name = nil
             if not root_can_reach_metric then
                 reason_code = "NO_SAFE_JOIN_PATH"
                 path = root_path
@@ -3772,8 +3805,11 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             elseif ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
                 reason_code = "MISSING_DIMENSION_ENTITY"
             else
-                local ok, reason, relationship_path = find_path(safe_edges, metric.base_entity_id, dimension.entity_id, true)
+                local ok, reason, relationship_path, proof = find_path(safe_edges, metric.base_entity_id, dimension.entity_id, true)
                 local dimension_entity = ctx.entity_by_id[key(dimension.entity_id)]
+                local hop_entity = ok
+                    and partitioned_join_hop(ctx, metric, proof, dimension.entity_id)
+                    or nil
                 if ok and dimension_entity ~= nil
                     and entity_is_partitioned(ctx, dimension_entity)
                     and not metric_leaf_entities(ctx, metric)[key(dimension.entity_id)] then
@@ -3786,6 +3822,13 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                     -- published dimensions silently.
                     reason_code = "FUSION_PARTITION_DIMENSION_UNSUPPORTED"
                     path = relationship_path
+                elseif hop_entity ~= nil then
+                    -- BUG-G01: the entity is not where the dimension lives, it
+                    -- is on the way there. Same defect, and the one the
+                    -- dimension-keyed check above cannot see.
+                    reason_code = "FUSION_PARTITION_JOIN_UNSUPPORTED"
+                    path = relationship_path
+                    partition_hop_name = hop_entity.name
                 elseif ok then
                     is_valid = true
                     reason_code = "OK"
@@ -3803,6 +3846,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 is_valid = is_valid,
                 reason_code = reason_code,
                 path = path,
+                partition_hop_name = partition_hop_name,
                 alternate_paths = alternates ~= nil
                     and #alternates.alternates > 0 and alternates.alternates or nil,
             }
@@ -4040,6 +4084,17 @@ local function validate_visible_metric_dimension_pairs(ctx)
                         .. base_name .. "', or remove this metric from object '"
                         .. tostring(object_name) .. "'."
                 end
+            elseif matrix_row.reason_code == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
+                local hop = matrix_row.partition_hop_name or "an intermediate entity"
+                message = message .. " Entity '" .. tostring(hop)
+                    .. "' carries F3 temporal coverage and sits on the join path"
+                    .. " between them. F3 expands partitions only where the"
+                    .. " entity is a metric's own leaf, so joining through it"
+                    .. " would read its primary partition alone and silently omit"
+                    .. " the others. Expose this dimension alongside metrics"
+                    .. " based at '" .. tostring(hop) .. "', in this or a"
+                    .. " separate semantic object, or remove the coverage"
+                    .. " declarations from that entity."
             elseif matrix_row.reason_code == "FUSION_PARTITION_DIMENSION_UNSUPPORTED" then
                 local dimension_entity_name = dimension ~= nil
                     and (ctx.entity_name_by_id[key(dimension.entity_id)]
