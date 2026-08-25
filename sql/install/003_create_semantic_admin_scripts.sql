@@ -8904,6 +8904,28 @@ end
 -- declared spelling. `cache` is an optional caller-owned table; the module
 -- keeps no state of its own so a long-running session cannot serve a stale
 -- name after a source is redefined.
+-- Resolve two declared column names against one source in a single call.
+--
+-- The F5 identity mapping relation is always addressed as a pair -- the
+-- source-local key and the semantic key of the same cross-reference table -- and
+-- both used to be quoted verbatim, so a lower-case declaration probed as
+-- `"account_id"` against a physical ACCOUNT_ID and failed (BUG-G03). Living here
+-- rather than in each runtime keeps the validator's probes and the compiler's
+-- rendering on one implementation, and costs neither runtime a file-scope local:
+-- Exasol caps a Lua function at 200 locals and the compiler runtime's main chunk
+-- is already at that ceiling.
+--
+-- Each name falls back to its declared spelling when the metadata cannot answer,
+-- so a source outside EXA_ALL_COLUMNS probes exactly as it did before and
+-- reports its own error rather than one invented here.
+function M.resolve_pair(query_fn, source_schema, source_object, first, second, cache)
+    local first_name = M.resolve(query_fn, source_schema, source_object,
+        first, cache) or first
+    local second_name = M.resolve(query_fn, source_schema, source_object,
+        second, cache) or second
+    return first_name, second_name
+end
+
 function M.resolve(query_fn, source_schema, source_object, column_name, cache)
     if missing(source_schema) or missing(source_object) or missing(column_name) then
         return nil, "source column is not visible: " .. tostring(column_name)
@@ -12115,12 +12137,16 @@ local function identity_grouped_key_query(representation, binding)
         semantic_expression = tostring(binding.expression)
     else
         local mapping = binding.mapping
+        -- BUG-G03: the declared spelling is the modeler's, not the database's.
+        local local_column, semantic_column = source_columns.resolve_pair(query,
+            mapping.source_schema, mapping.source_object, mapping.local_column,
+            mapping.semantic_column)
         local map_alias = "f5_map_" .. tostring(binding.id)
-        semantic_expression = map_alias .. "." .. quote_ident(mapping.semantic_column)
+        semantic_expression = map_alias .. "." .. quote_ident(semantic_column)
         from_sql = from_sql .. " JOIN "
             .. quote_qualified(mapping.source_schema, mapping.source_object)
             .. " " .. map_alias .. " ON " .. tostring(binding.expression)
-            .. " = " .. map_alias .. "." .. quote_ident(mapping.local_column)
+            .. " = " .. map_alias .. "." .. quote_ident(local_column)
     end
     return "SELECT " .. semantic_expression .. " FROM " .. from_sql
         .. " WHERE " .. semantic_expression .. " IS NOT NULL GROUP BY "
@@ -12159,21 +12185,24 @@ local function validate_semantic_identity_data(ctx)
                 end
                 if upper(binding.kind) == "MAPPED" then
                     local mapping = binding.mapping
+                    local map_local_column, map_semantic_column = source_columns.resolve_pair(query,
+                        mapping.source_schema, mapping.source_object, mapping.local_column,
+                        mapping.semantic_column)
                     local map_source = quote_qualified(mapping.source_schema, mapping.source_object)
                     local map_total, map_total_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
                     local map_local, map_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(mapping.local_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(mapping.local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(mapping.semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(mapping.local_column) .. ") f5_map_local")
+                        .. quote_ident(map_local_column) .. " FROM " .. map_source
+                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. quote_ident(map_local_column) .. ") f5_map_local")
                     local map_semantic, map_semantic_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(mapping.semantic_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(mapping.local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(mapping.semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(mapping.semantic_column) .. ") f5_map_semantic")
+                        .. quote_ident(map_semantic_column) .. " FROM " .. map_source
+                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. quote_ident(map_semantic_column) .. ") f5_map_semantic")
                     local mapped_local, mapped_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
                         .. tostring(binding.expression) .. " FROM "
@@ -12181,7 +12210,7 @@ local function validate_semantic_identity_data(ctx)
                             representation.source_object) .. " " .. tostring(representation.alias)
                         .. " JOIN " .. map_source .. " f5_total_map ON "
                         .. tostring(binding.expression) .. " = f5_total_map."
-                        .. quote_ident(mapping.local_column) .. " GROUP BY "
+                        .. quote_ident(map_local_column) .. " GROUP BY "
                         .. tostring(binding.expression) .. ") f5_mapped_local_keys")
                     if map_total_error ~= nil or map_local_error ~= nil
                         or map_semantic_error ~= nil or mapped_local_error ~= nil then
@@ -13019,16 +13048,23 @@ local function identity_conflict_source(representation, identity_binding, alias)
     local source_alias = "f5_conflict_src_" .. tostring(representation.id)
     local map_alias = "f5_conflict_map_" .. tostring(identity_binding.id)
     local mapping = identity_binding.mapping
+    -- Same resolution as the mapping probes and the compiler's own rendering of
+    -- this join: the F4 conflict probe reaches the mapping relation through the
+    -- declared column names too, so leaving it verbatim would have kept a third
+    -- of BUG-G03 alive on the one path that only runs for COALESCE/RECONCILE.
+    local local_column, semantic_column = source_columns.resolve_pair(query,
+        mapping.source_schema, mapping.source_object, mapping.local_column,
+        mapping.semantic_column)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident(semantic_column) .. " AS "
         .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
         .. quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. source_alias .. " JOIN "
         .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
         .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(mapping.local_column) .. ")"
+        .. quote_ident(local_column) .. ")"
     return source_sql, alias .. "." .. quote_ident("F5_SEMANTIC_KEY")
 end
 
@@ -14981,6 +15017,28 @@ end
 -- declared spelling. `cache` is an optional caller-owned table; the module
 -- keeps no state of its own so a long-running session cannot serve a stale
 -- name after a source is redefined.
+-- Resolve two declared column names against one source in a single call.
+--
+-- The F5 identity mapping relation is always addressed as a pair -- the
+-- source-local key and the semantic key of the same cross-reference table -- and
+-- both used to be quoted verbatim, so a lower-case declaration probed as
+-- `"account_id"` against a physical ACCOUNT_ID and failed (BUG-G03). Living here
+-- rather than in each runtime keeps the validator's probes and the compiler's
+-- rendering on one implementation, and costs neither runtime a file-scope local:
+-- Exasol caps a Lua function at 200 locals and the compiler runtime's main chunk
+-- is already at that ceiling.
+--
+-- Each name falls back to its declared spelling when the metadata cannot answer,
+-- so a source outside EXA_ALL_COLUMNS probes exactly as it did before and
+-- reports its own error rather than one invented here.
+function M.resolve_pair(query_fn, source_schema, source_object, first, second, cache)
+    local first_name = M.resolve(query_fn, source_schema, source_object,
+        first, cache) or first
+    local second_name = M.resolve(query_fn, source_schema, source_object,
+        second, cache) or second
+    return first_name, second_name
+end
+
 function M.resolve(query_fn, source_schema, source_object, column_name, cache)
     if missing(source_schema) or missing(source_object) or missing(column_name) then
         return nil, "source column is not visible: " .. tostring(column_name)
@@ -19148,11 +19206,14 @@ local function relationship_candidate(ctx, requirement, entity, representation)
     }, nil
 end
 
-local function base_semantic_key_expression(entity, representation, identity_binding)
+local function base_semantic_key_expression(ctx, entity, representation, identity_binding)
     if upper(identity_binding.kind) == "DIRECT" then
         return tostring(identity_binding.expression)
     end
     local mapping = identity_binding.mapping
+    local local_column, semantic_column = source_columns.resolve_pair(query,
+        mapping.source_schema, mapping.source_object, mapping.local_column,
+        mapping.semantic_column, ctx ~= nil and ctx._source_column_cache or nil)
     local map_alias = "f5_base_map_" .. tostring(identity_binding.id)
     entity.fusion_joins = entity.fusion_joins or {}
     entity.fusion_join_by_representation = entity.fusion_join_by_representation or {}
@@ -19162,15 +19223,16 @@ local function base_semantic_key_expression(entity, representation, identity_bin
             source_sql = quote_qualified(mapping.source_schema, mapping.source_object),
             alias = map_alias,
             predicates = {tostring(identity_binding.expression) .. " = "
-                .. map_alias .. "." .. quote_ident(mapping.local_column)},
+                .. map_alias .. "." .. quote_ident(local_column)},
             identity_mapping = true,
         }
         entity.fusion_join_by_representation[join_key] = true
     end
-    return map_alias .. "." .. quote_ident(mapping.semantic_column)
+    return map_alias .. "." .. quote_ident(semantic_column)
 end
 
-local function alternate_identity_source(representation, identity_binding, lookup_alias)
+local function alternate_identity_source(ctx, representation, identity_binding,
+        lookup_alias)
     if upper(identity_binding.kind) == "DIRECT" then
         return quote_qualified(representation.source_schema,
             representation.source_object),
@@ -19178,18 +19240,21 @@ local function alternate_identity_source(representation, identity_binding, looku
                 representation.alias, lookup_alias), nil
     end
     local mapping = identity_binding.mapping
+    local local_column, semantic_column = source_columns.resolve_pair(query,
+        mapping.source_schema, mapping.source_object, mapping.local_column,
+        mapping.semantic_column, ctx ~= nil and ctx._source_column_cache or nil)
     local source_alias = "f5_src_" .. tostring(representation.id)
     local map_alias = "f5_map_" .. tostring(identity_binding.id)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident(semantic_column) .. " AS "
         .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
         .. quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. source_alias .. " JOIN "
         .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
         .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(mapping.local_column) .. ")"
+        .. quote_ident(local_column) .. ")"
     return source_sql, lookup_alias .. "." .. quote_ident("F5_SEMANTIC_KEY"), mapping
 end
 
@@ -19237,7 +19302,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
     local base_identity_binding = semantic_identity
         and semantic_identity.binding_by_representation[key(base_representation.id)] or nil
     local base_identity_expression = base_identity_binding
-        and base_semantic_key_expression(entity, base_representation,
+        and base_semantic_key_expression(ctx, entity, base_representation,
             base_identity_binding) or nil
     local bindings = sorted_fusion_bindings(ctx,
         ctx.bindings_by_attribute[attribute_key] or {})
@@ -19265,7 +19330,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                         key(representation.id)]
                     local alternate_identity
                     source_sql, alternate_identity, identity_mapping =
-                        alternate_identity_source(representation, identity_binding,
+                        alternate_identity_source(ctx, representation, identity_binding,
                             lookup_alias)
                     predicates[#predicates + 1] = alternate_identity
                         .. " = " .. base_identity_expression

@@ -850,8 +850,17 @@ local function compiler_query_fixture(options)
             end
             if options.f5_identity then
                 return {
-                    {601, 1, 501, 101, "o.order_id", "DIRECT",
-                        null, null, null, null, null, null},
+                    -- The base representation's own identity is MAPPED too when
+                    -- f5_mapped_base is set, which is the only way to reach
+                    -- base_semantic_key_expression's mapped branch. Its mapping
+                    -- columns are declared lower case on purpose: BUG-G03 was
+                    -- these two names being quoted verbatim.
+                    options.f5_mapped_base
+                        and {601, 1, 501, 101, "o.order_id", "MAPPED",
+                            700, "IDENTITY_MAP", "ORDER_XREF", "order_id",
+                            "order_id", "CERTIFIED"}
+                        or {601, 1, 501, 101, "o.order_id", "DIRECT",
+                            null, null, null, null, null, null},
                     {602, 1, 501, 104, "o.legacy_order_id", "MAPPED",
                         701, "IDENTITY_MAP", "ORDER_XREF", "LEGACY_ORDER_ID",
                         "ORDER_ID", "CERTIFIED"},
@@ -1074,6 +1083,52 @@ test("F4 compiler reconciles attribute values by declared authority", function()
     assert_contains(result.plan_json, '"fusion_strategy":"RECONCILE"')
     assert_contains(result.plan_json, '"authority_role":"AUTHORITATIVE"')
     assert_contains(result.plan_json, '"authority_role":"SUPPLEMENTAL"')
+end)
+
+test("F5 mapping columns render the physical spelling, not the declared one", function()
+    -- BUG-G03. ADD_IDENTITY_MAPPING_RELATION stores the modeler's spelling, and
+    -- these were the one pair of declared column names that never reached
+    -- shared/source_columns.lua. Quoted verbatim, a lower-case `account_id`
+    -- became `"account_id"` against a physical ACCOUNT_ID: the validator's probe
+    -- failed with SEMANTIC_MODEL_049, and had it not, the compiler would have
+    -- rendered the same unexecutable SQL that BUG-F03 was about.
+    --
+    -- f5_mapped_base also puts a MAPPED binding on the *base* representation,
+    -- which is the only way into base_semantic_key_expression's mapped branch --
+    -- previously untested, and the second place the pair is rendered.
+    local result = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"total_revenue"},
+        dimensions = {"order_status"},
+    }, {f4_reconcile = true, f5_identity = true, f5_mapped_base = true})
+    assert_equal(result.status, "OK")
+
+    -- The base side: its own mapping join, rendered from the resolved spelling.
+    assert_contains(result.generated_sql, 'f5_base_map_601')
+    assert_contains(result.generated_sql, 'f5_base_map_601."ORDER_ID"')
+    -- The alternate side still resolves as before.
+    assert_contains(result.generated_sql, 'f5_map_602."LEGACY_ORDER_ID"')
+    -- Nothing anywhere may carry the declared lower-case spelling in quotes.
+    if result.generated_sql:find('"order_id"', 1, true) ~= nil then
+        error("mapping join quoted the declared spelling verbatim: "
+            .. tostring(result.generated_sql))
+    end
+
+    -- The same request with a DIRECT base identity must render no base mapping
+    -- join at all, so both sides of that decision are exercised rather than
+    -- only the one this test was added for.
+    local direct = compile_with_fixture({
+        model = "sales",
+        object = "SALES",
+        metrics = {"total_revenue"},
+        dimensions = {"order_status"},
+    }, {f4_reconcile = true, f5_identity = true})
+    assert_equal(direct.status, "OK")
+    assert_branch("compiler.identity_mapped_base",
+        result.generated_sql:find("f5_base_map_601", 1, true) ~= nil, true)
+    assert_branch("compiler.identity_mapped_base",
+        direct.generated_sql:find("f5_base_map_601", 1, true) ~= nil, false)
 end)
 
 test("F5 compiler reconciles through a certified source-local identity map", function()

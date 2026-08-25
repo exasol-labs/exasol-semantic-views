@@ -2299,12 +2299,16 @@ local function identity_grouped_key_query(representation, binding)
         semantic_expression = tostring(binding.expression)
     else
         local mapping = binding.mapping
+        -- BUG-G03: the declared spelling is the modeler's, not the database's.
+        local local_column, semantic_column = source_columns.resolve_pair(query,
+            mapping.source_schema, mapping.source_object, mapping.local_column,
+            mapping.semantic_column)
         local map_alias = "f5_map_" .. tostring(binding.id)
-        semantic_expression = map_alias .. "." .. quote_ident(mapping.semantic_column)
+        semantic_expression = map_alias .. "." .. quote_ident(semantic_column)
         from_sql = from_sql .. " JOIN "
             .. quote_qualified(mapping.source_schema, mapping.source_object)
             .. " " .. map_alias .. " ON " .. tostring(binding.expression)
-            .. " = " .. map_alias .. "." .. quote_ident(mapping.local_column)
+            .. " = " .. map_alias .. "." .. quote_ident(local_column)
     end
     return "SELECT " .. semantic_expression .. " FROM " .. from_sql
         .. " WHERE " .. semantic_expression .. " IS NOT NULL GROUP BY "
@@ -2343,21 +2347,24 @@ local function validate_semantic_identity_data(ctx)
                 end
                 if upper(binding.kind) == "MAPPED" then
                     local mapping = binding.mapping
+                    local map_local_column, map_semantic_column = source_columns.resolve_pair(query,
+                        mapping.source_schema, mapping.source_object, mapping.local_column,
+                        mapping.semantic_column)
                     local map_source = quote_qualified(mapping.source_schema, mapping.source_object)
                     local map_total, map_total_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
                     local map_local, map_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(mapping.local_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(mapping.local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(mapping.semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(mapping.local_column) .. ") f5_map_local")
+                        .. quote_ident(map_local_column) .. " FROM " .. map_source
+                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. quote_ident(map_local_column) .. ") f5_map_local")
                     local map_semantic, map_semantic_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(mapping.semantic_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(mapping.local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(mapping.semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(mapping.semantic_column) .. ") f5_map_semantic")
+                        .. quote_ident(map_semantic_column) .. " FROM " .. map_source
+                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. quote_ident(map_semantic_column) .. ") f5_map_semantic")
                     local mapped_local, mapped_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
                         .. tostring(binding.expression) .. " FROM "
@@ -2365,7 +2372,7 @@ local function validate_semantic_identity_data(ctx)
                             representation.source_object) .. " " .. tostring(representation.alias)
                         .. " JOIN " .. map_source .. " f5_total_map ON "
                         .. tostring(binding.expression) .. " = f5_total_map."
-                        .. quote_ident(mapping.local_column) .. " GROUP BY "
+                        .. quote_ident(map_local_column) .. " GROUP BY "
                         .. tostring(binding.expression) .. ") f5_mapped_local_keys")
                     if map_total_error ~= nil or map_local_error ~= nil
                         or map_semantic_error ~= nil or mapped_local_error ~= nil then
@@ -3203,16 +3210,23 @@ local function identity_conflict_source(representation, identity_binding, alias)
     local source_alias = "f5_conflict_src_" .. tostring(representation.id)
     local map_alias = "f5_conflict_map_" .. tostring(identity_binding.id)
     local mapping = identity_binding.mapping
+    -- Same resolution as the mapping probes and the compiler's own rendering of
+    -- this join: the F4 conflict probe reaches the mapping relation through the
+    -- declared column names too, so leaving it verbatim would have kept a third
+    -- of BUG-G03 alive on the one path that only runs for COALESCE/RECONCILE.
+    local local_column, semantic_column = source_columns.resolve_pair(query,
+        mapping.source_schema, mapping.source_object, mapping.local_column,
+        mapping.semantic_column)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident(semantic_column) .. " AS "
         .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
         .. quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. source_alias .. " JOIN "
         .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
         .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(mapping.local_column) .. ")"
+        .. quote_ident(local_column) .. ")"
     return source_sql, alias .. "." .. quote_ident("F5_SEMANTIC_KEY")
 end
 

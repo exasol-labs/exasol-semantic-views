@@ -32,6 +32,28 @@ end
 -- declared spelling. `cache` is an optional caller-owned table; the module
 -- keeps no state of its own so a long-running session cannot serve a stale
 -- name after a source is redefined.
+-- Resolve two declared column names against one source in a single call.
+--
+-- The F5 identity mapping relation is always addressed as a pair -- the
+-- source-local key and the semantic key of the same cross-reference table -- and
+-- both used to be quoted verbatim, so a lower-case declaration probed as
+-- `"account_id"` against a physical ACCOUNT_ID and failed (BUG-G03). Living here
+-- rather than in each runtime keeps the validator's probes and the compiler's
+-- rendering on one implementation, and costs neither runtime a file-scope local:
+-- Exasol caps a Lua function at 200 locals and the compiler runtime's main chunk
+-- is already at that ceiling.
+--
+-- Each name falls back to its declared spelling when the metadata cannot answer,
+-- so a source outside EXA_ALL_COLUMNS probes exactly as it did before and
+-- reports its own error rather than one invented here.
+function M.resolve_pair(query_fn, source_schema, source_object, first, second, cache)
+    local first_name = M.resolve(query_fn, source_schema, source_object,
+        first, cache) or first
+    local second_name = M.resolve(query_fn, source_schema, source_object,
+        second, cache) or second
+    return first_name, second_name
+end
+
 function M.resolve(query_fn, source_schema, source_object, column_name, cache)
     if missing(source_schema) or missing(source_object) or missing(column_name) then
         return nil, "source column is not visible: " .. tostring(column_name)

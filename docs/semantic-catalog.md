@@ -398,6 +398,16 @@ local expression uniqueness, mapping totality, bijection, and exact canonical
 key-set equality with the primary. Incomplete, ambiguous, uncertified, or
 probabilistic mappings fail closed as `SEMANTIC_MODEL_047` to `_049`.
 
+The mapping relation's two column names are **case-insensitive**, like every
+other declared column name: `account_id` and `ACCOUNT_ID` both resolve to
+whatever the source actually carries. Both names go through
+`lua/semantic_layer/shared/source_columns.lua`, so the validator's probes and the
+compiler's rendering of the same join cannot disagree about the spelling. They
+were the last pair of declared names quoted verbatim, which made a lower-case
+declaration fail validation with `SEMANTIC_MODEL_049` while the neighbouring
+`ADD_UNIQUE_KEY_WITH_COLUMNS` accepted either case — an inconsistency a modeller
+had no way to predict.
+
 `ADD_SEMANTIC_IDENTITY_WITH_BINDINGS` installs the identity, exactly one binding
 for every active representation, and nested mapping metadata for each `MAPPED`
 binding as one prospective candidate. Use it for published models, where the

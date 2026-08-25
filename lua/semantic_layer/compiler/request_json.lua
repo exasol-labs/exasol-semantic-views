@@ -1860,11 +1860,14 @@ local function relationship_candidate(ctx, requirement, entity, representation)
     }, nil
 end
 
-local function base_semantic_key_expression(entity, representation, identity_binding)
+local function base_semantic_key_expression(ctx, entity, representation, identity_binding)
     if upper(identity_binding.kind) == "DIRECT" then
         return tostring(identity_binding.expression)
     end
     local mapping = identity_binding.mapping
+    local local_column, semantic_column = source_columns.resolve_pair(query,
+        mapping.source_schema, mapping.source_object, mapping.local_column,
+        mapping.semantic_column, ctx ~= nil and ctx._source_column_cache or nil)
     local map_alias = "f5_base_map_" .. tostring(identity_binding.id)
     entity.fusion_joins = entity.fusion_joins or {}
     entity.fusion_join_by_representation = entity.fusion_join_by_representation or {}
@@ -1874,15 +1877,16 @@ local function base_semantic_key_expression(entity, representation, identity_bin
             source_sql = quote_qualified(mapping.source_schema, mapping.source_object),
             alias = map_alias,
             predicates = {tostring(identity_binding.expression) .. " = "
-                .. map_alias .. "." .. quote_ident(mapping.local_column)},
+                .. map_alias .. "." .. quote_ident(local_column)},
             identity_mapping = true,
         }
         entity.fusion_join_by_representation[join_key] = true
     end
-    return map_alias .. "." .. quote_ident(mapping.semantic_column)
+    return map_alias .. "." .. quote_ident(semantic_column)
 end
 
-local function alternate_identity_source(representation, identity_binding, lookup_alias)
+local function alternate_identity_source(ctx, representation, identity_binding,
+        lookup_alias)
     if upper(identity_binding.kind) == "DIRECT" then
         return quote_qualified(representation.source_schema,
             representation.source_object),
@@ -1890,18 +1894,21 @@ local function alternate_identity_source(representation, identity_binding, looku
                 representation.alias, lookup_alias), nil
     end
     local mapping = identity_binding.mapping
+    local local_column, semantic_column = source_columns.resolve_pair(query,
+        mapping.source_schema, mapping.source_object, mapping.local_column,
+        mapping.semantic_column, ctx ~= nil and ctx._source_column_cache or nil)
     local source_alias = "f5_src_" .. tostring(representation.id)
     local map_alias = "f5_map_" .. tostring(identity_binding.id)
     local local_expression = replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = "(SELECT " .. source_alias .. ".*, " .. map_alias .. "."
-        .. quote_ident(mapping.semantic_column) .. " AS "
+        .. quote_ident(semantic_column) .. " AS "
         .. quote_ident("F5_SEMANTIC_KEY") .. " FROM "
         .. quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. source_alias .. " JOIN "
         .. quote_qualified(mapping.source_schema, mapping.source_object) .. " "
         .. map_alias .. " ON " .. local_expression .. " = " .. map_alias .. "."
-        .. quote_ident(mapping.local_column) .. ")"
+        .. quote_ident(local_column) .. ")"
     return source_sql, lookup_alias .. "." .. quote_ident("F5_SEMANTIC_KEY"), mapping
 end
 
@@ -1949,7 +1956,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
     local base_identity_binding = semantic_identity
         and semantic_identity.binding_by_representation[key(base_representation.id)] or nil
     local base_identity_expression = base_identity_binding
-        and base_semantic_key_expression(entity, base_representation,
+        and base_semantic_key_expression(ctx, entity, base_representation,
             base_identity_binding) or nil
     local bindings = sorted_fusion_bindings(ctx,
         ctx.bindings_by_attribute[attribute_key] or {})
@@ -1977,7 +1984,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                         key(representation.id)]
                     local alternate_identity
                     source_sql, alternate_identity, identity_mapping =
-                        alternate_identity_source(representation, identity_binding,
+                        alternate_identity_source(ctx, representation, identity_binding,
                             lookup_alias)
                     predicates[#predicates + 1] = alternate_identity
                         .. " = " .. base_identity_expression

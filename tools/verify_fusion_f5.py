@@ -71,6 +71,85 @@ def compile_names(con: Any) -> tuple[list[str], dict[str, Any], str]:
     return sorted(str(row[0]) for row in rows), json.loads(str(compiled[5])), generated_sql
 
 
+def lower_case_mapping_case(con: Any) -> tuple[list[str], str]:
+    """The same F5 identity graph with the mapping relation declared lower case.
+
+    Everything else is identical to the model below; only the spelling of
+    IDENTITY_MAPPING_RELATIONS.SOURCE_LOCAL_COLUMN and SEMANTIC_KEY_COLUMN
+    differs. Both used to be quoted verbatim, so `account_id` probed as
+    `"account_id"` against a physical `ACCOUNT_ID` and validation refused the
+    model with SEMANTIC_MODEL_049 — while the neighbouring
+    ADD_UNIQUE_KEY_WITH_COLUMNS accepted either case, so the two APIs disagreed
+    with no way to predict it (BUG-G03).
+
+    Reuses the F5_VERIFY schema, so it must run after the physical tables exist.
+    """
+    try:
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('f5_verify_lower')")
+    except Exception:  # noqa: BLE001 - absent on the first run
+        pass
+    for statement in (
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL('f5_verify_lower', "
+        "'SEMANTIC_F5_VERIFY_LOWER', 'F5 lower-case mapping verification', NULL)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY('f5_verify_lower', 'customer', "
+        "'F5_VERIFY', 'CUSTOMERS_MDM', 'c', 'c.customer_id', 'One customer', 'Customer 360')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY('f5_verify_lower', 'customer', "
+        "'customer_pk', 'PRIMARY', 'MDM customer key', 'NATIVE')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN('f5_verify_lower', 'customer', "
+        "'customer_pk', 'CUSTOMER_ID', NULL, 1)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT('f5_verify_lower', "
+        "'CUSTOMER_360', 'customer', 'Customer 360')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('f5_verify_lower', 'CUSTOMER_360', "
+        "'customer', 'customer_name', 'c.customer_name', 'VARCHAR(100)', 'Customer Name', "
+        "'Resolved customer name', NULL, TRUE)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION('f5_verify_lower', "
+        "'customer', 'crm', 'RELATION', 'F5_VERIFY', 'ACCOUNTS_CRM', 20, 'MANUAL')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING('f5_verify_lower', 'DIMENSION', "
+        "'customer_name', 'crm', 'c.display_name', 'PREFER', 1)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY('f5_verify_lower', 'customer', "
+        "'customer_identity', 'GLOBAL', 'DECIMAL(18,0)', 'Certified customer identity')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING('f5_verify_lower', "
+        "'customer_identity', 'primary', 'c.customer_id', 'DIRECT')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_BINDING('f5_verify_lower', "
+        "'customer_identity', 'crm', 'c.account_id', 'MAPPED')",
+        # the whole point: declared lower case, physical columns are upper case
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION('f5_verify_lower', "
+        "'customer_identity', 'crm', 'F5_VERIFY', 'CUSTOMER_XREF', 'account_id', "
+        "'customer_id', 'CERTIFIED')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY('f5_verify_lower', "
+        "'customer', 'primary', 'PREFER')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY('f5_verify_lower', "
+        "'customer', 'crm', 'SUPPLEMENTAL')",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY('f5_verify_lower', "
+        "'DIMENSION', 'customer_name', 'COALESCE')",
+    ):
+        execute(con, statement)
+
+    issues = execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('f5_verify_lower')")
+    errors = [row for row in issues if str(row[0]).upper() == "ERROR"]
+    if errors:
+        raise AssertionError(
+            f"lower-case mapping model failed validation: {errors}")
+
+    payload = json.dumps(
+        {
+            "model": "f5_verify_lower",
+            "object": "CUSTOMER_360",
+            "dimensions": ["customer_name"],
+            "proof_mode": "STRICT_GRAIN",
+        },
+        separators=(",", ":"),
+    )
+    compiled = execute(
+        con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({literal(payload)})")[0]
+    if str(compiled[0]) != "OK":
+        raise AssertionError(
+            f"lower-case mapping compile failed: {compiled[1]} {compiled[2]}")
+    generated_sql = str(compiled[4])
+    rows = execute(con, generated_sql)
+    return sorted(str(row[0]) for row in rows), generated_sql
+
+
 def has_rule(issues: list[tuple[Any, ...]], rule: str) -> bool:
     return any(str(row[3]) == rule for row in issues)
 
@@ -191,17 +270,37 @@ def main() -> int:
         if int(remaining) != 0:
             raise AssertionError(f"semantic identity removal left {remaining} row(s)")
 
+        # BUG-G03: the mapping relation's declared columns were the one pair of
+        # declared names that never reached the shared resolver, so a lower-case
+        # declaration -- the case a modeller naturally types, and the case
+        # ADD_UNIQUE_KEY_WITH_COLUMNS already accepted -- failed validation.
+        lower_names, lower_sql = lower_case_mapping_case(con)
+        if lower_names != ["Alice", "Bob", "Carol"]:
+            raise AssertionError(f"F5 lower-case mapping result mismatch: {lower_names}")
+        map_lines = [line for line in lower_sql.splitlines() if "f5_map" in line]
+        if not map_lines:
+            raise AssertionError(f"no identity mapping join rendered: {lower_sql}")
+        joined = " ".join(map_lines)
+        if '"account_id"' in joined or '"customer_id"' in joined:
+            raise AssertionError(
+                f"mapping join quoted the declared spelling verbatim: {joined}")
+        if '"ACCOUNT_ID"' not in joined:
+            raise AssertionError(
+                f"mapping join did not resolve the local key column: {joined}")
+
         print("ok F5 identity: direct and mapped source-local keys")
         print("ok F5 validation: total, one-to-one canonical mapping")
         print("ok F5 failures: incomplete and non-bijective mappings rejected")
         print("ok F5 lifecycle: dependency guards and ordered removal")
         print(f"ok F5 rows: {names}")
+        print(f"ok F5 lower-case mapping columns resolve: {lower_names}")
         return 0
     finally:
-        try:
-            execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL('f5_verify')")
-        except Exception:
-            pass
+        for model in ("f5_verify", "f5_verify_lower"):
+            try:
+                execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(model)})")
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
         try:
             con.execute("DROP SCHEMA IF EXISTS F5_VERIFY CASCADE")
         except Exception:

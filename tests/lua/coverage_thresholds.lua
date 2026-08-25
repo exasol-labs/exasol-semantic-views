@@ -16,16 +16,24 @@
 -- the agent runtime, and the metric-grain proof against the object root in the
 -- validator -- and again the same day for BUG-G01, which added the
 -- partitioned-join-hop refusal to the matrix, the logical planner, and the
--- physical renderer's backstop.
+-- physical renderer's backstop, and again for BUG-G03, which routed the F5
+-- identity mapping columns through the shared resolver and covered the
+-- previously untested mapped-base rendering.
+--
+-- shared/source_columns.lua joined the gate with that change. It was loaded and
+-- measured but ungated, which is a poor place for a blind spot: both runtimes
+-- embed it, and it is the single point where a declared column name becomes the
+-- physical one.
 return {
     lines = {
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.6,
+        ["lua/semantic_layer/shared/source_columns.lua"] = 92.5,
         ["lua/semantic_layer/compiler/query_spec.lua"] = 96.7,
         ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 100,
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.3,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 86.6,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 87.1,
         ["lua/semantic_layer/admin/validator.lua"] = 93.5,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.0,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 71.7,
