@@ -392,7 +392,7 @@ local ENTITY_KEYS = {identity = true, representations = true,
 local REPRESENTATION_KEYS = {name = true, role = true, source_kind = true,
     source_schema = true, source_object = true, source_alias = true,
     priority = true, freshness_policy = true, authority = true,
-    coverage = true, identity_binding = true}
+    coverage = true, identity_binding = true, attribute_bindings = true}
 local IDENTITY_KEYS = {name = true, kind = true, data_type = true,
     description = true}
 local BINDING_KEYS = {source_expression = true, binding_kind = true,
@@ -403,6 +403,10 @@ local MAPPING_KEYS = {source_schema = true, source_object = true,
 local ATTRIBUTE_BINDING_KEYS = {attribute_type = true, attribute_name = true,
     representation = true, source_expression = true, binding_role = true,
     binding_priority = true}
+-- Inside a representation the enclosing object *is* the representation, so
+-- naming it again would be a second place to get it wrong.
+local REPRESENTATION_BINDING_KEYS = {attribute_type = true, attribute_name = true,
+    source_expression = true, binding_role = true, binding_priority = true}
 local ATTRIBUTE_POLICY_KEYS = {attribute_type = true, attribute_name = true,
     strategy = true}
 
@@ -701,6 +705,23 @@ local function plan_entity(query_fn, model, entity_name, entity)
                 valid_to = trim(coverage.valid_to) ~= "" and trim(coverage.valid_to) or nil,
                 coverage_predicate = trim(coverage.predicate) ~= "" and trim(coverage.predicate) or nil,
             }}
+        end
+        -- Bindings declared on the representation travel with it into the one
+        -- call that registers it, because a supplemental source narrower than
+        -- the primary is invalid until they land -- and on a published model
+        -- there is no later.
+        if representation.attribute_bindings ~= nil then
+            if type(representation.attribute_bindings) ~= "table"
+                or #representation.attribute_bindings == 0 then
+                error("SEMANTIC_FUSION_017: representation '" .. name
+                    .. "' attribute_bindings must be a non-empty array")
+            end
+            for _, binding in ipairs(representation.attribute_bindings) do
+                reject_unknown(binding, REPRESENTATION_BINDING_KEYS,
+                    "entity '" .. entity_name .. "' representation '" .. name
+                    .. "' attribute binding")
+            end
+            declarations.attribute_bindings = representation.attribute_bindings
         end
         if representation.identity_binding ~= nil then
             local binding = representation.identity_binding

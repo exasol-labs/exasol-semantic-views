@@ -81,6 +81,57 @@ test("fusion document plans operations in dependency order", function()
     assert_contains(operations[2].params.declarations_json, "MAPPED")
 end)
 
+test("a representation carries its own attribute bindings into one call", function()
+    -- The canonical F4 shape: a supplemental source narrower than the primary.
+    -- Entity-level bindings arrive after the representation has been registered
+    -- and validated, so on a published model they are always too late; scoping
+    -- them to the representation is what puts them in the same candidate.
+    local document = {entities = {customer = {
+        representations = {{
+            name = "crm", source_schema = "CRM", source_object = "C",
+            priority = 20, authority = "AUTHORITATIVE",
+            attribute_bindings = {{attribute_type = "DIMENSION",
+                attribute_name = "customer_region",
+                source_expression = "CAST(NULL AS VARCHAR(20))",
+                binding_role = "FALLBACK", binding_priority = 2}},
+        }},
+    }}}
+    local query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "PUBLISHED"}}
+        end
+        return {}
+    end)
+    local planned, operations = api.plan_document(query, "sales", encode_json(document))
+    assert_branch("fusion.document.representation_bindings", planned ~= nil, true)
+    -- One operation, not two: the bindings ride along rather than following.
+    assert_equal(#operations, 1)
+    assert_contains(operations[1].label, "ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS")
+    assert_contains(operations[1].params.declarations_json, "attribute_bindings")
+    assert_contains(operations[1].params.declarations_json, "CAST(NULL AS VARCHAR(20))")
+
+    -- Naming the representation again inside its own binding is refused: the
+    -- enclosing object already says which representation this is.
+    local redundant = {entities = {customer = {representations = {{
+        name = "crm", source_schema = "CRM", source_object = "C",
+        attribute_bindings = {{attribute_type = "DIMENSION",
+            attribute_name = "customer_region", representation = "crm",
+            source_expression = "CAST(NULL AS VARCHAR(20))"}},
+    }}}}}
+    local ok, err = pcall(api.plan_document, query, "sales", encode_json(redundant))
+    assert_branch("fusion.document.representation_bindings", ok, false)
+    assert_contains(tostring(err), "SEMANTIC_FUSION_011")
+
+    local empty = {entities = {customer = {representations = {{
+        name = "crm", source_schema = "CRM", source_object = "C",
+        attribute_bindings = {},
+    }}}}}
+    local empty_ok, empty_err = pcall(api.plan_document, query, "sales",
+        encode_json(empty))
+    assert_true(not empty_ok)
+    assert_contains(tostring(empty_err), "SEMANTIC_FUSION_017")
+end)
+
 test("fusion document refuses an identity binding with no identity", function()
     local document = {entities = {customer = {representations = {{
         name = "crm", source_schema = "CRM", source_object = "C",

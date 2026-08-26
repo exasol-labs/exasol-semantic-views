@@ -262,7 +262,7 @@ The reference model is in `sql/examples/`. Authoring order matters:
 3. `ADD_DIMENSION` -> `ADD_FACT` -> `ADD_METRIC`
 4. Optional representations, bindings, coverage, authority, and identity — use
    `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` and pass `{authority, coverage,
-   identity}` in one call; the one-dimensional `_WITH_AUTHORITY` / `_WITH_COVERAGE`
+   identity, attribute_bindings}` in one call; the one-dimensional `_WITH_AUTHORITY` / `_WITH_COVERAGE`
    / `_WITH_IDENTITY_BINDING` forms remain for existing callers
 5. `VALIDATE_MODEL` -> `PUBLISH_MODEL`
 

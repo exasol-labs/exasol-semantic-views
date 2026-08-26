@@ -365,17 +365,24 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION('sales', '<json>', TRUE);
 reports a refusal as `STATUS = 'ERROR'` in the row rather than raising — check
 the column, including for a malformed document.
 
-**Why a document rather than another call.** On a *published* model the fusion
-layer is not incrementally authorable at all. Given an entity that already has an
-F5 identity, each of these is refused on its own, because each alone leaves the
-model invalid:
+**Why a document rather than another call.** On a *published* model, adding a
+*second source* to an entity is not incrementally authorable. Each step below is
+refused on its own because each alone leaves the model invalid — and the premise
+matters, so it is stated per row rather than left to the table's heading:
 
-| Step | Alone |
-|---|---|
-| `ADD_ENTITY_REPRESENTATION` | refused, `SEMANTIC_ADMIN_094` |
-| `ADD_IDENTITY_BINDING` | refused, `SEMANTIC_ADMIN_049` |
-| `ADD_IDENTITY_MAPPING_RELATION` | refused, `SEMANTIC_ADMIN_050` |
-| `SET_REPRESENTATION_AUTHORITY` | refused, `SEMANTIC_ADMIN_047` |
+| Step | Premise | Alone |
+|---|---|---|
+| `ADD_ENTITY_REPRESENTATION` | entity has an F5 identity | refused, `SEMANTIC_ADMIN_094` |
+| `ADD_ENTITY_REPRESENTATION` | a dimension's column is missing from the new source | refused, `SEMANTIC_ADMIN_094` (`SEMANTIC_MODEL_017`) |
+| `ADD_IDENTITY_BINDING` | for an alternate that does not exist yet | refused, `SEMANTIC_ADMIN_049` |
+| `ADD_IDENTITY_MAPPING_RELATION` | for a binding that does not exist yet | refused, `SEMANTIC_ADMIN_050` |
+| `SET_REPRESENTATION_AUTHORITY` | for a representation that is not usable yet | refused, `SEMANTIC_ADMIN_047` |
+
+The incremental path is more capable than a flat "everything is refused" reading
+suggests: on a published model with no identity yet, `ADD_SEMANTIC_IDENTITY`
+followed by `ADD_IDENTITY_BINDING` for the **primary** representation are both
+accepted, because binding the primary is what completes the identity. What cannot
+be done incrementally is bringing in a *new* source.
 
 The unit a published fusion change has to arrive in is therefore "all of it".
 That is what the compound `_WITH_*` forms are for, and why there are eight of
@@ -409,6 +416,37 @@ The shape is keyed by entity:
       {"attribute_type": "DIMENSION", "attribute_name": "customer_name",
        "strategy": "RECONCILE"}]}}}
 ```
+
+**A supplemental source narrower than the primary declares its bindings *inside*
+the representation.** This is the canonical Attribute Reconciliation shape: a CRM
+extract carries `LOYALTY_TIER` and not `REGION`, so the entity's existing
+`customer_region` dimension cannot resolve on it. Entity-level
+`attribute_bindings` arrive too late — the representation is registered and
+validated before that phase runs — so put them where they travel with it:
+
+```json
+{"entities": {"customer": {"representations": [
+  {"name": "crm", "source_schema": "CRM", "source_object": "CUSTOMER_CRM",
+   "priority": 20, "authority": "AUTHORITATIVE",
+   "attribute_bindings": [
+     {"attribute_type": "DIMENSION", "attribute_name": "customer_region",
+      "source_expression": "CAST(NULL AS VARCHAR(20))",
+      "binding_role": "FALLBACK", "binding_priority": 2}]}]}}}
+```
+
+A representation-scoped binding omits `representation` — the enclosing object is
+the representation. The same list is accepted by
+`ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` as a fourth declaration kind, so
+the single call and the document have the same reach. Naming an attribute the
+entity does not have is refused with `SEMANTIC_ADMIN_217`, and nothing is
+registered.
+
+Without this, the shape was unreachable on a published model by *any* route: the
+plain form fails `SEMANTIC_MODEL_017`, the collapsed form fails
+`SEMANTIC_MODEL_040` on the binding it seeded from the primary's expression, and
+entity-level document bindings arrive after the representation has already been
+validated and rolled back. The workaround was to pre-join the source into a
+widened view — which is what the null-cast `FALLBACK` binding exists to replace.
 
 Properties worth relying on:
 

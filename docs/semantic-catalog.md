@@ -105,7 +105,10 @@ SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 
 `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` is the general form: the same eight
 positional arguments as `ADD_ENTITY_REPRESENTATION`, plus a `DECLARATIONS_JSON`
-block carrying any of `authority`, `coverage`, and `identity`. The three
+block carrying any of `authority`, `coverage`, `identity`, and
+`attribute_bindings`. Declaring `attribute_bindings` is what lets a supplemental
+source narrower than the primary be registered at all on a published model: the
+representation and the bindings that make it resolvable land as one candidate. The three
 one-dimensional `_WITH_*` calls remain supported and are equivalent to passing
 the corresponding single key. Reach for the collapsed form when a published
 entity needs more than one of them at once — most often `authority` together

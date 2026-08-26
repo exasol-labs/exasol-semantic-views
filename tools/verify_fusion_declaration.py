@@ -39,6 +39,7 @@ from typing import Any
 SCHEMA = "FUSION_DECL_VERIFY"
 MODEL = "fusion_decl_verify"
 MIRROR = "fusion_decl_mirror"
+NARROW = "fusion_decl_narrow"
 
 
 def connect():
@@ -284,6 +285,82 @@ def main() -> int:
                      representation_count(con, MODEL), 2)
         print("ok a document that fails part-way is rolled back whole")
 
+        # ---- the canonical F4 shape: a source narrower than the primary -----
+        #
+        # A CRM extract carries LOYALTY_TIER and not REGION, so the entity's
+        # existing dimension cannot resolve on it. Before representation-scoped
+        # attribute_bindings this was unreachable on a published model by any
+        # route: the plain form fails SEMANTIC_MODEL_017, the collapsed form
+        # fails SEMANTIC_MODEL_040 on the binding it seeds from the primary's
+        # expression, and entity-level document bindings arrive after the
+        # representation has already been validated and rolled back.
+        con.execute(f"CREATE TABLE {SCHEMA}.C_NARROW"
+                    " (CUSTOMER_ID DECIMAL(18,0), LOYALTY_TIER VARCHAR(20))")
+        con.execute(f"INSERT INTO {SCHEMA}.C_NARROW VALUES (1,'GOLD'),(2,'SILVER')")
+        build_model(con, NARROW, published=True)
+        # The entity has an F5 identity, so the new source must bind to it too --
+        # which makes this the full shape: identity, authority and the bindings
+        # that make a narrower source resolvable, all in one candidate.
+        narrow = {"entities": {"customer": {
+            "identity": {"name": "cid", "kind": "GLOBAL",
+                         "data_type": "DECIMAL(18,0)"},
+            "representations": [{
+                "name": "narrow", "source_kind": "RELATION", "source_schema": SCHEMA,
+                "source_object": "C_NARROW", "priority": 40,
+                "authority": "SUPPLEMENTAL",
+                "identity_binding": {"source_expression": "c.customer_id",
+                                     "binding_kind": "DIRECT"},
+                "attribute_bindings": [{
+                    "attribute_type": "DIMENSION", "attribute_name": "cname",
+                    "source_expression": "CAST(NULL AS VARCHAR(50))",
+                    "binding_role": "FALLBACK", "binding_priority": 2}]}]}}}
+
+        # Without the bindings it must still be refused -- otherwise this test
+        # would pass for the wrong reason.
+        without = json.loads(json.dumps(narrow))
+        del without["entities"]["customer"]["representations"][0]["attribute_bindings"]
+        refused = apply_document(con, NARROW, without, True)
+        if refused["status"] != "ERROR":
+            raise AssertionError(
+                "a narrower source was accepted with no binding declared; the "
+                f"fixture no longer exercises the gap: {refused}")
+        print("ok a narrower source is still refused when it declares no binding")
+
+        with_bindings = apply_document(con, NARROW, narrow, False)
+        if with_bindings["status"] != "OK":
+            raise AssertionError(
+                f"narrower source refused: {with_bindings['message'][:400]}")
+        assert_equal("the null-cast fallback is what landed",
+                     scalar(con,
+                            "SELECT b.SOURCE_EXPRESSION FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS b"
+                            " JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS r"
+                            "   ON r.REPRESENTATION_ID = b.REPRESENTATION_ID"
+                            " JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = b.MODEL_ID"
+                            f" WHERE m.MODEL_NAME = {literal(NARROW)}"
+                            " AND r.REPRESENTATION_NAME = 'narrow'"
+                            " AND b.STATUS = 'ACTIVE'"),
+                     "CAST(NULL AS VARCHAR(50))")
+        # And it survives a round-trip, so the document remains the record.
+        exported_narrow = export_document(con, NARROW)
+        narrow_rep = [r for r in exported_narrow["customer"]["representations"]
+                      if r.get("name") == "narrow"]
+        assert_equal("the narrower source exports", len(narrow_rep), 1)
+
+        # An attribute the entity does not have leaves nothing behind.
+        bogus = json.loads(json.dumps(narrow))
+        bogus["entities"]["customer"]["representations"][0]["name"] = "narrow2"
+        bogus["entities"]["customer"]["representations"][0][
+            "attribute_bindings"][0]["attribute_name"] = "no_such_attribute"
+        before_bogus = representation_count(con, NARROW)
+        rejected_bogus = apply_document(con, NARROW, bogus, False)
+        if rejected_bogus["status"] != "ERROR" or \
+                "SEMANTIC_ADMIN_217" not in rejected_bogus["message"]:
+            raise AssertionError(
+                f"an unknown attribute name was accepted: {rejected_bogus}")
+        assert_equal("the refused binding registered no representation",
+                     representation_count(con, NARROW), before_bogus)
+        print("ok an unknown attribute in a representation binding is refused clean")
+
         # ---- closed contract ------------------------------------------------
         typo = fused_document()
         typo["entities"]["customer"]["representations"][0]["authorityy"] = "PREFER"
@@ -325,7 +402,7 @@ def main() -> int:
         print("fusion declaration document verified")
         return 0
     finally:
-        for model in (MIRROR, MODEL):
+        for model in (NARROW, MIRROR, MODEL):
             try:
                 execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(model)})")
             except Exception:  # noqa: BLE001 - best effort

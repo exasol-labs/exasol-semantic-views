@@ -903,6 +903,29 @@ the database actually requires.
        "strategy": "RECONCILE"}]}}}
 ```
 
+**A supplemental source that does not carry every column the primary's
+dimensions reference declares its bindings inside the representation.** This is
+the ordinary Customer-360 case — a CRM extract has `LOYALTY_TIER` and no
+`REGION` — and entity-level `attribute_bindings` are too late on a published
+model, because the representation is registered and validated before that phase
+runs:
+
+```json
+{"entities": {"customer": {"representations": [
+  {"name": "crm", "source_schema": "CRM", "source_object": "CUSTOMER_CRM",
+   "priority": 20, "authority": "AUTHORITATIVE",
+   "attribute_bindings": [
+     {"attribute_type": "DIMENSION", "attribute_name": "customer_region",
+      "source_expression": "CAST(NULL AS VARCHAR(20))",
+      "binding_role": "FALLBACK", "binding_priority": 2}]}]}}}
+```
+
+Omit `representation` inside a representation-scoped binding — the enclosing
+object is the representation. `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS`
+accepts the same list as a fourth declaration kind, so the single call and the
+document reach equally far. Do not pre-join the source into a widened view for
+this; the null-cast `FALLBACK` binding is what replaced that workaround.
+
 Rules to work by:
 
 - Run `ALTER SESSION SET QUERY_TIMEOUT=60` first. Multi-representation key probes
@@ -920,6 +943,8 @@ Rules to work by:
   and friends to take a declaration away.
 - Unknown keys are refused by name (`SEMANTIC_FUSION_011`). Do not guess key
   names; export an existing fused model to see the exact shape.
+- A representation binding that names an attribute the entity does not have is
+  refused with `SEMANTIC_ADMIN_217`, and nothing is registered.
 
 ## Validation and Publication
 
