@@ -13184,7 +13184,9 @@ local function validate_representation_data_equivalence(ctx)
                                 "Declared key cardinality differs from PRIMARY for "
                                     .. object_name .. ": primary="
                                     .. tostring(primary_probe.distinct_count)
-                                    .. ", alternate=" .. tostring(probe.distinct_count) .. ".")
+                                    .. ", alternate=" .. tostring(probe.distinct_count) .. "."
+                                    .. alternate_representation_remedy(ctx,
+                                        {representation_name}))
                         elseif primary_probe.grouped_keys ~= nil
                             and probe.grouped_keys ~= nil then
                             local missing_from_alternate, forward_error = probe_count(
@@ -13211,7 +13213,9 @@ local function validate_representation_data_equivalence(ctx)
                                         .. object_name .. ": missing_in_alternate="
                                         .. tostring(missing_from_alternate)
                                         .. ", missing_in_primary="
-                                        .. tostring(missing_from_primary) .. ".")
+                                        .. tostring(missing_from_primary) .. "."
+                                        .. alternate_representation_remedy(ctx,
+                                            {representation_name}))
                             end
                         end
                     end
@@ -28148,32 +28152,50 @@ function M.build_document(query_fn, model_name, entity_name_arg)
     return {model = document.model, entities = fused, entity_order = order}
 end
 
+-- Assembled here rather than handed to encode_json whole, for two reasons the
+-- round trip depends on.
+--
+-- `entities` must be a JSON *object* even when empty: an empty Lua table
+-- serialises as `[]`, so a consumer would have to handle two types for the same
+-- field. And `model` must always be present -- SEMANTIC_FUSION_015 refuses a
+-- document applied to the wrong model by reading that key, and the first version
+-- of this export emitted it only when there was no fusion, so the guard could
+-- never fire on an exported-then-reapplied file: exactly the workflow it exists
+-- for.
+local function document_json(model_name, entities, order)
+    local parts = {}
+    for _, name in ipairs(order) do
+        parts[#parts + 1] = semantic_definition.encode_json(name) .. ":"
+            .. semantic_definition.encode_json(entities[name])
+    end
+    return '{"entities":{' .. table.concat(parts, ",") .. '},"model":'
+        .. semantic_definition.encode_json(model_name) .. "}"
+end
+
+-- One row, always: the whole tier-2 layer of the model as one document, which is
+-- what the docs promise and what makes it re-appliable without a client-side
+-- merge. Asking for a single entity returns that entity's slice, still as a
+-- complete document.
 function M.export_fusion_declaration(model_name, entity_name)
     local document = M.build_document(query, model_name, entity_name)
-    local rows = {}
+    local representation_count = 0
     for _, name in ipairs(document.entity_order) do
-        local entity = document.entities[name]
-        rows[#rows + 1] = {
-            "ENTITY", name, #entity.representations,
-            semantic_definition.encode_json({entities = {[name] = entity}}),
-        }
+        representation_count = representation_count
+            + #document.entities[name].representations
     end
-    -- A model with no fusion exports one row saying so, rather than an empty
-    -- result a caller has to distinguish from a failed read.
-    if #rows == 0 then
-        rows[1] = {"MODEL", document.model, 0,
-            semantic_definition.encode_json({model = document.model, entities = {}})}
+    local scope_kind = "MODEL"
+    local scope_name = document.model
+    if not missing(entity_name) then
+        scope_kind = "ENTITY"
+        scope_name = trim(entity_name)
     end
-    return rows
+    return {{scope_kind, scope_name, representation_count,
+        document_json(document.model, document.entities, document.entity_order)}}
 end
 
 function M.export_document_json(model_name, entity_name)
     local document = M.build_document(query, model_name, entity_name)
-    local entities = {}
-    for _, name in ipairs(document.entity_order) do
-        entities[name] = document.entities[name]
-    end
-    return semantic_definition.encode_json({model = document.model, entities = entities})
+    return document_json(document.model, document.entities, document.entity_order)
 end
 
 
@@ -28437,6 +28459,26 @@ local function attribute_binding_matches(query_fn, model, attribute_type,
     return rows ~= nil and #rows > 0
 end
 
+local function attribute_policy_matches(query_fn, model, attribute_type,
+        attribute_name, strategy)
+    local rows = query_fn([[
+        SELECT 1
+        FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES p
+        LEFT JOIN SYS_SEMANTIC.DIMENSIONS d
+          ON p.ATTRIBUTE_TYPE = 'DIMENSION' AND d.DIMENSION_ID = p.ATTRIBUTE_ID
+        LEFT JOIN SYS_SEMANTIC.FACTS f
+          ON p.ATTRIBUTE_TYPE = 'FACT' AND f.FACT_ID = p.ATTRIBUTE_ID
+        WHERE p.MODEL_ID = :model_id AND p.VERSION_ID = :version_id
+          AND p.STATUS = 'ACTIVE'
+          AND UPPER(p.ATTRIBUTE_TYPE) = UPPER(:attribute_type)
+          AND UPPER(COALESCE(d.DIMENSION_NAME, f.FACT_NAME)) = UPPER(:attribute_name)
+          AND UPPER(p.FUSION_STRATEGY) = UPPER(:strategy)
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        attribute_type = attribute_type, attribute_name = attribute_name,
+        strategy = strategy})
+    return rows ~= nil and #rows > 0
+end
+
 local function identity_exists(query_fn, model, identity_name)
     local rows = query_fn([[
         SELECT 1 FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
@@ -28669,14 +28711,25 @@ local function plan_entity(query_fn, model, entity_name, entity)
     for _, policy in ipairs(entity.attribute_policies or {}) do
         reject_unknown(policy, ATTRIBUTE_POLICY_KEYS,
             "entity '" .. entity_name .. "' attribute policy")
+        local policy_type = upper(required(policy.attribute_type, "attribute_type"))
+        local policy_attribute = required(policy.attribute_name, "attribute_name")
+        local policy_strategy = upper(required(policy.strategy, "strategy"))
         operations[#operations + 1] = {
-            label = "SET_ATTRIBUTE_FUSION_POLICY " .. trim(policy.attribute_name),
+            label = "SET_ATTRIBUTE_FUSION_POLICY " .. policy_attribute,
             statement = "SET_ATTRIBUTE_FUSION_POLICY(:model_name, :attribute_type,"
                 .. " :attribute_name, :fusion_strategy)",
-            params = {model_name = model.model_name,
-                attribute_type = upper(required(policy.attribute_type, "attribute_type")),
-                attribute_name = required(policy.attribute_name, "attribute_name"),
-                fusion_strategy = upper(required(policy.strategy, "strategy"))},
+            params = {model_name = model.model_name, attribute_type = policy_type,
+                attribute_name = policy_attribute,
+                fusion_strategy = policy_strategy},
+            -- Without this the policy was re-executed unconditionally, so an
+            -- exported document never converged: five of six operations reported
+            -- "already matches" and this one kept APPLIED_COUNT at 1 forever,
+            -- which turns a CI check for "no drift" into a permanent false
+            -- positive.
+            skip_fn = function(runtime_query, runtime_model)
+                return attribute_policy_matches(runtime_query, runtime_model,
+                    policy_type, policy_attribute, policy_strategy)
+            end,
         }
     end
 

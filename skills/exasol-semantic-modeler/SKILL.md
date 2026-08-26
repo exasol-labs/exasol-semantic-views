@@ -937,7 +937,9 @@ Rules to work by:
 - A refusal arrives as `STATUS = 'ERROR'` in the result row, not as an
   exception — check the column, including for a malformed document.
 - Re-applying an exported document is a no-op (`APPLIED_COUNT = 0`). Export is
-  the way to review what fusion a model actually carries.
+  the way to review what fusion a model actually carries, and it returns exactly
+  one row — the whole layer as one document, with `model` always set, so it can
+  be re-applied without merging anything.
 - It is an upsert: the document declares what it contains and does not remove
   what it omits. Use `REMOVE_ENTITY_REPRESENTATION`, `REMOVE_IDENTITY_BINDING`
   and friends to take a declaration away.

@@ -14,6 +14,17 @@ local function fake_query(handler)
     return function(sql, params) return handler(tostring(sql), params or {}) end
 end
 
+-- The export entrypoints read the script-context `query` global rather than
+-- taking it as an argument, because that is how they run inside Exasol.
+local function with_query(mock, fn)
+    local original_query = query
+    query = mock
+    local ok, result = xpcall(fn, debug.traceback)
+    query = original_query
+    if not ok then error(result, 0) end
+    return result
+end
+
 test("fusion document refuses keys it does not know, by name", function()
     -- A silently-dropped `authority` is a governance change nobody sees, so an
     -- unknown key has to be an error rather than a no-op.
@@ -220,6 +231,77 @@ test("fusion export leaves out entities that have nothing fused", function()
         authority = "AUTHORITATIVE"}}}))
     assert_true(api.is_fused({representations = {{name = "primary",
         coverage = {valid_to = "2026-01-01"}}}}))
+end)
+
+test("the exported document is one object that always names its model", function()
+    -- Two shapes the round trip depends on. `entities` must be a JSON *object*
+    -- even when empty -- an empty Lua table serialises as `[]`, which would make
+    -- a consumer handle two types for one field. And `model` must always be
+    -- present: SEMANTIC_FUSION_015 reads it to refuse a document applied to the
+    -- wrong model, and the first version emitted it only when there was no
+    -- fusion, so the guard could never fire on an exported file.
+    local empty_query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "DRAFT"}}
+        end
+        return {}
+    end)
+    local empty
+    with_query(empty_query, function()
+        empty = export_document_json("sales", nil)
+    end)
+    assert_equal(empty, '{"entities":{},"model":"sales"}')
+
+    local fused_query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "DRAFT"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS r", 1, true) then
+            return {{"customer", 1, "primary", "RELATION", "MDM", "C", "c",
+                     "PRIMARY", 10, null, null, null, null, null},
+                    {"customer", 2, "crm", "RELATION", "CRM", "C", "c",
+                     "ALTERNATE", 20, "MANUAL", null, null, null, "AUTHORITATIVE"}}
+        end
+        return {}
+    end)
+    local fused
+    with_query(fused_query, function()
+        fused = export_document_json("sales", nil)
+    end)
+    assert_contains(fused, '"model":"sales"')
+    assert_contains(fused, '"entities":{"customer":')
+    -- Never an array once populated either.
+    assert_true(not fused:find('"entities":%['))
+end)
+
+test("an attribute policy that already matches is not re-applied", function()
+    -- This was the one operation of six with no comparison, so an exported
+    -- document never converged: five reported "already matches" and this kept
+    -- APPLIED_COUNT at 1 forever, turning a CI drift check into a permanent
+    -- false positive.
+    local document = {entities = {customer = {
+        attribute_policies = {{attribute_type = "DIMENSION",
+            attribute_name = "customer_region", strategy = "RECONCILE"}},
+    }}}
+    local query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "PUBLISHED"}}
+        end
+        return {}
+    end)
+    local model, operations = api.plan_document(query, "sales", encode_json(document))
+    assert_equal(#operations, 1)
+    assert_contains(operations[1].label, "SET_ATTRIBUTE_FUSION_POLICY")
+    assert_true(operations[1].skip_fn ~= nil)
+
+    local stored = fake_query(function(sql)
+        if sql:find("ATTRIBUTE_FUSION_POLICIES", 1, true) then return {{1}} end
+        return {}
+    end)
+    local absent = fake_query(function() return {} end)
+    assert_branch("fusion.document.policy_matches",
+        operations[1].skip_fn(stored, model), true)
+    assert_branch("fusion.document.policy_matches",
+        operations[1].skip_fn(absent, model), false)
 end)
 
 test("fusion export omits absent values instead of writing nulls", function()

@@ -2625,7 +2625,9 @@ local function validate_representation_data_equivalence(ctx)
                                 "Declared key cardinality differs from PRIMARY for "
                                     .. object_name .. ": primary="
                                     .. tostring(primary_probe.distinct_count)
-                                    .. ", alternate=" .. tostring(probe.distinct_count) .. ".")
+                                    .. ", alternate=" .. tostring(probe.distinct_count) .. "."
+                                    .. alternate_representation_remedy(ctx,
+                                        {representation_name}))
                         elseif primary_probe.grouped_keys ~= nil
                             and probe.grouped_keys ~= nil then
                             local missing_from_alternate, forward_error = probe_count(
@@ -2652,7 +2654,9 @@ local function validate_representation_data_equivalence(ctx)
                                         .. object_name .. ": missing_in_alternate="
                                         .. tostring(missing_from_alternate)
                                         .. ", missing_in_primary="
-                                        .. tostring(missing_from_primary) .. ".")
+                                        .. tostring(missing_from_primary) .. "."
+                                        .. alternate_representation_remedy(ctx,
+                                            {representation_name}))
                             end
                         end
                     end

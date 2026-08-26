@@ -861,14 +861,16 @@ end)
 
 test("validator proves F1 representation grain and key-set equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
+    -- Roles are set because the recovery suffix on _037/_038 is only offered for
+    -- an ALTERNATE -- there is nothing to "complete or remove" about a primary.
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",
-        source_schema = "HUB", source_object = "CUSTOMERS"}
+        role = "PRIMARY", source_schema = "HUB", source_object = "CUSTOMERS"}
     local duplicate = {id = 2, entity_id = 1, name = "duplicate", alias = "c",
-        source_schema = "HUB", source_object = "CUSTOMERS_DUP"}
+        role = "ALTERNATE", source_schema = "HUB", source_object = "CUSTOMERS_DUP"}
     local half = {id = 3, entity_id = 1, name = "half", alias = "c",
-        source_schema = "HUB", source_object = "CUSTOMERS_HALF"}
+        role = "ALTERNATE", source_schema = "HUB", source_object = "CUSTOMERS_HALF"}
     local swapped = {id = 4, entity_id = 1, name = "swapped", alias = "c",
-        source_schema = "HUB", source_object = "CUSTOMERS_SWAPPED"}
+        role = "ALTERNATE", source_schema = "HUB", source_object = "CUSTOMERS_SWAPPED"}
     entity.primary_representation = primary
     local unique_key = {id = 10, entity_id = 1, name = "customer_pk",
         columns = {{ordinal_position = 1, column_name = "CUSTOMER_ID"}}}
@@ -903,6 +905,14 @@ test("validator proves F1 representation grain and key-set equivalence", functio
     assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_037").message,
         "does not preserve grain")
     assert_equal(primary_distinct_probes, 1)
+    -- _038 carries the recovery suffix its siblings do. It was the one message
+    -- in the family without it across three studies, and it is the most likely
+    -- first F3 encounter -- a modeller who hits it otherwise sees two row counts
+    -- and nothing to do about them. A key-set difference means the source is not
+    -- an *equivalent* representation, so the remedy is exactly the one the
+    -- shared helper states: declare coverage, give it an identity, or remove it.
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_038").message,
+        "REMOVE_ENTITY_REPRESENTATION")
 end)
 
 test("validator accepts contiguous F3 coverage and rejects boundary gaps", function()

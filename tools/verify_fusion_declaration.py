@@ -92,16 +92,23 @@ def apply_document(con: Any, model: str, document: dict, dry_run: bool) -> dict:
             "applied": rows[0][4]}
 
 
+def export_raw(con: Any, model: str, entity: str | None = None) -> tuple:
+    """The single export row: (scope_kind, scope_name, representation_count, json)."""
+    rows = execute(
+        con,
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION("
+        f"{literal(model)}, {literal(entity) if entity else 'NULL'})")
+    if len(rows) != 1:
+        raise AssertionError(
+            f"export must be one document, got {len(rows)} rows -- a caller "
+            "should never have to merge them client-side")
+    return rows[0]
+
+
 def export_document(con: Any, model: str) -> dict:
     """The whole model's fusion layer as one comparable object."""
-    rows = execute(
-        con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION({literal(model)}, NULL)")
-    entities: dict[str, Any] = {}
-    for scope_kind, scope_name, _count, payload in rows:
-        document = json.loads(str(payload))
-        for name, entity in (document.get("entities") or {}).items():
-            entities[name] = entity
-    return entities
+    document = json.loads(str(export_raw(con, model)[3]))
+    return document.get("entities") or {}
 
 
 def representation_count(con: Any, model: str) -> int:
@@ -242,9 +249,62 @@ def main() -> int:
         again = apply_document(con, MODEL, document, False)
         assert_equal("re-applying succeeds", again["status"], "OK")
         assert_equal("re-applying changes nothing", int(again["applied"]), 0)
+
+        # Convergence has to hold for a document carrying an attribute *policy*
+        # too: that operation had no comparison, so five of six reported "already
+        # matches" while it kept APPLIED_COUNT at 1 forever -- a permanent false
+        # positive for any CI check reading that as drift.
+        execute(con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY("
+                f"{literal(MODEL)}, 'DIMENSION', 'cname', 'PREFER')")
+        with_policy = export_document(con, MODEL)
+        if not (with_policy.get("customer") or {}).get("attribute_policies"):
+            raise AssertionError(
+                f"fixture no longer exports a policy: {with_policy}")
+        for attempt in range(1, 4):
+            converged = apply_document(con, MODEL, {"entities": with_policy}, False)
+            assert_equal(f"a document with a policy converges (apply #{attempt})",
+                         [converged["status"], int(converged["applied"])], ["OK", 0])
         if "nothing to do" not in again["message"]:
             raise AssertionError(f"a no-op apply should say so: {again['message']}")
         print("ok an already-applied document reports nothing to do")
+
+        # ---- the export contract --------------------------------------------
+        #
+        # "The whole tier-2 layer of a model, as one JSON document" has to be
+        # literally true, or a caller has to merge rows the docs never mention.
+        # And `model` has to be present *always*: SEMANTIC_FUSION_015 reads that
+        # key to refuse a document applied to the wrong model, and the first
+        # version of this export emitted it only when there was no fusion -- so
+        # the guard could never fire on an exported-then-reapplied file, which is
+        # the one workflow it exists for.
+        scope_kind, scope_name, reps, payload = export_raw(con, MODEL)
+        assert_equal("a whole-model export is one MODEL row", scope_kind, "MODEL")
+        assert_equal("named for the model", scope_name, MODEL)
+        whole = json.loads(str(payload))
+        assert_equal("the document always names its model", whole.get("model"), MODEL)
+        assert_equal("representation count is the document's total", int(reps),
+                     sum(len(e["representations"]) for e in whole["entities"].values()))
+        # An empty entities map is an object, not an array: one JSON type per
+        # field, or every consumer has to handle both.
+        assert_equal("an unfused model exports entities as an object",
+                     str(export_raw(con, "sales")[3]),
+                     '{"entities":{},"model":"sales"}')
+        entity_scope = export_raw(con, MODEL, "customer")
+        assert_equal("asking for one entity says so", entity_scope[0], "ENTITY")
+        assert_equal("and still returns a complete document",
+                     json.loads(str(entity_scope[3])).get("model"), MODEL)
+
+        # The guard is now reachable where it matters: an exported file carries
+        # the model name, so applying it to the wrong model is refused.
+        wrong = execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION("
+            f"{literal('sales')}, {literal(json.dumps(whole))}, TRUE)")
+        if str(wrong[0][0]) != "ERROR" or "SEMANTIC_FUSION_015" not in str(wrong[0][2]):
+            raise AssertionError(
+                f"an exported document was accepted by another model: {wrong[0]}")
+        print("ok an exported document is refused by a model it does not name")
 
         # ---- round-trip -----------------------------------------------------
         exported = export_document(con, MODEL)

@@ -462,9 +462,17 @@ Properties worth relying on:
   more here than anywhere else in the product, because fusion validation runs
   *data* probes — key uniqueness per representation, mapping totality and
   bijection, canonical key-set equivalence — against possibly remote sources.
+- **One row, one document.** `EXPORT_FUSION_DECLARATION` returns exactly one
+  row: `SCOPE_KIND = 'MODEL'` for the whole layer, or `'ENTITY'` when you name
+  one. No client-side merge, `entities` is always a JSON object (`{}` when
+  empty), and `model` is always present — which is what makes
+  `SEMANTIC_FUSION_015` able to refuse an exported file applied to the wrong
+  model, the workflow that guard exists for.
 - **Idempotent.** Re-applying an exported document reports
   `nothing to do, the catalog already matches` with `APPLIED_COUNT = 0`, which is
-  what makes the file safe to keep in Git and re-run.
+  what makes the file safe to keep in Git and re-run. That holds for every
+  declaration kind including attribute policies, so a CI job can read
+  `APPLIED_COUNT = 0` as "no drift".
 - **Upsert, not reconciliation.** The document declares what it contains and
   leaves alone what it omits. Removing a representation or an identity stays with
   the `REMOVE_*` scripts — deleting governance metadata because a JSON key is
