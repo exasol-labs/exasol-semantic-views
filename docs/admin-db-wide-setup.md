@@ -121,6 +121,39 @@ listing tools tend to expose them even when they omit Exasol views. They contain
 entrypoint guidance and SELECT statements for the richer `SEMANTIC_AGENT` and
 `SEMANTIC_CATALOG` views.
 
+**Why there are three, and why each repeats a little.** Each managed schema and
+each published schema holds exactly **one** physical table, and it is its
+discovery index — everything else in those schemas is a view. With the official
+MCP server's `views.enable` left at its default, that one table is the only
+object a client can enumerate, so it has to carry the pointers to everything
+else. The three are not copies:
+
+| Table | Answers |
+|---|---|
+| `SEMANTIC_CATALOG.SEMANTIC_CATALOG_DISCOVERY` | which catalog views exist, and four ready-to-run introspection queries |
+| `SEMANTIC_AGENT.SEMANTIC_AGENT_DISCOVERY` | which agent views exist, and seven agent-specific queries |
+| `SEMANTIC_<MODEL>.SEMANTIC_DISCOVERY` | that model's objects, their descriptions, a `SELECT` example each, and the entrypoint |
+
+The per-model table's object list looks redundant against
+`SEMANTIC_CATALOG.SEMANTIC_OBJECTS`, and is not: the published semantic objects
+are **views**, so for a client that cannot list views those rows are the only way
+to learn that `SEMANTIC_<MODEL>.<OBJECT>` exists. It is written by
+`PUBLISH_MODEL`, which is also what creates those views, so it is exactly as
+fresh as what it describes.
+
+The `MCP_GUIDANCE` and join-introspection rows appear in more than one table with
+similar wording, deliberately. Grants are per schema — a caller given
+`SELECT ON SCHEMA SEMANTIC_AGENT` cannot read `SEMANTIC_CATALOG` — so each table
+must be self-sufficient. A row pointing at another table is useless to a caller
+who cannot read it.
+
+`tools/verify_catalog_introspection.py` asserts the one-table-per-schema shape and
+**executes every `SELECT` these tables advertise**, because a query string naming
+a column that does not exist fails nowhere except in the hands of the agent that
+followed it. `METRIC_DEFINITIONS_QUERY` had been selecting `OBJECT_NAME` from
+`SEMANTIC_CATALOG.METRICS`, which has no such column; it reads `METRIC_OVERVIEW`
+now.
+
 Useful SELECT-only metadata queries:
 
 ```sql

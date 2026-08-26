@@ -317,6 +317,69 @@ def main() -> int:
         finally:
             limited.close()
 
+        # ---- the discovery tables' advertised queries must run --------------
+        #
+        # Each managed schema holds exactly one physical TABLE -- its
+        # SEMANTIC_*_DISCOVERY -- because a physical table is the only thing an
+        # MCP client with view listing disabled (the official server's default)
+        # can enumerate. Their *_QUERY rows are ready-to-run SELECT strings, and
+        # a string naming a column that does not exist is not a syntax error
+        # anywhere: it fails only for the agent that follows the advice.
+        #
+        # SEMANTIC_CATALOG's METRIC_DEFINITIONS_QUERY selected OBJECT_NAME from
+        # SEMANTIC_CATALOG.METRICS, which has no such column -- the object name
+        # lives on METRIC_OVERVIEW. Nothing executed these rows, so the catalog's
+        # own answer to "show me the metric definitions" had been broken with no
+        # test failing.
+        discovery_tables = execute(
+            con,
+            "SELECT OBJECT_SCHEMA_NAME, OBJECT_NAME FROM ("
+            "  SELECT ROOT_NAME AS OBJECT_SCHEMA_NAME, OBJECT_NAME, OBJECT_TYPE"
+            "  FROM SYS.EXA_ALL_OBJECTS"
+            "  WHERE ROOT_NAME IN ('SEMANTIC_CATALOG', 'SEMANTIC_AGENT')"
+            "     OR ROOT_NAME IN (SELECT PUBLISHED_SCHEMA FROM SEMANTIC_CATALOG.MODELS"
+            "                      WHERE PUBLISHED_SCHEMA IS NOT NULL))"
+            " WHERE OBJECT_TYPE = 'TABLE' ORDER BY 1, 2",
+        )
+        assert_true(
+            "every managed and published schema has exactly one physical table",
+            len(discovery_tables) >= 3
+            and len({schema for schema, _ in discovery_tables}) == len(discovery_tables),
+            discovery_tables,
+        )
+        for schema, table in discovery_tables:
+            assert_true(
+                f"{schema}'s one table is its discovery index",
+                "DISCOVERY" in str(table), (schema, table))
+
+        # The published views are guarded, so their SELECT examples only run
+        # once the entrypoint the same table advertises has been executed.
+        # Running it here checks that advice too.
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()")
+        try:
+            checked = 0
+            for schema, table in discovery_tables:
+                rows = execute(
+                    con, f"SELECT ENTRY_NAME, ENTRY_VALUE FROM {schema}.{table}"
+                         " ORDER BY ENTRY_NAME")
+                assert_true(f"{schema}.{table} is not empty", len(rows) > 0)
+                for name, value in rows:
+                    text = str(value or "")
+                    if not text.upper().lstrip().startswith("SELECT"):
+                        continue
+                    try:
+                        con.execute(text)
+                    except Exception as exc:  # noqa: BLE001 - the run is the assertion
+                        raise AssertionError(
+                            f"{schema}.{table} advertises a query that does not run: "
+                            f"{name}: {text[:150]} -> {str(exc).splitlines()[0][:120]}"
+                        ) from None
+                    checked += 1
+            assert_true("advertised queries all executed", checked >= 12, checked)
+            print(f"ok every SELECT the discovery tables advertise runs ({checked} queries)")
+        finally:
+            con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()")
+
         print()
         print("catalog introspection verified.")
         return 0
