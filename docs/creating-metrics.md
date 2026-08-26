@@ -141,8 +141,8 @@ REPLACE METRICS (
 );
 ```
 
-`REPLACE FACTS` and `REPLACE METRICS` replace the visible fact or metric
-membership for the semantic object. They are appropriate for bootstrap,
+`REPLACE DIMENSIONS`, `REPLACE FACTS` and `REPLACE METRICS` replace the
+dimension, fact or metric membership of the semantic object. They are appropriate for bootstrap,
 complete model regeneration, and deliberate resets. For one definition, use the
 single forms instead, which upsert it and leave the object's other facts and
 metrics in place:

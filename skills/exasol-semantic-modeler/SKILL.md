@@ -393,14 +393,18 @@ previous to succeed.
 6. ADD_SEMANTIC_OBJECT (per published object — root entity must exist)
 7. ADD_RELATIONSHIP, then ADD_RELATIONSHIP_KEY_MAPPING (per proven join)
 8. ADD_FACT or ADD_FACT_WITH_BINDINGS (per row-level expression)
-9. ADD_DIMENSION or ADD_DIMENSION_WITH_BINDINGS (per dimension)
+9. ADD_DIMENSION, or one ALTER SEMANTIC VIEW ... REPLACE DIMENSIONS block for
+   all of them; ADD_DIMENSION_WITH_BINDINGS when a representation computes it
+   differently
 10. Optional ADD_ATTRIBUTE_BINDING (repair an existing draft attribute)
 11. Optional SET_REPRESENTATION_AUTHORITY, then SET_ATTRIBUTE_FUSION_POLICY
     (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
 12. Optional ADD_SEMANTIC_IDENTITY, ADD_IDENTITY_BINDING for every representation,
     then ADD_IDENTITY_MAPPING_RELATION for each MAPPED binding
 13. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
-   metrics must exist for RATIO/DERIVED)
+   metrics must exist for RATIO/DERIVED). One statement may carry REPLACE
+   DIMENSIONS, REPLACE FACTS and REPLACE METRICS together: one validation pass,
+   one rollback unit.
 14. VALIDATE_MODEL
 15. PUBLISH_MODEL
 ```
@@ -598,8 +602,8 @@ must exactly match the metadata; free-form coverage SQL is rejected. Set
 declared source kinds or whether a local view wraps a Virtual Schema.
 
 After complete F3 coverage exists, `ADD_DIMENSION`, `ADD_FACT`, dimension
-upsert, and Semantic DDL `REPLACE FACTS` seed the governed expression on every
-active partition before validation. `SEMANTIC_MODEL_052` blocks certification
+upsert, and the Semantic DDL `REPLACE DIMENSIONS` / `REPLACE FACTS` blocks seed
+the governed expression on every active partition before validation. `SEMANTIC_MODEL_052` blocks certification
 and lists every missing attribute/partition binding left by older or direct
 catalog state.
 
@@ -716,8 +720,44 @@ mapping in descending ordinal order, then `REMOVE_RELATIONSHIP`.
 
 ## Dimension Maintenance
 
-Use the Lua admin script for all dimension changes. `ALTER SEMANTIC VIEW … ADD
-OR REPLACE DIMENSION` is not yet supported in DDL.
+Semantic DDL authors dimensions. A dimension takes the same clauses as a fact —
+`ON ENTITY`, `AS`, `RETURNS`, and optionally `DISPLAY`, `COMMENT`, `FORMAT`,
+`CERTIFIED`, `PRIVATE`. The object comes from the statement header.
+
+```sql
+ALTER SEMANTIC VIEW <model>.<object>
+ADD OR REPLACE DIMENSION <dim_name>
+  ON ENTITY <entity_alias>
+  AS <expression>
+  RETURNS <data_type>
+  FORMAT '<format_hint>'
+  DISPLAY '<display_name>'
+  COMMENT '<business definition>'
+  [PRIVATE] [CERTIFIED];
+```
+
+Set-level replacement, which decides the object's dimension membership:
+
+```sql
+ALTER SEMANTIC VIEW <model>.<object>
+REPLACE DIMENSIONS (
+  DIMENSION <name> ON ENTITY <entity> AS <expr> RETURNS <type> CERTIFIED,
+  DIMENSION <name> ON ENTITY <entity> AS <expr> RETURNS <type> CERTIFIED
+);
+```
+
+`PRIVATE` maps to the catalog's `IS_HIDDEN` — the column `DIMENSIONS` uses for
+what `FACTS` calls `IS_PRIVATE`. Dry-run through `APPLY_SEMANTIC_DEFINITION`
+first, as for any other definition.
+
+Use the Lua admin scripts when DDL cannot express what you need:
+
+- **removing one dimension** — `REMOVE_DIMENSION`; there is no single `DROP
+  DIMENSION` form. A `REPLACE DIMENSIONS` block removes by omission, which is a
+  different and blunter operation.
+- **per-representation bindings** — `ADD_DIMENSION_WITH_BINDINGS` when the
+  dimension is computed differently on, or absent from, an alternate
+  representation.
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
@@ -958,9 +998,14 @@ EXPORT SEMANTIC MODEL <model>;
 - Do not expose private metrics or hidden fields outside role-scoped views.
 - Validate before publishing. Never call `PUBLISH_MODEL` without a clean
   `VALIDATE_MODEL` pass.
-- `REPLACE METRICS (...)` replaces visible membership only; omitted catalog
-  definitions remain. Use `DROP METRIC` for intentional removal and
-  `ADD OR REPLACE METRIC` for incremental changes.
+- Every `REPLACE ...` block replaces visible membership only; omitted catalog
+  definitions remain. Use `DROP METRIC` or `REMOVE_DIMENSION` for intentional
+  removal, and the `ADD OR REPLACE` forms for incremental changes.
+- A `REPLACE` block renumbers the object's columns. One statement carrying all
+  three blocks numbers them dimensions, facts, then metrics from 1; separate
+  statements interleave. OSI export carries these ordinals to the imported
+  model, so it is a published column order — restore a model with one combined
+  statement, not several.
 - Do not hardcode physical table column references in metric expressions when
   a fact exists — reuse the fact layer.
 - Do not let historical SQL override physical grain, relationship, or comment

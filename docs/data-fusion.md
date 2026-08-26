@@ -5,7 +5,8 @@ graph over physical tables, metric definitions, a compiler that turns a
 metric-shaped request into SQL) but haven't run into "data fusion" as a named
 problem. It defines the term, explains why it comes up as soon as a semantic
 layer sits in front of more than one physical source, and describes what
-Exasol Semantic Views does about it.
+Exasol Semantic Views does about it. [The Two Tiers](#the-two-tiers) is the
+map: one semantic layer per source, and fusion above them.
 
 ## What Data Fusion Is
 
@@ -47,6 +48,84 @@ $953k of revenue in a `NULL`-loyalty-tier bucket because the authoritative
 warehouse column is missing for new customers; a customer table keyed
 `CUSTOMER_ID DECIMAL(18,0)` and another keyed
 `ACCOUNT_ID VARCHAR('ACC-000001')` refuse to join at all.
+
+## The Two Tiers
+
+Fusion is a second tier, sitting on top of one semantic layer per source. That
+shape is what makes the problem tractable: each source is described in its own
+keys and its own grain, and nothing has to agree until tier 2 says how.
+
+```text
+TIER 1 -- one semantic definition per source
+          what that source alone can say, in its own keys and its own grain
+
+  +---------------------+ +---------------------+ +---------------------+
+  | CRM                 | | Warehouse           | | Clickstream         |
+  | VIRTUAL_SCHEMA      | | RELATION            | | RELATION            |
+  |  federated, live    | |  native table       | |  loaded by ELT      |
+  +---------------------+ +---------------------+ +---------------------+
+  | entities            | | entities            | | entities            |
+  | dimensions, facts   | | dimensions, facts   | | dimensions, facts   |
+  | metrics             | | metrics             | | metrics             |
+  | relationships, keys | | relationships, keys | | relationships, keys |
+  +----------+----------+ +----------+----------+ +----------+----------+
+             |                       |                       |
+        ACCOUNT_ID              CUSTOMER_ID             CUSTOMER_ID
+        VARCHAR(20)             DECIMAL(18,0)           VARCHAR -- wrong type
+             |                       |                       |
+             +-----------------------+-----------------------+
+                                     |
+                    each source becomes a REPRESENTATION
+                         of one shared semantic entity
+                                     v
+TIER 2 -- semantic fusion
+          one governed model: which source answers, for which rows, when
+
+  +---------------------------------------------------------------------+
+  | Equivalent Representations  same grain and keys; pick one           |
+  | Temporal Partition Fusion   disjoint [from,to) windows; UNION ALL   |
+  | Attribute Reconciliation    who owns which attribute; COALESCE      |
+  | Semantic Identity           join across mismatched keys, CERTIFIED  |
+  | Identity Remap              right key content, wrong name or type   |
+  | Governed Model Evolution    agents propose, humans certify          |
+  +---------------------------------------------------------------------+
+                                     |
+                validator proves it safe, then compiler emits SQL
+                                     v
+THE INTERFACE -- the only tier agents and users see
+
+  published SEMANTIC_<MODEL> views  |  SEMANTIC_AGENT discovery views
+  semantic SQL via the preprocessor |  COMPILE_REQUEST_JSON / COMPILE_SQL
+```
+
+**Tier 1 normalises away how the data arrived.** A representation declares
+`SOURCE_KIND` as either `RELATION` or `VIRTUAL_SCHEMA`, and that is the only
+distinction the semantic layer makes. A native table, an ELT copy, a
+materialised extract and a view over external files are all `RELATION`; a
+live federated source is `VIRTUAL_SCHEMA`. Whether a row was loaded last night
+or is being read across the network changes cost, not meaning — so it changes
+planning, not semantics.
+
+**Tier 1 is per source; nothing is shared across sources at that tier.** Each
+source keeps its own key (`ACCOUNT_ID VARCHAR(20)` against
+`CUSTOMER_ID DECIMAL(18,0)`), its own grain, and its own names. This is
+deliberate: a source that already publishes a semantic model can be ingested
+as-is. Apache Ossie/OSI is the interchange format for exactly this tier —
+one document per source, describing datasets, dimensions, facts, metrics and
+relationships — and `tools/osi.py import` brings one in. OSI carries **no**
+fusion metadata, and should not: fusion is a statement about several sources,
+and OSI describes one. See `docs/osi-format.md`.
+
+**Tier 2 is where the sources meet, and the only tier with an opinion.** Every
+row of the second box is a declaration a modeller makes and a validator proves,
+against representations of *one* entity within *one* model.
+
+**Agents and users only ever see tier 2.** That is the point of the split. A
+question is asked against the fused model, and which source answered it —
+or which three, joined through a certified mapping relation and reconciled by
+declared authority — is a property of the plan, not of the question. The
+provenance stays inspectable rather than invisible: see
+[Seeing What Fusion Is Doing](#seeing-what-fusion-is-doing).
 
 ## What Semantic Fusion Adds
 
@@ -356,6 +435,8 @@ fact in the semantic layer rather than as a compile-time materialization.
 
 ## Where To Go Next
 
+- `docs/osi-format.md` — Apache Ossie/OSI, the interchange format for a
+  single source's tier-1 semantic layer.
 - `docs/semantic-catalog.md` — the physical catalog tables that back all
   of the vocabulary above.
 - `docs/semantic-compiler.md` — how fusion metadata affects the plan.

@@ -164,6 +164,174 @@ test("semantic definition accepts a fact-only replacement block", function()
     assert_branch("definition.replace.facts", definition.replace_facts, true)
 end)
 
+test("semantic definition parses dimensions in both forms", function()
+    -- A dimension is a fact's shape with FORMAT instead of an additive policy,
+    -- so it reuses the fact clauses and adds no keyword of its own.
+    local single = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        ADD OR REPLACE DIMENSION freight_band
+          ON ENTITY "order"
+          AS CASE WHEN o.freight_amount > 20 THEN 'HIGH' ELSE 'LOW' END
+          RETURNS VARCHAR(10)
+          DISPLAY 'Freight Band' COMMENT 'Bucketed freight'
+          FORMAT 'text'
+          CERTIFIED
+    ]])
+    assert_equal(#single.dimensions, 1)
+    assert_equal(#single.facts, 0)
+    assert_equal(#single.metrics, 0)
+    assert_equal(single.dimensions[1].kind, "DIMENSION")
+    assert_equal(single.dimensions[1].name, "freight_band")
+    assert_equal(single.dimensions[1].entity, "order")
+    assert_equal(single.dimensions[1].data_type, "VARCHAR(10)")
+    assert_equal(single.dimensions[1].display_name, "Freight Band")
+    assert_equal(single.dimensions[1].description, "Bucketed freight")
+    assert_equal(single.dimensions[1].format_hint, "text")
+    assert_true(single.dimensions[1].is_certified)
+    assert_true(not single.dimensions[1].is_hidden)
+    -- The CASE expression contains no clause keyword at depth 0, so it survives.
+    assert_equal(single.dimensions[1].expression,
+        "CASE WHEN o.freight_amount > 20 THEN 'HIGH' ELSE 'LOW' END")
+    -- Upserting one leaves the object's others alone.
+    assert_branch("definition.replace.dimensions", single.replace_dimensions, false)
+    assert_equal(api.definition_operation_count(single), 1)
+
+    local block = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        REPLACE DIMENSIONS (
+          DIMENSION ship_mode ON ENTITY "order" AS o.ship_mode RETURNS VARCHAR(20),
+          DIMENSION order_status ON ENTITY "order" AS o.order_status RETURNS VARCHAR(20) PRIVATE
+        )
+    ]])
+    assert_equal(#block.dimensions, 2)
+    assert_branch("definition.replace.dimensions", block.replace_dimensions, true)
+    assert_equal(block.dimensions[1].name, "ship_mode")
+    assert_equal(block.dimensions[2].name, "order_status")
+    -- PRIVATE maps to the catalog's IS_HIDDEN, which is what DIMENSIONS spells it.
+    assert_true(not block.dimensions[1].is_hidden)
+    assert_true(block.dimensions[2].is_hidden)
+    assert_equal(api.definition_operation_count(block), 2)
+end)
+
+test("semantic definition carries dimensions and metrics in one statement", function()
+    -- The block forms compose, which is the point of a set-level replace: one
+    -- statement, one validation pass, one rollback unit.
+    local definition = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES
+        REPLACE DIMENSIONS (
+          DIMENSION ship_mode ON ENTITY "order" AS o.ship_mode RETURNS VARCHAR(20)
+        )
+        REPLACE METRICS (
+          METRIC total_revenue AS SUM(net_revenue) ON ENTITY order_line
+            RETURNS DECIMAL(18,2) ADDITIVE PUBLIC
+        )
+    ]])
+    assert_equal(#definition.dimensions, 1)
+    assert_equal(#definition.metrics, 1)
+    assert_branch("definition.replace.dimensions", definition.replace_dimensions, true)
+    assert_equal(api.definition_operation_count(definition), 2)
+end)
+
+test("dimension upsert writes the catalog columns DIMENSIONS actually has", function()
+    -- FORMAT_HINT rather than ADDITIVE_POLICY, IS_HIDDEN rather than IS_PRIVATE,
+    -- and a *visible* object column because a dimension is something to group by.
+    local insert_params, binding_params, column_params = nil, nil, nil
+    with_query(function(sql, params)
+        local text = tostring(sql)
+        if text:find("SELECT ENTITY_ID", 1, true) then
+            return {{20}}
+        elseif text:find("INSERT INTO SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            insert_params = params
+            return {}
+        elseif text:find("SELECT DIMENSION_ID", 1, true) then
+            return insert_params ~= nil and {{55}} or {}
+        elseif text:find("SELECT REPRESENTATION_ID", 1, true) then
+            return {{7}}
+        elseif text:find("SELECT ATTRIBUTE_BINDING_ID", 1, true) then
+            return {}
+        elseif text:find("INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            binding_params = binding_params or params
+            return {}
+        elseif text:find("SELECT COUNT(*)", 1, true)
+                and text:find("SYS_SEMANTIC.OBJECT_COLUMNS", 1, true) then
+            return {{0}}
+        elseif text:find("COALESCE(MAX(ORDINAL_POSITION), 0)", 1, true) then
+            return {{3}}
+        elseif text:find("INSERT INTO SYS_SEMANTIC.OBJECT_COLUMNS", 1, true) then
+            column_params = params
+            return {}
+        end
+        return {}
+    end, function()
+        api.upsert_dimension({model_id = 1, version_id = 2}, 10, {
+            kind = "DIMENSION", name = "freight_band", entity = "order",
+            expression = "o.freight_amount", data_type = "VARCHAR(10)",
+            display_name = "Freight Band", description = "Bucketed freight",
+            format_hint = "text", is_hidden = false, is_certified = true,
+        })
+    end)
+    assert_true(insert_params ~= nil)
+    assert_equal(insert_params.dimension_name, "freight_band")
+    assert_equal(insert_params.format_hint, "text")
+    assert_equal(insert_params.is_hidden, false)
+    assert_equal(insert_params.is_certified, true)
+    -- A default binding on the primary representation, as facts get.
+    assert_true(binding_params ~= nil)
+    assert_equal(binding_params.representation_id, 7)
+    assert_equal(binding_params.dimension_id, 55)
+    -- Visible, unlike a fact.
+    assert_true(column_params ~= nil)
+    assert_equal(column_params.kind, "DIMENSION")
+    assert_equal(column_params.is_visible, true)
+    assert_equal(column_params.column_name, "freight_band")
+end)
+
+test("apply rollback carries dimensions, or a dry run leaks one", function()
+    -- The dry run and the failed-apply path both work by applying, validating,
+    -- and restoring a snapshot. Until dimensions were authorable through the DDL
+    -- the snapshot did not need to cover SYS_SEMANTIC.DIMENSIONS -- an apply
+    -- never touched it. The moment it did, a dry run inserted a dimension the
+    -- restore could not remove: the row survived, catalogued and visible, from a
+    -- statement that reported committing nothing.
+    local snapshot_tables, restore_inserts, cleared = {}, {}, {}
+    with_query(function(sql, params)
+        local text = tostring(sql)
+        local selected = text:match("FROM SYS_SEMANTIC%.([A-Z_]+)")
+        if text:find("SELECT", 1, true) == 1 or text:find("^%s*SELECT") then
+            if selected ~= nil then snapshot_tables[selected] = true end
+            if selected == "DIMENSIONS" then
+                return {{55, 1, 2, 20, "freight_band", "o.freight_amount",
+                         "VARCHAR(10)", "Freight Band", "Bucketed", "text", null,
+                         null, null, false, true, "ACTIVE"}}
+            end
+            return {}
+        end
+        local inserted = text:match("INSERT INTO SYS_SEMANTIC%.([A-Z_]+)")
+        if inserted ~= nil then
+            restore_inserts[inserted] = params
+        end
+        local deleted = text:match("DELETE FROM SYS_SEMANTIC%.([A-Z_]+)")
+        if deleted ~= nil then cleared[deleted] = true end
+        return {}
+    end, function()
+        local snapshot = api.snapshot_model_state({model_id = 1, version_id = 2})
+        assert_true(snapshot.dimensions ~= nil)
+        assert_equal(#snapshot.dimensions, 1)
+        api.restore_model_state({model_id = 1, version_id = 2}, snapshot)
+    end)
+    -- Captured, cleared and put back -- all three, or the rollback is partial.
+    assert_true(snapshot_tables.DIMENSIONS == true)
+    assert_true(cleared.DIMENSIONS == true)
+    assert_true(restore_inserts.DIMENSIONS ~= nil)
+    assert_equal(restore_inserts.DIMENSIONS.dimension_id, 55)
+    assert_equal(restore_inserts.DIMENSIONS.dimension_name, "freight_band")
+    assert_equal(restore_inserts.DIMENSIONS.format_hint, "text")
+    assert_equal(restore_inserts.DIMENSIONS.is_hidden, false)
+    assert_equal(restore_inserts.DIMENSIONS.status, "ACTIVE")
+    -- Facts were already covered; the point is that both are now.
+    assert_true(cleared.FACTS == true)
+end)
+
 test("semantic definition parses metric drop and rename", function()
     local dropped = api.parse_definition([[
         ALTER SEMANTIC VIEW sales.SALES DROP METRIC obsolete_revenue
@@ -447,6 +615,19 @@ test("semantic definition rejects incomplete authoring statements", function()
             .. " ADD OR REPLACE METRIC m AS SUM(x) ON ENTITY e RETURNS INT", "SEMANTIC_DDL_037"},
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f RETURNS INT"
             .. " REPLACE METRICS (METRIC m AS SUM(x) ON ENTITY e RETURNS INT)", "SEMANTIC_DDL_037"},
+        -- Dimensions mirror facts, including the refusals.
+        {"ALTER SEMANTIC VIEW sales.SALES REPLACE DIMENSIONS (FACT x ON ENTITY e AS f RETURNS INT)",
+            "SEMANTIC_DDL_025"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d ON ENTITY e RETURNS INT",
+            "SEMANTIC_DDL_026"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d ON ENTITY e AS f",
+            "SEMANTIC_DDL_027"},
+        {"ALTER SEMANTIC VIEW sales.SALES REPLACE DIMENSIONS DIMENSION d", "SEMANTIC_DDL_028"},
+        {"ALTER SEMANTIC VIEW sales.SALES REPLACE DIMENSIONS (DIMENSION d", "SEMANTIC_DDL_029"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d ON ENTITY e AS f RETURNS INT"
+            .. " REPLACE METRICS (METRIC m AS SUM(x) ON ENTITY e RETURNS INT)", "SEMANTIC_DDL_038"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f RETURNS INT"
+            .. " ADD OR REPLACE DIMENSION d ON ENTITY e AS g RETURNS INT", "SEMANTIC_DDL_037"},
     }
     for _, case in ipairs(cases) do
         assert_error(function() api.parse_definition(case[1]) end, case[2])

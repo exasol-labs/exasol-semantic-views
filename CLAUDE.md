@@ -266,32 +266,42 @@ The reference model is in `sql/examples/`. Authoring order matters:
    / `_WITH_IDENTITY_BINDING` forms remain for existing callers
 5. `VALIDATE_MODEL` -> `PUBLISH_MODEL`
 
-### Two Authoring Surfaces, Neither Complete
+### Two Authoring Surfaces, Divided By Job
 
-Do not reach for Semantic DDL expecting to author a model with it. It covers a
-narrow slice, and the scripts cover the rest:
+Not by preference — by what each is for. Neither is a "compatibility API" and
+neither is "preferred"; the boundary is the whole point, because it explains why
+a concept is absent from one of them.
 
-- **SQL-native Semantic DDL** — `APPLY_SEMANTIC_DEFINITION`, or `ALTER SEMANTIC
-  VIEW` directly once `ENABLE_SEMANTIC_SQL()` is on — covers **facts and metrics
-  only**, on a semantic object that already exists. The accepted forms are
-  `REPLACE FACTS`, `REPLACE METRICS`, `ADD OR REPLACE FACT`, `ADD OR REPLACE
-  METRIC`, `DROP METRIC`, `RENAME METRIC`. An unsupported clause — **including
-  `DIMENSION`** — is refused with `SEMANTIC_DDL_012`, which lists those six
-  forms; any other statement, including `CREATE SEMANTIC VIEW`, is refused with
-  `SEMANTIC_DDL_010: expected ALTER SEMANTIC VIEW`. Note that
-  `APPLY_SEMANTIC_DEFINITION` reports a refusal as `STATUS = 'ERROR'` in its
-  result row rather than raising, so check the column, not just for an exception.
-  See `sql/examples/sales_metrics_semantic_definition.sql`.
-- **The `ADD_*` / `SET_*` / `REMOVE_*` scripts** cover everything else, which is
-  most of a model: the model itself, entities, semantic objects, relationships,
-  unique keys, dimensions, representations, coverage (F3), authority (F4),
-  identity (F5), and materializations. Call them positionally, or by name through
-  `CALL_ADMIN_JSON` to avoid counting arguments.
+- **SQL-native Semantic DDL owns the interior of one semantic object** — its
+  dimensions, facts and metrics. `APPLY_SEMANTIC_DEFINITION`, or `ALTER SEMANTIC
+  VIEW` directly once `ENABLE_SEMANTIC_SQL()` is on, on an object that already
+  exists. Accepted forms: `REPLACE DIMENSIONS`, `REPLACE FACTS`, `REPLACE
+  METRICS`, `ADD OR REPLACE DIMENSION`, `ADD OR REPLACE FACT`, `ADD OR REPLACE
+  METRIC`, `DROP METRIC`, `RENAME METRIC`. Anything else is refused with
+  `SEMANTIC_DDL_012`, which lists them; any statement that is not `ALTER SEMANTIC
+  VIEW` — including `CREATE SEMANTIC VIEW` — is refused with `SEMANTIC_DDL_010`.
 
-So: bootstrap with the scripts, and maintain facts and metrics in DDL where it is
-the clearer record. Calling the scripts "compatibility APIs" would be misleading
-— for representations, identity, authority and materializations they are the only
-surface that exists.
+  Reach for it when the change is a *set* edited as a unit: a `REPLACE` block is
+  atomic, validates once, rolls back as one, and takes `DRY_RUN` to answer
+  "would this validate?" without touching the catalog. The scripts do one
+  attribute per call and have no dry run.
+
+  Note that `APPLY_SEMANTIC_DEFINITION` reports a refusal as `STATUS = 'ERROR'`
+  in its result row rather than raising, so check the column, not just for an
+  exception. See `sql/examples/sales_metrics_semantic_definition.sql`.
+- **The `ADD_*` / `SET_*` / `REMOVE_*` scripts own the graph** — everything that
+  brings objects into being or relates them: the model, entities, semantic
+  objects, relationships, unique keys, representations, coverage (F3), authority
+  (F4), identity (F5), and materializations. These are graph operations with
+  ordering constraints that a per-object `ALTER` statement cannot express, which
+  is why they are not in the DDL and are not going to be. Call them
+  positionally, or by name through `CALL_ADMIN_JSON` to avoid counting arguments.
+
+So: bootstrap the graph with the scripts, and keep an object's dimensions, facts
+and metrics in DDL, where the file is the record. Note the fusion layer (F1–F5)
+has **no** declarative surface yet, and on a published model it is not
+incrementally authorable at all — every declaration must arrive complete, which
+is what the compound `_WITH_*` forms are for.
 
 ### SQL NULL Is Truthy Userdata in Lua
 

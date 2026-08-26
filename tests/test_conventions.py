@@ -295,6 +295,71 @@ class VerifiersNamedByInvariant(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Agent skills must not describe a surface that has moved on
+# ---------------------------------------------------------------------------
+
+SKILLS = sorted((ROOT / "skills").rglob("*.md"))
+
+
+class SkillsMatchTheSurface(unittest.TestCase):
+    """The skills are an interface contract, and a stale one misleads silently.
+
+    `skills/exasol-semantic-modeler/SKILL.md` told agents that "`ALTER SEMANTIC
+    VIEW ... ADD OR REPLACE DIMENSION` is not yet supported in DDL" for as long
+    as that was true, and nothing failed when it stopped being true. An agent
+    following it would reach for the ten-parameter script instead, or conclude a
+    capability was missing.
+
+    These checks are deliberately narrow: they pin the *claims* that go stale
+    when a form is added or a code renumbered, not the prose around them.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = {path: path.read_text(encoding="utf-8") for path in SKILLS}
+        cls.joined = "\n".join(cls.text.values())
+
+    def test_the_skills_are_being_read(self):
+        self.assertGreaterEqual(len(SKILLS), 6, [p.name for p in SKILLS])
+
+    def test_no_skill_claims_a_supported_form_is_unsupported(self):
+        """Every DDL form the parser accepts, stated as unsupported somewhere."""
+        # The exact strings SEMANTIC_DDL_012 advertises.
+        supported = ("REPLACE DIMENSIONS", "REPLACE FACTS", "REPLACE METRICS",
+                     "ADD OR REPLACE DIMENSION", "ADD OR REPLACE FACT",
+                     "ADD OR REPLACE METRIC", "DROP METRIC", "RENAME METRIC")
+        denials = ("not yet supported", "is not supported", "not supported in DDL",
+                   "has no DDL form")
+        offenders = []
+        for path, text in self.text.items():
+            for line in text.split("\n"):
+                if not any(denial in line for denial in denials):
+                    continue
+                for form in supported:
+                    if form in line:
+                        offenders.append(f"{path.name}: {line.strip()[:90]}")
+        self.assertEqual(
+            [], offenders,
+            "a skill calls an accepted Semantic DDL form unsupported")
+
+    def test_the_forms_the_parser_accepts_are_the_forms_the_docs_list(self):
+        """SEMANTIC_DDL_012's own message is the source of truth."""
+        parser = (ROOT / "lua/semantic_layer/admin/semantic_definition.lua").read_text(
+            encoding="utf-8")
+        advertised = parser.split('error("SEMANTIC_DDL_012: expected ', 1)[1]
+        advertised = advertised.split('")', 1)[0]
+        for form in ("REPLACE DIMENSIONS", "ADD OR REPLACE DIMENSION"):
+            self.assertIn(form, advertised,
+                          "SEMANTIC_DDL_012 stopped advertising a supported form")
+
+    def test_no_skill_quotes_a_renumbered_code(self):
+        """Codes that moved: keeping the old spelling sends readers nowhere."""
+        for retired in ("SEMANTIC_ADMIN_W060", "SEMANTIC_ADMIN_W061"):
+            self.assertNotIn(retired, self.joined,
+                             f"{retired} was renumbered; skills still quote it")
+
+
+# ---------------------------------------------------------------------------
 # 3. Derive a surface, do not restate it
 # ---------------------------------------------------------------------------
 

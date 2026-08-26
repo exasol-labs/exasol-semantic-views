@@ -119,18 +119,53 @@ Every name position accepts a double-quoted identifier for names that collide
 with SQL keywords (`ON ENTITY "order"`); the quoted text must still be a valid
 identifier.
 
-`ALTER SEMANTIC VIEW` currently supports `REPLACE FACTS`, `REPLACE METRICS`,
-single `ADD OR REPLACE FACT`, single `ADD OR REPLACE METRIC`, `DROP METRIC`,
-and `RENAME METRIC ... TO ...`. Either `REPLACE` block is a valid statement on
-its own. The two single forms each take the rest of the statement as one
-clause, so they cannot be combined with each other or with a `REPLACE` block
-(`SEMANTIC_DDL_037`).
+`ALTER SEMANTIC VIEW` supports `REPLACE DIMENSIONS`, `REPLACE FACTS`, `REPLACE
+METRICS`, single `ADD OR REPLACE DIMENSION`, `ADD OR REPLACE FACT`, `ADD OR
+REPLACE METRIC`, `DROP METRIC`, and `RENAME METRIC ... TO ...`. Any `REPLACE`
+block is a valid statement on its own, and the blocks compose — one statement may
+carry dimensions, facts and metrics together, validated once and rolled back as a
+unit. The three single forms each take the rest of the statement as one clause,
+so none can be combined with another change (`SEMANTIC_DDL_037` for a fact,
+`SEMANTIC_DDL_038` for a dimension).
 
-Fact *removal* has no DDL form: it waits until dependent-metric rewrites are
-transactional. Unsupported authoring forms, such as `ADD OR REPLACE DIMENSION`,
-fail during preprocessing instead of returning a result row that callers might
-ignore. Use `SEMANTIC_ADMIN.ADD_DIMENSION` or
-`SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION` for dimension maintenance.
+A dimension takes the same clauses as a fact — `ON ENTITY`, `AS`, `RETURNS`, and
+optionally `DISPLAY`, `COMMENT`, `FORMAT`, `CERTIFIED`, `PRIVATE`:
+
+```sql
+ALTER SEMANTIC VIEW sales.SALES
+REPLACE DIMENSIONS (
+  DIMENSION ship_mode
+    ON ENTITY "order"
+    AS o.ship_mode
+    RETURNS VARCHAR(20)
+    DISPLAY 'Ship Mode'
+    COMMENT 'How the order shipped'
+    CERTIFIED
+);
+```
+
+`PRIVATE` maps to the catalog's `IS_HIDDEN`, which is how `DIMENSIONS` spells
+what `FACTS` calls `IS_PRIVATE`. `AS` requires `SEMANTIC_DDL_026` and `RETURNS`
+requires `SEMANTIC_DDL_027`, mirroring a fact's `_021`/`_022`.
+
+**Column order is a side effect of block order.** Each `REPLACE` block deletes
+its kind's `OBJECT_COLUMNS` rows first, and the apply then re-adds dimensions,
+facts and metrics in that order, each taking `MAX(ORDINAL_POSITION) + 1`. So one
+statement carrying all three blocks renumbers the object from 1, in that order —
+which is the order `sales_model_seed.sql` produces by calling `ADD_DIMENSION`
+before applying its fact and metric blocks. Two separate statements interleave
+instead: replacing dimensions on their own lands them *after* the surviving facts
+and metrics. That matters beyond cosmetics, because OSI export carries these
+ordinals into the imported model, so it is a published column order.
+
+Fact and dimension *removal* have no single DDL form: they wait until
+dependent-metric rewrites are transactional. A `REPLACE` block does remove — it
+decides the object's membership, so anything left out of the block leaves the
+object. Unsupported authoring forms fail during preprocessing instead of
+returning a result row that callers might ignore. `SEMANTIC_ADMIN.ADD_DIMENSION`
+and `SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION` remain available and are the way to
+remove a single dimension (`REMOVE_DIMENSION`) or to add one outside a `REPLACE`
+block's set semantics.
 
 ## Introspection Commands
 

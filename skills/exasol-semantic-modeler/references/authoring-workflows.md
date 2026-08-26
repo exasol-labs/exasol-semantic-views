@@ -806,7 +806,52 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_FACT(
 
 ## Add Dimensions
 
-Categorical dimensions:
+Semantic DDL is the shorter and more readable form, and one block validates and
+rolls back as a unit:
+
+```sql
+ALTER SEMANTIC VIEW sales.SALES
+REPLACE DIMENSIONS (
+  DIMENSION order_status
+    ON ENTITY "order"
+    AS o.order_status
+    RETURNS VARCHAR(32)
+    DISPLAY 'Order Status'
+    COMMENT 'Fulfilment status of the order'
+    CERTIFIED,
+
+  DIMENSION customer_region
+    ON ENTITY customer
+    AS c.region
+    RETURNS VARCHAR(100)
+    DISPLAY 'Customer Region'
+    COMMENT 'Geographic region of the customer'
+    CERTIFIED
+);
+```
+
+`REPLACE DIMENSIONS` decides the object's dimension membership, so anything left
+out of the block leaves the object — use it for bootstrap and deliberate resets.
+For one dimension without disturbing the others, use the single form:
+
+```sql
+ALTER SEMANTIC VIEW sales.SALES
+ADD OR REPLACE DIMENSION order_status
+  ON ENTITY "order"
+  AS o.order_status
+  RETURNS VARCHAR(32)
+  DISPLAY 'Order Status'
+  COMMENT 'Fulfilment status of the order'
+  CERTIFIED;
+```
+
+Quote an entity whose name collides with a SQL keyword (`ON ENTITY "order"`).
+`PRIVATE` maps to the catalog's `IS_HIDDEN`. Dry-run through
+`APPLY_SEMANTIC_DEFINITION(..., TRUE)` before applying.
+
+The equivalent through the admin script, which is still the surface for removing
+one dimension (`REMOVE_DIMENSION`) or for per-representation bindings
+(`ADD_DIMENSION_WITH_BINDINGS`):
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
@@ -842,8 +887,10 @@ FROM MART.ORDERS o
 LIMIT 1;
 ```
 
-Run this smoke test before `ADD_DIMENSION`. It verifies executable Exasol SQL
-and the returned types; `VALIDATE_MODEL` does not compile every expression.
+Run this smoke test before declaring the dimension, whichever surface you use.
+It verifies executable Exasol SQL and the returned types; `VALIDATE_MODEL` does
+not compile every expression, so an invalid dialect expression can pass
+validation and fail at query time.
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION(
@@ -940,9 +987,27 @@ ADD OR REPLACE METRIC completed_revenue
 );
 ```
 
-Ratio metric:
+Ratio metric. A `RATIO` divides two *metrics*, so declare the numerator as a
+metric first — this one aggregates the `gross_margin` fact created above. Naming
+it `total_gross_margin` rather than reusing `gross_margin` keeps the fact and the
+metric distinct; a metric that aggregates a fact of the same name is fine, but a
+metric that references *itself* fails with `SEMANTIC_MODEL_012: cyclic metric
+dependency`.
 
 ```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
+  'ALTER SEMANTIC VIEW sales.SALES
+ADD OR REPLACE METRIC total_gross_margin
+  AS SUM(gross_margin)
+  ON ENTITY order_line
+  RETURNS DECIMAL(18,2)
+  FORMAT ''currency''
+  DISPLAY ''Gross Margin''
+  COMMENT ''Net revenue minus cost of goods''
+  ADDITIVE PUBLIC CERTIFIED',
+  FALSE
+);
+
 EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
   'ALTER SEMANTIC VIEW sales.SALES
 ADD OR REPLACE METRIC gross_margin_pct
@@ -956,6 +1021,17 @@ ADD OR REPLACE METRIC gross_margin_pct
   FALSE
 );
 ```
+
+Referencing a name that is not an active metric fails with `SEMANTIC_MODEL_011`,
+which names what it could not resolve. Before this fix the ratio above referenced
+`total_gross_margin` without ever declaring it, so following this file top to
+bottom hit exactly that error.
+
+> These examples build **this file's** model, which is not the shipped `sales`
+> demo: it declares a `gross_margin` fact, where the demo derives
+> `gross_margin` from `total_revenue - total_cost`. Replaying an example here
+> against the demo model can therefore fail for reasons that have nothing to do
+> with the example.
 
 Rename a metric while preserving its identity and old name as a compatibility
 synonym:
@@ -985,8 +1061,17 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
 
 Apply with `FALSE` after reviewing the dry-run. The drop deactivates a metric
 only after its last object membership is removed, and validation rejects the
-change while another active metric depends on it. `REPLACE METRICS (...)`
-changes visible object membership but does not delete omitted catalog metrics.
+change while another active metric depends on it. Every `REPLACE ...` block
+changes visible object membership but does not delete the omitted catalog
+definitions.
+
+One statement may carry `REPLACE DIMENSIONS`, `REPLACE FACTS` and `REPLACE
+METRICS` together — the whole interior of a semantic object, validated once and
+rolled back as one unit. That is also the only way to restore an object's column
+*order*: each block clears its kind first and the apply re-adds dimensions,
+facts, then metrics, each taking the next ordinal, so a combined statement
+numbers the object from 1 in that order while separate statements interleave.
+OSI export carries those ordinals into the imported model.
 
 ## Import a Databricks UCMV
 

@@ -659,6 +659,44 @@ local function parse_fact(text)
     }
 end
 
+-- A dimension is the same shape as a fact -- an expression on an entity, with a
+-- type and some presentation metadata -- so it reuses the fact clauses exactly
+-- and adds none. What differs is where it lands: a fact is an invisible object
+-- column (metrics are built from it), a dimension is a visible one, and the
+-- catalog spells its visibility flag IS_HIDDEN rather than IS_PRIVATE.
+--
+-- FORMAT is the one clause a fact does not use and a dimension does; it was
+-- already in CLAUSES for metrics.
+local function parse_dimension(text)
+    local tokens = tokenize(text)
+    if token_upper(tokens[1]) ~= "DIMENSION" then
+        error("SEMANTIC_DDL_025: expected DIMENSION entry")
+    end
+    local name = normalize_name(token_identifier(tokens[2]), "DIMENSION_NAME")
+    local positions, ordered = clause_positions(tokens, 3)
+    local entity = normalize_name(clause_text(text, tokens, positions, ordered, "ON_ENTITY"), "ENTITY_NAME")
+    local expression = clause_text(text, tokens, positions, ordered, "AS")
+    local data_type = clause_text(text, tokens, positions, ordered, "RETURNS")
+    if missing(expression) then
+        error("SEMANTIC_DDL_026: DIMENSION " .. name .. " requires AS")
+    end
+    if missing(data_type) then
+        error("SEMANTIC_DDL_027: DIMENSION " .. name .. " requires RETURNS")
+    end
+    return {
+        kind = "DIMENSION",
+        name = name,
+        entity = entity,
+        expression = expression,
+        data_type = data_type,
+        display_name = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "DISPLAY")),
+        description = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "COMMENT")),
+        format_hint = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "FORMAT")),
+        is_hidden = positions.PRIVATE ~= nil,
+        is_certified = positions.CERTIFIED ~= nil,
+    }
+end
+
 local function aggregate_parts(expression)
     local text = trim(expression)
     local tokens = tokenize(text)
@@ -798,14 +836,18 @@ local function parse_definition(definition_sql)
         model_name = model_name,
         object_name = object_name,
         facts = {},
+        dimensions = {},
         metrics = {},
         replace_facts = false,
+        replace_dimensions = false,
         replace_metrics = false,
     }
 
     local replace_facts = find_sequence(tokens, {"REPLACE", "FACTS"}, next_index, 0)
     local replace_metrics = find_sequence(tokens, {"REPLACE", "METRICS"}, next_index, 0)
+    local replace_dimensions = find_sequence(tokens, {"REPLACE", "DIMENSIONS"}, next_index, 0)
     local add_fact = find_sequence(tokens, {"ADD", "OR", "REPLACE", "FACT"}, next_index, 0)
+    local add_dimension = find_sequence(tokens, {"ADD", "OR", "REPLACE", "DIMENSION"}, next_index, 0)
     local add_metric = find_sequence(tokens, {"ADD", "OR", "REPLACE", "METRIC"}, next_index, 0)
     local drop_metric = find_sequence(tokens, {"DROP", "METRIC"}, next_index, 0)
     local rename_metric = find_sequence(tokens, {"RENAME", "METRIC"}, next_index, 0)
@@ -840,8 +882,12 @@ local function parse_definition(definition_sql)
     -- statement as one clause, so they cannot share a statement with each other
     -- or with a REPLACE block. Say so instead of silently absorbing the tail.
     if add_fact ~= nil and (replace_facts ~= nil or replace_metrics ~= nil
-        or add_metric ~= nil) then
+        or replace_dimensions ~= nil or add_metric ~= nil or add_dimension ~= nil) then
         error("SEMANTIC_DDL_037: ADD OR REPLACE FACT must be the only change in a statement")
+    end
+    if add_dimension ~= nil and (replace_facts ~= nil or replace_metrics ~= nil
+        or replace_dimensions ~= nil or add_metric ~= nil or add_fact ~= nil) then
+        error("SEMANTIC_DDL_038: ADD OR REPLACE DIMENSION must be the only change in a statement")
     end
 
     if replace_facts ~= nil then
@@ -866,6 +912,26 @@ local function parse_definition(definition_sql)
         definition.facts[#definition.facts + 1] = parse_fact(fact_text)
     end
 
+    if replace_dimensions ~= nil then
+        definition.replace_dimensions = true
+        local open = replace_dimensions + 2
+        if tokens[open] == nil or tokens[open].text ~= "(" then
+            error("SEMANTIC_DDL_028: REPLACE DIMENSIONS requires a parenthesized block")
+        end
+        local close = matching_close(tokens, open)
+        if close == nil then
+            error("SEMANTIC_DDL_029: unterminated DIMENSIONS block")
+        end
+        local block = string.sub(source, tokens[open].end_pos + 1, tokens[close].start_pos - 1)
+        for _, part in ipairs(split_top_level_text(block)) do
+            definition.dimensions[#definition.dimensions + 1] = parse_dimension(part)
+        end
+    elseif add_dimension ~= nil then
+        -- Upsert one dimension, leaving the object's others in place.
+        local dimension_text = string.sub(source, tokens[add_dimension + 3].start_pos)
+        definition.dimensions[#definition.dimensions + 1] = parse_dimension(dimension_text)
+    end
+
     if replace_metrics ~= nil then
         definition.replace_metrics = true
         local open = replace_metrics + 2
@@ -883,11 +949,14 @@ local function parse_definition(definition_sql)
     elseif add_metric ~= nil then
         local metric_text = string.sub(source, tokens[add_metric + 3].start_pos)
         definition.metrics[#definition.metrics + 1] = parse_metric(metric_text, false)
-    elseif replace_facts == nil and add_fact == nil then
-        -- Fact-only statements are valid: this used to reject `REPLACE FACTS`
-        -- on its own even though the message listed it as an accepted form.
-        error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE METRICS, "
-            .. "ADD OR REPLACE FACT, ADD OR REPLACE METRIC, DROP METRIC, or RENAME METRIC")
+    elseif replace_facts == nil and add_fact == nil
+        and replace_dimensions == nil and add_dimension == nil then
+        -- Fact-only and dimension-only statements are valid: this used to reject
+        -- `REPLACE FACTS` on its own even though the message listed it as an
+        -- accepted form.
+        error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE DIMENSIONS, "
+            .. "REPLACE METRICS, ADD OR REPLACE FACT, ADD OR REPLACE DIMENSION, "
+            .. "ADD OR REPLACE METRIC, DROP METRIC, or RENAME METRIC")
     end
 
     return definition
@@ -1165,6 +1234,146 @@ local function upsert_fact(model, object_id_value, fact)
     ]], {model_id = model.model_id, version_id = model.version_id,
         entity_id = entity, fact_id = existing_id, expression = fact.expression})
     add_object_column(object_id_value, "FACT", existing_id, fact.name, false)
+    return existing_id
+end
+
+-- Mirrors upsert_fact. The three differences are the catalog's, not the DDL's:
+-- DIMENSIONS carries FORMAT_HINT where FACTS carries ADDITIVE_POLICY, spells
+-- visibility IS_HIDDEN rather than IS_PRIVATE, and a dimension is a *visible*
+-- object column because it is something a caller groups by.
+--
+-- Like a fact, a dimension needs a default attribute binding on the primary
+-- representation, and needs one seeded on every non-primary representation of a
+-- partitioned entity before the single validation pass -- SEMANTIC_MODEL_052
+-- rejects an attribute that is missing a binding on any partition, and REPLACE
+-- DIMENSIONS validates once at the end.
+local function upsert_dimension(model, object_id_value, dimension)
+    local entity = entity_id(model, dimension.entity)
+    local existing_id = scalar([[
+        SELECT DIMENSION_ID
+        FROM SYS_SEMANTIC.DIMENSIONS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension.name})
+    if existing_id ~= nil then
+        query([[
+            UPDATE SYS_SEMANTIC.DIMENSIONS
+            SET ENTITY_ID = :entity_id,
+                EXPRESSION = :expression,
+                DATA_TYPE = :data_type,
+                DISPLAY_NAME = :display_name,
+                DESCRIPTION = :description,
+                FORMAT_HINT = :format_hint,
+                IS_HIDDEN = :is_hidden,
+                IS_CERTIFIED = :is_certified,
+                STATUS = 'ACTIVE'
+            WHERE DIMENSION_ID = :dimension_id
+        ]], {
+            dimension_id = existing_id,
+            entity_id = entity,
+            expression = dimension.expression,
+            data_type = dimension.data_type,
+            display_name = null_if_missing(dimension.display_name),
+            description = null_if_missing(dimension.description),
+            format_hint = null_if_missing(dimension.format_hint),
+            is_hidden = dimension.is_hidden,
+            is_certified = dimension.is_certified,
+        })
+    else
+        query([[
+            INSERT INTO SYS_SEMANTIC.DIMENSIONS (
+              MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION, DATA_TYPE,
+              DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, IS_HIDDEN, IS_CERTIFIED, STATUS
+            ) VALUES (
+              :model_id, :version_id, :entity_id, :dimension_name, :expression, :data_type,
+              :display_name, :description, :format_hint, :is_hidden, :is_certified, 'ACTIVE'
+            )
+        ]], {
+            model_id = model.model_id,
+            version_id = model.version_id,
+            entity_id = entity,
+            dimension_name = dimension.name,
+            expression = dimension.expression,
+            data_type = dimension.data_type,
+            display_name = null_if_missing(dimension.display_name),
+            description = null_if_missing(dimension.description),
+            format_hint = null_if_missing(dimension.format_hint),
+            is_hidden = dimension.is_hidden,
+            is_certified = dimension.is_certified,
+        })
+        existing_id = scalar([[
+            SELECT DIMENSION_ID FROM SYS_SEMANTIC.DIMENSIONS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
+        ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension.name})
+    end
+    local primary_representation_id = scalar([[
+        SELECT REPRESENTATION_ID
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE ENTITY_ID = :entity_id
+          AND REPRESENTATION_ROLE = 'PRIMARY'
+          AND STATUS = 'ACTIVE'
+    ]], {entity_id = entity})
+    local default_binding_id = scalar([[
+        SELECT ATTRIBUTE_BINDING_ID
+        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        WHERE ATTRIBUTE_TYPE = 'DIMENSION'
+          AND ATTRIBUTE_ID = :dimension_id
+          AND IS_DEFAULT = TRUE
+          AND STATUS = 'ACTIVE'
+    ]], {dimension_id = existing_id})
+    if default_binding_id == nil then
+        query([[
+            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+              MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+              REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+              BINDING_PRIORITY, IS_DEFAULT, STATUS
+            ) VALUES (
+              :model_id, :version_id, :entity_id, 'DIMENSION', :dimension_id,
+              :representation_id, :expression, 'PREFER', 1, TRUE, 'ACTIVE'
+            )
+        ]], {model_id = model.model_id, version_id = model.version_id,
+            entity_id = entity, dimension_id = existing_id,
+            representation_id = primary_representation_id, expression = dimension.expression})
+    else
+        query([[
+            UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            SET ENTITY_ID = :entity_id, REPRESENTATION_ID = :representation_id,
+                SOURCE_EXPRESSION = :expression,
+                UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+            WHERE ATTRIBUTE_BINDING_ID = :binding_id
+        ]], {entity_id = entity, representation_id = primary_representation_id,
+            expression = dimension.expression, binding_id = default_binding_id})
+    end
+    query([[
+        INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
+          MODEL_ID, VERSION_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+          REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
+          BINDING_PRIORITY, IS_DEFAULT, STATUS
+        )
+        SELECT :model_id, :version_id, :entity_id, 'DIMENSION', :dimension_id,
+               er.REPRESENTATION_ID, :expression, 'PREFER', 1, FALSE, 'ACTIVE'
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+        WHERE er.ENTITY_ID = :entity_id AND er.STATUS = 'ACTIVE'
+          AND er.REPRESENTATION_ROLE <> 'PRIMARY'
+          AND (SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS active_er
+               WHERE active_er.ENTITY_ID = :entity_id AND active_er.STATUS = 'ACTIVE') > 1
+          AND NOT EXISTS (
+            SELECT 1 FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS uncovered_er
+            WHERE uncovered_er.ENTITY_ID = :entity_id
+              AND uncovered_er.STATUS = 'ACTIVE'
+              AND uncovered_er.COVERAGE_PREDICATE IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS existing_binding
+            WHERE existing_binding.ATTRIBUTE_TYPE = 'DIMENSION'
+              AND existing_binding.ATTRIBUTE_ID = :dimension_id
+              AND existing_binding.REPRESENTATION_ID = er.REPRESENTATION_ID
+              AND existing_binding.STATUS = 'ACTIVE'
+          )
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_id = entity, dimension_id = existing_id, expression = dimension.expression})
+    add_object_column(object_id_value, "DIMENSION", existing_id, dimension.name, true)
     return existing_id
 end
 
@@ -1780,7 +1989,7 @@ local function definition_operation_count(definition)
     if definition.operation == "DROP_METRIC" or definition.operation == "RENAME_METRIC" then
         return 1
     end
-    return #definition.facts + #definition.metrics
+    return #definition.facts + #definition.dimensions + #definition.metrics
 end
 
 local function validation_error_message(validation_rows)
@@ -1814,9 +2023,23 @@ local function apply_definition_changes(definition, model, object_id_value, defi
         if definition.replace_facts then
             replace_object_columns(object_id_value, "FACT")
         end
+        if definition.replace_dimensions then
+            replace_object_columns(object_id_value, "DIMENSION")
+        end
         if definition.replace_metrics then
             replace_object_columns(object_id_value, "METRIC")
             prepare_replacement_synonyms(model, definition.metrics)
+        end
+        -- Dimensions, then facts, then metrics. Two reasons, both load-bearing:
+        -- a metric may reference either, so both must exist first; and
+        -- OBJECT_COLUMNS.ORDINAL_POSITION is assigned MAX+1 as each column is
+        -- added, so this order is what a statement carrying all three blocks
+        -- produces -- and it is the order the seed produces by calling
+        -- ADD_DIMENSION before applying the fact and metric blocks. OSI export
+        -- carries those ordinals to the imported model, so changing the order
+        -- here changes a published column order downstream.
+        for _, dimension in ipairs(definition.dimensions) do
+            upsert_dimension(model, object_id_value, dimension)
         end
         for _, fact in ipairs(definition.facts) do
             upsert_fact(model, object_id_value, fact)
@@ -1858,6 +2081,13 @@ local function snapshot_model_state(model)
                    SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
                    IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
             FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
+        dimensions = query([[
+            SELECT DIMENSION_ID, MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION,
+                   DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
+                   SENSITIVITY_LABEL, DISPLAY_POLICY, IS_HIDDEN, IS_CERTIFIED, STATUS
+            FROM SYS_SEMANTIC.DIMENSIONS
             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
         ]], {model_id = model.model_id, version_id = model.version_id}) or {},
         facts = query([[
@@ -1963,10 +2193,46 @@ local function clear_model_state(model)
         DELETE FROM SYS_SEMANTIC.FACTS
         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
     ]], {model_id = model.model_id, version_id = model.version_id})
+    query([[
+        DELETE FROM SYS_SEMANTIC.DIMENSIONS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = model.model_id, version_id = model.version_id})
 end
 
 local function restore_model_state(model, snapshot)
     clear_model_state(model)
+    -- Dimensions first: ATTRIBUTE_BINDINGS and OBJECT_COLUMNS rows restored
+    -- below point at these ids.
+    for _, row in ipairs(snapshot.dimensions or {}) do
+        query([[
+            INSERT INTO SYS_SEMANTIC.DIMENSIONS (
+              DIMENSION_ID, MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION,
+              DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
+              SENSITIVITY_LABEL, DISPLAY_POLICY, IS_HIDDEN, IS_CERTIFIED, STATUS
+            ) VALUES (
+              :dimension_id, :model_id, :version_id, :entity_id, :dimension_name, :expression,
+              :data_type, :display_name, :description, :format_hint, :unit_hint,
+              :sensitivity_label, :display_policy, :is_hidden, :is_certified, :status
+            )
+        ]], {
+            dimension_id = row_value(row, "DIMENSION_ID", 1),
+            model_id = row_value(row, "MODEL_ID", 2),
+            version_id = row_value(row, "VERSION_ID", 3),
+            entity_id = row_value(row, "ENTITY_ID", 4),
+            dimension_name = row_value(row, "DIMENSION_NAME", 5),
+            expression = row_value(row, "EXPRESSION", 6),
+            data_type = row_value(row, "DATA_TYPE", 7),
+            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 8)),
+            description = null_if_missing(row_value(row, "DESCRIPTION", 9)),
+            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 10)),
+            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 11)),
+            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 12)),
+            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 13)),
+            is_hidden = row_value(row, "IS_HIDDEN", 14),
+            is_certified = row_value(row, "IS_CERTIFIED", 15),
+            status = row_value(row, "STATUS", 16),
+        })
+    end
     for _, row in ipairs(snapshot.facts or {}) do
         query([[
             INSERT INTO SYS_SEMANTIC.FACTS (
@@ -4330,6 +4596,9 @@ if rawget(_G, "ESV_TEST_MODE") then
         apply_definition_changes = apply_definition_changes,
         validate_definition_model = validate_definition_model,
         upsert_metric = upsert_metric,
+        upsert_dimension = upsert_dimension,
+        snapshot_model_state = snapshot_model_state,
+        restore_model_state = restore_model_state,
         drop_metric = drop_metric,
         rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,

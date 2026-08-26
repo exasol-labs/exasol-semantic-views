@@ -1,10 +1,58 @@
--- SQL-native metric authoring example.
+-- SQL-native authoring example for a semantic object's interior.
 --
--- This file is intentionally not part of the legacy smoke seed yet. It is the
--- target Semantic SQL surface implemented by the definition runtime and
--- preprocessor.
+-- One statement per concept set. Each REPLACE block decides the object's
+-- membership for that kind, and the blocks compose: a single statement may carry
+-- dimensions, facts and metrics together, validated once and rolled back as one.
+--
+-- This covers everything inside a semantic object. The object itself, its
+-- entities, relationships, keys and the fusion layer are graph operations with
+-- ordering constraints an ALTER on one object cannot express -- those are the
+-- SEMANTIC_ADMIN scripts (see sql/examples/sales_model_seed.sql).
+--
+-- This file is intentionally not part of the legacy smoke seed yet.
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL();
+
+-- Dimensions: what the object can be grouped by. Same clauses as a fact, plus
+-- FORMAT; PRIVATE hides one from discovery (the catalog spells it IS_HIDDEN).
+--
+-- These four are the declarative equivalent of the four ADD_DIMENSION calls in
+-- sales_model_seed.sql -- same expressions, types and format hints.
+ALTER SEMANTIC VIEW sales.SALES
+REPLACE DIMENSIONS (
+  DIMENSION customer_region
+    ON ENTITY customer
+    AS c.region
+    RETURNS VARCHAR(100)
+    DISPLAY 'Customer Region'
+    COMMENT 'Commercial region assigned to the customer'
+    CERTIFIED,
+
+  DIMENSION order_month
+    ON ENTITY "order"
+    AS DATE_TRUNC('month', o.order_date)
+    RETURNS DATE
+    DISPLAY 'Order Month'
+    COMMENT 'Calendar month of the order date'
+    FORMAT 'month'
+    CERTIFIED,
+
+  DIMENSION order_status
+    ON ENTITY "order"
+    AS o.order_status
+    RETURNS VARCHAR(32)
+    DISPLAY 'Order Status'
+    COMMENT 'Lifecycle status of the order'
+    CERTIFIED,
+
+  DIMENSION product_category
+    ON ENTITY product
+    AS p.category
+    RETURNS VARCHAR(100)
+    DISPLAY 'Product Category'
+    COMMENT 'Commercial product category'
+    CERTIFIED
+);
 
 ALTER SEMANTIC VIEW sales.SALES
 REPLACE FACTS (

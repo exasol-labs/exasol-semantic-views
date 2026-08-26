@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import sys
+from pathlib import Path
 from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 SEMANTIC_DEFINITION = """ALTER SEMANTIC VIEW sales.SALES
@@ -180,6 +185,26 @@ def cleanup_metrics(con, metric_names: list[str]) -> None:
     )
     con.execute("DELETE FROM SYS_SEMANTIC.METRICS WHERE METRIC_NAME IN (" + quoted + ")")
     con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+
+
+def cleanup_dimensions(con, dimension_names: list[str]) -> None:
+    """Remove probe dimensions so this file re-runs against a dirty model."""
+    quoted = ", ".join(sql_string(name) for name in dimension_names)
+    con.execute(
+        "DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_TYPE = 'DIMENSION' "
+        "AND ATTRIBUTE_ID IN (SELECT DIMENSION_ID FROM SYS_SEMANTIC.DIMENSIONS "
+        "WHERE DIMENSION_NAME IN (" + quoted + "))"
+    )
+    con.execute(
+        "DELETE FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES WHERE ATTRIBUTE_TYPE = 'DIMENSION' "
+        "AND ATTRIBUTE_ID IN (SELECT DIMENSION_ID FROM SYS_SEMANTIC.DIMENSIONS "
+        "WHERE DIMENSION_NAME IN (" + quoted + "))"
+    )
+    con.execute(
+        "DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE COLUMN_KIND = 'DIMENSION' "
+        "AND COLUMN_NAME IN (" + quoted + ")"
+    )
+    con.execute("DELETE FROM SYS_SEMANTIC.DIMENSIONS WHERE DIMENSION_NAME IN (" + quoted + ")")
 
 
 def apply_definition(con, definition_sql: str, dry_run: bool) -> dict[str, Any]:
@@ -945,6 +970,281 @@ ADD OR REPLACE METRIC obsolete_metric
                      "SELECT FACT_ID FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'quoted_probe')")
         con.execute("DELETE FROM SYS_SEMANTIC.FACTS WHERE FACT_NAME = 'quoted_probe'")
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+
+        # ---- DIMENSION in ALTER SEMANTIC VIEW -------------------------------
+        #
+        # Until now the DDL covered facts and metrics only, and `DIMENSION` was
+        # refused with SEMANTIC_DDL_012 -- so the documented "SQL-native" surface
+        # could describe what an object measures but not what it can be grouped
+        # by, and the one clause a modeller most often edits had to go through
+        # ADD_DIMENSION's ten positional parameters.
+        #
+        # A dimension is a fact's shape (an expression on an entity, with a type
+        # and presentation metadata), so it reuses the fact clauses and adds no
+        # keyword. What differs is where it lands: DIMENSIONS spells visibility
+        # IS_HIDDEN rather than IS_PRIVATE, carries FORMAT_HINT rather than an
+        # additive policy, and a dimension is a *visible* object column because
+        # it is something a caller groups by.
+        cleanup_dimensions(con, ["freight_band", "bad_column_dim"])
+        dim_dry = apply_definition(
+            con,
+            'ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION freight_band'
+            ' ON ENTITY "order"'
+            " AS CASE WHEN o.freight_amount > 20 THEN 'HIGH' ELSE 'LOW' END"
+            " RETURNS VARCHAR(10) DISPLAY 'Freight Band' COMMENT 'Bucketed freight'"
+            " FORMAT 'text' CERTIFIED",
+            True)
+        assert_equal("dimension dry run status", dim_dry["status"], "DRY_RUN")
+        assert_equal("dimension dry run counts one operation", dim_dry["operation_count"], 1)
+        assert_equal(
+            "dimension dry run committed nothing",
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.DIMENSIONS"
+                        " WHERE DIMENSION_NAME = 'freight_band'"),
+            0,
+        )
+
+        dim_applied = apply_definition(
+            con,
+            'ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION freight_band'
+            ' ON ENTITY "order"'
+            " AS CASE WHEN o.freight_amount > 20 THEN 'HIGH' ELSE 'LOW' END"
+            " RETURNS VARCHAR(10) DISPLAY 'Freight Band' COMMENT 'Bucketed freight'"
+            " FORMAT 'text' CERTIFIED",
+            False)
+        assert_status_ok("dimension apply", dim_applied)
+        dim_row = fetchall(
+            con,
+            "SELECT DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, IS_HIDDEN,"
+            " IS_CERTIFIED FROM SEMANTIC_CATALOG.DIMENSIONS"
+            " WHERE MODEL_NAME = 'sales' AND DIMENSION_NAME = 'freight_band'")
+        assert_equal("dimension catalog row", list(dim_row[0]),
+                     ["VARCHAR(10)", "Freight Band", "Bucketed freight", "text", False, True])
+        assert_equal(
+            "dimension is a visible object column",
+            scalar(con,
+                   "SELECT oc.IS_VISIBLE FROM SYS_SEMANTIC.OBJECT_COLUMNS oc"
+                   " JOIN SYS_SEMANTIC.DIMENSIONS d ON d.DIMENSION_ID = oc.OBJECT_REF_ID"
+                   " WHERE oc.COLUMN_KIND = 'DIMENSION' AND d.DIMENSION_NAME = 'freight_band'"),
+            True,
+        )
+        assert_equal(
+            "dimension got its default attribute binding",
+            scalar(con,
+                   "SELECT COUNT(*) FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS ab"
+                   " JOIN SYS_SEMANTIC.DIMENSIONS d ON d.DIMENSION_ID = ab.ATTRIBUTE_ID"
+                   " WHERE ab.ATTRIBUTE_TYPE = 'DIMENSION' AND ab.IS_DEFAULT = TRUE"
+                   " AND ab.STATUS = 'ACTIVE' AND d.DIMENSION_NAME = 'freight_band'"),
+            1,
+        )
+
+        # The point of authoring it: it has to answer a query, with the numbers a
+        # hand-written join gives.
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")
+        compiled = compile_request(con, {"model": "sales", "object": "SALES",
+                                         "metrics": ["total_revenue"],
+                                         "dimensions": ["freight_band"]})
+        assert_equal("compile grouped by the new dimension", compiled["status"], "OK")
+        got = {str(row[0]): row[1] for row in fetchall(con, compiled["generated_sql"])}
+        truth = {str(row[0]): row[1] for row in fetchall(
+            con,
+            "SELECT CASE WHEN o.FREIGHT_AMOUNT > 20 THEN 'HIGH' ELSE 'LOW' END,"
+            " SUM(ol.QUANTITY * ol.NET_UNIT_PRICE)"
+            " FROM MART.ORDER_LINES ol JOIN MART.ORDERS o ON o.ORDER_ID = ol.ORDER_ID"
+            " GROUP BY 1")}
+        assert_equal("DDL-authored dimension returns the truth", got, truth)
+
+        # REPLACE DIMENSIONS is a set replacement, exactly as REPLACE FACTS is:
+        # it decides the object's dimension membership, and the ones left out
+        # leave the object.
+        before = scalar(con,
+            "SELECT COUNT(*) FROM SYS_SEMANTIC.OBJECT_COLUMNS oc"
+            " JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID"
+            " WHERE so.OBJECT_NAME = 'SALES' AND oc.COLUMN_KIND = 'DIMENSION'")
+        if int(before) < 2:
+            raise AssertionError(f"fixture needs several dimensions on SALES, has {before}")
+        combined = apply_definition(
+            con,
+            'ALTER SEMANTIC VIEW sales.SALES'
+            ' REPLACE DIMENSIONS ('
+            '   DIMENSION ship_mode ON ENTITY "order" AS o.ship_mode RETURNS VARCHAR(20)'
+            "     DISPLAY 'Ship Mode' CERTIFIED,"
+            '   DIMENSION order_status ON ENTITY "order" AS o.order_status'
+            "     RETURNS VARCHAR(20) DISPLAY 'Order Status' CERTIFIED)"
+            ' REPLACE METRICS ('
+            '   METRIC total_revenue AS SUM(net_revenue) ON ENTITY order_line'
+            "     RETURNS DECIMAL(18,2) FORMAT 'currency' ADDITIVE PUBLIC CERTIFIED)",
+            False)
+        assert_status_ok("dimensions and metrics in one statement", combined)
+        assert_equal("one statement counted three operations",
+                     combined["operation_count"], 3)
+        assert_equal(
+            "REPLACE DIMENSIONS decided the object's dimension set",
+            scalar(con,
+                   "SELECT COUNT(*) FROM SYS_SEMANTIC.OBJECT_COLUMNS oc"
+                   " JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID"
+                   " WHERE so.OBJECT_NAME = 'SALES' AND oc.COLUMN_KIND = 'DIMENSION'"),
+            2,
+        )
+
+        # Refusals. The message must list the new forms, or a caller reading it
+        # concludes dimensions are still unsupported.
+        for label, statement, expected in (
+            ("block entry must be a DIMENSION",
+             'ALTER SEMANTIC VIEW sales.SALES REPLACE DIMENSIONS'
+             ' (FACT x ON ENTITY "order" AS o.ship_mode RETURNS VARCHAR(20))',
+             "SEMANTIC_DDL_025"),
+            ("dimension requires AS",
+             'ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d'
+             ' ON ENTITY "order" RETURNS VARCHAR(20)', "SEMANTIC_DDL_026"),
+            ("dimension requires RETURNS",
+             'ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d'
+             ' ON ENTITY "order" AS o.ship_mode', "SEMANTIC_DDL_027"),
+            ("REPLACE DIMENSIONS needs a block",
+             'ALTER SEMANTIC VIEW sales.SALES REPLACE DIMENSIONS DIMENSION d',
+             "SEMANTIC_DDL_028"),
+            ("unterminated DIMENSIONS block",
+             'ALTER SEMANTIC VIEW sales.SALES REPLACE DIMENSIONS (DIMENSION d',
+             "SEMANTIC_DDL_029"),
+            ("single dimension form cannot share a statement",
+             'ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d'
+             ' ON ENTITY "order" AS o.ship_mode RETURNS VARCHAR(20)'
+             ' REPLACE METRICS (METRIC m AS SUM(net_revenue) ON ENTITY order_line'
+             ' RETURNS DECIMAL(18,2))', "SEMANTIC_DDL_038"),
+        ):
+            refused = apply_definition(con, statement, True)
+            if refused["status"] != "ERROR":
+                raise AssertionError(f"{label}: expected ERROR, got {refused}")
+            assert_contains(label, str(refused["error_code"]) + " " + str(refused["message"]),
+                            expected)
+        # The two surfaces must agree. `sales_model_seed.sql` builds the four
+        # SALES dimensions with ADD_DIMENSION; the DDL block in
+        # `sales_metrics_semantic_definition.sql` claims to be its declarative
+        # equivalent. Replay that block and require the four rows to carry the
+        # seed's exact values -- otherwise the example's claim quietly stops
+        # being true. Stated as literals rather than as a before/after snapshot,
+        # because earlier checks in this file deliberately edit these same
+        # dimensions and a snapshot would just compare them to themselves.
+        SEEDED_SALES_DIMENSIONS = [
+            ("customer_region", "customer", "c.region", "VARCHAR(100)",
+             "Customer Region", "Commercial region assigned to the customer",
+             None, False, True),
+            ("order_month", "order", "DATE_TRUNC('month', o.order_date)", "DATE",
+             "Order Month", "Calendar month of the order date", "month", False, True),
+            ("order_status", "order", "o.order_status", "VARCHAR(32)",
+             "Order Status", "Lifecycle status of the order", None, False, True),
+            ("product_category", "product", "p.category", "VARCHAR(100)",
+             "Product Category", "Commercial product category", None, False, True),
+        ]
+        seeded_names = tuple(row[0] for row in SEEDED_SALES_DIMENSIONS)
+        dimension_columns = (
+            "SELECT DIMENSION_NAME, ENTITY_NAME, EXPRESSION, DATA_TYPE, DISPLAY_NAME,"
+            " DESCRIPTION, FORMAT_HINT, IS_HIDDEN, IS_CERTIFIED"
+            " FROM SEMANTIC_CATALOG.DIMENSIONS WHERE MODEL_NAME = 'sales'"
+            f" AND DIMENSION_NAME IN {seeded_names} ORDER BY DIMENSION_NAME")
+        example = (ROOT / "sql/examples/sales_metrics_semantic_definition.sql").read_text(
+            encoding="utf-8")
+        block = re.search(
+            r"(ALTER SEMANTIC VIEW sales\.SALES\s*\nREPLACE DIMENSIONS \(.*?\n\);)",
+            example, re.S)
+        if block is None:
+            raise AssertionError(
+                "the example no longer carries a REPLACE DIMENSIONS block")
+        statement = block.group(1).rstrip(";")
+        replayed = apply_definition(con, statement, False)
+        assert_status_ok("example dimension block replays", replayed)
+        assert_equal("DDL block reproduces the ADD_DIMENSION seed exactly",
+                     fetchall(con, dimension_columns),
+                     [tuple(row) for row in SEEDED_SALES_DIMENSIONS])
+        # Applying it again must be a no-op, which is what makes the file safe to
+        # keep in source control and re-run.
+        again = apply_definition(con, statement, False)
+        assert_status_ok("example dimension block is idempotent", again)
+        assert_equal("second apply changed nothing",
+                     fetchall(con, dimension_columns),
+                     [tuple(row) for row in SEEDED_SALES_DIMENSIONS])
+
+        # A *failed* apply must roll the dimension back, not just a dry run.
+        # Both paths restore the same snapshot, and that snapshot did not cover
+        # SYS_SEMANTIC.DIMENSIONS until dimensions became authorable here.
+        rejected = apply_definition(
+            con,
+            'ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION bad_column_dim'
+            ' ON ENTITY "order" AS o.no_such_column_xyz RETURNS VARCHAR(20)',
+            False)
+        if rejected["status"] != "ERROR":
+            raise AssertionError(f"invalid dimension was accepted: {rejected}")
+        assert_contains("failed apply names the unknown column",
+                        str(rejected["message"]), "SEMANTIC_MODEL_017")
+        assert_equal(
+            "failed apply left no dimension row behind",
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.DIMENSIONS"
+                        " WHERE DIMENSION_NAME = 'bad_column_dim'"),
+            0,
+        )
+        assert_equal(
+            "failed apply left no orphan binding behind",
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS ab"
+                        " WHERE ab.ATTRIBUTE_TYPE = 'DIMENSION' AND NOT EXISTS ("
+                        " SELECT 1 FROM SYS_SEMANTIC.DIMENSIONS d"
+                        " WHERE d.DIMENSION_ID = ab.ATTRIBUTE_ID)"),
+            0,
+        )
+
+        unsupported = apply_definition(con, "ALTER SEMANTIC VIEW sales.SALES REPLACE NOTHING (x)", True)
+        for form in ("REPLACE DIMENSIONS", "ADD OR REPLACE DIMENSION"):
+            assert_contains("SEMANTIC_DDL_012 advertises " + form,
+                            str(unsupported["message"]), form)
+
+        # Put the model back the way this file found it -- content *and* column
+        # order. The probes above used REPLACE blocks, which are set
+        # replacements: they drop what they leave out, and verifiers later in
+        # tools/run_smoke.sh depend on this object. verify_osi_batch_import.py
+        # pins OBJECT_COLUMNS exactly, ordinals included, because OSI export
+        # carries them to the imported model.
+        #
+        # Restoring in one statement is what makes the ordinals come back as
+        # 1..12: all three REPLACE blocks delete first, then the apply re-adds
+        # dimensions, facts and metrics in that order, each taking MAX+1. Two
+        # separate statements would interleave -- dimensions landing after the
+        # surviving facts and metrics -- and renumber the object.
+        cleanup_dimensions(con, ["freight_band", "bad_column_dim"])
+        restore_statement = (
+            statement.rstrip()
+            + "\n"
+            + SEMANTIC_DEFINITION.split("ALTER SEMANTIC VIEW sales.SALES", 1)[1].strip()
+        )
+        assert_status_ok("model restored after the probes",
+                         apply_definition(con, restore_statement, False))
+        assert_equal(
+            "object columns restored, ordinals included",
+            fetchall(con,
+                     "SELECT oc.COLUMN_KIND, oc.COLUMN_NAME, oc.ORDINAL_POSITION,"
+                     " oc.IS_VISIBLE FROM SYS_SEMANTIC.OBJECT_COLUMNS oc"
+                     " JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID"
+                     " WHERE so.OBJECT_NAME = 'SALES' ORDER BY oc.ORDINAL_POSITION"),
+            [("DIMENSION", "customer_region", 1, True),
+             ("DIMENSION", "order_month", 2, True),
+             ("DIMENSION", "order_status", 3, True),
+             ("DIMENSION", "product_category", 4, True),
+             ("FACT", "net_revenue", 5, False),
+             ("FACT", "net_cost", 6, False),
+             ("FACT", "quantity", 7, False),
+             ("METRIC", "total_revenue", 8, True),
+             ("METRIC", "total_cost", 9, True),
+             ("METRIC", "gross_margin", 10, True),
+             ("METRIC", "gross_margin_pct", 11, True),
+             ("METRIC", "completed_revenue", 12, True)],
+        )
+        for restored in ("gross_margin_pct", "completed_revenue"):
+            assert_equal(
+                f"{restored} is back on the object",
+                scalar(con,
+                       "SELECT COUNT(*) FROM SYS_SEMANTIC.OBJECT_COLUMNS oc"
+                       " JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID"
+                       " WHERE so.OBJECT_NAME = 'SALES' AND oc.COLUMN_KIND = 'METRIC'"
+                       f" AND oc.COLUMN_NAME = {sql_string(restored)}"),
+                1,
+            )
 
         add_replace_rows = fetchall(
             con,
