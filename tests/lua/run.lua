@@ -80,6 +80,16 @@ load_runtime("lua/semantic_layer/admin/semantic_definition.lua", function()
         explain_semantic_metric, export_semantic_definition, preprocess_sql,
         ESV_SEMANTIC_DEFINITION_TEST_API}
 end)
+-- The fusion document module reads the definition runtime's JSON helpers the
+-- way the installed script does: through the global the packager sets.
+ESV_SEMANTIC_DEFINITION_RUNTIME = {
+    encode_json = encode_json,
+    decode_json = decode_json,
+}
+load_runtime("lua/semantic_layer/admin/fusion_declaration.lua", function()
+    return {export_fusion_declaration, export_document_json,
+        apply_fusion_declaration, ESV_FUSION_DECLARATION_TEST_API}
+end)
 load_runtime("lua/semantic_layer/agent/runtime.lua", function()
     return {add_agent_instruction, add_verified_query, search_semantic_objects,
         describe_semantic_object, get_business_glossary, explain_compiled_sql,
@@ -168,6 +178,7 @@ local specs = {
     "tests/lua/validator_unit_test.lua",
     "tests/lua/materialization_unit_test.lua",
     "tests/lua/semantic_definition_unit_test.lua",
+    "tests/lua/fusion_declaration_unit_test.lua",
     "tests/lua/agent_unit_test.lua",
 }
 for _, spec in ipairs(specs) do dofile(repo_root .. "/" .. spec) end

@@ -156,6 +156,7 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 "$PYTHON_BIN" tools/verify_fusion_f3.py
 "$PYTHON_BIN" tools/verify_fusion_f4.py
 "$PYTHON_BIN" tools/verify_fusion_f5.py
+"$PYTHON_BIN" tools/verify_fusion_declaration.py
 "$PYTHON_BIN" tools/verify_fusion_f51.py
 "$PYTHON_BIN" tools/verify_fusion_f7.py
 

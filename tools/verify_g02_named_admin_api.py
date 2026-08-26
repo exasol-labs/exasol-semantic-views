@@ -27,28 +27,29 @@ than a workaround.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import ssl
 import sys
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 MODEL = "g02_named_verify"
 PUBLISHED_SCHEMA = "SEMANTIC_G02_NAMED_VERIFY"
 
 # Scripts that exist in SEMANTIC_ADMIN but are not callable APIs. Mirrors
-# NON_CALLABLE_SCRIPTS in tools/package_lua_scripts.py; asserted against the
-# live database here so the two cannot drift apart silently.
-NON_CALLABLE = {
-    "AGENT_RUNTIME",
-    "COMPILER_RUNTIME",
-    "MATERIALIZATION_RUNTIME",
-    "SEMANTIC_DEFINITION_RUNTIME",
-    "SEMANTIC_GUARD",
-    "SEMANTIC_PREPROCESSOR",
-    "VALIDATOR_RUNTIME",
-}
+# Read from tools/package_lua_scripts.py rather than restated here. This list
+# used to be a second copy with a comment claiming the two "cannot drift apart
+# silently" -- and then they did: FUSION_RUNTIME was added to the packager's set
+# and not to this one, and nothing failed until a full smoke run reached this
+# verifier. One place to declare a library, one place to read it.
+_PACKAGER_SPEC = importlib.util.spec_from_file_location(
+    "esv_packager", Path(__file__).resolve().parent / "package_lua_scripts.py")
+_PACKAGER = importlib.util.module_from_spec(_PACKAGER_SPEC)  # type: ignore[arg-type]
+_PACKAGER_SPEC.loader.exec_module(_PACKAGER)  # type: ignore[union-attr]
+NON_CALLABLE = set(_PACKAGER.NON_CALLABLE_SCRIPTS)
 
 # The nine BUG-G02 omitted, all declared `) AS`.
 SILENT_MUTATORS = [

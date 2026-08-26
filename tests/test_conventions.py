@@ -402,6 +402,22 @@ class DerivedNotDeclared(unittest.TestCase):
             "the exclusion names polymorphic columns literally again; read them "
             "out of `discriminated`, which is the one place they are declared")
 
+    def test_the_library_exclusion_list_is_declared_once(self):
+        """`NON_CALLABLE_SCRIPTS` lives in the packager and is read, not copied.
+
+        `tools/verify_g02_named_admin_api.py` used to carry a second copy with a
+        comment claiming the two "cannot drift apart silently". They then did:
+        FUSION_RUNTIME was added to the packager's set and not the copy, and
+        nothing failed until a full smoke run reached that verifier.
+        """
+        verifier = (ROOT / "tools/verify_g02_named_admin_api.py").read_text(
+            encoding="utf-8")
+        self.assertIn("_PACKAGER.NON_CALLABLE_SCRIPTS", verifier)
+        for library in ("COMPILER_RUNTIME", "VALIDATOR_RUNTIME", "FUSION_RUNTIME"):
+            self.assertNotIn(
+                f'"{library}",', verifier,
+                "the verifier restates a library name; read the packager's set")
+
     def test_discriminated_is_declared_before_it_is_read(self):
         """A WITH clause can only reference an earlier one, so order is load-bearing."""
         self.assertLess(self.body.index("discriminated AS ("),

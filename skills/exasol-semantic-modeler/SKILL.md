@@ -401,6 +401,9 @@ previous to succeed.
     (overlapping F4 Customer 360 sources; do not combine with F3 coverage)
 12. Optional ADD_SEMANTIC_IDENTITY, ADD_IDENTITY_BINDING for every representation,
     then ADD_IDENTITY_MAPPING_RELATION for each MAPPED binding
+    -- or declare 4, 5, 11 and 12 as one fusion document with
+    APPLY_FUSION_DECLARATION, which is the only workable route on a *published*
+    model (see Fusion Declaration Document below)
 13. ADD OR REPLACE METRIC (per aggregate — facts must exist for ADDITIVE;
    metrics must exist for RATIO/DERIVED). One statement may carry REPLACE
    DIMENSIONS, REPLACE FACTS and REPLACE METRICS together: one validation pass,
@@ -857,6 +860,66 @@ metric when no other object uses it. It is rejected and rolled back when active
 metrics still depend on it. `RENAME METRIC` preserves the metric ID, rewrites
 dependent metric expressions, and retains the old name as a synonym so verified
 requests and existing clients can migrate without an immediate break.
+
+## Fusion Declaration Document
+
+The whole tier-2 fusion layer of a model in one JSON document, applied
+atomically with a dry run, and exportable back for review or Git:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION('<model>', '<json>', TRUE);
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION('<model>', '<json>', FALSE);
+EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION('<model>', NULL);
+```
+
+**Prefer this over the individual F1-F5 scripts on a published model, where they
+do not work at all.** Given an entity that already has an F5 identity, each of
+`ADD_ENTITY_REPRESENTATION`, `ADD_IDENTITY_BINDING`,
+`ADD_IDENTITY_MAPPING_RELATION` and `SET_REPRESENTATION_AUTHORITY` is refused on
+its own, because each alone leaves the model invalid. The document is the unit
+the database actually requires.
+
+```json
+{"entities": {
+  "customer": {
+    "identity": {"name": "cid", "kind": "GLOBAL", "data_type": "DECIMAL(18,0)"},
+    "representations": [
+      {"name": "crm", "source_kind": "RELATION",
+       "source_schema": "CRM", "source_object": "CUSTOMERS_CRM",
+       "priority": 20, "authority": "AUTHORITATIVE",
+       "identity_binding": {"source_expression": "c.account_id",
+                            "binding_kind": "MAPPED",
+                            "mapping": {"source_schema": "CRM",
+                                        "source_object": "CUSTOMER_XREF",
+                                        "source_local_column": "ACCOUNT_ID",
+                                        "semantic_key_column": "CUSTOMER_ID",
+                                        "certification_status": "CERTIFIED"}}}],
+    "attribute_bindings": [
+      {"attribute_type": "DIMENSION", "attribute_name": "customer_name",
+       "representation": "crm", "source_expression": "c.display_name",
+       "binding_role": "PREFER", "binding_priority": 1}],
+    "attribute_policies": [
+      {"attribute_type": "DIMENSION", "attribute_name": "customer_name",
+       "strategy": "RECONCILE"}]}}}
+```
+
+Rules to work by:
+
+- Run `ALTER SESSION SET QUERY_TIMEOUT=60` first. Multi-representation key probes
+  require it (`SEMANTIC_MODEL_041`) and it is the first thing an unset session
+  hits.
+- Dry-run every document before applying it. Fusion validation runs data probes
+  against possibly remote sources, so "would this validate?" is worth asking
+  without mutating anything.
+- A refusal arrives as `STATUS = 'ERROR'` in the result row, not as an
+  exception — check the column, including for a malformed document.
+- Re-applying an exported document is a no-op (`APPLIED_COUNT = 0`). Export is
+  the way to review what fusion a model actually carries.
+- It is an upsert: the document declares what it contains and does not remove
+  what it omits. Use `REMOVE_ENTITY_REPRESENTATION`, `REMOVE_IDENTITY_BINDING`
+  and friends to take a declaration away.
+- Unknown keys are refused by name (`SEMANTIC_FUSION_011`). Do not guess key
+  names; export an existing fused model to see the exact shape.
 
 ## Validation and Publication
 

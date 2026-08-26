@@ -43,6 +43,7 @@ def split_scripts(sql_text: str) -> dict[str, str]:
 # admin entry points, so the mutator rule does not apply to them.
 LIBRARY_MODULES = {
     "COMPILER_RUNTIME",
+    "FUSION_RUNTIME",
     "MATERIALIZATION_RUNTIME",
     "SEMANTIC_DEFINITION_RUNTIME",
     "VALIDATOR_RUNTIME",

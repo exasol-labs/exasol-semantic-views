@@ -120,6 +120,11 @@ and OSI describes one. See `docs/osi-format.md`.
 row of the second box is a declaration a modeller makes and a validator proves,
 against representations of *one* entity within *one* model.
 
+Tier 2 has its own document, and it round-trips — see
+[The Fusion Declaration Document](#the-fusion-declaration-document). The
+`ADD_*` / `SET_*` scripts sit underneath it and remain the only way to *remove* a
+declaration.
+
 **Agents and users only ever see tier 2.** That is the point of the split. A
 question is asked against the fused model, and which source answered it —
 or which three, joined through a certified mapping relation and reconciled by
@@ -346,6 +351,107 @@ Deliberately not part of the query path. Agents write proposals into
 The audit record is one-way — certification doesn't activate anything,
 it just records the decision.
 
+## The Fusion Declaration Document
+
+The whole tier-2 layer of a model, as one JSON document, in both directions:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION('sales', NULL);
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION('sales', '<json>', TRUE);
+```
+
+`APPLY_` takes `DRY_RUN` and reports `STATUS`, `ERROR_CODE`, `MESSAGE`,
+`OPERATION_COUNT` and `APPLIED_COUNT`. Like `APPLY_SEMANTIC_DEFINITION` it
+reports a refusal as `STATUS = 'ERROR'` in the row rather than raising — check
+the column, including for a malformed document.
+
+**Why a document rather than another call.** On a *published* model the fusion
+layer is not incrementally authorable at all. Given an entity that already has an
+F5 identity, each of these is refused on its own, because each alone leaves the
+model invalid:
+
+| Step | Alone |
+|---|---|
+| `ADD_ENTITY_REPRESENTATION` | refused, `SEMANTIC_ADMIN_094` |
+| `ADD_IDENTITY_BINDING` | refused, `SEMANTIC_ADMIN_049` |
+| `ADD_IDENTITY_MAPPING_RELATION` | refused, `SEMANTIC_ADMIN_050` |
+| `SET_REPRESENTATION_AUTHORITY` | refused, `SEMANTIC_ADMIN_047` |
+
+The unit a published fusion change has to arrive in is therefore "all of it".
+That is what the compound `_WITH_*` forms are for, and why there are eight of
+them over a space that is a product — authority × coverage × identity × bindings
+× primary. A document makes the unit the caller writes match the unit the
+database requires, so the combination space stops needing a hand-enumerated door
+per point.
+
+The shape is keyed by entity:
+
+```json
+{"entities": {
+  "customer": {
+    "identity": {"name": "cid", "kind": "GLOBAL", "data_type": "DECIMAL(18,0)"},
+    "representations": [
+      {"name": "crm", "source_kind": "RELATION",
+       "source_schema": "CRM", "source_object": "CUSTOMERS_CRM",
+       "priority": 20, "authority": "AUTHORITATIVE",
+       "identity_binding": {"source_expression": "c.account_id",
+                            "binding_kind": "MAPPED",
+                            "mapping": {"source_schema": "CRM",
+                                        "source_object": "CUSTOMER_XREF",
+                                        "source_local_column": "ACCOUNT_ID",
+                                        "semantic_key_column": "CUSTOMER_ID",
+                                        "certification_status": "CERTIFIED"}}}],
+    "attribute_bindings": [
+      {"attribute_type": "DIMENSION", "attribute_name": "customer_name",
+       "representation": "crm", "source_expression": "c.display_name",
+       "binding_role": "PREFER", "binding_priority": 1}],
+    "attribute_policies": [
+      {"attribute_type": "DIMENSION", "attribute_name": "customer_name",
+       "strategy": "RECONCILE"}]}}}
+```
+
+Properties worth relying on:
+
+- **Ordered by dependency, not by the file.** The identity is created before a
+  representation binds to it, each representation before an attribute binds to
+  it, and a promotion to `PRIMARY` last. Every alternate arrives through
+  `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` carrying its authority, coverage
+  and identity binding at once, so no intermediate state is invalid.
+- **Atomic.** A failure anywhere restores the seven fusion tables from a snapshot
+  taken before the first operation. The column lists for that snapshot are read
+  from `EXA_ALL_COLUMNS`, so a new column is carried without editing the module.
+- **Dry run.** `DRY_RUN = TRUE` applies, validates, and rolls back. This matters
+  more here than anywhere else in the product, because fusion validation runs
+  *data* probes — key uniqueness per representation, mapping totality and
+  bijection, canonical key-set equivalence — against possibly remote sources.
+- **Idempotent.** Re-applying an exported document reports
+  `nothing to do, the catalog already matches` with `APPLIED_COUNT = 0`, which is
+  what makes the file safe to keep in Git and re-run.
+- **Upsert, not reconciliation.** The document declares what it contains and
+  leaves alone what it omits. Removing a representation or an identity stays with
+  the `REMOVE_*` scripts — deleting governance metadata because a JSON key is
+  absent is not a mistake worth making convenient.
+- **A closed contract.** An unknown key is refused by name
+  (`SEMANTIC_FUSION_011`), as are a document naming a different model
+  (`_015`) and an identity binding on an entity that declares no identity
+  (`_014`).
+
+The export is proportional to the fusion, not to the model: an entity with one
+representation, no identity and no declarations exports nothing. The demo `sales`
+model therefore exports an empty document, and that is correct — it federates
+nothing.
+
+**`QUERY_TIMEOUT` is a caller precondition.** Multi-representation key probes
+need it (`SEMANTIC_MODEL_041`), so run `ALTER SESSION SET QUERY_TIMEOUT=60`
+before applying a document that adds a representation. It is the first thing an
+unset session hits.
+
+**Scope.** The document covers F1–F5 and the attribute policies — what makes
+sources compose. It deliberately excludes anything tier 1 owns (entities,
+dimensions, facts, metrics, relationships, keys: those are Semantic DDL)
+and materializations, which accelerate an object physically rather than saying
+anything about how sources relate.
+
 ## Seeing What Fusion Is Doing
 
 Fusion changes the answer, so every declaration is discoverable as data rather
@@ -443,6 +549,7 @@ fact in the semantic layer rather than as a compile-time materialization.
 - `docs/validation-rules.md` — the full rule inventory
   (`SEMANTIC_MODEL_034` through `_052` are fusion-specific).
 - Live-DB worked examples, one per level:
+  - `tools/verify_fusion_declaration.py` — the tier-2 document, both directions
   - `tools/verify_fusion_f3.py` — Temporal Partition Fusion
   - `tools/verify_fusion_f4.py` — Attribute Reconciliation
   - `tools/verify_fusion_f5.py` — Semantic Identity

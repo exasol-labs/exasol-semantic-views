@@ -22,6 +22,7 @@ METRIC_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/metric_plan.lua"
 PHYSICAL_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/physical_plan.lua"
 GRAIN_SQL_SOURCE = ROOT / "lua/semantic_layer/compiler/grain_sql.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
+FUSION_DECLARATION_SOURCE = ROOT / "lua/semantic_layer/admin/fusion_declaration.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
 
 BEGIN = "-- BEGIN GENERATED COMPILER_RUNTIME"
@@ -30,6 +31,9 @@ VALIDATOR_BEGIN = "-- BEGIN GENERATED VALIDATOR_RUNTIME"
 VALIDATOR_END = "-- END GENERATED VALIDATOR_RUNTIME"
 SEMANTIC_BEGIN = "-- BEGIN GENERATED SEMANTIC_DEFINITION_RUNTIME"
 SEMANTIC_END = "-- END GENERATED SEMANTIC_DEFINITION_RUNTIME"
+
+FUSION_BEGIN = "-- BEGIN GENERATED FUSION_RUNTIME"
+FUSION_END = "-- END GENERATED FUSION_RUNTIME"
 SCRIPT_PARAMETERS_BEGIN = "-- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS"
 SCRIPT_PARAMETERS_END = "-- END GENERATED ADMIN_SCRIPT_PARAMETERS"
 CATALOG_VIEWS_SQL = ROOT / "sql/install/002_create_semantic_catalog_views.sql"
@@ -67,6 +71,7 @@ NON_CALLABLE_SCRIPTS = frozenset({
     "AGENT_RUNTIME",
     "COMPILER_RUNTIME",
     "MATERIALIZATION_RUNTIME",
+    "FUSION_RUNTIME",
     "SEMANTIC_DEFINITION_RUNTIME",
     "SEMANTIC_GUARD",          # LUA SCALAR, called from generated view SQL
     "SEMANTIC_PREPROCESSOR",   # LUA PREPROCESSOR, invoked by the session
@@ -597,6 +602,61 @@ exit({{{{"OK", "SESSION", null, "Semantic SQL disabled for this session."}}}}, [
 {SEMANTIC_END}"""
 
 
+def fusion_declaration_block() -> str:
+    """The tier-2 fusion document surface.
+
+    Its own script rather than more of SEMANTIC_DEFINITION_RUNTIME: that chunk
+    is at 124 of Exasol's 200 main-chunk locals, and a document format that will
+    grow should not spend someone else's headroom. It imports the definition
+    runtime for JSON encode/decode instead of carrying a second copy.
+    """
+    source = FUSION_DECLARATION_SOURCE.read_text(encoding="utf-8").rstrip()
+    return f"""{FUSION_BEGIN}
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.FUSION_RUNTIME AS
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "esv_semantic_definition")
+ESV_SEMANTIC_DEFINITION_RUNTIME = esv_semantic_definition
+
+{source}
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION(
+  MODEL_NAME,
+  ENTITY_NAME
+)
+RETURNS TABLE AS
+import("SEMANTIC_ADMIN.FUSION_RUNTIME", "fusion")
+
+local rows = fusion.export_fusion_declaration(MODEL_NAME, ENTITY_NAME)
+
+exit(rows or {{}}, [[
+  SCOPE_KIND VARCHAR(32),
+  SCOPE_NAME VARCHAR(256),
+  REPRESENTATION_COUNT DECIMAL(18,0),
+  DECLARATION_JSON VARCHAR(2000000)
+]])
+/
+
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION(
+  MODEL_NAME,
+  DECLARATION_JSON,
+  DRY_RUN
+)
+RETURNS TABLE AS
+import("SEMANTIC_ADMIN.FUSION_RUNTIME", "fusion")
+
+local rows = fusion.apply_fusion_declaration(MODEL_NAME, DECLARATION_JSON, DRY_RUN)
+
+exit(rows or {{}}, [[
+  STATUS VARCHAR(32),
+  ERROR_CODE VARCHAR(128),
+  MESSAGE VARCHAR(2000000),
+  OPERATION_COUNT DECIMAL(18,0),
+  APPLIED_COUNT DECIMAL(18,0)
+]])
+/
+{FUSION_END}"""
+
+
 def agent_block() -> str:
     source = AGENT_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{AGENT_BEGIN}
@@ -857,6 +917,7 @@ def main() -> int:
     original = INSTALL_SQL.read_text(encoding="utf-8")
     updated = replace_between_markers(original, validator_block(), VALIDATOR_BEGIN, VALIDATOR_END)
     updated = replace_between_markers(updated, semantic_definition_block(), SEMANTIC_BEGIN, SEMANTIC_END)
+    updated = replace_between_markers(updated, fusion_declaration_block(), FUSION_BEGIN, FUSION_END)
     updated = replace_between_markers(updated, compiler_block(), BEGIN, END)
     check_main_chunk_locals(INSTALL_SQL, updated)
     if updated != original:

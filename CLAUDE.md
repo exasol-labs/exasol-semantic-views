@@ -292,16 +292,22 @@ a concept is absent from one of them.
 - **The `ADD_*` / `SET_*` / `REMOVE_*` scripts own the graph** — everything that
   brings objects into being or relates them: the model, entities, semantic
   objects, relationships, unique keys, representations, coverage (F3), authority
-  (F4), identity (F5), and materializations. These are graph operations with
+  (F4), identity (F5), and materializations. For F1–F5 the fusion document is
+  the ergonomic front end; these are what it dispatches to, and what removal
+  still needs. These are graph operations with
   ordering constraints that a per-object `ALTER` statement cannot express, which
   is why they are not in the DDL and are not going to be. Call them
   positionally, or by name through `CALL_ADMIN_JSON` to avoid counting arguments.
 
 So: bootstrap the graph with the scripts, and keep an object's dimensions, facts
-and metrics in DDL, where the file is the record. Note the fusion layer (F1–F5)
-has **no** declarative surface yet, and on a published model it is not
-incrementally authorable at all — every declaration must arrive complete, which
-is what the compound `_WITH_*` forms are for.
+and metrics in DDL, where the file is the record.
+
+The fusion layer (F1–F5) is a third surface with a third job: it has its own
+document, `APPLY_FUSION_DECLARATION` / `EXPORT_FUSION_DECLARATION`, because on a
+published model fusion is not incrementally authorable at all — every
+declaration must arrive complete. That document round-trips and re-applies as a
+no-op; the compound `_WITH_*` forms sit underneath it and remain the only way to
+*remove* a declaration. See `docs/data-fusion.md`.
 
 ### SQL NULL Is Truthy Userdata in Lua
 

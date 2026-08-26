@@ -20,6 +20,12 @@
 -- identity mapping columns through the shared resolver and covered the
 -- previously untested mapped-base rendering.
 --
+-- admin/fusion_declaration.lua joined the gate 2026-08-26. Its end-to-end
+-- claims -- one document on a published model, dry run, round-trip -- are
+-- proven live in tools/verify_fusion_declaration.py, which this gate cannot
+-- see; the unit tests cover the contract refusals, the operation order and
+-- the rollback's column discovery.
+--
 -- shared/identity_join.lua joined the gate when it was extracted 2026-08-25:
 -- one join that had been written out five times, and had already carried one bug
 -- in all five. It is fully covered, so the floor is 100.
@@ -42,6 +48,7 @@ return {
         ["lua/semantic_layer/admin/validator.lua"] = 93.5,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.0,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 72.5,
+        ["lua/semantic_layer/admin/fusion_declaration.lua"] = 62.8,
         ["lua/semantic_layer/agent/runtime.lua"] = 93.4,
     },
     branches = 100,
