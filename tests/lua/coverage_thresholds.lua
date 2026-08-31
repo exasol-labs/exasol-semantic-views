@@ -34,22 +34,36 @@
 -- measured but ungated, which is a poor place for a blind spot: both runtimes
 -- embed it, and it is the single point where a declared column name becomes the
 -- physical one.
+--
+-- shared/json.lua joined the gate 2026-08-31, when four private JSON codecs
+-- became one. Floored at 100: a codec with an untested branch is a decoder that
+-- accepts something no test has ever looked at, and the module is 75 active
+-- lines. Ratcheted the same day after the extraction moved fully-covered lines
+-- out of four files -- which lowers a percentage without lowering coverage, so
+-- each of those was re-measured *after* adding tests that put it back above its
+-- old floor rather than by lowering the floor. Net: semantic_definition.lua
+-- 72.5 -> 76.1 (the DDL rollback's snapshot/restore round trip, previously
+-- untested), agent/runtime.lua 93.4 -> 95.4 (instruction scope dispatch, four
+-- of six branches previously uncovered), request_json.lua 87.1 -> 88.2 (the
+-- HAVING predicate parser, whose WHERE twin was the only one tested),
+-- query_spec.lua 96.7 -> 100.
 return {
     lines = {
+        ["lua/semantic_layer/shared/json.lua"] = 100,
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.6,
         ["lua/semantic_layer/shared/source_columns.lua"] = 92.5,
         ["lua/semantic_layer/shared/identity_join.lua"] = 100,
-        ["lua/semantic_layer/compiler/query_spec.lua"] = 96.7,
+        ["lua/semantic_layer/compiler/query_spec.lua"] = 100,
         ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 100,
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.3,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 87.1,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 88.2,
         ["lua/semantic_layer/admin/validator.lua"] = 93.8,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.0,
-        ["lua/semantic_layer/admin/semantic_definition.lua"] = 72.5,
-        ["lua/semantic_layer/admin/fusion_declaration.lua"] = 66.7,
-        ["lua/semantic_layer/agent/runtime.lua"] = 93.4,
+        ["lua/semantic_layer/admin/semantic_definition.lua"] = 76.1,
+        ["lua/semantic_layer/admin/fusion_declaration.lua"] = 67.0,
+        ["lua/semantic_layer/agent/runtime.lua"] = 95.4,
     },
     branches = 100,
 }

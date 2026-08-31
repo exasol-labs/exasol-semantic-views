@@ -3,6 +3,17 @@ local api = ESV_VALIDATOR_TEST_API
 test("validator accepts valid JSON and rejects malformed JSON", function()
     assert_branch("validator.valid_json", api.valid_json_text('{"a":[1,true,null]}'), true)
     assert_branch("validator.valid_json", api.valid_json_text('{"a":01}'), false)
+
+    -- The validator no longer carries its own JSON parser; it uses the strict
+    -- mode of shared/json.lua. What must survive that is the strictness, which
+    -- is why `01` is still refused: extension data_json is written by a model
+    -- author, and a payload the compiler's lenient decoder would tolerate is
+    -- still not a payload worth storing.
+    assert_equal(api.valid_json_text('{"a":1.}'), false)
+    assert_equal(api.valid_json_text('"\\uZZZZ"'), false)
+    assert_equal(api.valid_json_text('"\\u00e9"'), true)
+    assert_equal(api.valid_json_text(null), false)
+    assert_equal(api.valid_json_text(""), false)
 end)
 
 test("validator expression inspection ignores strings and permits qualified UDFs", function()

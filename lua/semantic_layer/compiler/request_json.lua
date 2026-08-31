@@ -1,4 +1,5 @@
 local M = {}
+local json = assert(ESV_JSON, "shared JSON runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -18,7 +19,9 @@ end
 
 local materialization_runtime = materializations
 
-local JSON_NULL = {}
+-- Identity, not a copy: JSON_NULL is meaningful only while every holder of a
+-- decoded null compares against the same table (see shared/json.lua).
+local JSON_NULL = json.NULL
 local MAX_LIMIT = 10000
 
 local function missing(value)
@@ -59,252 +62,6 @@ local function null_if_missing(value)
     return value
 end
 
-local function is_array(value)
-    if type(value) ~= "table" or value == JSON_NULL then
-        return false
-    end
-    local max_index = 0
-    local count = 0
-    for k, _ in pairs(value) do
-        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
-            return false
-        end
-        if k > max_index then
-            max_index = k
-        end
-        count = count + 1
-    end
-    return max_index == count
-end
-
-local function json_escape(value)
-    local text = tostring(value)
-    text = string.gsub(text, "\\", "\\\\")
-    text = string.gsub(text, '"', '\\"')
-    text = string.gsub(text, "\n", "\\n")
-    text = string.gsub(text, "\r", "\\r")
-    text = string.gsub(text, "\t", "\\t")
-    return text
-end
-
-local function json_encode(value)
-    local value_type = type(value)
-    if value == nil or value == null or value == JSON_NULL then
-        return "null"
-    elseif value_type == "string" then
-        return '"' .. json_escape(value) .. '"'
-    elseif value_type == "number" then
-        return tostring(value)
-    elseif value_type == "boolean" then
-        return value and "true" or "false"
-    elseif value_type == "table" then
-        local parts = {}
-        if is_array(value) then
-            for i = 1, #value do
-                parts[#parts + 1] = json_encode(value[i])
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
-        end
-        local keys = {}
-        for k, _ in pairs(value) do
-            keys[#keys + 1] = tostring(k)
-        end
-        table.sort(keys)
-        for _, k in ipairs(keys) do
-            parts[#parts + 1] = json_encode(k) .. ":" .. json_encode(value[k])
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    return json_encode(tostring(value))
-end
-
-local function json_decode(text)
-    if missing(text) then
-        error("empty JSON payload")
-    end
-    text = tostring(text)
-    local pos = 1
-
-    local function peek()
-        return string.sub(text, pos, pos)
-    end
-
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-
-    local function parse_string()
-        if peek() ~= '"' then
-            error("expected string at byte " .. tostring(pos))
-        end
-        pos = pos + 1
-        local out = {}
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return table.concat(out)
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" then
-                    out[#out + 1] = e
-                    pos = pos + 2
-                elseif e == "b" then
-                    out[#out + 1] = "\b"
-                    pos = pos + 2
-                elseif e == "f" then
-                    out[#out + 1] = "\f"
-                    pos = pos + 2
-                elseif e == "n" then
-                    out[#out + 1] = "\n"
-                    pos = pos + 2
-                elseif e == "r" then
-                    out[#out + 1] = "\r"
-                    pos = pos + 2
-                elseif e == "t" then
-                    out[#out + 1] = "\t"
-                    pos = pos + 2
-                elseif e == "u" then
-                    out[#out + 1] = "?"
-                    pos = pos + 6
-                else
-                    error("invalid escape at byte " .. tostring(pos))
-                end
-            else
-                out[#out + 1] = c
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-
-    local parse_value
-
-    local function parse_number()
-        local start_pos = pos
-        local c = peek()
-        if c == "-" then
-            pos = pos + 1
-        end
-        while string.match(peek(), "%d") do
-            pos = pos + 1
-        end
-        if peek() == "." then
-            pos = pos + 1
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then
-                pos = pos + 1
-            end
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        local raw = string.sub(text, start_pos, pos - 1)
-        local value = tonumber(raw)
-        if value == nil then
-            error("invalid number at byte " .. tostring(start_pos))
-        end
-        return value
-    end
-
-    local function parse_array()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            out[#out + 1] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return out
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected array comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    local function parse_object()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            skip_ws()
-            local name = parse_string()
-            skip_ws()
-            if peek() ~= ":" then
-                error("expected object colon at byte " .. tostring(pos))
-            end
-            pos = pos + 1
-            out[name] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return out
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected object comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then
-            return parse_string()
-        elseif c == "{" then
-            return parse_object()
-        elseif c == "[" then
-            return parse_array()
-        elseif c == "-" or string.match(c, "%d") then
-            return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return false
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return JSON_NULL
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-
-    local value = parse_value()
-    skip_ws()
-    if pos <= #text then
-        error("unexpected trailing JSON at byte " .. tostring(pos))
-    end
-    return value
-end
 
 local function quote_ident(name)
     local text = tostring(name)
@@ -367,7 +124,7 @@ local function as_array(value, field_name)
     if missing(value) then
         return {}
     end
-    if not is_array(value) then
+    if not json.is_array(value) then
         error(field_name .. " must be an array")
     end
     return value
@@ -395,7 +152,7 @@ local function error_result(code, message, clarification)
         error_message = message,
         generated_sql = nil,
         plan_json = nil,
-        clarification_json = clarification and json_encode(clarification) or nil,
+        clarification_json = clarification and json.encode(clarification) or nil,
         validation_run_id = nil,
         agent_request_id = nil,
         query_log_id = nil,
@@ -511,7 +268,7 @@ do
             error_code = nil,
             error_message = nil,
             generated_sql = sql_text,
-            plan_json = json_encode(plan),
+            plan_json = json.encode(plan),
             clarification_json = nil,
             validation_run_id = validation_run_id,
             agent_request_id = nil,
@@ -587,7 +344,7 @@ do
         if options == nil or options == null or options == JSON_NULL then
             return nil
         end
-        if type(options) ~= "table" or is_array(options) then
+        if type(options) ~= "table" or json.is_array(options) then
             return error_result("SEMANTIC_REQUEST_004",
                 "options must be an object with keys: "
                     .. table.concat(option_names, ", ") .. ".")
@@ -624,7 +381,7 @@ do
             return null
         end
         if type(value) == "table" then
-            if is_array(value) then
+            if json.is_array(value) then
                 local out = {}
                 for i = 1, #value do
                     out[i] = compile_cache.canonical_value(value[i])
@@ -657,7 +414,7 @@ do
                 stripped[k] = v
             end
         end
-        local ok, encoded = pcall(json_encode, compile_cache.canonical_value(stripped))
+        local ok, encoded = pcall(json.encode, compile_cache.canonical_value(stripped))
         if not ok then
             return nil
         end
@@ -745,7 +502,7 @@ do
         -- straight from storage. materialization_used is recovered by decoding it.
         local plan = nil
         if not missing(cached.plan_json) then
-            local ok, decoded = pcall(json_decode, cached.plan_json)
+            local ok, decoded = pcall(json.decode, cached.plan_json)
             if ok then plan = decoded end
         end
         return {
@@ -2872,8 +2629,8 @@ local function log_request(result, request_json, request, model)
         request_json = null_if_missing(request_json),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
-        requested_metrics = null_if_missing(json_encode(metrics)),
-        requested_dimensions = null_if_missing(json_encode(dimensions)),
+        requested_metrics = null_if_missing(json.encode(metrics)),
+        requested_dimensions = null_if_missing(json.encode(dimensions)),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
@@ -2911,8 +2668,8 @@ local function log_query_result(result, original_sql, request, model, client_nam
         original_sql = null_if_missing(original_sql),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
-        requested_dimensions = null_if_missing(json_encode(dimensions)),
-        requested_metrics = null_if_missing(json_encode(metrics)),
+        requested_dimensions = null_if_missing(json.encode(dimensions)),
+        requested_metrics = null_if_missing(json.encode(metrics)),
         materialization_used = null_if_missing(result.materialization_used),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
@@ -3418,7 +3175,7 @@ local function compile_request_table(request, options)
 
     local function plan_error(code, message)
         local result = error_result(error_prefix .. code, message)
-        result.plan_json = json_encode(plan_envelope())
+        result.plan_json = json.encode(plan_envelope())
         return result
     end
 
@@ -3557,11 +3314,11 @@ local function compile_request_table(request, options)
 end
 
 local function compile_internal(request_json)
-    local decoded, request = pcall(json_decode, request_json)
+    local decoded, request = pcall(json.decode, request_json)
     if not decoded then
         return error_result("SEMANTIC_REQUEST_001", "Invalid request JSON: " .. tostring(request) .. ".")
     end
-    if type(request) ~= "table" or is_array(request) then
+    if type(request) ~= "table" or json.is_array(request) then
         return error_result("SEMANTIC_REQUEST_001", "Request JSON must be an object.")
     end
     local request_key_error = compile_cache.validate_structured_request_keys(request)
@@ -4536,7 +4293,7 @@ function M.suggest_grain_metadata(model_name)
                     "UNIQUE_KEY",
                     entity_name,
                     "LEGACY_PRIMARY_KEY_EXPR",
-                    json_encode({
+                    json.encode({
                         key_name = tostring(entity_name) .. "_pk",
                         key_kind = "PRIMARY",
                         columns = {{ordinal_position = 1, column_name = column_name}},
@@ -4584,7 +4341,7 @@ function M.suggest_grain_metadata(model_name)
                     "RELATIONSHIP_MAPPING",
                     relationship_name,
                     "SIMPLE_EQUALITY_JOIN",
-                    json_encode({
+                    json.encode({
                         ordinal_position = 1,
                         from_column_name = from_column,
                         to_column_name = to_column,
@@ -4612,8 +4369,8 @@ suggest_grain_metadata = M.suggest_grain_metadata
 -- database catalog.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_COMPILER_TEST_API = {
-        json_encode = json_encode,
-        json_decode = json_decode,
+        json_encode = json.encode,
+        json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,
         compile_cache_key = compile_cache.compile_cache_key,
         quote_ident = quote_ident,

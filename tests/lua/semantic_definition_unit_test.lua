@@ -1021,3 +1021,121 @@ test("Databricks public API returns dry-run plans and stable diagnostics", funct
     assert_equal(missing[1][1], "ERROR")
     assert_equal(missing[1][2], "DBX_IMPORT_020")
 end)
+
+-- The DDL apply path rolls back by hand: snapshot_model_state SELECTs eleven
+-- tables and restore_model_state re-INSERTs them, with every column written out
+-- four times per table -- in the SELECT, the INSERT column list, its VALUES
+-- list, and the parameter map, the last carrying ordinals that must stay in
+-- lockstep with the first. Nothing checked that the four agreed, so a column
+-- added to SYS_SEMANTIC and wired into only three of them would restore as
+-- NULL: a rollback that quietly loses whatever was added last.
+--
+-- admin/fusion_declaration.lua does the same job in 45 lines by reading its
+-- column lists from EXA_ALL_COLUMNS, which is why it needs no test like this.
+-- Until this one is lifted to the same shape, these two tests are what stands
+-- in for that: what the snapshot reads, the restore writes back, unchanged.
+test("DDL rollback restores every column its snapshot captured", function()
+    local model = {model_id = 7, version_id = 3, model_name = "rollback_model"}
+
+    -- One fabricated row per snapshotted table, keyed by the column names the
+    -- snapshot asks for, so the fixture cannot silently disagree with the code.
+    local selected = {}
+    local snapshot = with_query(function(sql)
+        local table_name = string.match(sql, "FROM SYS_SEMANTIC%.([A-Z_]+)")
+        local column_text = string.match(sql, "SELECT%s+(.-)%s+FROM")
+        if table_name == nil or column_text == nil then return {} end
+        local row = {}
+        local names = {}
+        for column in string.gmatch(column_text, "[%w_%.]+") do
+            local bare = string.match(column, "([A-Z_0-9]+)$")
+            if bare ~= nil and bare ~= "SYS_SEMANTIC" then
+                names[#names + 1] = bare
+                row[bare] = string.lower(table_name) .. ":" .. bare
+            end
+        end
+        row.MODEL_ID = model.model_id
+        row.VERSION_ID = model.version_id
+        selected[table_name] = names
+        return {row}
+    end, function()
+        return api.snapshot_model_state(model)
+    end)
+
+    assert_true(selected.METRICS ~= nil, "METRICS was not snapshotted")
+    assert_true(#selected.METRICS >= 29, "METRICS snapshot lost columns")
+
+    local inserted = {}
+    with_query(function(sql, params)
+        local table_name = string.match(sql, "INSERT INTO SYS_SEMANTIC%.([A-Z_]+)")
+        if table_name == nil then return {} end
+        local column_text = string.match(sql, "%(%s*(.-)%s*%)%s*VALUES")
+        local placeholder_text = string.match(sql, "VALUES%s*%(%s*(.-)%s*%)%s*$")
+        local names, placeholders = {}, {}
+        for column in string.gmatch(column_text or "", "[A-Z_0-9]+") do
+            names[#names + 1] = column
+        end
+        for placeholder in string.gmatch(placeholder_text or "", ":([%w_]+)") do
+            placeholders[#placeholders + 1] = placeholder
+        end
+        inserted[table_name] = {names = names, placeholders = placeholders,
+            params = params or {}}
+        return {}
+    end, function()
+        api.restore_model_state(model, snapshot)
+    end)
+
+    for table_name, snapshot_columns in pairs(selected) do
+        local write = inserted[table_name]
+        assert_true(write ~= nil, table_name .. " was snapshotted but not restored")
+
+        -- Same columns, same order: the parameter map is positional in spirit
+        -- even though it is written by name, and a reordering is how an ordinal
+        -- in row_value silently starts reading its neighbour.
+        assert_equal(#write.names, #snapshot_columns,
+            table_name .. " restores a different number of columns than it captured")
+        for index, column in ipairs(snapshot_columns) do
+            assert_equal(write.names[index], column,
+                table_name .. " column " .. tostring(index) .. " differs")
+        end
+
+        -- One placeholder per column, and each bound to the value the snapshot
+        -- read for that column -- which is what makes it a restore rather than
+        -- a partial one.
+        assert_equal(#write.placeholders, #write.names,
+            table_name .. " binds a different number of values than columns")
+        for index, column in ipairs(write.names) do
+            local bound = write.params[write.placeholders[index]]
+            if column ~= "MODEL_ID" and column ~= "VERSION_ID" then
+                assert_equal(bound, string.lower(table_name) .. ":" .. column,
+                    table_name .. "." .. column .. " was not restored")
+            end
+        end
+    end
+end)
+
+test("DDL rollback carries a NULL through as NULL rather than dropping it", function()
+    -- null_if_missing() guards every optional column in the restore. A row read
+    -- back as SQL NULL has to arrive as NULL, not as the empty string that
+    -- tostring() would produce, or an optional column comes back "set".
+    local model = {model_id = 1, version_id = 1, model_name = "nulls"}
+    local snapshot = {metrics = {{
+        METRIC_ID = 5, MODEL_ID = 1, VERSION_ID = 1, METRIC_NAME = "revenue",
+        EXPRESSION = "SUM(x)", METRIC_TYPE = "SIMPLE", DATA_TYPE = "DECIMAL",
+        STATUS = "ACTIVE", FILTER_EXPR = null, DISPLAY_NAME = null,
+        DESCRIPTION = null, MEASURE_EXPR = null, TYPE_PARAMS_JSON = null,
+    }}}
+    local bound = nil
+    with_query(function(sql, params)
+        if string.find(sql, "INSERT INTO SYS_SEMANTIC.METRICS", 1, true) then
+            bound = params
+        end
+        return {}
+    end, function()
+        api.restore_model_state(model, snapshot)
+    end)
+    assert_true(bound ~= nil, "the metric row was not restored")
+    assert_equal(bound.metric_name, "revenue")
+    assert_equal(bound.filter_expr, null)
+    assert_equal(bound.display_name, null)
+    assert_equal(bound.measure_expr, null)
+end)

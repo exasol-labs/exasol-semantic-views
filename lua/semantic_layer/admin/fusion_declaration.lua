@@ -28,8 +28,7 @@
 -- materializations, which are physical acceleration of an object rather than a
 -- statement about how sources compose.
 
-local semantic_definition = assert(ESV_SEMANTIC_DEFINITION_RUNTIME,
-    "semantic definition runtime is required for JSON encoding")
+local json = assert(ESV_JSON, "shared JSON runtime is required")
 
 local M = {}
 
@@ -38,8 +37,17 @@ local M = {}
 -- "userdata: 0x...". `null` is the script-context global for it, and comparing
 -- against it is the only reliable test. Getting this wrong here silently
 -- filtered every export to an entity literally named "userdata: 0x...".
+-- json.NULL is in the list because this module reads a *decoded document*: an
+-- explicit `"authority": null` arrives as the decoder's sentinel table, which is
+-- neither nil nor Exasol's `null` and whose tostring is "table: 0x...". Before
+-- the JSON codec was shared this module had no way to name that value, so an
+-- explicit null read as a present declaration and rendered its own address into
+-- the catalog. An omitted key and an explicit null now mean the same thing,
+-- which is what the round-trip contract requires -- the exporter omits absent
+-- keys rather than writing them as null.
 local function missing(value)
-    return value == nil or value == null or tostring(value) == ""
+    return value == nil or value == null or value == json.NULL
+        or tostring(value) == ""
 end
 
 local function trim(value)
@@ -365,11 +373,11 @@ end
 local function document_json(model_name, entities, order)
     local parts = {}
     for _, name in ipairs(order) do
-        parts[#parts + 1] = semantic_definition.encode_json(name) .. ":"
-            .. semantic_definition.encode_json(entities[name])
+        parts[#parts + 1] = json.encode(name) .. ":"
+            .. json.encode(entities[name])
     end
     return '{"entities":{' .. table.concat(parts, ",") .. '},"model":'
-        .. semantic_definition.encode_json(model_name) .. "}"
+        .. json.encode(model_name) .. "}"
 end
 
 -- One row, always: the whole tier-2 layer of the model as one document, which is
@@ -429,7 +437,10 @@ local ATTRIBUTE_POLICY_KEYS = {attribute_type = true, attribute_name = true,
     strategy = true}
 
 local function reject_unknown(table_value, allowed, label)
-    if type(table_value) ~= "table" then
+    -- The decoded null is a table, so `type` alone would let an explicit
+    -- `"identity": null` through as an empty object -- a declaration silently
+    -- read as "declare nothing" instead of being named as malformed.
+    if type(table_value) ~= "table" or table_value == json.NULL then
         error("SEMANTIC_FUSION_010: " .. label .. " must be a JSON object")
     end
     if table_value[1] ~= nil then
@@ -872,7 +883,7 @@ local function plan_entity(query_fn, model, entity_name, entity)
                     priority = tonumber(tostring(representation.priority or 10)) or 10,
                     freshness_policy = trim(representation.freshness_policy) ~= ""
                         and trim(representation.freshness_policy) or "MANUAL",
-                    declarations_json = semantic_definition.encode_json(declarations)},
+                    declarations_json = json.encode(declarations)},
             }
         end
     end
@@ -959,7 +970,7 @@ end
 
 function M.plan_document(query_fn, model_name, declaration_json)
     local declaration_text = required(declaration_json, "DECLARATION_JSON")
-    local decoded_ok, document = pcall(semantic_definition.decode_json,
+    local decoded_ok, document = pcall(json.decode,
         declaration_text)
     if not decoded_ok or type(document) ~= "table" then
         error("SEMANTIC_FUSION_010: DECLARATION_JSON must be a JSON object with"

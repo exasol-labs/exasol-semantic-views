@@ -138,8 +138,12 @@ context needed by that object.
 
 ### Lossless
 
-Use `--profile lossless` for Exasol-to-Exasol workflows, Git review, backups,
-and migrations between Exasol Semantic Views environments.
+Use `--profile lossless` for Exasol-to-Exasol workflows, Git review, and
+migrations between Exasol Semantic Views environments.
+
+**Lossless is lossless within tier 1, which is what Ossie describes.** It is not
+a whole-model backup on its own — see [What no profile can
+carry](#what-no-profile-can-carry) below for the second file a backup needs.
 
 The lossless profile writes Ossie core plus `custom_extensions` with
 `vendor_name: EXASOL`. These extensions preserve native metadata such as:
@@ -161,6 +165,84 @@ The lossless profile writes Ossie core plus `custom_extensions` with
 For import, `--profile auto` detects Exasol lossless extensions when they are
 present. Use `--strict` for lossless workflows so ambiguous or lossy documents
 block instead of being accepted with best-effort defaults.
+
+### What No Profile Can Carry
+
+Ossie describes **one source**. The fusion layer describes **how several
+compose**, and the schema has no shape for it: `0.2.0.dev0` defines `Dataset`,
+`Dimension`, `Field`, `Metric`, `Relationship`, `SemanticModel`,
+`CustomExtension`, `AIContext` and `Vendor`, and nothing else. So neither
+profile carries any of:
+
+| Concept | Level | `lossless` |
+|---|---|---|
+| alternate entity representations | F1 | refuses |
+| attribute fusion policies | F2 | refuses |
+| coverage predicates and validity windows | F3 | refuses |
+| authority declarations | F4 | refuses |
+| semantic identities, identity bindings, identity mapping relations | F5 | refuses |
+| materializations | — physical acceleration, not fusion | warns |
+
+This is a scope boundary, not a gap to be closed: pushing tier 2 through
+`CustomExtension` would make Exasol documents unreadable to other Ossie tools
+while still not being a standard. See `docs/data-fusion.md`.
+
+**The last column is about consequence, not about tier.** Losing an authority
+declaration or an identity binding changes what the model *answers* — it decides
+which source wins for a conflicting key — so the restored model returns
+different numbers and validates while doing it. Losing a materialization changes
+only how *fast* the model answers: re-register it with
+`SEMANTIC_ADMIN.REGISTER_MATERIALIZATION` and the numbers were never in
+question. So the fusion layer blocks a `lossless` export and a materialization
+warns.
+
+**`osi.py export --profile lossless` refuses a model that carries any blocking
+concept**, names what it found, and points at the companion export. Under
+`--profile interoperability` every finding is an `OSI_EXPORT_050` warning,
+because dropping what the standard cannot express is what interchange means —
+doing it silently is not.
+
+The refusal exists because the silent version was not detectable downstream. An
+export that dropped an alternate representation and an authority declaration
+wrote a document and a `{"warnings": []}` file; the reimported model then passed
+`VALIDATE_MODEL` with zero errors. It was simply a different, valid model that
+answered differently, and nothing at any point said so.
+
+A single `PRIMARY` representation per entity is the F0 compatibility row that
+`ADD_ENTITY` creates, not a fusion declaration, so an ordinary tier-1 model
+exports without a warning.
+
+#### A complete backup is two files
+
+```sh
+python3 tools/osi.py export --model sales --profile lossless \
+  --format json --output sales.osi.json
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION('sales');
+```
+
+Restore in the same order — tier 1 first, because fusion declares how *existing*
+entities compose:
+
+```sh
+python3 tools/osi.py import --apply --strict --target-model sales sales.osi.json
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION('sales', '<document>', FALSE);
+```
+
+The fusion document round-trips and re-applies as a no-op, so re-running it
+against an already-restored model reports `nothing to do`. See
+`docs/data-fusion.md`.
+
+#### Exporting tier 1 alone, deliberately
+
+`--allow-lossy` downgrades the refusal to the same `OSI_EXPORT_050` warning, for
+when the tier-1 half is what you actually want:
+
+```sh
+python3 tools/osi.py export --model sales --profile lossless --allow-lossy \
+  --warnings-output /tmp/sales_warnings.json --output /tmp/sales.osi.json
+```
 
 ## Import Planning And Apply
 
@@ -250,6 +332,7 @@ extensions, and what remains outside the Ossie/OSI artifact.
 | Relationship join SQL | Core relationships use `from_columns` and `to_columns` arrays | Simple equality joins export to core arrays. Complex joins are omitted from core with `OSI_EXPORT_040` and preserved in lossless native relationship metadata. |
 | Relationship endpoint columns | Relationship `from_columns` / `to_columns` | Imported into ordered `RELATIONSHIP_KEY_MAPPINGS` and preferred during export; simple legacy join conditions remain an export fallback. |
 | Relationship cardinality, join type, and path priority | No complete core equivalent | Stored in `EXASOL` relationship extensions. Batch apply preserves path priority and description. |
+| Fusion layer (F1-F5) and materializations | No definition at all | Out of scope: Ossie describes one source. `--profile lossless` refuses the fusion layer and warns on materializations; `--profile interoperability` and `--allow-lossy` warn with `OSI_EXPORT_050`. Export separately with `EXPORT_FUSION_DECLARATION`. |
 | Primary and unique keys | Simple column keys are supported | Simple primary and unique keys export to core. Expression-based keys are preserved in extensions and produce `OSI_EXPORT_030` for the core loss. |
 | Agent instructions | Core `ai_context.instructions` is plain text | Instruction text round-trips. Native kind, priority, and role are not represented in OSI core. |
 | Synonyms | Core synonyms are plain strings | Synonym text round-trips. Native synonym source metadata is not represented in OSI core. |

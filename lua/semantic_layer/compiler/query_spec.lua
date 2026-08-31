@@ -1,5 +1,7 @@
 -- Canonical request boundary shared by JSON and Semantic SQL lowering.
 
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
 local M = {VERSION = 1}
 
 local ARRAY_FIELDS = {"metrics", "dimensions", "filters", "having", "order_by"}
@@ -28,20 +30,6 @@ local function normalize_name(value)
     return normalized
 end
 
-local function is_array(value)
-    if type(value) ~= "table" then return false end
-    local count = 0
-    local largest = 0
-    for item_key, _ in pairs(value) do
-        if type(item_key) ~= "number" or item_key < 1 or item_key % 1 ~= 0 then
-            return false
-        end
-        count = count + 1
-        if item_key > largest then largest = item_key end
-    end
-    return count == largest
-end
-
 function M.new(request, source)
     if type(request) ~= "table" then
         return nil, "QUERY_SPEC_INVALID"
@@ -59,8 +47,15 @@ function M.new(request, source)
     }
     for _, name in ipairs(ARRAY_FIELDS) do
         local value = request[name]
-        if value ~= nil then
-            if not is_array(value) then
+        -- An explicit JSON null means the same as an omitted key. This module
+        -- used to reach that answer by accident: its private `is_array` had no
+        -- sentinel to compare against, so the decoder's null -- an empty table --
+        -- satisfied the array test and arrived as an empty list. Now the
+        -- sentinel is shared, the test would refuse it, so the leniency has to
+        -- be stated. `missing()` treats a decoded null as absent everywhere
+        -- else in the runtime; this keeps that consistent.
+        if value ~= nil and value ~= json.NULL then
+            if not json.is_array(value) then
                 return nil, "QUERY_SPEC_" .. string.upper(name) .. "_NOT_ARRAY"
             end
             spec[name] = copy(value)

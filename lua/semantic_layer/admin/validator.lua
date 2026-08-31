@@ -1,4 +1,5 @@
 local M = {}
+local json = assert(ESV_JSON, "shared JSON runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -249,199 +250,15 @@ local function null_if_missing(value)
     return value
 end
 
-local function parse_json_text(text)
-    if missing(text) then
-        error("empty JSON payload")
-    end
-    text = tostring(text)
-    local pos = 1
-
-    local function peek()
-        return string.sub(text, pos, pos)
-    end
-
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-
-    local function is_digit(c)
-        return string.match(c, "^%d$") ~= nil
-    end
-
-    local function is_hex(c)
-        return string.match(c, "^[0-9A-Fa-f]$") ~= nil
-    end
-
-    local function read_digits()
-        local count = 0
-        while is_digit(peek()) do
-            count = count + 1
-            pos = pos + 1
-        end
-        return count
-    end
-
-    local function parse_string()
-        if peek() ~= '"' then
-            error("expected string at byte " .. tostring(pos))
-        end
-        pos = pos + 1
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return true
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" or e == "b" or e == "f"
-                    or e == "n" or e == "r" or e == "t" then
-                    pos = pos + 2
-                elseif e == "u" then
-                    for offset = 2, 5 do
-                        if not is_hex(string.sub(text, pos + offset, pos + offset)) then
-                            error("invalid unicode escape at byte " .. tostring(pos))
-                        end
-                    end
-                    pos = pos + 6
-                else
-                    error("invalid escape at byte " .. tostring(pos))
-                end
-            elseif c == "" or string.byte(c) < 32 then
-                error("invalid control character in string at byte " .. tostring(pos))
-            else
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-
-    local parse_value
-
-    local function parse_number()
-        local start_pos = pos
-        if peek() == "-" then
-            pos = pos + 1
-        end
-        if peek() == "0" then
-            pos = pos + 1
-        elseif string.match(peek(), "^[1-9]$") then
-            read_digits()
-        else
-            error("invalid number at byte " .. tostring(start_pos))
-        end
-        if peek() == "." then
-            pos = pos + 1
-            if read_digits() == 0 then
-                error("invalid number fraction at byte " .. tostring(pos))
-            end
-        end
-        local c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then
-                pos = pos + 1
-            end
-            if read_digits() == 0 then
-                error("invalid number exponent at byte " .. tostring(pos))
-            end
-        end
-        return true
-    end
-
-    local function parse_array()
-        pos = pos + 1
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return true
-        end
-        while true do
-            parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return true
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected array comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    local function parse_object()
-        pos = pos + 1
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return true
-        end
-        while true do
-            skip_ws()
-            parse_string()
-            skip_ws()
-            if peek() ~= ":" then
-                error("expected object colon at byte " .. tostring(pos))
-            end
-            pos = pos + 1
-            parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return true
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected object comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then
-            return parse_string()
-        elseif c == "{" then
-            return parse_object()
-        elseif c == "[" then
-            return parse_array()
-        elseif c == "-" or is_digit(c) then
-            return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return true
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return true
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-
-    parse_value()
-    skip_ws()
-    if pos <= #text then
-        error("unexpected trailing JSON at byte " .. tostring(pos))
-    end
-    return true
-end
-
+-- Well-formedness of a user-supplied JSON payload -- extension `data_json`,
+-- agent metadata -- under the strict scalar grammar. This was a fourth
+-- hand-written JSON parser; it is now the strict mode of the one in
+-- shared/json.lua. The strictness is the point: the compiler's decoder is
+-- lenient about what it accepts because it re-reads payloads this runtime
+-- itself wrote, but a model author's JSON is refused at definition time rather
+-- than surprising someone at query time.
 local function valid_json_text(text)
-    local ok, _ = pcall(parse_json_text, text)
-    return ok
+    return json.is_valid(text)
 end
 
 local function start_validation_run(ctx)
@@ -4301,7 +4118,6 @@ validate_model = M.validate_model
 -- gated instead of becoming part of the installed runtime contract.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
-        parse_json_text = parse_json_text,
         valid_json_text = valid_json_text,
         strip_string_literals = strip_string_literals,
         aliases_in_expression = aliases_in_expression,

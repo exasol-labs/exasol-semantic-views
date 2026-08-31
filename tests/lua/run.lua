@@ -39,6 +39,9 @@ local function load_runtime(relative_path, roots)
     module_roots[relative_path] = roots()
 end
 
+load_runtime("lua/semantic_layer/shared/json.lua", function()
+    return {ESV_JSON}
+end)
 load_runtime("lua/semantic_layer/shared/grain_graph.lua", function()
     return {ESV_GRAIN_GRAPH}
 end)
@@ -80,12 +83,6 @@ load_runtime("lua/semantic_layer/admin/semantic_definition.lua", function()
         explain_semantic_metric, export_semantic_definition, preprocess_sql,
         ESV_SEMANTIC_DEFINITION_TEST_API}
 end)
--- The fusion document module reads the definition runtime's JSON helpers the
--- way the installed script does: through the global the packager sets.
-ESV_SEMANTIC_DEFINITION_RUNTIME = {
-    encode_json = encode_json,
-    decode_json = decode_json,
-}
 load_runtime("lua/semantic_layer/admin/fusion_declaration.lua", function()
     return {export_fusion_declaration, export_document_json,
         apply_fusion_declaration, ESV_FUSION_DECLARATION_TEST_API}
@@ -172,6 +169,7 @@ function assert_branch(name, actual, expected)
 end
 
 local specs = {
+    "tests/lua/json_unit_test.lua",
     "tests/lua/grain_graph_unit_test.lua",
     "tests/lua/grain_planner_unit_test.lua",
     "tests/lua/compiler_unit_test.lua",

@@ -25,7 +25,7 @@ from __future__ import annotations
 LINE_THRESHOLDS: dict[str, float] = {
     "tools/semantic_client.py": 44.7,
     "tools/install.py":         52.7,
-    "tools/osi.py":             57.7,
+    "tools/osi.py":             59.4,
     "tools/run_sql_files.py":   62.3,
     "tools/release_notes.py":   72.0,
     # Values floored to nearest 0.1 pp below the actual observed percentage so

@@ -13,6 +13,7 @@ AGENT_INSTALL_SQL = ROOT / "sql/install/006_create_semantic_agent_views.sql"
 COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
 VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
+JSON_SOURCE = ROOT / "lua/semantic_layer/shared/json.lua"
 GRAIN_GRAPH_SOURCE = ROOT / "lua/semantic_layer/shared/grain_graph.lua"
 SOURCE_COLUMNS_SOURCE = ROOT / "lua/semantic_layer/shared/source_columns.lua"
 IDENTITY_JOIN_SOURCE = ROOT / "lua/semantic_layer/shared/identity_join.lua"
@@ -242,6 +243,7 @@ FROM (VALUES
 
 
 def validator_block() -> str:
+    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
     source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
     identity_join_source = IDENTITY_JOIN_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -252,6 +254,8 @@ def validator_block() -> str:
     source = VALIDATOR_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{VALIDATOR_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
+{json_source}
+
 {graph_source}
 
 {source_columns_source}
@@ -266,6 +270,7 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 
 
 def compiler_block() -> str:
+    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
     source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
     identity_join_source = IDENTITY_JOIN_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -282,6 +287,8 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
+{json_source}
+
 {graph_source}
 
 {source_columns_source}
@@ -420,9 +427,12 @@ exit(rows or {{}}, [[
 
 
 def semantic_definition_block() -> str:
+    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
     source = SEMANTIC_DEFINITION_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{SEMANTIC_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME AS
+{json_source}
+
 {source}
 /
 
@@ -606,15 +616,21 @@ def fusion_declaration_block() -> str:
     """The tier-2 fusion document surface.
 
     Its own script rather than more of SEMANTIC_DEFINITION_RUNTIME: that chunk
-    is at 124 of Exasol's 200 main-chunk locals, and a document format that will
-    grow should not spend someone else's headroom. It imports the definition
-    runtime for JSON encode/decode instead of carrying a second copy.
+    is near Exasol's 200 main-chunk locals, and a document format that will grow
+    should not spend someone else's headroom.
+
+    It carries shared/json.lua rather than importing the definition runtime for a
+    codec. Importing was the cheap way to avoid a fifth copy of the encoder, but
+    it made a document format depend on the DDL parser, and it left this module
+    holding decoded values whose null sentinel belonged to another module -- so
+    an explicit `null` in a declaration was unrecognisable here. Two locals of
+    this chunk's budget buy back both.
     """
+    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
     source = FUSION_DECLARATION_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{FUSION_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.FUSION_RUNTIME AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "esv_semantic_definition")
-ESV_SEMANTIC_DEFINITION_RUNTIME = esv_semantic_definition
+{json_source}
 
 {source}
 /
@@ -658,9 +674,12 @@ exit(rows or {{}}, [[
 
 
 def agent_block() -> str:
+    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
     source = AGENT_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{AGENT_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.AGENT_RUNTIME AS
+{json_source}
+
 {source}
 /
 

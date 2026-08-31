@@ -104,6 +104,10 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/compiler/grain_sql.lua` | same | imported compiler module |
 | `lua/semantic_layer/compiler/materializations.lua` | same | `SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME` |
 | `lua/semantic_layer/shared/grain_graph.lua` | same | shared validator/compiler module |
+| `lua/semantic_layer/shared/json.lua` | same, plus `006_…` | shared codec, embedded in every runtime |
+| `lua/semantic_layer/shared/identity_join.lua` | same | shared validator/compiler module |
+| `lua/semantic_layer/shared/source_columns.lua` | same | shared validator/compiler module |
+| `lua/semantic_layer/admin/fusion_declaration.lua` | same | `SEMANTIC_ADMIN.FUSION_RUNTIME` |
 | `lua/semantic_layer/admin/semantic_definition.lua` | same | `SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME` |
 | `lua/semantic_layer/agent/runtime.lua` | `006_create_semantic_agent_views.sql` | `SEMANTIC_ADMIN.AGENT_RUNTIME` |
 | `lua/semantic_layer/admin/validator.lua` | `003_create_semantic_admin_scripts.sql` | inline in `VALIDATE_MODEL` |
@@ -344,9 +348,45 @@ SQL NULL. Two tests hold the line: `NullNormalisationTest` in
 `tools/verify_g02_named_admin_api.py` calls every model-scoped script with only
 `MODEL_NAME` set and fails if any refusal mentions `userdata`.
 
+### The 200-Local Ceiling Applies to the Sum, Not to a File
+
+Exasol caps a Lua function at 200 local variables, and a generated runtime
+script is **one chunk** holding several concatenated source files. So the
+ceiling applies to the *sum* of their top-level locals. `COMPILER_RUNTIME` is
+nine sources and sits at 188/200; `request_json.lua` alone declares 106 of them.
+
+The consequence is the part that is easy to get wrong: **splitting a file into
+two files buys no headroom.** Both halves land in the same chunk and declare the
+same names. What buys headroom is *namespacing* — putting helpers behind a table
+so the chunk pays one local instead of eighteen:
+
+| Shape | Cost |
+|---|---|
+| 18 helpers as top-level `local function`s | 18 locals |
+| the same 18 inside a `do … end` behind two namespace tables | 2 locals |
+| a module file exporting one table (`grain_sql.lua`, 172 lines) | 3 locals |
+
+That is why the `do` block in `request_json.lua` is load-bearing rather than
+stylistic, and why its header says so: deleting it to "tidy up" reintroduces the
+wall. It is also why a shared module is worth more than its line count suggests
+— `shared/json.lua` replaced five top-level locals in each of three runtimes
+with two.
+
+`tools/package_lua_scripts.py` counts per generated script, fails the build with
+the script name and the sources it was assembled from, and prints the remaining
+headroom from 190 up. Exceeding it without that check fails at *install* time
+with `too many local variables (limit is 200) in main function` and a line
+number in a 29 000-line generated file.
+
+**Every runtime that uses a shared module must embed it.** The chunks share no
+globals, so a `shared/` file that one block in the packager forgets leaves that
+runtime asserting on a nil global at install time. `tests/test_conventions.py`
+derives this from the generated SQL: any script referencing `ESV_JSON` must also
+contain its definition.
+
 ## Conventions
 
-Four rules with no correctness consequence, so nothing else fails when one is
+Five rules with no correctness consequence, so nothing else fails when one is
 broken. `tests/test_conventions.py` enforces each as a ratchet — the current
 state is pinned, may shrink, and may not grow. The first two both govern the
 error-code namespace.
@@ -373,6 +413,20 @@ not `verify_bug26_published_f3_batch.py`. 24 of 58 verifiers are named after bug
 IDs and are grandfathered in the test; adding a 25th fails. Fold a bug-specific
 case into the file that owns the behaviour — `verify_fusion_f5.py` absorbed
 BUG-G03's lower-case mapping column rather than growing a `verify_g03_*.py`.
+
+**A routine is written once.** A function body that is byte-identical in two
+modules is pinned in `DUPLICATED_LUA_BODIES`; the pin may shrink and may not
+grow. BUG-G03 was one defect in five copies of the same F5 join, and the JSON
+codec was the same story without the bug report — four private copies whose null
+sentinel is a bare table with no meaning beyond its identity, so a null decoded
+by one module was an anonymous empty table to the others. `query_spec.lua` read
+it as an empty array while `request_json.lua` refused it; `fusion_declaration.lua`
+read it as a present declaration and wrote its address to the catalog. Nothing
+failed, because nothing compared the copies. Put it in
+`lua/semantic_layer/shared/` and add it to every packager block that needs it —
+`identity_join.lua` and `json.lua` are the worked examples. Seven bodies remain
+pinned; `replace_qualified_alias` and `strip_string_literals` are the two worth
+doing next, because a divergence there is wrong SQL that validates.
 
 **Derive a surface, do not restate it.** `CATALOG_COLUMNS`,
 `ADMIN_SCRIPT_PARAMETERS` and `CATALOG_RELATIONSHIPS` read `EXA_ALL_*`, so they

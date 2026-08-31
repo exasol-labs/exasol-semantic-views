@@ -139,7 +139,12 @@ def main() -> int:
             con,
             osi.ExportOptions(model_name="sales", object_name=None, profile="lossless"),
         )
-        assert_equal("source export warnings", warnings, [])
+        # The sales model ships a materialization, which no Ossie profile can
+        # carry. It does not block a lossless export -- losing one changes query
+        # cost, not answers -- but it is reported, so this asserts the expected
+        # warning rather than none. A second code here is a real regression.
+        assert_equal("source export warning codes",
+                     [item["code"] for item in warnings], ["OSI_EXPORT_050"])
         plan = make_plan(document)
         assert_equal("batch plan status", plan["status"], "ok")
 

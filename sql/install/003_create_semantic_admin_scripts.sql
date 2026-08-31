@@ -9106,6 +9106,349 @@ exit({{ model_name_actual, role_name, published_schema, 'REVOKED' }}, [[
 
 -- BEGIN GENERATED VALIDATOR_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
+-- One JSON implementation for the whole runtime.
+--
+-- There were four. `compiler/request_json.lua` and `admin/semantic_definition.lua`
+-- carried a byte-identical 179-line block (encoder, decoder, `is_array`, escape);
+-- `agent/runtime.lua` carried a third copy of the encoder half; and
+-- `admin/validator.lua` carried a fourth parser of its own for well-formedness
+-- checks. `admin/fusion_declaration.lua` avoided becoming a fifth only by taking
+-- a dependency on the 4 600-line DDL parser to reach an encoder.
+--
+-- The copies had already drifted, and the drift was invisible because nothing
+-- compared them. `compiler/query_spec.lua`'s `is_array` omitted the `JSON_NULL`
+-- guard the other three had -- it had no sentinel in scope to compare against --
+-- so `{"metrics": null}` reached the planner as an empty list on one code path
+-- and as a refusal on another. `admin/fusion_declaration.lua` borrowed a decoder
+-- whose sentinel its own `missing()` did not recognise, so a JSON `null` in a
+-- declaration read as a *present* value that rendered as "table: 0x...".
+--
+-- Both defects are the same defect: a sentinel is only meaningful to code that
+-- shares its identity, and identity cannot be shared across copies. Hence one
+-- module, embedded by tools/package_lua_scripts.py into every runtime script
+-- that needs it, the way shared/identity_join.lua already is.
+--
+-- Two entry points read text, and they are deliberately not the same function:
+--
+--   M.decode(text)    builds a value; lenient about scalar spelling
+--   M.is_valid(text)  answers yes/no; strict RFC 8259 scalar grammar
+--
+-- The difference is real and load-bearing, so it is one parser with one `strict`
+-- flag rather than two files. `M.decode` is applied to payloads this runtime
+-- wrote and must keep accepting what it accepted before; `M.is_valid` backs
+-- SEMANTIC_MODEL validation of user-supplied extension JSON, where "looks close
+-- enough" is the wrong answer. tests/lua/json_unit_test.lua pins each input the
+-- two disagree about.
+
+local M = {}
+
+-- The decoded spelling of JSON `null`.
+--
+-- A sentinel table, not Lua `nil`: in a Lua table an explicit null and an absent
+-- key are the same thing, and the difference matters wherever a document's
+-- omitted key means "leave alone" and an explicit null means "unset". Callers
+-- test identity (`value == json.NULL`), never `type` or `tostring`, so this
+-- stays a bare table with no metatable -- giving it a `__tostring` would make
+-- the wrong test look like it worked.
+M.NULL = {}
+
+function M.is_array(value)
+    if type(value) ~= "table" or value == M.NULL then
+        return false
+    end
+    local max_index = 0
+    local count = 0
+    for k, _ in pairs(value) do
+        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
+            return false
+        end
+        if k > max_index then
+            max_index = k
+        end
+        count = count + 1
+    end
+    return max_index == count
+end
+
+function M.escape(value)
+    local text = tostring(value)
+    text = string.gsub(text, "\\", "\\\\")
+    text = string.gsub(text, '"', '\\"')
+    text = string.gsub(text, "\n", "\\n")
+    text = string.gsub(text, "\r", "\\r")
+    text = string.gsub(text, "\t", "\\t")
+    return text
+end
+
+-- Object keys are emitted in sorted order, which is what makes an exported
+-- document comparable to a re-exported one -- the round-trip contract behind
+-- EXPORT_FUSION_DECLARATION and EXPORT_SEMANTIC_DEFINITION.
+function M.encode(value)
+    local value_type = type(value)
+    if value == nil or value == null or value == M.NULL then
+        return "null"
+    elseif value_type == "string" then
+        return '"' .. M.escape(value) .. '"'
+    elseif value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "true" or "false"
+    elseif value_type == "table" then
+        local parts = {}
+        if M.is_array(value) then
+            for i = 1, #value do
+                parts[#parts + 1] = M.encode(value[i])
+            end
+            return "[" .. table.concat(parts, ",") .. "]"
+        end
+        local keys = {}
+        for k, _ in pairs(value) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            parts[#parts + 1] = M.encode(k) .. ":" .. M.encode(value[k])
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+    end
+    return M.encode(tostring(value))
+end
+
+-- One recursive-descent parser. `strict` selects the scalar grammar:
+--
+--   strict = false  numbers are scanned loosely and handed to tonumber, a \u
+--                   escape is accepted without checking its digits and decodes
+--                   to "?", and a raw control character inside a string passes.
+--   strict = true   numbers follow RFC 8259 exactly (no leading zero, a
+--                   fraction and an exponent must have digits), \u must be four
+--                   hex digits, and a byte below 0x20 inside a string is an
+--                   error.
+--
+-- The structure -- whitespace, arrays, objects, keywords, the trailing-input
+-- check -- is shared, because that half never differed between the two copies
+-- this replaces. Values are built in both modes; is_valid discards them, which
+-- costs less than a second traversal would cost to maintain.
+local function parse(text, strict)
+    if text == nil or text == null or text == M.NULL or tostring(text) == "" then
+        error("empty JSON payload")
+    end
+    text = tostring(text)
+    local pos = 1
+
+    local function peek()
+        return string.sub(text, pos, pos)
+    end
+
+    local function is_digit(c)
+        return string.match(c, "^%d$") ~= nil
+    end
+
+    local function skip_ws()
+        while pos <= #text do
+            local c = peek()
+            if c == " " or c == "\n" or c == "\r" or c == "\t" then
+                pos = pos + 1
+            else
+                return
+            end
+        end
+    end
+
+    local function read_digits()
+        local count = 0
+        while is_digit(peek()) do
+            count = count + 1
+            pos = pos + 1
+        end
+        return count
+    end
+
+    local ESCAPES = {['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b",
+        f = "\f", n = "\n", r = "\r", t = "\t"}
+
+    local function parse_string()
+        if peek() ~= '"' then
+            error("expected string at byte " .. tostring(pos))
+        end
+        pos = pos + 1
+        local out = {}
+        while pos <= #text do
+            local c = peek()
+            if c == '"' then
+                pos = pos + 1
+                return table.concat(out)
+            elseif c == "\\" then
+                local e = string.sub(text, pos + 1, pos + 1)
+                if ESCAPES[e] ~= nil then
+                    out[#out + 1] = ESCAPES[e]
+                    pos = pos + 2
+                elseif e == "u" then
+                    if strict then
+                        for offset = 2, 5 do
+                            local digit = string.sub(text, pos + offset, pos + offset)
+                            if string.match(digit, "^[0-9A-Fa-f]$") == nil then
+                                error("invalid unicode escape at byte " .. tostring(pos))
+                            end
+                        end
+                    end
+                    -- Lossy and long-standing: the runtime stores model metadata
+                    -- as ASCII, and a decoder that expanded escapes would have to
+                    -- encode them again to keep a round-trip stable.
+                    out[#out + 1] = "?"
+                    pos = pos + 6
+                else
+                    error("invalid escape at byte " .. tostring(pos))
+                end
+            elseif strict and (c == "" or string.byte(c) < 32) then
+                error("invalid control character in string at byte " .. tostring(pos))
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+        error("unterminated string")
+    end
+
+    local parse_value
+
+    local function parse_number()
+        local start_pos = pos
+        if peek() == "-" then
+            pos = pos + 1
+        end
+        if strict then
+            if peek() == "0" then
+                pos = pos + 1
+            elseif string.match(peek(), "^[1-9]$") then
+                read_digits()
+            else
+                error("invalid number at byte " .. tostring(start_pos))
+            end
+        else
+            read_digits()
+        end
+        if peek() == "." then
+            pos = pos + 1
+            if read_digits() == 0 and strict then
+                error("invalid number fraction at byte " .. tostring(pos))
+            end
+        end
+        local c = peek()
+        if c == "e" or c == "E" then
+            pos = pos + 1
+            c = peek()
+            if c == "+" or c == "-" then
+                pos = pos + 1
+            end
+            if read_digits() == 0 and strict then
+                error("invalid number exponent at byte " .. tostring(pos))
+            end
+        end
+        local value = tonumber(string.sub(text, start_pos, pos - 1))
+        if value == nil then
+            error("invalid number at byte " .. tostring(start_pos))
+        end
+        return value
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "]" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            out[#out + 1] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "]" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected array comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "}" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            skip_ws()
+            local name = parse_string()
+            skip_ws()
+            if peek() ~= ":" then
+                error("expected object colon at byte " .. tostring(pos))
+            end
+            pos = pos + 1
+            out[name] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "}" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected object comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    function parse_value()
+        skip_ws()
+        local c = peek()
+        if c == '"' then
+            return parse_string()
+        elseif c == "{" then
+            return parse_object()
+        elseif c == "[" then
+            return parse_array()
+        elseif c == "-" or is_digit(c) then
+            return parse_number()
+        elseif string.sub(text, pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif string.sub(text, pos, pos + 4) == "false" then
+            pos = pos + 5
+            return false
+        elseif string.sub(text, pos, pos + 3) == "null" then
+            pos = pos + 4
+            return M.NULL
+        end
+        error("unexpected JSON token at byte " .. tostring(pos))
+    end
+
+    local value = parse_value()
+    skip_ws()
+    if pos <= #text then
+        error("unexpected trailing JSON at byte " .. tostring(pos))
+    end
+    return value
+end
+
+-- Raises on malformed input; the message names the byte offset.
+function M.decode(text)
+    return parse(text, false)
+end
+
+-- Well-formedness only, under the strict scalar grammar. Never raises.
+function M.is_valid(text)
+    local ok = pcall(parse, text, true)
+    return ok
+end
+
+ESV_JSON = M
+
 -- Canonical relationship graph and path-proof implementation shared by the
 -- validator and compiler runtimes. The packaging step embeds this source into
 -- both Exasol scripts so the installed runtime has no external dependency.
@@ -10625,6 +10968,7 @@ end
 ESV_METRIC_PLAN = M
 
 local M = {}
+local json = assert(ESV_JSON, "shared JSON runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -10875,199 +11219,15 @@ local function null_if_missing(value)
     return value
 end
 
-local function parse_json_text(text)
-    if missing(text) then
-        error("empty JSON payload")
-    end
-    text = tostring(text)
-    local pos = 1
-
-    local function peek()
-        return string.sub(text, pos, pos)
-    end
-
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-
-    local function is_digit(c)
-        return string.match(c, "^%d$") ~= nil
-    end
-
-    local function is_hex(c)
-        return string.match(c, "^[0-9A-Fa-f]$") ~= nil
-    end
-
-    local function read_digits()
-        local count = 0
-        while is_digit(peek()) do
-            count = count + 1
-            pos = pos + 1
-        end
-        return count
-    end
-
-    local function parse_string()
-        if peek() ~= '"' then
-            error("expected string at byte " .. tostring(pos))
-        end
-        pos = pos + 1
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return true
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" or e == "b" or e == "f"
-                    or e == "n" or e == "r" or e == "t" then
-                    pos = pos + 2
-                elseif e == "u" then
-                    for offset = 2, 5 do
-                        if not is_hex(string.sub(text, pos + offset, pos + offset)) then
-                            error("invalid unicode escape at byte " .. tostring(pos))
-                        end
-                    end
-                    pos = pos + 6
-                else
-                    error("invalid escape at byte " .. tostring(pos))
-                end
-            elseif c == "" or string.byte(c) < 32 then
-                error("invalid control character in string at byte " .. tostring(pos))
-            else
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-
-    local parse_value
-
-    local function parse_number()
-        local start_pos = pos
-        if peek() == "-" then
-            pos = pos + 1
-        end
-        if peek() == "0" then
-            pos = pos + 1
-        elseif string.match(peek(), "^[1-9]$") then
-            read_digits()
-        else
-            error("invalid number at byte " .. tostring(start_pos))
-        end
-        if peek() == "." then
-            pos = pos + 1
-            if read_digits() == 0 then
-                error("invalid number fraction at byte " .. tostring(pos))
-            end
-        end
-        local c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then
-                pos = pos + 1
-            end
-            if read_digits() == 0 then
-                error("invalid number exponent at byte " .. tostring(pos))
-            end
-        end
-        return true
-    end
-
-    local function parse_array()
-        pos = pos + 1
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return true
-        end
-        while true do
-            parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return true
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected array comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    local function parse_object()
-        pos = pos + 1
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return true
-        end
-        while true do
-            skip_ws()
-            parse_string()
-            skip_ws()
-            if peek() ~= ":" then
-                error("expected object colon at byte " .. tostring(pos))
-            end
-            pos = pos + 1
-            parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return true
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected object comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then
-            return parse_string()
-        elseif c == "{" then
-            return parse_object()
-        elseif c == "[" then
-            return parse_array()
-        elseif c == "-" or is_digit(c) then
-            return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return true
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return true
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-
-    parse_value()
-    skip_ws()
-    if pos <= #text then
-        error("unexpected trailing JSON at byte " .. tostring(pos))
-    end
-    return true
-end
-
+-- Well-formedness of a user-supplied JSON payload -- extension `data_json`,
+-- agent metadata -- under the strict scalar grammar. This was a fourth
+-- hand-written JSON parser; it is now the strict mode of the one in
+-- shared/json.lua. The strictness is the point: the compiler's decoder is
+-- lenient about what it accepts because it re-reads payloads this runtime
+-- itself wrote, but a model author's JSON is refused at definition time rather
+-- than surprising someone at query time.
 local function valid_json_text(text)
-    local ok, _ = pcall(parse_json_text, text)
-    return ok
+    return json.is_valid(text)
 end
 
 local function start_validation_run(ctx)
@@ -14927,7 +15087,6 @@ validate_model = M.validate_model
 -- gated instead of becoming part of the installed runtime contract.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
-        parse_json_text = parse_json_text,
         valid_json_text = valid_json_text,
         strip_string_literals = strip_string_literals,
         aliases_in_expression = aliases_in_expression,
@@ -15429,6 +15588,349 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
+-- One JSON implementation for the whole runtime.
+--
+-- There were four. `compiler/request_json.lua` and `admin/semantic_definition.lua`
+-- carried a byte-identical 179-line block (encoder, decoder, `is_array`, escape);
+-- `agent/runtime.lua` carried a third copy of the encoder half; and
+-- `admin/validator.lua` carried a fourth parser of its own for well-formedness
+-- checks. `admin/fusion_declaration.lua` avoided becoming a fifth only by taking
+-- a dependency on the 4 600-line DDL parser to reach an encoder.
+--
+-- The copies had already drifted, and the drift was invisible because nothing
+-- compared them. `compiler/query_spec.lua`'s `is_array` omitted the `JSON_NULL`
+-- guard the other three had -- it had no sentinel in scope to compare against --
+-- so `{"metrics": null}` reached the planner as an empty list on one code path
+-- and as a refusal on another. `admin/fusion_declaration.lua` borrowed a decoder
+-- whose sentinel its own `missing()` did not recognise, so a JSON `null` in a
+-- declaration read as a *present* value that rendered as "table: 0x...".
+--
+-- Both defects are the same defect: a sentinel is only meaningful to code that
+-- shares its identity, and identity cannot be shared across copies. Hence one
+-- module, embedded by tools/package_lua_scripts.py into every runtime script
+-- that needs it, the way shared/identity_join.lua already is.
+--
+-- Two entry points read text, and they are deliberately not the same function:
+--
+--   M.decode(text)    builds a value; lenient about scalar spelling
+--   M.is_valid(text)  answers yes/no; strict RFC 8259 scalar grammar
+--
+-- The difference is real and load-bearing, so it is one parser with one `strict`
+-- flag rather than two files. `M.decode` is applied to payloads this runtime
+-- wrote and must keep accepting what it accepted before; `M.is_valid` backs
+-- SEMANTIC_MODEL validation of user-supplied extension JSON, where "looks close
+-- enough" is the wrong answer. tests/lua/json_unit_test.lua pins each input the
+-- two disagree about.
+
+local M = {}
+
+-- The decoded spelling of JSON `null`.
+--
+-- A sentinel table, not Lua `nil`: in a Lua table an explicit null and an absent
+-- key are the same thing, and the difference matters wherever a document's
+-- omitted key means "leave alone" and an explicit null means "unset". Callers
+-- test identity (`value == json.NULL`), never `type` or `tostring`, so this
+-- stays a bare table with no metatable -- giving it a `__tostring` would make
+-- the wrong test look like it worked.
+M.NULL = {}
+
+function M.is_array(value)
+    if type(value) ~= "table" or value == M.NULL then
+        return false
+    end
+    local max_index = 0
+    local count = 0
+    for k, _ in pairs(value) do
+        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
+            return false
+        end
+        if k > max_index then
+            max_index = k
+        end
+        count = count + 1
+    end
+    return max_index == count
+end
+
+function M.escape(value)
+    local text = tostring(value)
+    text = string.gsub(text, "\\", "\\\\")
+    text = string.gsub(text, '"', '\\"')
+    text = string.gsub(text, "\n", "\\n")
+    text = string.gsub(text, "\r", "\\r")
+    text = string.gsub(text, "\t", "\\t")
+    return text
+end
+
+-- Object keys are emitted in sorted order, which is what makes an exported
+-- document comparable to a re-exported one -- the round-trip contract behind
+-- EXPORT_FUSION_DECLARATION and EXPORT_SEMANTIC_DEFINITION.
+function M.encode(value)
+    local value_type = type(value)
+    if value == nil or value == null or value == M.NULL then
+        return "null"
+    elseif value_type == "string" then
+        return '"' .. M.escape(value) .. '"'
+    elseif value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "true" or "false"
+    elseif value_type == "table" then
+        local parts = {}
+        if M.is_array(value) then
+            for i = 1, #value do
+                parts[#parts + 1] = M.encode(value[i])
+            end
+            return "[" .. table.concat(parts, ",") .. "]"
+        end
+        local keys = {}
+        for k, _ in pairs(value) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            parts[#parts + 1] = M.encode(k) .. ":" .. M.encode(value[k])
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+    end
+    return M.encode(tostring(value))
+end
+
+-- One recursive-descent parser. `strict` selects the scalar grammar:
+--
+--   strict = false  numbers are scanned loosely and handed to tonumber, a \u
+--                   escape is accepted without checking its digits and decodes
+--                   to "?", and a raw control character inside a string passes.
+--   strict = true   numbers follow RFC 8259 exactly (no leading zero, a
+--                   fraction and an exponent must have digits), \u must be four
+--                   hex digits, and a byte below 0x20 inside a string is an
+--                   error.
+--
+-- The structure -- whitespace, arrays, objects, keywords, the trailing-input
+-- check -- is shared, because that half never differed between the two copies
+-- this replaces. Values are built in both modes; is_valid discards them, which
+-- costs less than a second traversal would cost to maintain.
+local function parse(text, strict)
+    if text == nil or text == null or text == M.NULL or tostring(text) == "" then
+        error("empty JSON payload")
+    end
+    text = tostring(text)
+    local pos = 1
+
+    local function peek()
+        return string.sub(text, pos, pos)
+    end
+
+    local function is_digit(c)
+        return string.match(c, "^%d$") ~= nil
+    end
+
+    local function skip_ws()
+        while pos <= #text do
+            local c = peek()
+            if c == " " or c == "\n" or c == "\r" or c == "\t" then
+                pos = pos + 1
+            else
+                return
+            end
+        end
+    end
+
+    local function read_digits()
+        local count = 0
+        while is_digit(peek()) do
+            count = count + 1
+            pos = pos + 1
+        end
+        return count
+    end
+
+    local ESCAPES = {['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b",
+        f = "\f", n = "\n", r = "\r", t = "\t"}
+
+    local function parse_string()
+        if peek() ~= '"' then
+            error("expected string at byte " .. tostring(pos))
+        end
+        pos = pos + 1
+        local out = {}
+        while pos <= #text do
+            local c = peek()
+            if c == '"' then
+                pos = pos + 1
+                return table.concat(out)
+            elseif c == "\\" then
+                local e = string.sub(text, pos + 1, pos + 1)
+                if ESCAPES[e] ~= nil then
+                    out[#out + 1] = ESCAPES[e]
+                    pos = pos + 2
+                elseif e == "u" then
+                    if strict then
+                        for offset = 2, 5 do
+                            local digit = string.sub(text, pos + offset, pos + offset)
+                            if string.match(digit, "^[0-9A-Fa-f]$") == nil then
+                                error("invalid unicode escape at byte " .. tostring(pos))
+                            end
+                        end
+                    end
+                    -- Lossy and long-standing: the runtime stores model metadata
+                    -- as ASCII, and a decoder that expanded escapes would have to
+                    -- encode them again to keep a round-trip stable.
+                    out[#out + 1] = "?"
+                    pos = pos + 6
+                else
+                    error("invalid escape at byte " .. tostring(pos))
+                end
+            elseif strict and (c == "" or string.byte(c) < 32) then
+                error("invalid control character in string at byte " .. tostring(pos))
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+        error("unterminated string")
+    end
+
+    local parse_value
+
+    local function parse_number()
+        local start_pos = pos
+        if peek() == "-" then
+            pos = pos + 1
+        end
+        if strict then
+            if peek() == "0" then
+                pos = pos + 1
+            elseif string.match(peek(), "^[1-9]$") then
+                read_digits()
+            else
+                error("invalid number at byte " .. tostring(start_pos))
+            end
+        else
+            read_digits()
+        end
+        if peek() == "." then
+            pos = pos + 1
+            if read_digits() == 0 and strict then
+                error("invalid number fraction at byte " .. tostring(pos))
+            end
+        end
+        local c = peek()
+        if c == "e" or c == "E" then
+            pos = pos + 1
+            c = peek()
+            if c == "+" or c == "-" then
+                pos = pos + 1
+            end
+            if read_digits() == 0 and strict then
+                error("invalid number exponent at byte " .. tostring(pos))
+            end
+        end
+        local value = tonumber(string.sub(text, start_pos, pos - 1))
+        if value == nil then
+            error("invalid number at byte " .. tostring(start_pos))
+        end
+        return value
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "]" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            out[#out + 1] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "]" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected array comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "}" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            skip_ws()
+            local name = parse_string()
+            skip_ws()
+            if peek() ~= ":" then
+                error("expected object colon at byte " .. tostring(pos))
+            end
+            pos = pos + 1
+            out[name] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "}" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected object comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    function parse_value()
+        skip_ws()
+        local c = peek()
+        if c == '"' then
+            return parse_string()
+        elseif c == "{" then
+            return parse_object()
+        elseif c == "[" then
+            return parse_array()
+        elseif c == "-" or is_digit(c) then
+            return parse_number()
+        elseif string.sub(text, pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif string.sub(text, pos, pos + 4) == "false" then
+            pos = pos + 5
+            return false
+        elseif string.sub(text, pos, pos + 3) == "null" then
+            pos = pos + 4
+            return M.NULL
+        end
+        error("unexpected JSON token at byte " .. tostring(pos))
+    end
+
+    local value = parse_value()
+    skip_ws()
+    if pos <= #text then
+        error("unexpected trailing JSON at byte " .. tostring(pos))
+    end
+    return value
+end
+
+-- Raises on malformed input; the message names the byte offset.
+function M.decode(text)
+    return parse(text, false)
+end
+
+-- Well-formedness only, under the strict scalar grammar. Never raises.
+function M.is_valid(text)
+    local ok = pcall(parse, text, true)
+    return ok
+end
+
+ESV_JSON = M
+
 -- Canonical relationship graph and path-proof implementation shared by the
 -- validator and compiler runtimes. The packaging step embeds this source into
 -- both Exasol scripts so the installed runtime has no external dependency.
@@ -16085,6 +16587,8 @@ ESV_IDENTITY_JOIN = M
 
 -- Canonical request boundary shared by JSON and Semantic SQL lowering.
 
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
 local M = {VERSION = 1}
 
 local ARRAY_FIELDS = {"metrics", "dimensions", "filters", "having", "order_by"}
@@ -16113,20 +16617,6 @@ local function normalize_name(value)
     return normalized
 end
 
-local function is_array(value)
-    if type(value) ~= "table" then return false end
-    local count = 0
-    local largest = 0
-    for item_key, _ in pairs(value) do
-        if type(item_key) ~= "number" or item_key < 1 or item_key % 1 ~= 0 then
-            return false
-        end
-        count = count + 1
-        if item_key > largest then largest = item_key end
-    end
-    return count == largest
-end
-
 function M.new(request, source)
     if type(request) ~= "table" then
         return nil, "QUERY_SPEC_INVALID"
@@ -16144,8 +16634,15 @@ function M.new(request, source)
     }
     for _, name in ipairs(ARRAY_FIELDS) do
         local value = request[name]
-        if value ~= nil then
-            if not is_array(value) then
+        -- An explicit JSON null means the same as an omitted key. This module
+        -- used to reach that answer by accident: its private `is_array` had no
+        -- sentinel to compare against, so the decoder's null -- an empty table --
+        -- satisfied the array test and arrived as an empty list. Now the
+        -- sentinel is shared, the test would refuse it, so the leniency has to
+        -- be stated. `missing()` treats a decoded null as absent everywhere
+        -- else in the runtime; this keeps that consistent.
+        if value ~= nil and value ~= json.NULL then
+            if not json.is_array(value) then
                 return nil, "QUERY_SPEC_" .. string.upper(name) .. "_NOT_ARRAY"
             end
             spec[name] = copy(value)
@@ -18343,6 +18840,7 @@ end
 ESV_GRAIN_SQL = M
 
 local M = {}
+local json = assert(ESV_JSON, "shared JSON runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -18362,7 +18860,9 @@ end
 
 local materialization_runtime = materializations
 
-local JSON_NULL = {}
+-- Identity, not a copy: JSON_NULL is meaningful only while every holder of a
+-- decoded null compares against the same table (see shared/json.lua).
+local JSON_NULL = json.NULL
 local MAX_LIMIT = 10000
 
 local function missing(value)
@@ -18403,252 +18903,6 @@ local function null_if_missing(value)
     return value
 end
 
-local function is_array(value)
-    if type(value) ~= "table" or value == JSON_NULL then
-        return false
-    end
-    local max_index = 0
-    local count = 0
-    for k, _ in pairs(value) do
-        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
-            return false
-        end
-        if k > max_index then
-            max_index = k
-        end
-        count = count + 1
-    end
-    return max_index == count
-end
-
-local function json_escape(value)
-    local text = tostring(value)
-    text = string.gsub(text, "\\", "\\\\")
-    text = string.gsub(text, '"', '\\"')
-    text = string.gsub(text, "\n", "\\n")
-    text = string.gsub(text, "\r", "\\r")
-    text = string.gsub(text, "\t", "\\t")
-    return text
-end
-
-local function json_encode(value)
-    local value_type = type(value)
-    if value == nil or value == null or value == JSON_NULL then
-        return "null"
-    elseif value_type == "string" then
-        return '"' .. json_escape(value) .. '"'
-    elseif value_type == "number" then
-        return tostring(value)
-    elseif value_type == "boolean" then
-        return value and "true" or "false"
-    elseif value_type == "table" then
-        local parts = {}
-        if is_array(value) then
-            for i = 1, #value do
-                parts[#parts + 1] = json_encode(value[i])
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
-        end
-        local keys = {}
-        for k, _ in pairs(value) do
-            keys[#keys + 1] = tostring(k)
-        end
-        table.sort(keys)
-        for _, k in ipairs(keys) do
-            parts[#parts + 1] = json_encode(k) .. ":" .. json_encode(value[k])
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    return json_encode(tostring(value))
-end
-
-local function json_decode(text)
-    if missing(text) then
-        error("empty JSON payload")
-    end
-    text = tostring(text)
-    local pos = 1
-
-    local function peek()
-        return string.sub(text, pos, pos)
-    end
-
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-
-    local function parse_string()
-        if peek() ~= '"' then
-            error("expected string at byte " .. tostring(pos))
-        end
-        pos = pos + 1
-        local out = {}
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return table.concat(out)
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" then
-                    out[#out + 1] = e
-                    pos = pos + 2
-                elseif e == "b" then
-                    out[#out + 1] = "\b"
-                    pos = pos + 2
-                elseif e == "f" then
-                    out[#out + 1] = "\f"
-                    pos = pos + 2
-                elseif e == "n" then
-                    out[#out + 1] = "\n"
-                    pos = pos + 2
-                elseif e == "r" then
-                    out[#out + 1] = "\r"
-                    pos = pos + 2
-                elseif e == "t" then
-                    out[#out + 1] = "\t"
-                    pos = pos + 2
-                elseif e == "u" then
-                    out[#out + 1] = "?"
-                    pos = pos + 6
-                else
-                    error("invalid escape at byte " .. tostring(pos))
-                end
-            else
-                out[#out + 1] = c
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-
-    local parse_value
-
-    local function parse_number()
-        local start_pos = pos
-        local c = peek()
-        if c == "-" then
-            pos = pos + 1
-        end
-        while string.match(peek(), "%d") do
-            pos = pos + 1
-        end
-        if peek() == "." then
-            pos = pos + 1
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then
-                pos = pos + 1
-            end
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        local raw = string.sub(text, start_pos, pos - 1)
-        local value = tonumber(raw)
-        if value == nil then
-            error("invalid number at byte " .. tostring(start_pos))
-        end
-        return value
-    end
-
-    local function parse_array()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            out[#out + 1] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return out
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected array comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    local function parse_object()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            skip_ws()
-            local name = parse_string()
-            skip_ws()
-            if peek() ~= ":" then
-                error("expected object colon at byte " .. tostring(pos))
-            end
-            pos = pos + 1
-            out[name] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return out
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected object comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then
-            return parse_string()
-        elseif c == "{" then
-            return parse_object()
-        elseif c == "[" then
-            return parse_array()
-        elseif c == "-" or string.match(c, "%d") then
-            return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return false
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return JSON_NULL
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-
-    local value = parse_value()
-    skip_ws()
-    if pos <= #text then
-        error("unexpected trailing JSON at byte " .. tostring(pos))
-    end
-    return value
-end
 
 local function quote_ident(name)
     local text = tostring(name)
@@ -18711,7 +18965,7 @@ local function as_array(value, field_name)
     if missing(value) then
         return {}
     end
-    if not is_array(value) then
+    if not json.is_array(value) then
         error(field_name .. " must be an array")
     end
     return value
@@ -18739,7 +18993,7 @@ local function error_result(code, message, clarification)
         error_message = message,
         generated_sql = nil,
         plan_json = nil,
-        clarification_json = clarification and json_encode(clarification) or nil,
+        clarification_json = clarification and json.encode(clarification) or nil,
         validation_run_id = nil,
         agent_request_id = nil,
         query_log_id = nil,
@@ -18855,7 +19109,7 @@ do
             error_code = nil,
             error_message = nil,
             generated_sql = sql_text,
-            plan_json = json_encode(plan),
+            plan_json = json.encode(plan),
             clarification_json = nil,
             validation_run_id = validation_run_id,
             agent_request_id = nil,
@@ -18931,7 +19185,7 @@ do
         if options == nil or options == null or options == JSON_NULL then
             return nil
         end
-        if type(options) ~= "table" or is_array(options) then
+        if type(options) ~= "table" or json.is_array(options) then
             return error_result("SEMANTIC_REQUEST_004",
                 "options must be an object with keys: "
                     .. table.concat(option_names, ", ") .. ".")
@@ -18968,7 +19222,7 @@ do
             return null
         end
         if type(value) == "table" then
-            if is_array(value) then
+            if json.is_array(value) then
                 local out = {}
                 for i = 1, #value do
                     out[i] = compile_cache.canonical_value(value[i])
@@ -19001,7 +19255,7 @@ do
                 stripped[k] = v
             end
         end
-        local ok, encoded = pcall(json_encode, compile_cache.canonical_value(stripped))
+        local ok, encoded = pcall(json.encode, compile_cache.canonical_value(stripped))
         if not ok then
             return nil
         end
@@ -19089,7 +19343,7 @@ do
         -- straight from storage. materialization_used is recovered by decoding it.
         local plan = nil
         if not missing(cached.plan_json) then
-            local ok, decoded = pcall(json_decode, cached.plan_json)
+            local ok, decoded = pcall(json.decode, cached.plan_json)
             if ok then plan = decoded end
         end
         return {
@@ -21216,8 +21470,8 @@ local function log_request(result, request_json, request, model)
         request_json = null_if_missing(request_json),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
-        requested_metrics = null_if_missing(json_encode(metrics)),
-        requested_dimensions = null_if_missing(json_encode(dimensions)),
+        requested_metrics = null_if_missing(json.encode(metrics)),
+        requested_dimensions = null_if_missing(json.encode(dimensions)),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
@@ -21255,8 +21509,8 @@ local function log_query_result(result, original_sql, request, model, client_nam
         original_sql = null_if_missing(original_sql),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
-        requested_dimensions = null_if_missing(json_encode(dimensions)),
-        requested_metrics = null_if_missing(json_encode(metrics)),
+        requested_dimensions = null_if_missing(json.encode(dimensions)),
+        requested_metrics = null_if_missing(json.encode(metrics)),
         materialization_used = null_if_missing(result.materialization_used),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
@@ -21762,7 +22016,7 @@ local function compile_request_table(request, options)
 
     local function plan_error(code, message)
         local result = error_result(error_prefix .. code, message)
-        result.plan_json = json_encode(plan_envelope())
+        result.plan_json = json.encode(plan_envelope())
         return result
     end
 
@@ -21901,11 +22155,11 @@ local function compile_request_table(request, options)
 end
 
 local function compile_internal(request_json)
-    local decoded, request = pcall(json_decode, request_json)
+    local decoded, request = pcall(json.decode, request_json)
     if not decoded then
         return error_result("SEMANTIC_REQUEST_001", "Invalid request JSON: " .. tostring(request) .. ".")
     end
-    if type(request) ~= "table" or is_array(request) then
+    if type(request) ~= "table" or json.is_array(request) then
         return error_result("SEMANTIC_REQUEST_001", "Request JSON must be an object.")
     end
     local request_key_error = compile_cache.validate_structured_request_keys(request)
@@ -22880,7 +23134,7 @@ function M.suggest_grain_metadata(model_name)
                     "UNIQUE_KEY",
                     entity_name,
                     "LEGACY_PRIMARY_KEY_EXPR",
-                    json_encode({
+                    json.encode({
                         key_name = tostring(entity_name) .. "_pk",
                         key_kind = "PRIMARY",
                         columns = {{ordinal_position = 1, column_name = column_name}},
@@ -22928,7 +23182,7 @@ function M.suggest_grain_metadata(model_name)
                     "RELATIONSHIP_MAPPING",
                     relationship_name,
                     "SIMPLE_EQUALITY_JOIN",
-                    json_encode({
+                    json.encode({
                         ordinal_position = 1,
                         from_column_name = from_column,
                         to_column_name = to_column,
@@ -22956,8 +23210,8 @@ suggest_grain_metadata = M.suggest_grain_metadata
 -- database catalog.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_COMPILER_TEST_API = {
-        json_encode = json_encode,
-        json_decode = json_decode,
+        json_encode = json.encode,
+        json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,
         compile_cache_key = compile_cache.compile_cache_key,
         quote_ident = quote_ident,
@@ -23115,70 +23369,54 @@ exit(rows or {}, [[
 
 -- BEGIN GENERATED SEMANTIC_DEFINITION_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME AS
+-- One JSON implementation for the whole runtime.
+--
+-- There were four. `compiler/request_json.lua` and `admin/semantic_definition.lua`
+-- carried a byte-identical 179-line block (encoder, decoder, `is_array`, escape);
+-- `agent/runtime.lua` carried a third copy of the encoder half; and
+-- `admin/validator.lua` carried a fourth parser of its own for well-formedness
+-- checks. `admin/fusion_declaration.lua` avoided becoming a fifth only by taking
+-- a dependency on the 4 600-line DDL parser to reach an encoder.
+--
+-- The copies had already drifted, and the drift was invisible because nothing
+-- compared them. `compiler/query_spec.lua`'s `is_array` omitted the `JSON_NULL`
+-- guard the other three had -- it had no sentinel in scope to compare against --
+-- so `{"metrics": null}` reached the planner as an empty list on one code path
+-- and as a refusal on another. `admin/fusion_declaration.lua` borrowed a decoder
+-- whose sentinel its own `missing()` did not recognise, so a JSON `null` in a
+-- declaration read as a *present* value that rendered as "table: 0x...".
+--
+-- Both defects are the same defect: a sentinel is only meaningful to code that
+-- shares its identity, and identity cannot be shared across copies. Hence one
+-- module, embedded by tools/package_lua_scripts.py into every runtime script
+-- that needs it, the way shared/identity_join.lua already is.
+--
+-- Two entry points read text, and they are deliberately not the same function:
+--
+--   M.decode(text)    builds a value; lenient about scalar spelling
+--   M.is_valid(text)  answers yes/no; strict RFC 8259 scalar grammar
+--
+-- The difference is real and load-bearing, so it is one parser with one `strict`
+-- flag rather than two files. `M.decode` is applied to payloads this runtime
+-- wrote and must keep accepting what it accepted before; `M.is_valid` backs
+-- SEMANTIC_MODEL validation of user-supplied extension JSON, where "looks close
+-- enough" is the wrong answer. tests/lua/json_unit_test.lua pins each input the
+-- two disagree about.
+
 local M = {}
 
-local JSON_NULL = {}
+-- The decoded spelling of JSON `null`.
+--
+-- A sentinel table, not Lua `nil`: in a Lua table an explicit null and an absent
+-- key are the same thing, and the difference matters wherever a document's
+-- omitted key means "leave alone" and an explicit null means "unset". Callers
+-- test identity (`value == json.NULL`), never `type` or `tostring`, so this
+-- stays a bare table with no metatable -- giving it a `__tostring` would make
+-- the wrong test look like it worked.
+M.NULL = {}
 
-local function missing(value)
-    return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
-end
-
-local function trim(value)
-    return tostring(value):match("^%s*(.-)%s*$")
-end
-
-local function upper(value)
-    return string.upper(tostring(value))
-end
-
-local function key(value)
-    return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
-end
-
-local function sql_string(value)
-    if missing(value) then
-        return "NULL"
-    end
-    local text = tostring(value)
-    text = string.gsub(text, "'", "''")
-    return "'" .. text .. "'"
-end
-
-local function sql_boolean(value)
-    return value and "TRUE" or "FALSE"
-end
-
-local function sql_bool(value)
-    if value == true or tostring(value) == "true" or tostring(value) == "TRUE" or tostring(value) == "1" then
-        return true
-    end
-    return false
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
-    end
-    return value
-end
-
-local function is_array(value)
-    if type(value) ~= "table" or value == JSON_NULL then
+function M.is_array(value)
+    if type(value) ~= "table" or value == M.NULL then
         return false
     end
     local max_index = 0
@@ -23195,7 +23433,7 @@ local function is_array(value)
     return max_index == count
 end
 
-local function json_escape(value)
+function M.escape(value)
     local text = tostring(value)
     text = string.gsub(text, "\\", "\\\\")
     text = string.gsub(text, '"', '\\"')
@@ -23205,21 +23443,24 @@ local function json_escape(value)
     return text
 end
 
-local function json_encode(value)
+-- Object keys are emitted in sorted order, which is what makes an exported
+-- document comparable to a re-exported one -- the round-trip contract behind
+-- EXPORT_FUSION_DECLARATION and EXPORT_SEMANTIC_DEFINITION.
+function M.encode(value)
     local value_type = type(value)
-    if value == nil or value == null or value == JSON_NULL then
+    if value == nil or value == null or value == M.NULL then
         return "null"
     elseif value_type == "string" then
-        return '"' .. json_escape(value) .. '"'
+        return '"' .. M.escape(value) .. '"'
     elseif value_type == "number" then
         return tostring(value)
     elseif value_type == "boolean" then
         return value and "true" or "false"
     elseif value_type == "table" then
         local parts = {}
-        if is_array(value) then
+        if M.is_array(value) then
             for i = 1, #value do
-                parts[#parts + 1] = json_encode(value[i])
+                parts[#parts + 1] = M.encode(value[i])
             end
             return "[" .. table.concat(parts, ",") .. "]"
         end
@@ -23229,15 +23470,29 @@ local function json_encode(value)
         end
         table.sort(keys)
         for _, k in ipairs(keys) do
-            parts[#parts + 1] = json_encode(k) .. ":" .. json_encode(value[k])
+            parts[#parts + 1] = M.encode(k) .. ":" .. M.encode(value[k])
         end
         return "{" .. table.concat(parts, ",") .. "}"
     end
-    return json_encode(tostring(value))
+    return M.encode(tostring(value))
 end
 
-local function json_decode(text)
-    if missing(text) then
+-- One recursive-descent parser. `strict` selects the scalar grammar:
+--
+--   strict = false  numbers are scanned loosely and handed to tonumber, a \u
+--                   escape is accepted without checking its digits and decodes
+--                   to "?", and a raw control character inside a string passes.
+--   strict = true   numbers follow RFC 8259 exactly (no leading zero, a
+--                   fraction and an exponent must have digits), \u must be four
+--                   hex digits, and a byte below 0x20 inside a string is an
+--                   error.
+--
+-- The structure -- whitespace, arrays, objects, keywords, the trailing-input
+-- check -- is shared, because that half never differed between the two copies
+-- this replaces. Values are built in both modes; is_valid discards them, which
+-- costs less than a second traversal would cost to maintain.
+local function parse(text, strict)
+    if text == nil or text == null or text == M.NULL or tostring(text) == "" then
         error("empty JSON payload")
     end
     text = tostring(text)
@@ -23245,6 +23500,10 @@ local function json_decode(text)
 
     local function peek()
         return string.sub(text, pos, pos)
+    end
+
+    local function is_digit(c)
+        return string.match(c, "^%d$") ~= nil
     end
 
     local function skip_ws()
@@ -23257,6 +23516,18 @@ local function json_decode(text)
             end
         end
     end
+
+    local function read_digits()
+        local count = 0
+        while is_digit(peek()) do
+            count = count + 1
+            pos = pos + 1
+        end
+        return count
+    end
+
+    local ESCAPES = {['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b",
+        f = "\f", n = "\n", r = "\r", t = "\t"}
 
     local function parse_string()
         if peek() ~= '"' then
@@ -23271,30 +23542,28 @@ local function json_decode(text)
                 return table.concat(out)
             elseif c == "\\" then
                 local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" then
-                    out[#out + 1] = e
-                    pos = pos + 2
-                elseif e == "b" then
-                    out[#out + 1] = "\b"
-                    pos = pos + 2
-                elseif e == "f" then
-                    out[#out + 1] = "\f"
-                    pos = pos + 2
-                elseif e == "n" then
-                    out[#out + 1] = "\n"
-                    pos = pos + 2
-                elseif e == "r" then
-                    out[#out + 1] = "\r"
-                    pos = pos + 2
-                elseif e == "t" then
-                    out[#out + 1] = "\t"
+                if ESCAPES[e] ~= nil then
+                    out[#out + 1] = ESCAPES[e]
                     pos = pos + 2
                 elseif e == "u" then
+                    if strict then
+                        for offset = 2, 5 do
+                            local digit = string.sub(text, pos + offset, pos + offset)
+                            if string.match(digit, "^[0-9A-Fa-f]$") == nil then
+                                error("invalid unicode escape at byte " .. tostring(pos))
+                            end
+                        end
+                    end
+                    -- Lossy and long-standing: the runtime stores model metadata
+                    -- as ASCII, and a decoder that expanded escapes would have to
+                    -- encode them again to keep a round-trip stable.
                     out[#out + 1] = "?"
                     pos = pos + 6
                 else
                     error("invalid escape at byte " .. tostring(pos))
                 end
+            elseif strict and (c == "" or string.byte(c) < 32) then
+                error("invalid control character in string at byte " .. tostring(pos))
             else
                 out[#out + 1] = c
                 pos = pos + 1
@@ -23307,32 +23576,38 @@ local function json_decode(text)
 
     local function parse_number()
         local start_pos = pos
-        local c = peek()
-        if c == "-" then
+        if peek() == "-" then
             pos = pos + 1
         end
-        while string.match(peek(), "%d") do
-            pos = pos + 1
+        if strict then
+            if peek() == "0" then
+                pos = pos + 1
+            elseif string.match(peek(), "^[1-9]$") then
+                read_digits()
+            else
+                error("invalid number at byte " .. tostring(start_pos))
+            end
+        else
+            read_digits()
         end
         if peek() == "." then
             pos = pos + 1
-            while string.match(peek(), "%d") do
-                pos = pos + 1
+            if read_digits() == 0 and strict then
+                error("invalid number fraction at byte " .. tostring(pos))
             end
         end
-        c = peek()
+        local c = peek()
         if c == "e" or c == "E" then
             pos = pos + 1
             c = peek()
             if c == "+" or c == "-" then
                 pos = pos + 1
             end
-            while string.match(peek(), "%d") do
-                pos = pos + 1
+            if read_digits() == 0 and strict then
+                error("invalid number exponent at byte " .. tostring(pos))
             end
         end
-        local raw = string.sub(text, start_pos, pos - 1)
-        local value = tonumber(raw)
+        local value = tonumber(string.sub(text, start_pos, pos - 1))
         if value == nil then
             error("invalid number at byte " .. tostring(start_pos))
         end
@@ -23401,7 +23676,7 @@ local function json_decode(text)
             return parse_object()
         elseif c == "[" then
             return parse_array()
-        elseif c == "-" or string.match(c, "%d") then
+        elseif c == "-" or is_digit(c) then
             return parse_number()
         elseif string.sub(text, pos, pos + 3) == "true" then
             pos = pos + 4
@@ -23411,7 +23686,7 @@ local function json_decode(text)
             return false
         elseif string.sub(text, pos, pos + 3) == "null" then
             pos = pos + 4
-            return JSON_NULL
+            return M.NULL
         end
         error("unexpected JSON token at byte " .. tostring(pos))
     end
@@ -23423,6 +23698,86 @@ local function json_decode(text)
     end
     return value
 end
+
+-- Raises on malformed input; the message names the byte offset.
+function M.decode(text)
+    return parse(text, false)
+end
+
+-- Well-formedness only, under the strict scalar grammar. Never raises.
+function M.is_valid(text)
+    local ok = pcall(parse, text, true)
+    return ok
+end
+
+ESV_JSON = M
+
+local M = {}
+
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
+-- Identity, not a copy: a decoded null is only recognisable to code holding the
+-- same sentinel table (see shared/json.lua).
+local JSON_NULL = json.NULL
+
+local function missing(value)
+    return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function upper(value)
+    return string.upper(tostring(value))
+end
+
+local function key(value)
+    return tostring(value)
+end
+
+local function row_value(row, name, position)
+    if row == nil then
+        return nil
+    end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then
+        return nil
+    end
+    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
+end
+
+local function sql_string(value)
+    if missing(value) then
+        return "NULL"
+    end
+    local text = tostring(value)
+    text = string.gsub(text, "'", "''")
+    return "'" .. text .. "'"
+end
+
+local function sql_boolean(value)
+    return value and "TRUE" or "FALSE"
+end
+
+local function sql_bool(value)
+    if value == true or tostring(value) == "true" or tostring(value) == "TRUE" or tostring(value) == "1" then
+        return true
+    end
+    return false
+end
+
+local function null_if_missing(value)
+    if missing(value) then
+        return null
+    end
+    return value
+end
+
 
 local function normalize_name(value, label)
     if missing(value) then
@@ -24789,7 +25144,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             distinct_key_expr = null_if_missing(metric.distinct_key_expr),
             non_additive_dimension_id = null_if_missing(non_additive_dimension_id),
             window_spec_json = null_if_missing(metric.window_spec_json),
-            type_params_json = json_encode({metric_type = metric.metric_type}),
+            type_params_json = json.encode({metric_type = metric.metric_type}),
             definition_source_id = null_if_missing(definition_source_id),
         })
     else
@@ -24831,7 +25186,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             distinct_key_expr = null_if_missing(metric.distinct_key_expr),
             non_additive_dimension_id = null_if_missing(non_additive_dimension_id),
             window_spec_json = null_if_missing(metric.window_spec_json),
-            type_params_json = json_encode({metric_type = metric.metric_type}),
+            type_params_json = json.encode({metric_type = metric.metric_type}),
             definition_source_id = null_if_missing(definition_source_id),
         })
         existing_id = scalar([[
@@ -25999,7 +26354,7 @@ function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings
     local warnings = {}
     local current_operation = nil
     local ok, result = pcall(function()
-        local plan = json_decode(plan_json)
+        local plan = json.decode(plan_json)
         if type(plan) ~= "table" or type(plan.operations) ~= "table" then
             error("SEMANTIC_OSI_001: normalized import plan must contain operations")
         end
@@ -26037,7 +26392,7 @@ function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings
             "SEMANTIC_ADMIN.VALIDATE_MODEL",
             "$.models",
             nil,
-            json_encode(warnings),
+            json.encode(warnings),
             validation_run_id or null,
             message,
         }
@@ -26053,7 +26408,7 @@ function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings
         current_operation and current_operation.target or "SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT",
         current_operation and current_operation.source_path or "$",
         nil,
-        json_encode(warnings),
+        json.encode(warnings),
         nil,
         tostring(result),
     }
@@ -26066,7 +26421,7 @@ function M.apply_semantic_definition(definition_sql, dry_run)
     local restore_model = nil
     local ok, result = pcall(function()
         local definition = parse_definition(definition_sql)
-        local normalized_json = json_encode(definition)
+        local normalized_json = json.encode(definition)
         local operation_count = definition_operation_count(definition)
         local is_dry_run = sql_bool(dry_run)
         local model = load_model(definition.model_name)
@@ -27663,19 +28018,19 @@ function M.import_databricks_metric_view(yaml_text, model_name, published_schema
     if ok then
         return {{
             "OK", null, "Databricks metric view translated" .. (sql_bool(apply_flag) and " and applied." or "."),
-            result.plan.model_name, result.ddl, json_encode(diags), result.validation_run_id,
+            result.plan.model_name, result.ddl, json.encode(diags), result.validation_run_id,
         }}
     end
     local message = tostring(result)
     local error_code = string.match(message, "(DBX_IMPORT_%d+)") or string.match(message, "(SEMANTIC_%w+_%d+)") or "DBX_IMPORT_999"
     return {{
         "ERROR", error_code, message, missing(model_name) and null or dbx_ident(model_name),
-        null, json_encode(diags), null,
+        null, json.encode(diags), null,
     }}
 end
 
 function M.decode_json(json_text)
-    return json_decode(json_text)
+    return json.decode(json_text)
 end
 
 apply_semantic_definition = M.apply_semantic_definition
@@ -27690,15 +28045,15 @@ decode_json = M.decode_json
 -- Published for SEMANTIC_ADMIN.CALL_ADMIN_JSON, which serialises a called
 -- script's rows back to the caller. decode_json was already public.
 function M.encode_json(value)
-    return json_encode(value)
+    return json.encode(value)
 end
 
 encode_json = M.encode_json
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {
-        json_encode = json_encode,
-        json_decode = json_decode,
+        json_encode = json.encode,
+        json_decode = json.decode,
         tokenize = tokenize,
         split_top_level_text = split_top_level_text,
         parse_literal_list = parse_literal_list,
@@ -27908,8 +28263,348 @@ exit({{"OK", "SESSION", null, "Semantic SQL disabled for this session."}}, [[
 
 -- BEGIN GENERATED FUSION_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.FUSION_RUNTIME AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "esv_semantic_definition")
-ESV_SEMANTIC_DEFINITION_RUNTIME = esv_semantic_definition
+-- One JSON implementation for the whole runtime.
+--
+-- There were four. `compiler/request_json.lua` and `admin/semantic_definition.lua`
+-- carried a byte-identical 179-line block (encoder, decoder, `is_array`, escape);
+-- `agent/runtime.lua` carried a third copy of the encoder half; and
+-- `admin/validator.lua` carried a fourth parser of its own for well-formedness
+-- checks. `admin/fusion_declaration.lua` avoided becoming a fifth only by taking
+-- a dependency on the 4 600-line DDL parser to reach an encoder.
+--
+-- The copies had already drifted, and the drift was invisible because nothing
+-- compared them. `compiler/query_spec.lua`'s `is_array` omitted the `JSON_NULL`
+-- guard the other three had -- it had no sentinel in scope to compare against --
+-- so `{"metrics": null}` reached the planner as an empty list on one code path
+-- and as a refusal on another. `admin/fusion_declaration.lua` borrowed a decoder
+-- whose sentinel its own `missing()` did not recognise, so a JSON `null` in a
+-- declaration read as a *present* value that rendered as "table: 0x...".
+--
+-- Both defects are the same defect: a sentinel is only meaningful to code that
+-- shares its identity, and identity cannot be shared across copies. Hence one
+-- module, embedded by tools/package_lua_scripts.py into every runtime script
+-- that needs it, the way shared/identity_join.lua already is.
+--
+-- Two entry points read text, and they are deliberately not the same function:
+--
+--   M.decode(text)    builds a value; lenient about scalar spelling
+--   M.is_valid(text)  answers yes/no; strict RFC 8259 scalar grammar
+--
+-- The difference is real and load-bearing, so it is one parser with one `strict`
+-- flag rather than two files. `M.decode` is applied to payloads this runtime
+-- wrote and must keep accepting what it accepted before; `M.is_valid` backs
+-- SEMANTIC_MODEL validation of user-supplied extension JSON, where "looks close
+-- enough" is the wrong answer. tests/lua/json_unit_test.lua pins each input the
+-- two disagree about.
+
+local M = {}
+
+-- The decoded spelling of JSON `null`.
+--
+-- A sentinel table, not Lua `nil`: in a Lua table an explicit null and an absent
+-- key are the same thing, and the difference matters wherever a document's
+-- omitted key means "leave alone" and an explicit null means "unset". Callers
+-- test identity (`value == json.NULL`), never `type` or `tostring`, so this
+-- stays a bare table with no metatable -- giving it a `__tostring` would make
+-- the wrong test look like it worked.
+M.NULL = {}
+
+function M.is_array(value)
+    if type(value) ~= "table" or value == M.NULL then
+        return false
+    end
+    local max_index = 0
+    local count = 0
+    for k, _ in pairs(value) do
+        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
+            return false
+        end
+        if k > max_index then
+            max_index = k
+        end
+        count = count + 1
+    end
+    return max_index == count
+end
+
+function M.escape(value)
+    local text = tostring(value)
+    text = string.gsub(text, "\\", "\\\\")
+    text = string.gsub(text, '"', '\\"')
+    text = string.gsub(text, "\n", "\\n")
+    text = string.gsub(text, "\r", "\\r")
+    text = string.gsub(text, "\t", "\\t")
+    return text
+end
+
+-- Object keys are emitted in sorted order, which is what makes an exported
+-- document comparable to a re-exported one -- the round-trip contract behind
+-- EXPORT_FUSION_DECLARATION and EXPORT_SEMANTIC_DEFINITION.
+function M.encode(value)
+    local value_type = type(value)
+    if value == nil or value == null or value == M.NULL then
+        return "null"
+    elseif value_type == "string" then
+        return '"' .. M.escape(value) .. '"'
+    elseif value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "true" or "false"
+    elseif value_type == "table" then
+        local parts = {}
+        if M.is_array(value) then
+            for i = 1, #value do
+                parts[#parts + 1] = M.encode(value[i])
+            end
+            return "[" .. table.concat(parts, ",") .. "]"
+        end
+        local keys = {}
+        for k, _ in pairs(value) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            parts[#parts + 1] = M.encode(k) .. ":" .. M.encode(value[k])
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+    end
+    return M.encode(tostring(value))
+end
+
+-- One recursive-descent parser. `strict` selects the scalar grammar:
+--
+--   strict = false  numbers are scanned loosely and handed to tonumber, a \u
+--                   escape is accepted without checking its digits and decodes
+--                   to "?", and a raw control character inside a string passes.
+--   strict = true   numbers follow RFC 8259 exactly (no leading zero, a
+--                   fraction and an exponent must have digits), \u must be four
+--                   hex digits, and a byte below 0x20 inside a string is an
+--                   error.
+--
+-- The structure -- whitespace, arrays, objects, keywords, the trailing-input
+-- check -- is shared, because that half never differed between the two copies
+-- this replaces. Values are built in both modes; is_valid discards them, which
+-- costs less than a second traversal would cost to maintain.
+local function parse(text, strict)
+    if text == nil or text == null or text == M.NULL or tostring(text) == "" then
+        error("empty JSON payload")
+    end
+    text = tostring(text)
+    local pos = 1
+
+    local function peek()
+        return string.sub(text, pos, pos)
+    end
+
+    local function is_digit(c)
+        return string.match(c, "^%d$") ~= nil
+    end
+
+    local function skip_ws()
+        while pos <= #text do
+            local c = peek()
+            if c == " " or c == "\n" or c == "\r" or c == "\t" then
+                pos = pos + 1
+            else
+                return
+            end
+        end
+    end
+
+    local function read_digits()
+        local count = 0
+        while is_digit(peek()) do
+            count = count + 1
+            pos = pos + 1
+        end
+        return count
+    end
+
+    local ESCAPES = {['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b",
+        f = "\f", n = "\n", r = "\r", t = "\t"}
+
+    local function parse_string()
+        if peek() ~= '"' then
+            error("expected string at byte " .. tostring(pos))
+        end
+        pos = pos + 1
+        local out = {}
+        while pos <= #text do
+            local c = peek()
+            if c == '"' then
+                pos = pos + 1
+                return table.concat(out)
+            elseif c == "\\" then
+                local e = string.sub(text, pos + 1, pos + 1)
+                if ESCAPES[e] ~= nil then
+                    out[#out + 1] = ESCAPES[e]
+                    pos = pos + 2
+                elseif e == "u" then
+                    if strict then
+                        for offset = 2, 5 do
+                            local digit = string.sub(text, pos + offset, pos + offset)
+                            if string.match(digit, "^[0-9A-Fa-f]$") == nil then
+                                error("invalid unicode escape at byte " .. tostring(pos))
+                            end
+                        end
+                    end
+                    -- Lossy and long-standing: the runtime stores model metadata
+                    -- as ASCII, and a decoder that expanded escapes would have to
+                    -- encode them again to keep a round-trip stable.
+                    out[#out + 1] = "?"
+                    pos = pos + 6
+                else
+                    error("invalid escape at byte " .. tostring(pos))
+                end
+            elseif strict and (c == "" or string.byte(c) < 32) then
+                error("invalid control character in string at byte " .. tostring(pos))
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+        error("unterminated string")
+    end
+
+    local parse_value
+
+    local function parse_number()
+        local start_pos = pos
+        if peek() == "-" then
+            pos = pos + 1
+        end
+        if strict then
+            if peek() == "0" then
+                pos = pos + 1
+            elseif string.match(peek(), "^[1-9]$") then
+                read_digits()
+            else
+                error("invalid number at byte " .. tostring(start_pos))
+            end
+        else
+            read_digits()
+        end
+        if peek() == "." then
+            pos = pos + 1
+            if read_digits() == 0 and strict then
+                error("invalid number fraction at byte " .. tostring(pos))
+            end
+        end
+        local c = peek()
+        if c == "e" or c == "E" then
+            pos = pos + 1
+            c = peek()
+            if c == "+" or c == "-" then
+                pos = pos + 1
+            end
+            if read_digits() == 0 and strict then
+                error("invalid number exponent at byte " .. tostring(pos))
+            end
+        end
+        local value = tonumber(string.sub(text, start_pos, pos - 1))
+        if value == nil then
+            error("invalid number at byte " .. tostring(start_pos))
+        end
+        return value
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "]" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            out[#out + 1] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "]" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected array comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "}" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            skip_ws()
+            local name = parse_string()
+            skip_ws()
+            if peek() ~= ":" then
+                error("expected object colon at byte " .. tostring(pos))
+            end
+            pos = pos + 1
+            out[name] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "}" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected object comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    function parse_value()
+        skip_ws()
+        local c = peek()
+        if c == '"' then
+            return parse_string()
+        elseif c == "{" then
+            return parse_object()
+        elseif c == "[" then
+            return parse_array()
+        elseif c == "-" or is_digit(c) then
+            return parse_number()
+        elseif string.sub(text, pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif string.sub(text, pos, pos + 4) == "false" then
+            pos = pos + 5
+            return false
+        elseif string.sub(text, pos, pos + 3) == "null" then
+            pos = pos + 4
+            return M.NULL
+        end
+        error("unexpected JSON token at byte " .. tostring(pos))
+    end
+
+    local value = parse_value()
+    skip_ws()
+    if pos <= #text then
+        error("unexpected trailing JSON at byte " .. tostring(pos))
+    end
+    return value
+end
+
+-- Raises on malformed input; the message names the byte offset.
+function M.decode(text)
+    return parse(text, false)
+end
+
+-- Well-formedness only, under the strict scalar grammar. Never raises.
+function M.is_valid(text)
+    local ok = pcall(parse, text, true)
+    return ok
+end
+
+ESV_JSON = M
 
 -- The fusion layer as one document.
 --
@@ -27941,8 +28636,7 @@ ESV_SEMANTIC_DEFINITION_RUNTIME = esv_semantic_definition
 -- materializations, which are physical acceleration of an object rather than a
 -- statement about how sources compose.
 
-local semantic_definition = assert(ESV_SEMANTIC_DEFINITION_RUNTIME,
-    "semantic definition runtime is required for JSON encoding")
+local json = assert(ESV_JSON, "shared JSON runtime is required")
 
 local M = {}
 
@@ -27951,8 +28645,17 @@ local M = {}
 -- "userdata: 0x...". `null` is the script-context global for it, and comparing
 -- against it is the only reliable test. Getting this wrong here silently
 -- filtered every export to an entity literally named "userdata: 0x...".
+-- json.NULL is in the list because this module reads a *decoded document*: an
+-- explicit `"authority": null` arrives as the decoder's sentinel table, which is
+-- neither nil nor Exasol's `null` and whose tostring is "table: 0x...". Before
+-- the JSON codec was shared this module had no way to name that value, so an
+-- explicit null read as a present declaration and rendered its own address into
+-- the catalog. An omitted key and an explicit null now mean the same thing,
+-- which is what the round-trip contract requires -- the exporter omits absent
+-- keys rather than writing them as null.
 local function missing(value)
-    return value == nil or value == null or tostring(value) == ""
+    return value == nil or value == null or value == json.NULL
+        or tostring(value) == ""
 end
 
 local function trim(value)
@@ -28278,11 +28981,11 @@ end
 local function document_json(model_name, entities, order)
     local parts = {}
     for _, name in ipairs(order) do
-        parts[#parts + 1] = semantic_definition.encode_json(name) .. ":"
-            .. semantic_definition.encode_json(entities[name])
+        parts[#parts + 1] = json.encode(name) .. ":"
+            .. json.encode(entities[name])
     end
     return '{"entities":{' .. table.concat(parts, ",") .. '},"model":'
-        .. semantic_definition.encode_json(model_name) .. "}"
+        .. json.encode(model_name) .. "}"
 end
 
 -- One row, always: the whole tier-2 layer of the model as one document, which is
@@ -28342,7 +29045,10 @@ local ATTRIBUTE_POLICY_KEYS = {attribute_type = true, attribute_name = true,
     strategy = true}
 
 local function reject_unknown(table_value, allowed, label)
-    if type(table_value) ~= "table" then
+    -- The decoded null is a table, so `type` alone would let an explicit
+    -- `"identity": null` through as an empty object -- a declaration silently
+    -- read as "declare nothing" instead of being named as malformed.
+    if type(table_value) ~= "table" or table_value == json.NULL then
         error("SEMANTIC_FUSION_010: " .. label .. " must be a JSON object")
     end
     if table_value[1] ~= nil then
@@ -28785,7 +29491,7 @@ local function plan_entity(query_fn, model, entity_name, entity)
                     priority = tonumber(tostring(representation.priority or 10)) or 10,
                     freshness_policy = trim(representation.freshness_policy) ~= ""
                         and trim(representation.freshness_policy) or "MANUAL",
-                    declarations_json = semantic_definition.encode_json(declarations)},
+                    declarations_json = json.encode(declarations)},
             }
         end
     end
@@ -28872,7 +29578,7 @@ end
 
 function M.plan_document(query_fn, model_name, declaration_json)
     local declaration_text = required(declaration_json, "DECLARATION_JSON")
-    local decoded_ok, document = pcall(semantic_definition.decode_json,
+    local decoded_ok, document = pcall(json.decode,
         declaration_text)
     if not decoded_ok or type(document) ~= "table" then
         error("SEMANTIC_FUSION_010: DECLARATION_JSON must be a JSON object with"

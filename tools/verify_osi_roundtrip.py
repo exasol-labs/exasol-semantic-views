@@ -163,13 +163,28 @@ def prepare_roundtrip_catalog(con) -> None:
     )
 
 
+# What a lossless export of these fixtures is expected to report.
+#
+# `sales` ships a materialization, and no Ossie profile can carry one. That does
+# not block the export -- losing a materialization changes query cost, not
+# answers -- but it is reported rather than silently dropped, which is the whole
+# point of the check. The round-trip target models are built by import and carry
+# none, so they still export clean. Asserting the exact code list rather than
+# "no warnings" keeps a *new* loss failing here.
+EXPECTED_EXPORT_WARNINGS: dict[str, list[str]] = {
+    SOURCE_MODEL: ["OSI_EXPORT_050"],
+}
+
+
 def export_lossless(con, model_name: str) -> dict[str, Any]:
     document, warnings = osi.export_model(
         con,
         osi.ExportOptions(model_name=model_name, object_name=None, profile="lossless"),
     )
     osi.validate_document(document)
-    assert_no_warnings(f"{model_name} lossless export warnings", warnings)
+    assert_equal(f"{model_name} lossless export warning codes",
+                 [item["code"] for item in warnings],
+                 EXPECTED_EXPORT_WARNINGS.get(model_name, []))
     return document
 
 

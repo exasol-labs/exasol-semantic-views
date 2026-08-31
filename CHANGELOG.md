@@ -8,6 +8,97 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### `osi.py export --profile lossless` refuses to be quietly lossy
+
+- Apache Ossie describes **one source**; the fusion layer describes **how several
+  compose**, and `0.2.0.dev0` has no definition for a representation, a coverage
+  window, an authority role, a semantic identity, an identity binding, a mapping
+  relation, an attribute fusion policy or a materialization. Exporting a model
+  that carried any of them produced a document, a `{"warnings": []}` file, and an
+  imported copy that passed `VALIDATE_MODEL` with zero errors — a *different,
+  valid* model that answers differently, with nothing on either side saying so.
+- A `lossless` export now **refuses** when the model carries fusion metadata, names
+  what it found, and points at `EXPORT_FUSION_DECLARATION` as the companion file
+  a complete backup needs. `--profile interoperability` reports the same finding
+  as an `OSI_EXPORT_050` warning, because dropping what the standard cannot
+  express is what interchange means — doing it silently is not.
+- The refusal is scoped by **consequence, not by tier**. Losing an authority
+  declaration changes what the model *answers*, so it blocks. Losing a
+  materialization changes only how *fast* it answers, so it warns and names
+  `REGISTER_MATERIALIZATION`. The single `PRIMARY` representation `ADD_ENTITY`
+  auto-creates is the F0 compatibility row, not a declaration, so an ordinary
+  tier-1 model still exports clean.
+- `--allow-lossy` exports the tier-1 half deliberately, downgrading the refusal
+  to the same warning.
+- `docs/osi-format.md` no longer recommends `lossless` for backups without
+  qualification; it documents the scope boundary, the two-file backup, and the
+  restore order.
+
+### Changed
+
+#### One JSON implementation instead of four
+
+- `lua/semantic_layer/shared/json.lua` replaces a byte-identical 179-line codec
+  in `compiler/request_json.lua` and `admin/semantic_definition.lua`, a third
+  copy of the encoder half in `agent/runtime.lua`, and a fourth parser in
+  `admin/validator.lua`. `admin/fusion_declaration.lua` no longer imports the
+  4 600-line DDL parser to reach an encoder.
+- The copies had already drifted where it was least visible. A decoded JSON
+  `null` is a bare sentinel table whose only meaning is its *identity*, so a null
+  produced by one module was an anonymous empty table to the others.
+  `compiler/query_spec.lua` read `{"metrics": null}` as an empty list while
+  `compiler/request_json.lua`'s own copy would have refused it, and
+  `admin/fusion_declaration.lua` read an explicit `null` as a *present*
+  declaration, rendering `table: 0x...` into the catalog. Both are fixed: a null
+  array field is now explicitly an absent one, and a null where a declaration
+  belongs is `SEMANTIC_FUSION_010`.
+- `M.decode` and `M.is_valid` are one parser with one `strict` flag. Behaviour is
+  unchanged on both sides — the decoder stays lenient because it re-reads
+  payloads this runtime wrote, and validation stays strict because a model
+  author's `data_json` should be refused at definition time.
+- No behaviour change for callers otherwise; `COMPILER_RUNTIME` gives back one
+  main-chunk local (189 → 188 of 200) and the generated SQL loses a duplicate.
+
+### Fixed
+
+- `tools/verify_osi_import.py`, `verify_osi_batch_import.py` and
+  `verify_osi_roundtrip.py` asserted the sales export produced no warnings. It
+  drops a materialization, so they now assert the exact warning and still fail on
+  a new one.
+
+### Testing
+
+- `tests/lua/json_unit_test.lua` (4 tests, 100 % line coverage of the new module)
+  pins the encoder's sorted-key determinism, every decoder form and refusal, the
+  sentinel's identity, and each input `decode` and `is_valid` answer differently
+  about.
+- A fifth convention in `tests/test_conventions.py`: **a routine is written
+  once.** A function body identical in two Lua modules is pinned in
+  `DUPLICATED_LUA_BODIES` and may only shrink; a separate check forbids a private
+  JSON codec or sentinel outside the owning module, and a third derives from the
+  *generated* SQL that every runtime referencing `ESV_JSON` also embeds it. All
+  three were verified by breaking them.
+- Coverage raised rather than re-baselined where the extraction moved
+  fully-covered lines out of a file: `semantic_definition.lua` 72.5 → 76.1 (the
+  DDL rollback's snapshot/restore round trip, previously untested and the place a
+  new catalog column silently stops being restored), `agent/runtime.lua`
+  93.4 → 95.4 (instruction scope dispatch — four of six branches were uncovered,
+  and a scope resolved against the wrong table attaches an instruction to
+  whatever object shares that id), `request_json.lua` 87.1 → 88.2 (the HAVING
+  predicate parser, whose identical WHERE twin was the only one tested),
+  `query_spec.lua` 96.7 → 100, `tools/osi.py` 57.7 → 59.4.
+- `tools/verify_osi_export.py` builds a model carrying an authority declaration
+  and proves the refusal live, because the check is a query against catalog views
+  that a unit test cannot keep honest.
+
+### Documentation
+
+- `CLAUDE.md`: **the 200-local ceiling applies to the sum, not to a file.** A
+  generated runtime script is one Exasol chunk of concatenated sources, so
+  splitting a file into two buys no headroom — only namespacing does. Records the
+  cost table, why the `do` block in `request_json.lua` is load-bearing, and that
+  every runtime using a shared module must embed it.
+
 #### The fusion declaration document: tier 2 as one file
 
 - Tier 1 — what one source says about itself — has had a document format for a

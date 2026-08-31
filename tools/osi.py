@@ -63,6 +63,7 @@ class ExportOptions:
     model_name: str
     object_name: str | None
     profile: str
+    allow_lossy: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,57 @@ class ImportApplyOptions:
     validate_after_apply: bool
     warnings_as_errors: bool
     apply_mode: str = "script"
+
+
+# Concepts the Ossie schema has no shape for, so neither profile can carry them.
+#
+# Ossie 0.2.0.dev0 defines Dataset, Dimension, Field, Metric, Relationship,
+# SemanticModel, CustomExtension, AIContext and Vendor. There is no definition
+# for a representation, a coverage window, an authority role, a semantic
+# identity, an identity binding, a mapping relation, an attribute fusion policy
+# or a materialization -- and for the fusion layer that is correct, because
+# Ossie describes one source and fusion describes how several compose. This
+# tool is where the omission has to become visible: exporting a model that
+# carried any of them produced a document, a `{"warnings": []}` file, and an
+# imported copy that passed VALIDATE_MODEL clean. Nothing at any point said the
+# restored model was a different, valid model that answers differently.
+#
+# `blocking` is the whole distinction, and it is about consequence rather than
+# about which tier a concept belongs to:
+#
+#   True   losing it changes what the model *answers*. An authority declaration
+#          or an identity binding decides which source wins for a conflicting
+#          key, so a restore without it returns different numbers -- and returns
+#          them from a model that validates. `lossless` refuses.
+#   False  losing it changes only how *fast* the model answers. A materialization
+#          is physical acceleration: re-register it and the numbers were never
+#          in question. Warn, and let the export through.
+#
+# Each entry is (label, catalog view, blocking, extra predicate). The predicate
+# exists for ENTITY_REPRESENTATIONS only, where ADD_ENTITY auto-creates one
+# PRIMARY representation per entity: that F0 compatibility row is not a fusion
+# declaration, and counting it would refuse every export of every model.
+UNCARRIED_CONCEPTS: tuple[tuple[str, str, bool, str], ...] = (
+    ("alternate representations", "ENTITY_REPRESENTATIONS", True,
+     "AND (UPPER(REPRESENTATION_ROLE) <> 'PRIMARY'"
+     " OR ENTITY_ID IN (SELECT ENTITY_ID FROM SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS"
+     " WHERE {filter} AND STATUS = 'ACTIVE'"
+     " GROUP BY ENTITY_ID HAVING COUNT(*) > 1))"),
+    ("coverage windows (F3)", "ENTITY_REPRESENTATIONS", True,
+     "AND (COVERAGE_PREDICATE IS NOT NULL OR VALID_FROM IS NOT NULL"
+     " OR VALID_TO IS NOT NULL)"),
+    ("authority declarations (F4)", "REPRESENTATION_AUTHORITIES", True, ""),
+    ("semantic identities (F5)", "SEMANTIC_IDENTITIES", True, ""),
+    ("identity bindings (F5)", "IDENTITY_BINDINGS", True, ""),
+    ("identity mapping relations (F5)", "IDENTITY_MAPPING_RELATIONS", True, ""),
+    ("attribute fusion policies (F2)", "ATTRIBUTE_FUSION_POLICIES", True, ""),
+    ("materializations", "MATERIALIZATIONS", False, ""),
+)
+
+# Where each half of that split is authored back, named in the diagnostic so the
+# reader does not have to find it.
+FUSION_REMEDY = "EXECUTE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION({model})"
+MATERIALIZATION_REMEDY = "SEMANTIC_ADMIN.REGISTER_MATERIALIZATION"
 
 
 def sql_string(value: str) -> str:
@@ -919,11 +971,77 @@ def build_document(catalog: dict[str, Any], options: ExportOptions) -> tuple[dic
     return clean_json_value(document), warnings
 
 
+def uncarried_concepts(con: Any, model: dict[str, Any]) -> list[tuple[str, int, bool]]:
+    """What this model carries that no Ossie profile can express, with counts."""
+    model_filter = (
+        f"MODEL_NAME = {sql_string(model['MODEL_NAME'])} "
+        f"AND VERSION_NUMBER = {int(model['ACTIVE_VERSION_NUMBER'])}"
+    )
+    present: list[tuple[str, int, bool]] = []
+    for label, surface, blocking, extra in UNCARRIED_CONCEPTS:
+        predicate = extra.format(filter=model_filter) if extra else ""
+        rows = fetch_dicts(
+            con,
+            f"SELECT COUNT(*) AS N FROM SEMANTIC_CATALOG.{surface} "
+            f"WHERE {model_filter} AND STATUS = 'ACTIVE' {predicate}",
+        )
+        count = int(rows[0]["N"]) if rows else 0
+        if count:
+            present.append((label, count, blocking))
+    return present
+
+
+def uncarried_concept_diagnostics(
+    present: list[tuple[str, int, bool]], model_name: str
+) -> list[dict[str, Any]]:
+    remedy = FUSION_REMEDY.format(model=sql_string(model_name))
+    return [
+        {
+            "code": "OSI_EXPORT_050",
+            "severity": "WARNING",
+            "path": "semantic_model",
+            "message": (
+                f"{count} {label} in this model are not carried by any Ossie "
+                "profile and will be absent from the imported copy. "
+                + (f"Export them with {remedy} and keep both files together."
+                   if blocking else
+                   f"Re-register them with {MATERIALIZATION_REMEDY} after import; "
+                   "results are unaffected, only query cost.")
+            ),
+        }
+        for label, count, blocking in present
+    ]
+
+
 def export_model(con: Any, options: ExportOptions) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if options.profile not in VALID_PROFILES:
         raise OsiError(f"Unsupported profile: {options.profile}")
     catalog = load_catalog(con, options.model_name, options.object_name)
+
+    # A profile named `lossless` that drops the fusion layer in silence is worse
+    # than one that refuses: the round trip produces a *valid* model that answers
+    # differently, so neither VALIDATE_MODEL nor a diff of the document can tell
+    # you anything is missing. Interchange is allowed to drop what the standard
+    # cannot express; it is not allowed to do so quietly, and a backup is not
+    # allowed to do so at all.
+    present = uncarried_concepts(con, catalog["model"])
+    blocking = [(label, count) for label, count, blocks in present if blocks]
+    if blocking and options.profile == "lossless" and not options.allow_lossy:
+        detail = "; ".join(f"{count} {label}" for label, count in blocking)
+        remedy = FUSION_REMEDY.format(model=sql_string(options.model_name))
+        raise OsiError(
+            f"Refusing a lossless export of '{options.model_name}': {detail} "
+            f"cannot be represented in Ossie {OSI_VERSION} and would be absent "
+            "from the imported copy, which would still pass VALIDATE_MODEL and "
+            "answer differently.\n"
+            "For a complete backup, export the fusion layer alongside this "
+            f"document:\n  {remedy};\n"
+            "Pass --allow-lossy to export the tier-1 half anyway; the dropped "
+            "concepts are then reported as warnings."
+        )
+
     document, warnings = build_document(catalog, options)
+    warnings = uncarried_concept_diagnostics(present, options.model_name) + warnings
     validate_document(document)
     return document, warnings
 
@@ -3204,7 +3322,8 @@ def infer_output_format(format_arg: str, output: Path | None) -> str:
 
 
 def command_export(args: argparse.Namespace) -> int:
-    options = ExportOptions(model_name=args.model, object_name=args.object, profile=args.profile)
+    options = ExportOptions(model_name=args.model, object_name=args.object,
+                            profile=args.profile, allow_lossy=args.allow_lossy)
     con = connect(args)
     try:
         document, warnings = export_model(con, options)
@@ -3291,6 +3410,14 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--format", choices=["auto", "json", "yaml"], default="auto")
     export_parser.add_argument("--output", type=Path)
     export_parser.add_argument("--warnings-output", type=Path)
+    export_parser.add_argument(
+        "--allow-lossy",
+        action="store_true",
+        help="export under --profile lossless even though the model carries "
+             "representations, coverage, authority, identity, fusion policies "
+             "or materializations, which no Ossie profile can express; they are "
+             "reported as warnings instead of refused",
+    )
     export_parser.add_argument("--host", default=os.environ.get("EXASOL_HOST", "localhost"))
     export_parser.add_argument("--port", default=int(os.environ.get("EXASOL_PORT", "8563")), type=int)
     export_parser.add_argument("--user", default=os.environ.get("EXASOL_USER", "sys"))

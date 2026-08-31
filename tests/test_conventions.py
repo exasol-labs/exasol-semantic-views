@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The conventions this codebase holds itself to.
 
-Four rules that cost nothing to follow and compound if they are not. None is a
+Five rules that cost nothing to follow and compound if they are not. None is a
 correctness property, so nothing else will ever fail because one was broken --
 which is exactly why they need a test. Each is a *ratchet*: the current state is
 pinned, the pinned state may shrink, and it may not grow. Same discipline as
@@ -12,6 +12,7 @@ pinned, the pinned state may shrink, and it may not grow. Same discipline as
   3. Verifiers are named for the invariant they protect, not the ticket that
      prompted them.
   4. A catalog surface derives what it can look up instead of restating it.
+  5. A routine is written once; a copy in a second module is pinned and shrinks.
 
 Each rule records what it cost when it was broken, because a convention with no
 story attached is the first thing dropped under deadline.
@@ -434,6 +435,185 @@ class DerivedNotDeclared(unittest.TestCase):
             "derives from this set, so a parse failure silently excludes nothing")
         self.assertIn("CHILD_COLUMN", self.body.split(") AS d (", 1)[1][:200],
                       "the column the subquery selects is not the one declared here")
+
+
+# ---------------------------------------------------------------------------
+# 5. A routine is written once
+# ---------------------------------------------------------------------------
+
+# What the copies cost, twice over.
+#
+# BUG-G03 was one defect -- a declared column name quoted verbatim, so a
+# lower-case `account_id` rendered as `"account_id"` against a physical
+# ACCOUNT_ID -- and it existed independently in five renderings of the same F5
+# mapping join. Fixing it meant finding all five; the last was found by grepping
+# after the fix looked complete. shared/identity_join.lua now owns that join.
+#
+# The JSON codec was the same story without the bug report. compiler/request_json.lua
+# and admin/semantic_definition.lua carried a byte-identical 179-line block,
+# agent/runtime.lua a third copy of its encoder half, admin/validator.lua a
+# fourth parser. They had already drifted where it was hardest to see: the null
+# sentinel is a bare table whose only meaning is its identity, so a null decoded
+# by one module was an anonymous empty table to the others --
+# compiler/query_spec.lua read it as an empty array, admin/fusion_declaration.lua
+# as a present declaration that rendered as "table: 0x...". Nothing failed,
+# because nothing compared the copies. shared/json.lua now owns it.
+#
+# This ratchet is the comparison. A body identical in two modules is pinned with
+# the modules it appears in; the pin may shrink and may not grow.
+
+LUA_SOURCES = sorted((ROOT / "lua").rglob("*.lua"))
+
+# A body has to be substantial enough that sharing it is worth a module: two
+# statements is a spelling, not a routine.
+MIN_DUPLICATE_BODY_LINES = 3
+
+# Every routine that currently exists in more than one module, with the modules.
+# Fold one into lua/semantic_layer/shared/ and shrink the entry -- as
+# identity_join.lua and json.lua both did. Adding an entry is the thing this
+# test exists to stop.
+#
+# Two of these are worth more than the others, and are the next to go:
+# `replace_qualified_alias` rewrites a table alias inside a SQL expression while
+# respecting string literals, so the validator proves an expression safe with one
+# copy and the compiler emits SQL with the other -- a divergence there is wrong
+# SQL that validates. `strip_string_literals` backs the same analysis.
+DUPLICATED_LUA_BODIES = {
+    "null_if_missing": ("request_json.lua", "runtime.lua",
+                        "semantic_definition.lua", "validator.lua"),
+    "physical_fusion_key/physical_unique_key": ("request_json.lua", "validator.lua"),
+    "replace_qualified_alias": ("request_json.lua", "validator.lua"),
+    "row_value": ("materializations.lua", "request_json.lua", "runtime.lua",
+                  "semantic_definition.lua", "validator.lua"),
+    "scalar": ("request_json.lua", "runtime.lua", "semantic_definition.lua",
+               "validator.lua"),
+    "strip_string_literals": ("request_json.lua", "validator.lua"),
+    "token_upper": ("request_json.lua", "semantic_definition.lua"),
+}
+
+# Modules that must not grow a private JSON codec again. The sentinel makes this
+# stricter than the body-identity rule above can be: a *reworded* second decoder
+# would pass that check and still mint a second null nobody else recognises.
+JSON_OWNER = "lua/semantic_layer/shared/json.lua"
+JSON_PRIVATE_NAMES = re.compile(
+    r"^local (?:function )?(json_encode|json_decode|json_escape|is_array"
+    r"|parse_json_text)\b|^local JSON_NULL\s*=\s*\{", re.MULTILINE)
+
+
+def _lua_function_bodies():
+    """(name, module) grouped by the exact text of the body.
+
+    Comments and blank lines are dropped and each line is stripped, so a copy
+    that was only re-indented or re-commented still counts as a copy.
+    """
+    opener = re.compile(r"^local function ([\w.]+)|^function ([\w.]+)")
+    bodies = collections.defaultdict(set)
+    for path in LUA_SOURCES:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        index = 0
+        while index < len(lines):
+            match = opener.match(lines[index])
+            if not match:
+                index += 1
+                continue
+            name = match.group(1) or match.group(2)
+            close = index
+            while close < len(lines) and lines[close] != "end":
+                close += 1
+            body = [line.strip() for line in lines[index + 1:close]
+                    if line.strip() and not line.strip().startswith("--")]
+            if len(body) >= MIN_DUPLICATE_BODY_LINES:
+                bodies["\n".join(body)].add((name, path.name))
+            index = close
+    return bodies
+
+
+class RoutinesAreWrittenOnce(unittest.TestCase):
+    """A function body identical in two modules is pinned, and the pin shrinks."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.measured = {}
+        for occurrences in _lua_function_bodies().values():
+            modules = {module for _, module in occurrences}
+            if len(modules) > 1:
+                label = "/".join(sorted({name for name, _ in occurrences}))
+                cls.measured[label] = tuple(sorted(modules))
+
+    def test_the_sources_are_being_read(self):
+        self.assertGreater(len(LUA_SOURCES), 10, [p.name for p in LUA_SOURCES])
+
+    def test_no_routine_is_newly_copied_into_a_second_module(self):
+        self.maxDiff = None
+        self.assertEqual(
+            DUPLICATED_LUA_BODIES, self.measured,
+            "a routine gained a copy, or a pinned copy was folded away without "
+            "shrinking DUPLICATED_LUA_BODIES. Put it in "
+            "lua/semantic_layer/shared/ and have both runtimes call it; "
+            "tools/package_lua_scripts.py embeds shared modules into every "
+            "script that needs them (see identity_join.lua, json.lua)")
+
+    def test_the_json_codec_has_exactly_one_owner(self):
+        """A reworded copy would pass the body check and still mint a second null.
+
+        The sentinel's whole meaning is its identity, so a private `JSON_NULL`
+        anywhere is a null that only its own file can recognise -- which is how
+        compiler/query_spec.lua came to read an explicit null as an empty array
+        while compiler/request_json.lua refused it.
+        """
+        offenders = {
+            str(path.relative_to(ROOT)): sorted(
+                m.group(1) for m in JSON_PRIVATE_NAMES.finditer(
+                    path.read_text(encoding="utf-8")))
+            for path in LUA_SOURCES
+            if str(path.relative_to(ROOT)) != JSON_OWNER
+            and JSON_PRIVATE_NAMES.search(path.read_text(encoding="utf-8"))
+        }
+        self.assertEqual(
+            {}, offenders,
+            f"JSON belongs to {JSON_OWNER}; use ESV_JSON rather than declaring "
+            "a private codec or sentinel")
+
+    def test_the_owner_actually_owns_it(self):
+        """Deriving the rule from a module that had been emptied would pass silently."""
+        owner = (ROOT / JSON_OWNER).read_text(encoding="utf-8")
+        for exported in ("M.NULL", "function M.encode", "function M.decode",
+                         "function M.is_valid", "function M.is_array"):
+            self.assertIn(exported, owner)
+        self.assertIn("ESV_JSON = M", owner)
+
+    def test_every_runtime_that_uses_a_shared_module_carries_it(self):
+        """A shared module only helps where the packager actually embeds it.
+
+        Each runtime script is a separate Exasol chunk with no shared globals, so
+        a `shared/` file one block forgets leaves that runtime asserting on a nil
+        global at install time. Read from the generated SQL rather than from the
+        packager's block functions: what matters is the artefact Exasol runs, and
+        a check against the generator's source would pass on a block that
+        assigned the source and forgot to interpolate it.
+        """
+        script = re.compile(
+            r"^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)"
+            r"[^\n]*\n(.*?)^/$", re.S | re.M)
+        consumers, providers = set(), set()
+        for generated in (ROOT / "sql/install/003_create_semantic_admin_scripts.sql",
+                          ROOT / "sql/install/006_create_semantic_agent_views.sql"):
+            for match in script.finditer(generated.read_text(encoding="utf-8")):
+                name, body = match.group(1), match.group(2)
+                if "ESV_JSON" not in body:
+                    continue
+                consumers.add(name)
+                if "ESV_JSON = M" in body:
+                    providers.add(name)
+        self.assertGreaterEqual(
+            len(consumers), 5,
+            f"only {sorted(consumers)} runtimes reference ESV_JSON; the scan is "
+            "not finding the generated scripts")
+        self.assertEqual(
+            set(), consumers - providers,
+            "these generated scripts reference ESV_JSON without embedding "
+            "lua/semantic_layer/shared/json.lua, so they would fail to install; "
+            "add json_source to their block in tools/package_lua_scripts.py")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,10 @@
 local M = {}
 
-local JSON_NULL = {}
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
+-- Identity, not a copy: a decoded null is only recognisable to code holding the
+-- same sentinel table (see shared/json.lua).
+local JSON_NULL = json.NULL
 
 local function missing(value)
     return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
@@ -60,252 +64,6 @@ local function null_if_missing(value)
     return value
 end
 
-local function is_array(value)
-    if type(value) ~= "table" or value == JSON_NULL then
-        return false
-    end
-    local max_index = 0
-    local count = 0
-    for k, _ in pairs(value) do
-        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
-            return false
-        end
-        if k > max_index then
-            max_index = k
-        end
-        count = count + 1
-    end
-    return max_index == count
-end
-
-local function json_escape(value)
-    local text = tostring(value)
-    text = string.gsub(text, "\\", "\\\\")
-    text = string.gsub(text, '"', '\\"')
-    text = string.gsub(text, "\n", "\\n")
-    text = string.gsub(text, "\r", "\\r")
-    text = string.gsub(text, "\t", "\\t")
-    return text
-end
-
-local function json_encode(value)
-    local value_type = type(value)
-    if value == nil or value == null or value == JSON_NULL then
-        return "null"
-    elseif value_type == "string" then
-        return '"' .. json_escape(value) .. '"'
-    elseif value_type == "number" then
-        return tostring(value)
-    elseif value_type == "boolean" then
-        return value and "true" or "false"
-    elseif value_type == "table" then
-        local parts = {}
-        if is_array(value) then
-            for i = 1, #value do
-                parts[#parts + 1] = json_encode(value[i])
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
-        end
-        local keys = {}
-        for k, _ in pairs(value) do
-            keys[#keys + 1] = tostring(k)
-        end
-        table.sort(keys)
-        for _, k in ipairs(keys) do
-            parts[#parts + 1] = json_encode(k) .. ":" .. json_encode(value[k])
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    return json_encode(tostring(value))
-end
-
-local function json_decode(text)
-    if missing(text) then
-        error("empty JSON payload")
-    end
-    text = tostring(text)
-    local pos = 1
-
-    local function peek()
-        return string.sub(text, pos, pos)
-    end
-
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-
-    local function parse_string()
-        if peek() ~= '"' then
-            error("expected string at byte " .. tostring(pos))
-        end
-        pos = pos + 1
-        local out = {}
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return table.concat(out)
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" then
-                    out[#out + 1] = e
-                    pos = pos + 2
-                elseif e == "b" then
-                    out[#out + 1] = "\b"
-                    pos = pos + 2
-                elseif e == "f" then
-                    out[#out + 1] = "\f"
-                    pos = pos + 2
-                elseif e == "n" then
-                    out[#out + 1] = "\n"
-                    pos = pos + 2
-                elseif e == "r" then
-                    out[#out + 1] = "\r"
-                    pos = pos + 2
-                elseif e == "t" then
-                    out[#out + 1] = "\t"
-                    pos = pos + 2
-                elseif e == "u" then
-                    out[#out + 1] = "?"
-                    pos = pos + 6
-                else
-                    error("invalid escape at byte " .. tostring(pos))
-                end
-            else
-                out[#out + 1] = c
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-
-    local parse_value
-
-    local function parse_number()
-        local start_pos = pos
-        local c = peek()
-        if c == "-" then
-            pos = pos + 1
-        end
-        while string.match(peek(), "%d") do
-            pos = pos + 1
-        end
-        if peek() == "." then
-            pos = pos + 1
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then
-                pos = pos + 1
-            end
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        local raw = string.sub(text, start_pos, pos - 1)
-        local value = tonumber(raw)
-        if value == nil then
-            error("invalid number at byte " .. tostring(start_pos))
-        end
-        return value
-    end
-
-    local function parse_array()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            out[#out + 1] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return out
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected array comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    local function parse_object()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            skip_ws()
-            local name = parse_string()
-            skip_ws()
-            if peek() ~= ":" then
-                error("expected object colon at byte " .. tostring(pos))
-            end
-            pos = pos + 1
-            out[name] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return out
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected object comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then
-            return parse_string()
-        elseif c == "{" then
-            return parse_object()
-        elseif c == "[" then
-            return parse_array()
-        elseif c == "-" or string.match(c, "%d") then
-            return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return false
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return JSON_NULL
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-
-    local value = parse_value()
-    skip_ws()
-    if pos <= #text then
-        error("unexpected trailing JSON at byte " .. tostring(pos))
-    end
-    return value
-end
 
 local function normalize_name(value, label)
     if missing(value) then
@@ -1672,7 +1430,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             distinct_key_expr = null_if_missing(metric.distinct_key_expr),
             non_additive_dimension_id = null_if_missing(non_additive_dimension_id),
             window_spec_json = null_if_missing(metric.window_spec_json),
-            type_params_json = json_encode({metric_type = metric.metric_type}),
+            type_params_json = json.encode({metric_type = metric.metric_type}),
             definition_source_id = null_if_missing(definition_source_id),
         })
     else
@@ -1714,7 +1472,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             distinct_key_expr = null_if_missing(metric.distinct_key_expr),
             non_additive_dimension_id = null_if_missing(non_additive_dimension_id),
             window_spec_json = null_if_missing(metric.window_spec_json),
-            type_params_json = json_encode({metric_type = metric.metric_type}),
+            type_params_json = json.encode({metric_type = metric.metric_type}),
             definition_source_id = null_if_missing(definition_source_id),
         })
         existing_id = scalar([[
@@ -2882,7 +2640,7 @@ function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings
     local warnings = {}
     local current_operation = nil
     local ok, result = pcall(function()
-        local plan = json_decode(plan_json)
+        local plan = json.decode(plan_json)
         if type(plan) ~= "table" or type(plan.operations) ~= "table" then
             error("SEMANTIC_OSI_001: normalized import plan must contain operations")
         end
@@ -2920,7 +2678,7 @@ function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings
             "SEMANTIC_ADMIN.VALIDATE_MODEL",
             "$.models",
             nil,
-            json_encode(warnings),
+            json.encode(warnings),
             validation_run_id or null,
             message,
         }
@@ -2936,7 +2694,7 @@ function M.apply_normalized_osi_import(plan_json, validate_after_apply, warnings
         current_operation and current_operation.target or "SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT",
         current_operation and current_operation.source_path or "$",
         nil,
-        json_encode(warnings),
+        json.encode(warnings),
         nil,
         tostring(result),
     }
@@ -2949,7 +2707,7 @@ function M.apply_semantic_definition(definition_sql, dry_run)
     local restore_model = nil
     local ok, result = pcall(function()
         local definition = parse_definition(definition_sql)
-        local normalized_json = json_encode(definition)
+        local normalized_json = json.encode(definition)
         local operation_count = definition_operation_count(definition)
         local is_dry_run = sql_bool(dry_run)
         local model = load_model(definition.model_name)
@@ -4546,19 +4304,19 @@ function M.import_databricks_metric_view(yaml_text, model_name, published_schema
     if ok then
         return {{
             "OK", null, "Databricks metric view translated" .. (sql_bool(apply_flag) and " and applied." or "."),
-            result.plan.model_name, result.ddl, json_encode(diags), result.validation_run_id,
+            result.plan.model_name, result.ddl, json.encode(diags), result.validation_run_id,
         }}
     end
     local message = tostring(result)
     local error_code = string.match(message, "(DBX_IMPORT_%d+)") or string.match(message, "(SEMANTIC_%w+_%d+)") or "DBX_IMPORT_999"
     return {{
         "ERROR", error_code, message, missing(model_name) and null or dbx_ident(model_name),
-        null, json_encode(diags), null,
+        null, json.encode(diags), null,
     }}
 end
 
 function M.decode_json(json_text)
-    return json_decode(json_text)
+    return json.decode(json_text)
 end
 
 apply_semantic_definition = M.apply_semantic_definition
@@ -4573,15 +4331,15 @@ decode_json = M.decode_json
 -- Published for SEMANTIC_ADMIN.CALL_ADMIN_JSON, which serialises a called
 -- script's rows back to the caller. decode_json was already public.
 function M.encode_json(value)
-    return json_encode(value)
+    return json.encode(value)
 end
 
 encode_json = M.encode_json
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {
-        json_encode = json_encode,
-        json_decode = json_decode,
+        json_encode = json.encode,
+        json_decode = json.decode,
         tokenize = tokenize,
         split_top_level_text = split_top_level_text,
         parse_literal_list = parse_literal_list,

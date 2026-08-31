@@ -315,6 +315,87 @@ test("HAVING parser supports unary null predicates", function()
     assert_equal(filters[1].value, nil)
 end)
 
+test("WHERE and HAVING parse the same predicate grammar identically", function()
+    -- parse_where_filters and parse_having_filters are two ~110-line functions
+    -- whose diff is almost entirely the clause noun in three messages: HAVING
+    -- additionally resolves the field and refuses a non-metric. Everything else
+    -- -- the top-level AND split that skips BETWEEN's AND, the operator scan,
+    -- IS NULL / IN / BETWEEN, the literal-or-raw-SQL fallback -- is the same
+    -- code twice, so a predicate form added to one and forgotten in the other
+    -- would pass every test that existed before this one.
+    --
+    -- Until they are one function, this is the seam: parse the same shapes
+    -- through both and require the same filters out.
+    local ctx = compiler_context()
+    local shapes = {
+        {"IS NULL", "IS NULL"},
+        {"IS NOT NULL", "IS NOT NULL"},
+        {"= 100", "="},
+        {">= 100", ">="},
+        {"<> 100", "<>"},
+        {"IN (1, 2, 3)", "IN"},
+        {"BETWEEN 1 AND 9", "BETWEEN"},
+    }
+    for _, shape in ipairs(shapes) do
+        local suffix, expected_op = shape[1], shape[2]
+
+        local where_tokens = api.sql_tokens("customer_region " .. suffix)
+        local where_filters, where_err =
+            api.parse_where_filters(where_tokens, 1, #where_tokens)
+        assert_equal(where_err, nil, "WHERE " .. suffix)
+        assert_equal(#where_filters, 1, "WHERE " .. suffix)
+
+        local having_tokens = api.sql_tokens("total_revenue " .. suffix)
+        local having_filters, having_err =
+            api.parse_having_filters(ctx, having_tokens, 1, #having_tokens)
+        assert_equal(having_err, nil, "HAVING " .. suffix)
+        assert_equal(#having_filters, 1, "HAVING " .. suffix)
+
+        assert_equal(where_filters[1].op, expected_op, "WHERE op " .. suffix)
+        assert_equal(having_filters[1].op, expected_op, "HAVING op " .. suffix)
+        assert_equal(api.json_encode(where_filters[1].value),
+            api.json_encode(having_filters[1].value),
+            "value shape differs for " .. suffix)
+    end
+
+    -- A conjunction whose second predicate is a BETWEEN: the AND that belongs
+    -- to the range must not split the chunk. Same bug surface on both sides.
+    local both = api.sql_tokens("total_revenue > 1 AND total_revenue BETWEEN 2 AND 3")
+    local conjunction = assert(api.parse_having_filters(ctx, both, 1, #both))
+    assert_equal(#conjunction, 2)
+    assert_equal(conjunction[2].op, "BETWEEN")
+    assert_equal(#conjunction[2].value, 2)
+
+    -- And the refusals both sides share, plus the one only HAVING has.
+    local malformed = {
+        {"total_revenue IS", "SEMANTIC_QUERY_036"},
+        {"total_revenue IS NULL EXTRA", "SEMANTIC_QUERY_036"},
+        {"total_revenue IN 1, 2", "SEMANTIC_QUERY_032"},
+        {"total_revenue IN (1 + 2)", "SEMANTIC_QUERY_033"},
+        {"total_revenue BETWEEN 1", "SEMANTIC_QUERY_034"},
+        {"total_revenue BETWEEN 1 + 1 AND 3", "SEMANTIC_QUERY_035"},
+        {"total_revenue", "SEMANTIC_QUERY_030"},
+    }
+    for _, case in ipairs(malformed) do
+        local tokens = api.sql_tokens(case[1])
+        local filters, err = api.parse_having_filters(ctx, tokens, 1, #tokens)
+        assert_equal(filters, nil, case[1])
+        assert_equal(err.error_code, case[2], case[1])
+    end
+
+    -- HAVING is metric-only; that is the one asymmetry, and it is deliberate.
+    local dimension_tokens = api.sql_tokens("customer_region = 'EMEA'")
+    local refused, refusal =
+        api.parse_having_filters(ctx, dimension_tokens, 1, #dimension_tokens)
+    assert_equal(refused, nil)
+    assert_equal(refusal.error_code, "SEMANTIC_QUERY_040")
+    assert_branch("compiler.having.metric_only", refused == nil, true)
+
+    local metric_tokens = api.sql_tokens("total_revenue = 1")
+    assert_true(api.parse_having_filters(ctx, metric_tokens, 1, #metric_tokens) ~= nil)
+    assert_branch("compiler.having.metric_only", false, false)
+end)
+
 test("compiler field resolution handles canonical synonyms and ambiguity", function()
     local ctx = compiler_context()
     local exact = api.resolve_field(ctx, " customer_region ", "DIMENSION")
@@ -352,6 +433,44 @@ test("compiler join planner follows safe cardinality direction", function()
     assert_equal(none, nil)
     assert_branch("compiler.join.path", none ~= nil, false)
     assert_equal(reverse_err.error_code, "SEMANTIC_REQUEST_042")
+end)
+
+test("canonical request treats an explicit JSON null as an absent field", function()
+    -- The query spec used to reach this answer by accident. Its private
+    -- is_array had no null sentinel to compare against, so the decoder's null --
+    -- an empty table -- passed the array test and arrived as an empty list,
+    -- while the compiler's own copy of is_array would have refused it. One
+    -- shared sentinel makes the leniency a decision: `missing()` treats a
+    -- decoded null as absent everywhere else, and so does this.
+    local decoded = ESV_JSON.decode(
+        '{"model":"sales","object":"SALES","metrics":["total_revenue"],' ..
+        '"dimensions":null,"filters":null}')
+    local spec = assert(ESV_QUERY_SPEC.new(decoded))
+    assert_equal(#spec.metrics, 1)
+    assert_equal(#spec.dimensions, 0)
+    assert_equal(#spec.filters, 0)
+    assert_branch("compiler.request.null_array", spec.dimensions ~= nil, true)
+
+    -- A value that is neither an array nor null is still refused by name.
+    local rejected, reason = ESV_QUERY_SPEC.new({
+        model = "sales", object = "SALES", dimensions = {region = "EMEA"},
+    })
+    assert_equal(rejected, nil)
+    assert_equal(reason, "QUERY_SPEC_DIMENSIONS_NOT_ARRAY")
+    assert_branch("compiler.request.null_array", false, false)
+
+    -- And a request that is not an object at all.
+    local not_a_table, invalid = ESV_QUERY_SPEC.new("model=sales")
+    assert_equal(not_a_table, nil)
+    assert_equal(invalid, "QUERY_SPEC_INVALID")
+
+    -- natural_language_text travels with the canonical request so the query log
+    -- records what was asked, not only what was compiled.
+    local asked = assert(ESV_QUERY_SPEC.new({
+        model = "sales", object = "SALES", metrics = {"total_revenue"},
+        natural_language_text = "revenue by region",
+    }))
+    assert_equal(asked.natural_language_text, "revenue by region")
 end)
 
 test("request options tighten planner safeguards and never loosen them", function()

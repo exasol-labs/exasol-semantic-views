@@ -1,6 +1,9 @@
 local M = {}
 
-local JSON_NULL = {}
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
+-- Identity, not a copy: see shared/json.lua.
+local JSON_NULL = json.NULL
 
 local function missing(value)
     return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
@@ -77,65 +80,6 @@ local function bool_value(value, default_value)
     end
     local text = string.lower(tostring(value))
     return value == true or text == "true" or text == "1" or text == "yes"
-end
-
-local function json_escape(value)
-    local text = tostring(value)
-    text = string.gsub(text, "\\", "\\\\")
-    text = string.gsub(text, '"', '\\"')
-    text = string.gsub(text, "\n", "\\n")
-    text = string.gsub(text, "\r", "\\r")
-    text = string.gsub(text, "\t", "\\t")
-    return text
-end
-
-local function is_array(value)
-    if type(value) ~= "table" or value == JSON_NULL then
-        return false
-    end
-    local max_index = 0
-    local count = 0
-    for k, _ in pairs(value) do
-        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
-            return false
-        end
-        if k > max_index then
-            max_index = k
-        end
-        count = count + 1
-    end
-    return max_index == count
-end
-
-local function json_encode(value)
-    local value_type = type(value)
-    if value == nil or value == null or value == JSON_NULL then
-        return "null"
-    elseif value_type == "string" then
-        return '"' .. json_escape(value) .. '"'
-    elseif value_type == "number" then
-        return tostring(value)
-    elseif value_type == "boolean" then
-        return value and "true" or "false"
-    elseif value_type == "table" then
-        local parts = {}
-        if is_array(value) then
-            for i = 1, #value do
-                parts[#parts + 1] = json_encode(value[i])
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
-        end
-        local keys = {}
-        for k, _ in pairs(value) do
-            keys[#keys + 1] = tostring(k)
-        end
-        table.sort(keys)
-        for _, k in ipairs(keys) do
-            parts[#parts + 1] = json_encode(k) .. ":" .. json_encode(value[k])
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    return json_encode(tostring(value))
 end
 
 -- Top-level fields of a JSON object, without carrying a full parser.
@@ -221,7 +165,7 @@ local function scope_request_json(request_json, model_name, object_name)
         local present = fields[field]
         if present == nil then
             additions[#additions + 1] = '"' .. field .. '":'
-                .. json_encode(scope[field])
+                .. json.encode(scope[field])
         elseif type(present) == "string"
             and string.upper(present) ~= string.upper(scope[field]) then
             error("SEMANTIC_AGENT_021: REQUEST_JSON " .. field .. " '"
@@ -875,7 +819,7 @@ function M.describe_semantic_object(model_name_arg, object_name_arg)
         null,
         null,
         row_value(object, "DESCRIPTION", 6),
-        json_encode({
+        json.encode({
             published_schema = row_value(object, "PUBLISHED_SCHEMA", 3),
             published_object = row_value(object, "PUBLISHED_OBJECT_NAME", 4),
             root_entity = row_value(object, "ROOT_ENTITY_NAME", 5),
@@ -904,7 +848,7 @@ function M.describe_semantic_object(model_name_arg, object_name_arg)
             row_value(field, "SQL_COLUMN_NAME", 5),
             row_value(field, "DATA_TYPE", 6),
             row_value(field, "DESCRIPTION", 8),
-            json_encode({
+            json.encode({
                 display_name = row_value(field, "DISPLAY_NAME", 7),
                 format_hint = row_value(field, "FORMAT_HINT", 9),
                 unit_hint = row_value(field, "UNIT_HINT", 10),
@@ -998,7 +942,7 @@ function M.get_business_glossary(model_name_arg, object_name_arg, query_mode_arg
         row_value(object, "OBJECT_NAME", 2),
         query_mode,
         table.concat(lines, "\n"),
-        json_encode({
+        json.encode({
             fields = rows_to_objects(fields, {"FIELD_KIND", "FIELD_NAME", "DISPLAY_NAME", "DESCRIPTION", "DATA_TYPE", "FILTER_EXPRESSION"}),
             instructions = rows_to_objects(instructions, {"INSTRUCTION_KIND", "INSTRUCTION_TEXT"}),
             verified_queries = rows_to_objects(verified, {"QUERY_NAME", "NATURAL_LANGUAGE_TEXT", "REQUEST_JSON"}),
@@ -1199,7 +1143,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         normalize_name = normalize_name,
         normalize_choice = normalize_choice,
         bool_value = bool_value,
-        json_encode = json_encode,
+        json_encode = json.encode,
         rows_to_objects = rows_to_objects,
         search_term = search_term,
         like_pattern = like_pattern,

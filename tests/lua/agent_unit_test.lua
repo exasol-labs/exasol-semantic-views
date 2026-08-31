@@ -112,6 +112,81 @@ test("agent instruction validation rejects missing and invalid scopes", function
     end)
 end)
 
+test("agent instruction scopes resolve against the table each kind lives in", function()
+    -- One instruction can be scoped to a model, a semantic object, an entity, a
+    -- dimension, a fact or a metric, and each kind resolves its name against a
+    -- different table, id column and name column. Only METRIC and MODEL were
+    -- exercised, so four of the six branches -- and the id/name column pairing
+    -- that makes each one right -- were carried by inspection alone. A scope
+    -- resolved against the wrong table attaches the instruction to whatever
+    -- object happens to share that id, which no later step can detect.
+    local scopes = {
+        {"SEMANTIC_OBJECT", "SYS_SEMANTIC.SEMANTIC_OBJECTS", "OBJECT_ID", "OBJECT_NAME"},
+        {"ENTITY", "SYS_SEMANTIC.ENTITIES", "ENTITY_ID", "ENTITY_NAME"},
+        {"DIMENSION", "SYS_SEMANTIC.DIMENSIONS", "DIMENSION_ID", "DIMENSION_NAME"},
+        {"FACT", "SYS_SEMANTIC.FACTS", "FACT_ID", "FACT_NAME"},
+        {"METRIC", "SYS_SEMANTIC.METRICS", "METRIC_ID", "METRIC_NAME"},
+    }
+    for _, scope in ipairs(scopes) do
+        local scope_type, table_name, id_column, name_column = scope[1], scope[2], scope[3], scope[4]
+        local lookup, inserted = nil, nil
+        with_query(function(sql, params)
+            if contains(sql, "FROM SYS_SEMANTIC.MODELS") then
+                return {{1, "sales", 2, "SEMANTIC_SALES"}}
+            elseif contains(sql, "FROM " .. table_name) and contains(sql, "SELECT " .. id_column) then
+                lookup = sql
+                return {{77}}
+            elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_INSTRUCTIONS") then
+                inserted = params
+                return {}
+            elseif contains(sql, "SELECT MAX(") then
+                return {{4}}
+            end
+            return {}
+        end, function()
+            add_agent_instruction("sales", scope_type, "thing", "GENERAL", "text", nil, nil)
+        end)
+        assert_true(lookup ~= nil, scope_type .. " did not resolve against " .. table_name)
+        assert_contains(lookup, "UPPER(" .. name_column .. ")", scope_type)
+        assert_true(inserted ~= nil, scope_type .. " wrote no instruction")
+        assert_equal(inserted.scope_id, 77, scope_type)
+        assert_equal(inserted.scope_type, scope_type)
+    end
+
+    -- A MODEL-scoped instruction needs no scope name and scopes to the model.
+    local model_scoped = nil
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS_SEMANTIC.MODELS") then
+            return {{1, "sales", 2, "SEMANTIC_SALES"}}
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_INSTRUCTIONS") then
+            model_scoped = params
+        elseif contains(sql, "SELECT MAX(") then
+            return {{5}}
+        end
+        return {}
+    end, function()
+        add_agent_instruction("sales", "MODEL", nil, "GENERAL", "text", nil, nil)
+    end)
+    assert_true(model_scoped ~= nil)
+    assert_equal(model_scoped.scope_type, "MODEL")
+    assert_equal(model_scoped.scope_id, 1)
+
+    -- And the two refusals that guard the dispatch.
+    with_query(function(sql)
+        if contains(sql, "FROM SYS_SEMANTIC.MODELS") then
+            return {{1, "sales", 2, "SEMANTIC_SALES"}}
+        end
+        return {}
+    end, function()
+        assert_error(function()
+            add_agent_instruction("sales", "COLUMN", "thing", "GENERAL", "text", nil, nil)
+        end, "SEMANTIC_AGENT_003")
+        assert_error(function()
+            add_agent_instruction("sales", "ENTITY", nil, "GENERAL", "text", nil, nil)
+        end, "SCOPE_NAME is required for ENTITY")
+    end)
+end)
+
 test("verified query registration requires a successful compile", function()
     local compile_ok = true
     local inserted = nil

@@ -371,3 +371,44 @@ test("fusion export omits absent values instead of writing nulls", function()
     assert_true(representation.authority == nil)
     assert_equal(representation.priority, 10)
 end)
+
+test("fusion document reads an explicit JSON null as absent, not as a value", function()
+    -- This module used to reach an encoder by importing SEMANTIC_DEFINITION_RUNTIME,
+    -- so it decoded documents with a sentinel it had no name for: its own
+    -- missing() checked nil and Exasol's `null` but not the decoder's null,
+    -- whose tostring is "table: 0x...". An explicit `"source_alias": null` was
+    -- therefore a *present* value, and the address went to the catalog. Sharing
+    -- one codec is what makes the sentinel nameable here.
+    assert_true(ESV_JSON.decode('{"k":null}').k == ESV_JSON.NULL)
+
+    -- Absent, so the same as an omitted key wherever a value is optional.
+    assert_equal(api.is_fused ~= nil, true)
+    local document = ESV_JSON.decode([[
+        {"model": null,
+         "entities": {"CUSTOMER": {"identity": null}}}
+    ]])
+    assert_equal(document.model, ESV_JSON.NULL)
+
+    -- A null `model` is an omitted model, not a model named "table: 0x...", so
+    -- the document applies to the model it was addressed to.
+    local model_rows = function(sql)
+        if string.find(sql, "FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{MODEL_ID = 1, ACTIVE_VERSION_ID = 2, MODEL_NAME = "sales",
+                STATUS = "DRAFT"}}
+        end
+        return {}
+    end
+    local ok, err = pcall(api.plan_document, fake_query(model_rows), "sales",
+        ESV_JSON.encode({model = ESV_JSON.NULL, entities = {}}))
+    assert_true(ok, tostring(err))
+
+    -- But a null where an object belongs is malformed, not an empty object: a
+    -- declaration read as "declare nothing" is the silent drop the closed
+    -- contract exists to prevent.
+    local null_ok, null_err = pcall(api.reject_unknown, ESV_JSON.NULL,
+        {authority = true}, "representation")
+    assert_true(not null_ok)
+    assert_contains(tostring(null_err), "SEMANTIC_FUSION_010")
+    assert_contains(tostring(null_err), "must be a JSON object")
+    assert_branch("fusion.document.closed_contract", null_ok, false)
+end)

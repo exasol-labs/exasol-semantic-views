@@ -1045,6 +1045,185 @@ def test_diff_json_values_reports_stable_paths() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# A profile named `lossless` must not be quietly lossy
+# ---------------------------------------------------------------------------
+
+class _CatalogStatement:
+    def __init__(self, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
+        self._columns = columns
+        self._rows = rows
+
+    def description(self) -> list[tuple[str]]:
+        return [(column,) for column in self._columns]
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+
+class _FusionCatalogConnection:
+    """Just enough catalog for export_model's pre-flight, plus a row counter.
+
+    `carries` maps a SEMANTIC_CATALOG surface to the COUNT(*) it should report,
+    which is all `uncarried_concepts` reads. Everything else answers empty, so a
+    query the pre-flight adds without a fixture shows up as a zero rather than a
+    crash -- and the assertions below check the counts, so a silent zero fails.
+    """
+
+    def __init__(self, carries: dict[str, int]) -> None:
+        self.carries = carries
+        self.counted: list[str] = []
+
+    def execute(self, sql: str) -> _CatalogStatement:
+        if "SELECT COUNT(*) AS N FROM SEMANTIC_CATALOG." in sql:
+            surface = sql.split("SEMANTIC_CATALOG.", 1)[1].split(" ", 1)[0]
+            self.counted.append(surface)
+            return _CatalogStatement(["N"], [(self.carries.get(surface, 0),)])
+        if "FROM SEMANTIC_CATALOG.MODELS" in sql:
+            return _CatalogStatement(
+                ["MODEL_ID", "MODEL_NAME", "ACTIVE_VERSION_ID",
+                 "ACTIVE_VERSION_NUMBER", "PUBLISHED_SCHEMA", "OWNER_ROLE"],
+                [(1, "fused", 2, 1, "SEMANTIC_FUSED", None)])
+        if "FROM SEMANTIC_CATALOG.ENTITIES" in sql:
+            # One dataset, so the document validates and the warning path is
+            # exercised on a real export rather than on an empty model.
+            return _CatalogStatement(
+                ["ENTITY_ID", "MODEL_NAME", "ENTITY_NAME", "SOURCE_SCHEMA",
+                 "SOURCE_OBJECT", "SOURCE_ALIAS", "DESCRIPTION",
+                 "LEGACY_PRIMARY_KEY_EXPR", "GRAIN_DESCRIPTION", "STATUS"],
+                [(10, "fused", "orders", "MART", "ORDERS", "o", None, None,
+                  None, "ACTIVE")])
+        return _CatalogStatement([], [])
+
+    def close(self) -> None:
+        pass
+
+
+def test_lossless_export_refuses_a_model_whose_fusion_layer_it_cannot_carry() -> None:
+    """The failure this replaces produced a document and `{"warnings": []}`.
+
+    Ossie 0.2.0.dev0 has no definition for a representation, an authority role
+    or a semantic identity, so a round trip through the `lossless` profile
+    returned a different model that still passed VALIDATE_MODEL -- nothing on
+    either side said anything had been dropped.
+    """
+    con = _FusionCatalogConnection({"REPRESENTATION_AUTHORITIES": 1,
+                                    "SEMANTIC_IDENTITIES": 2})
+    try:
+        osi.export_model(con, osi.ExportOptions(
+            model_name="fused", object_name=None, profile="lossless"))
+    except osi.OsiError as error:
+        message = str(error)
+    else:
+        raise AssertionError("a lossy lossless export was not refused")
+
+    # The refusal has to name what was found, what it costs, and the way out.
+    assert "1 authority declarations (F4)" in message, message
+    assert "2 semantic identities (F5)" in message, message
+    assert "would still pass VALIDATE_MODEL" in message, message
+    assert "EXPORT_FUSION_DECLARATION" in message, message
+    assert "--allow-lossy" in message, message
+
+    # Every concept is probed, not only the ones that happened to be present.
+    assert {surface for _, surface, _, _ in osi.UNCARRIED_CONCEPTS} <= set(con.counted)
+
+
+def test_interoperability_export_warns_where_lossless_refuses() -> None:
+    """Interchange may drop what the standard cannot express -- but must say so."""
+    con = _FusionCatalogConnection({"IDENTITY_MAPPING_RELATIONS": 3})
+    _, warnings = osi.export_model(con, osi.ExportOptions(
+        model_name="fused", object_name=None, profile="interoperability"))
+    dropped = [item for item in warnings if item["code"] == "OSI_EXPORT_050"]
+    assert len(dropped) == 1, warnings
+    assert dropped[0]["severity"] == "WARNING"
+    assert "3 identity mapping relations (F5)" in dropped[0]["message"]
+    assert "EXPORT_FUSION_DECLARATION" in dropped[0]["message"]
+
+
+def test_allow_lossy_downgrades_the_lossless_refusal_to_a_warning() -> None:
+    con = _FusionCatalogConnection({"SEMANTIC_IDENTITIES": 4})
+    _, warnings = osi.export_model(con, osi.ExportOptions(
+        model_name="fused", object_name=None, profile="lossless",
+        allow_lossy=True))
+    codes = {item["code"] for item in warnings}
+    assert "OSI_EXPORT_050" in codes, warnings
+
+
+def test_a_materialization_warns_but_does_not_block_a_lossless_export() -> None:
+    """Losing one changes how fast the model answers, not what it answers.
+
+    The refusal is about consequence, not about tier: an authority declaration
+    decides which source wins a key conflict, so a restore without it returns
+    different numbers from a model that validates. A materialization is physical
+    acceleration -- re-register it and the numbers were never in question. The
+    sales demo model ships one, so getting this wrong refuses every export of
+    the model the round-trip verifier uses.
+    """
+    con = _FusionCatalogConnection({"MATERIALIZATIONS": 1})
+    _, warnings = osi.export_model(con, osi.ExportOptions(
+        model_name="fused", object_name=None, profile="lossless"))
+    dropped = [item for item in warnings if item["code"] == "OSI_EXPORT_050"]
+    assert len(dropped) == 1, warnings
+    assert "1 materializations" in dropped[0]["message"]
+    assert "REGISTER_MATERIALIZATION" in dropped[0]["message"]
+    assert "results are unaffected" in dropped[0]["message"]
+
+    # And a model carrying both blocks on the fusion half alone.
+    both = _FusionCatalogConnection({"MATERIALIZATIONS": 1,
+                                     "REPRESENTATION_AUTHORITIES": 1})
+    try:
+        osi.export_model(both, osi.ExportOptions(
+            model_name="fused", object_name=None, profile="lossless"))
+    except osi.OsiError as error:
+        assert "1 authority declarations (F4)" in str(error)
+        assert "materializations" not in str(error), str(error)
+    else:
+        raise AssertionError("the fusion half did not block")
+
+
+def test_every_uncarried_concept_is_classified_and_probed() -> None:
+    """A new entry with no `blocking` decision is the thing to catch here."""
+    labels = [label for label, _, _, _ in osi.UNCARRIED_CONCEPTS]
+    assert len(labels) == len(set(labels)), labels
+    for label, surface, blocking, extra in osi.UNCARRIED_CONCEPTS:
+        assert isinstance(blocking, bool), label
+        assert surface.isupper(), surface
+        # A predicate is appended to a WHERE that already has a term, and it is
+        # interpolated with the model filter -- a stray placeholder would raise
+        # at export time, against a live connection, on somebody's backup.
+        if extra:
+            assert extra.startswith("AND "), label
+            assert extra.format(filter="MODEL_NAME = 'x'").count("{") == 0, label
+    # Every fusion level is represented; materializations are the one advisory.
+    advisory = {label for label, _, blocking, _ in osi.UNCARRIED_CONCEPTS
+                if not blocking}
+    assert advisory == {"materializations"}, advisory
+
+
+def test_a_model_with_no_fusion_layer_exports_without_a_warning() -> None:
+    """ADD_ENTITY auto-creates one PRIMARY representation per entity.
+
+    That F0 compatibility row is not a fusion declaration, and counting it would
+    refuse every export of every model -- including the sales demo, which
+    tools/verify_osi_roundtrip.py round-trips.
+    """
+    con = _FusionCatalogConnection({})
+    _, warnings = osi.export_model(con, osi.ExportOptions(
+        model_name="fused", object_name=None, profile="lossless"))
+    assert [item for item in warnings if item["code"] == "OSI_EXPORT_050"] == []
+
+
+def test_the_alternate_representation_probe_excludes_the_sole_primary() -> None:
+    """The predicate, read as SQL, is what keeps the F0 row out of the count."""
+    predicate = {label: extra for label, _, _, extra
+                 in osi.UNCARRIED_CONCEPTS}["alternate representations"]
+    assert "UPPER(REPRESENTATION_ROLE) <> 'PRIMARY'" in predicate
+    assert "HAVING COUNT(*) > 1" in predicate
+    # It interpolates the same model filter the outer query uses, so a second
+    # model's entities cannot make this one look fused.
+    assert "{filter}" in predicate
+
+
 def main() -> int:
     test_fixtures_validate()
     test_sales_osi_example_matches_interoperability_fixture()
@@ -1079,6 +1258,13 @@ def main() -> int:
     test_batch_warning_json_decodes_to_diagnostics()
     test_roundtrip_document_normalization_is_order_stable()
     test_diff_json_values_reports_stable_paths()
+    test_lossless_export_refuses_a_model_whose_fusion_layer_it_cannot_carry()
+    test_interoperability_export_warns_where_lossless_refuses()
+    test_allow_lossy_downgrades_the_lossless_refusal_to_a_warning()
+    test_a_model_with_no_fusion_layer_exports_without_a_warning()
+    test_the_alternate_representation_probe_excludes_the_sole_primary()
+    test_a_materialization_warns_but_does_not_block_a_lossless_export()
+    test_every_uncarried_concept_is_classified_and_probed()
     print("ok osi tool tests")
     return 0
 

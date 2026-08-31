@@ -58,6 +58,81 @@ def assert_no_warnings(name: str, warnings: list[dict[str, Any]]) -> None:
     print(f"ok {name}: no warnings")
 
 
+def assert_only_warning(name: str, warnings: list[dict[str, Any]], code: str,
+                        fragment: str) -> None:
+    codes = [item["code"] for item in warnings]
+    if codes != [code]:
+        raise AssertionError(f"{name}: expected exactly [{code}], got {codes!r}")
+    if fragment not in warnings[0]["message"]:
+        raise AssertionError(f"{name}: message lacks {fragment!r}: "
+                             f"{warnings[0]['message']!r}")
+    print(f"ok {name}: {code}")
+
+
+def check_fusion_layer_blocks_a_lossless_export(con: Any) -> None:
+    """A `lossless` profile must not silently drop what it cannot carry.
+
+    Ossie 0.2.0.dev0 has no definition for an authority role, so exporting a
+    model that declares one produced a document, an empty warnings file, and a
+    reimported model that passed VALIDATE_MODEL — a different, valid model that
+    answers differently, with nothing on either side saying so.
+
+    Built here rather than mocked because the check is a query against the
+    catalog views, and a view rename or a STATUS-filter change would leave a
+    unit test green while the export went back to being silent.
+    """
+    # Called by name rather than positionally: 15 of the 82 parameterised admin
+    # scripts take eight or more positional arguments, and a miscount is caught
+    # by Exasol's SQL layer as `expected 9 script parameters but got 8` with no
+    # script or parameter name in it.
+    def call(script: str, **arguments: Any) -> None:
+        con.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.CALL_ADMIN_JSON("
+            f"{osi.sql_string(script)}, {osi.sql_string(json.dumps(arguments))})")
+
+    call("CREATE_MODEL", MODEL_NAME="osi_fusion_scope",
+         PUBLISHED_SCHEMA="SEMANTIC_OSI_FUSION_SCOPE")
+    try:
+        call("ADD_ENTITY", MODEL_NAME="osi_fusion_scope", ENTITY_NAME="customer",
+             SOURCE_SCHEMA="MART", SOURCE_OBJECT="CUSTOMERS", SOURCE_ALIAS="c")
+        model = {"MODEL_NAME": "osi_fusion_scope", "ACTIVE_VERSION_NUMBER": 1}
+
+        # The auto-created F0 representation is not a fusion declaration: an
+        # ordinary tier-1 model has to export clean, or the refusal refuses
+        # everything and gets switched off.
+        assert_equal("no fusion layer before declaring one",
+                     osi.uncarried_concepts(con, model), [])
+
+        call("ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY",
+             MODEL_NAME="osi_fusion_scope", ENTITY_NAME="customer",
+             REPRESENTATION_NAME="crm", SOURCE_KIND="RELATION",
+             SOURCE_SCHEMA="MART", SOURCE_OBJECT="CUSTOMERS",
+             AUTHORITY_ROLE="AUTHORITATIVE")
+        present = osi.uncarried_concepts(con, model)
+        labels = {label for label, _, _ in present}
+        assert_true("authority declaration is detected",
+                    "authority declarations (F4)" in labels)
+        assert_true("alternate representation is detected",
+                    "alternate representations" in labels)
+
+        try:
+            osi.export_model(con, osi.ExportOptions(
+                model_name="osi_fusion_scope", object_name=None,
+                profile="lossless"))
+        except osi.OsiError as error:
+            message = str(error)
+        else:
+            raise AssertionError("lossless export of a fused model was not refused")
+        assert_true("refusal names the authority declaration",
+                    "authority declarations (F4)" in message)
+        assert_true("refusal names the companion export",
+                    "EXPORT_FUSION_DECLARATION" in message)
+        assert_true("refusal names the override", "--allow-lossy" in message)
+        print("ok lossless export refuses a model carrying a fusion layer")
+    finally:
+        osi.cleanup_imported_model(con, "osi_fusion_scope")
+
+
 def extension_data(extensions: list[dict[str, str]], vendor_name: str) -> list[dict[str, Any]]:
     result = []
     for extension in extensions:
@@ -114,6 +189,7 @@ def main() -> int:
             con,
             osi.ExportOptions(model_name="sales", object_name=None, profile="lossless"),
         )
+        check_fusion_layer_blocks_a_lossless_export(con)
     finally:
         con.close()
 
@@ -121,8 +197,13 @@ def main() -> int:
     osi.validate_document(lossless)
     assert_equal("interop version", interop["version"], "0.2.0.dev0")
     assert_equal("lossless version", lossless["version"], "0.2.0.dev0")
-    assert_no_warnings("interop warnings", interop_warnings)
-    assert_no_warnings("lossless warnings", lossless_warnings)
+    # The sales model ships a materialization, which no profile carries. It does
+    # not block -- losing one changes query cost, not answers -- but the export
+    # must say so rather than write `{"warnings": []}` over a partial model.
+    for name, warnings in (("interop warnings", interop_warnings),
+                           ("lossless warnings", lossless_warnings)):
+        assert_only_warning(name, warnings, "OSI_EXPORT_050",
+                            "REGISTER_MATERIALIZATION")
 
     order = dataset_by_name(interop, "order")
     assert_equal("order primary key", order.get("primary_key"), ["order_id"])
