@@ -71,6 +71,17 @@ def q(value: str) -> str:
 
 
 CASES: list[tuple[str, str, str]] = [
+    # SEMANTIC_ADMIN_218: SOURCE_KIND was free text, so VIRTUAL_SCHEMA over an
+    # ordinary table and RELATION over a virtual schema were both stored. The
+    # compiler treats the distinction as a planning input, and
+    # SYS.EXA_ALL_VIRTUAL_SCHEMAS settles it, so a disagreement is refused.
+    (
+        "admin_218/source_kind_disagrees_with_catalog",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION("
+        "'sales', 'customer', 'vs_mislabel', 'VIRTUAL_SCHEMA', 'MART',"
+        " 'CUSTOMERS', 55, 'MANUAL')",
+        "SEMANTIC_ADMIN_218",
+    ),
     # SEMANTIC_ADMIN_001: required field missing
     (
         "admin_001/model_name_required",

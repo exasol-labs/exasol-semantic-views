@@ -859,6 +859,60 @@ test("F2 identity mismatches prescribe canonical views and Phase F5", function()
     assert_contains(mapping_issue.message, "anchored DIRECT F5 identity")
 end)
 
+test("a metric must be based on the entity its facts belong to", function()
+    -- The compiler renders a fact's expression against the *metric's* base
+    -- entity FROM clause and never joins the fact's own entity, so a mismatch
+    -- compiled to SQL referencing an alias it never joined -- STATUS = OK and a
+    -- runtime "object O.FREIGHT_AMOUNT not found". Both directions failed that
+    -- way, so this is not the fan-out question the grain proofs already answer.
+    local order_line = {id = 1, name = "order_line", alias = "ol"}
+    local order = {id = 2, name = "order", alias = "o"}
+    local fact = {id = 30, entity_id = 2, name = "freight_fact",
+        expression = "o.freight_amount"}
+    local metric = {id = 40, name = "freight_total", base_entity_id = 1,
+        expression = "SUM(freight_fact)", metric_type = "SIMPLE"}
+    local ctx = validation_context({
+        entities = {order_line, order},
+        facts = {fact},
+        metrics = {metric},
+        -- load_model builds this from the catalog; a synthetic ctx has to supply
+        -- it, and the message is only useful if it can name both entities.
+        entity_by_id = {["1"] = order_line, ["2"] = order},
+    })
+    ctx.metric_by_id = {[tostring(metric.id)] = metric}
+    with_query(function(sql)
+        if contains(sql, "METRIC_DEPENDENCIES") then
+            return {{40, "FACT", 30}}
+        end
+        return {}
+    end, function()
+        api.validate_metric_plannability(ctx)
+    end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_061"))
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_061")
+    -- Both entities and the fact are named, or the reader cannot tell which end
+    -- to move.
+    assert_contains(issue.message, "order_line")
+    assert_contains(issue.message, "order")
+    assert_contains(issue.message, "freight_fact")
+
+    -- The matching case is silent.
+    local matched_metric = {id = 41, name = "ok_metric", base_entity_id = 2,
+        expression = "SUM(freight_fact)", metric_type = "SIMPLE"}
+    local clean = validation_context({
+        entities = {order_line, order}, facts = {fact}, metrics = {matched_metric},
+        entity_by_id = {["1"] = order_line, ["2"] = order},
+    })
+    clean.metric_by_id = {[tostring(matched_metric.id)] = matched_metric}
+    with_query(function(sql)
+        if contains(sql, "METRIC_DEPENDENCIES") then return {{41, "FACT", 30}} end
+        return {}
+    end, function()
+        api.validate_metric_plannability(clean)
+    end)
+    assert_true(not has_rule(clean, "SEMANTIC_MODEL_061"))
+end)
+
 test("validator proves F1 representation grain and key-set equivalence", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     -- Roles are set because the recovery suffix on _037/_038 is only offered for

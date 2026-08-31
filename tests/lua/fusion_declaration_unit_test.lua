@@ -74,6 +74,8 @@ test("fusion document plans operations in dependency order", function()
     local query = fake_query(function(sql)
         if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{7, 9, "sales", "PUBLISHED"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
         end
         return {}
     end)
@@ -110,6 +112,8 @@ test("a representation carries its own attribute bindings into one call", functi
     local query = fake_query(function(sql)
         if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{7, 9, "sales", "PUBLISHED"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
         end
         return {}
     end)
@@ -151,6 +155,8 @@ test("fusion document refuses an identity binding with no identity", function()
     local query = fake_query(function(sql)
         if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{7, 9, "sales", "DRAFT"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
         end
         return {}
     end)
@@ -159,10 +165,43 @@ test("fusion document refuses an identity binding with no identity", function()
     assert_contains(tostring(err), "SEMANTIC_FUSION_014")
 end)
 
+test("fusion document refuses an entity the model does not have", function()
+    -- A typo'd entity name is the likeliest error in a hand-edited document, and
+    -- it used to report success having done nothing. Unknown *keys* were already
+    -- refused by name; the closed contract had a hole exactly where a human
+    -- pokes it.
+    local query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "DRAFT"}}
+        end
+        -- No entity rows: nothing resolves.
+        return {}
+    end)
+    local ok, err = pcall(api.plan_document, query, "sales",
+        encode_json({entities = {nosuchentity = {representations = {}}}}))
+    assert_branch("fusion.document.entity_resolves", ok, false)
+    assert_contains(tostring(err), "SEMANTIC_FUSION_018")
+    assert_contains(tostring(err), "nosuchentity")
+
+    local resolving = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "DRAFT"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
+        end
+        return {}
+    end)
+    local good = pcall(api.plan_document, resolving, "sales",
+        encode_json({entities = {customer = {representations = {}}}}))
+    assert_branch("fusion.document.entity_resolves", good, true)
+end)
+
 test("fusion document refuses a document that names another model", function()
     local query = fake_query(function(sql)
         if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{7, 9, "sales", "DRAFT"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
         end
         return {}
     end)
@@ -243,6 +282,8 @@ test("the exported document is one object that always names its model", function
     local empty_query = fake_query(function(sql)
         if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{7, 9, "sales", "DRAFT"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
         end
         return {}
     end)
@@ -285,6 +326,8 @@ test("an attribute policy that already matches is not re-applied", function()
     local query = fake_query(function(sql)
         if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{7, 9, "sales", "PUBLISHED"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
         end
         return {}
     end)

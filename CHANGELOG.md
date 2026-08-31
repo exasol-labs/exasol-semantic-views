@@ -8,6 +8,116 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### The fusion declaration document: tier 2 as one file
+
+- Tier 1 — what one source says about itself — has had a document format for a
+  while: Apache Ossie/OSI, one file per source. Tier 2, how those sources
+  compose, had none, and on a *published* model it was not incrementally
+  authorable at all: `ADD_ENTITY_REPRESENTATION`, `ADD_IDENTITY_BINDING`,
+  `ADD_IDENTITY_MAPPING_RELATION` and `SET_REPRESENTATION_AUTHORITY` are each
+  refused alone, because each alone leaves the model invalid.
+- `SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION(MODEL_NAME, DECLARATION_JSON, DRY_RUN)`
+  applies the whole tier-2 layer as one entity-keyed JSON document: ordered by
+  dependency, atomic against a snapshot of the seven fusion tables, and
+  dry-runnable — which matters most here because fusion validation runs *data*
+  probes against possibly remote sources.
+- `SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION(MODEL_NAME, ENTITY_NAME)` returns the
+  same document back, one row, always naming its model. Re-applying an exported
+  document reports `nothing to do` with `APPLIED_COUNT = 0`, so a CI job can read
+  that as "no drift".
+- It is an upsert, not a reconciliation: the document declares what it contains
+  and leaves alone what it omits. Removal stays with the `REMOVE_*` scripts —
+  deleting governance metadata because a JSON key is absent is not a mistake
+  worth making convenient.
+- A representation may carry its own `attribute_bindings`, which is what makes
+  the canonical F4 shape reachable on a published model: a supplemental source
+  narrower than the primary is invalid until those bindings land, and entity-level
+  bindings arrive after the representation has already been validated. Refusals
+  are `SEMANTIC_FUSION_011` (unknown key), `_014` (identity binding with no
+  identity), `_015` (document names another model), `_017` (empty bindings array),
+  `_018` (unknown entity), and `SEMANTIC_ADMIN_217` (unknown attribute).
+
+#### `DIMENSION` in `ALTER SEMANTIC VIEW`
+
+- Semantic DDL covered facts and metrics only, so the SQL-native surface could
+  describe what an object measures but not what it can be grouped by. `REPLACE
+  DIMENSIONS (...)` and `ADD OR REPLACE DIMENSION` complete an object's interior,
+  reusing the fact clauses exactly — `ON ENTITY`, `AS`, `RETURNS`, `DISPLAY`,
+  `COMMENT`, `FORMAT`, `CERTIFIED`, `PRIVATE`.
+- One statement may carry `REPLACE DIMENSIONS`, `REPLACE FACTS` and `REPLACE
+  METRICS` together: one validation pass, one rollback unit. That is also the
+  only way to restore an object's column *order*, which OSI export carries into
+  the imported model.
+- New refusals `SEMANTIC_DDL_025`–`_029` and `_038`, and `SEMANTIC_DDL_012` now
+  advertises all eight accepted forms.
+
+#### `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS`
+
+- Authority × coverage × identity × bindings is a product, and the
+  one-dimensional `_WITH_*` forms cover four points of it by hand; BUG-G04 was a
+  report that one combination had no door. One call now takes a closed
+  `DECLARATIONS_JSON` carrying any of `authority`, `coverage`, `identity` and
+  `attribute_bindings`, atomically. Unknown keys are refused by name
+  (`SEMANTIC_ADMIN_214`); `coverage` with `identity` is refused (`_215`) because
+  `SEMANTIC_MODEL_047` rejects that pair anyway.
+
+### Changed
+
+- **Two authoring surfaces are now divided by job, not by preference.** Semantic
+  DDL owns the interior of a semantic object; the `ADD_*`/`SET_*`/`REMOVE_*`
+  scripts own the graph between objects; the fusion document owns how sources
+  compose. The docs previously called one "preferred" and the others
+  "compatibility APIs", which had to be either kept true or repeatedly corrected.
+- `docs/data-fusion.md` gains a two-tier architecture diagram: one semantic layer
+  per federated source at tier 1, semantic fusion above them at tier 2, and tier
+  2 as the only surface agents and users see.
+- `EXPORT_FUSION_DECLARATION` returns one row per call rather than one per entity,
+  always emits `model`, and serialises an empty `entities` as `{}` — without
+  which `SEMANTIC_FUSION_015` could never fire on an exported-then-reapplied
+  file, the one workflow it exists for.
+- `SOURCE_KIND` is cross-checked against `SYS.EXA_ALL_VIRTUAL_SCHEMAS`
+  (`SEMANTIC_ADMIN_218`) instead of being free text, and the primary
+  representation `ADD_ENTITY` creates now derives its kind — so a federated
+  entity records `VIRTUAL_SCHEMA` rather than being mislabelled `RELATION`.
+- Advisory codes `SEMANTIC_ADMIN_W060`/`W061` are renumbered `220`/`221`.
+  Severity is carried by the channel — a raised error, or a `SEVERITY`/`WARNINGS`
+  column — never by a code's spelling.
+- `SEMANTIC_MODEL_038` now carries the recovery suffix its siblings have, so a
+  key-cardinality difference says what to do about it instead of printing two row
+  counts.
+
+### Fixed
+
+- **A metric based on one entity but aggregating another entity's fact compiled
+  to invalid SQL** with `STATUS = OK`: the fact's expression was rendered against
+  the base entity's `FROM` clause without joining its own, so
+  `SUM((o.freight_amount)) FROM "MART"."ORDER_LINES" ol` failed at execution with
+  `object O.FREIGHT_AMOUNT not found`. Both directions failed the same way.
+  `SEMANTIC_MODEL_061` now refuses it at definition time.
+- A visible metric aggregating at an entity coarser than its object's root is
+  refused with `SEMANTIC_MODEL_059`, and a partitioned entity used as an
+  intermediate join hop no longer silently drops partitions
+  (`FUSION_PARTITION_JOIN_UNSUPPORTED`).
+- `SEMANTIC_MODEL_060` splits "semantic identity has no binding for active
+  representation" out of `SEMANTIC_MODEL_047`, so validation can promote the root
+  cause to the head of the report by comparing a code instead of searching the
+  message text.
+- The F5 mapping-relation join is rendered from one shared module, fixing a
+  case-sensitivity defect that existed independently in five places.
+- SQL NULL reaching an Exasol Lua script as truthy `userdata` no longer defeats
+  required-parameter checks: `REMOVE_RELATIONSHIP`, `REMOVE_UNIQUE_KEY`,
+  `REMOVE_UNIQUE_KEY_WITH_COLUMNS`, `REMOVE_ATTRIBUTE_BINDING` and
+  `RECERTIFY_MODEL_IF_PUBLISHED` reported an address instead of
+  `SEMANTIC_ADMIN_001`, and `DESCRIBE_SEMANTIC_METRIC`/`EXPLAIN_SEMANTIC_METRIC`
+  crashed concatenating it. `PUBLISH_MODEL` no longer writes
+  `userdata: 0x...` into `SEMANTIC_DISCOVERY` for an undescribed object.
+- `SEMANTIC_CATALOG_DISCOVERY.METRIC_DEFINITIONS_QUERY` selected `OBJECT_NAME`
+  from a view that has no such column; it reads `METRIC_OVERVIEW` now, and every
+  `SELECT` the discovery tables advertise is executed by
+  `verify_catalog_introspection.py`.
+- An attribute policy already matching the catalog is no longer re-applied, so a
+  fusion document converges instead of reporting `APPLIED_COUNT = 1` forever.
+
 #### Named admin calls and a published script signature
 
 - Exasol checks parameter arity in the SQL layer, *before* a script body runs, so

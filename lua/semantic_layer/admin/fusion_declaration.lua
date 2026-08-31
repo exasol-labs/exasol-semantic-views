@@ -679,6 +679,16 @@ local function attribute_policy_matches(query_fn, model, attribute_type,
     return rows ~= nil and #rows > 0
 end
 
+local function entity_exists(query_fn, model, entity_name)
+    local rows = query_fn([[
+        SELECT 1 FROM SYS_SEMANTIC.ENTITIES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE' AND UPPER(ENTITY_NAME) = UPPER(:entity_name)
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_name = entity_name})
+    return rows ~= nil and #rows > 0
+end
+
 local function identity_exists(query_fn, model, identity_name)
     local rows = query_fn([[
         SELECT 1 FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
@@ -976,6 +986,20 @@ function M.plan_document(query_fn, model_name, declaration_json)
         names[#names + 1] = tostring(entity_name)
     end
     table.sort(names)
+    local unknown = {}
+    for _, entity_name in ipairs(names) do
+        if not entity_exists(query_fn, model, entity_name) then
+            unknown[#unknown + 1] = entity_name
+        end
+    end
+    if #unknown > 0 then
+        error("SEMANTIC_FUSION_018: document names entit"
+            .. (#unknown == 1 and "y" or "ies") .. " that model '"
+            .. tostring(model.model_name) .. "' does not have: "
+            .. table.concat(unknown, ", ")
+            .. ". Fusion declares how existing entities compose; create the"
+            .. " entity first with ADD_ENTITY.")
+    end
     local operations = {}
     for _, entity_name in ipairs(names) do
         for _, operation in ipairs(

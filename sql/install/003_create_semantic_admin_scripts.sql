@@ -455,16 +455,29 @@ local entity_id = scalar([[
       AND VERSION_ID = :version_id
       AND UPPER(ENTITY_NAME) = UPPER(:entity_name)
 ]], {model_id = model.model_id, version_id = model.version_id, entity_name = entity_name})
+-- Derived, not declared: ADD_ENTITY takes no SOURCE_KIND, so the primary
+-- representation of a federated entity used to be recorded as RELATION --
+-- unrecordable truth in a model whose whole point is that the source is
+-- federated. The catalog already knows, and the doc calls the distinction a
+-- planning input, so a wrong label is a wrong plan input rather than a
+-- cosmetic one.
+local primary_source_kind = "RELATION"
+if tonumber(scalar([[
+    SELECT COUNT(*) FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS
+    WHERE UPPER(SCHEMA_NAME) = UPPER(:source_schema)
+]], {source_schema = source_schema}) or 0) > 0 then
+    primary_source_kind = "VIRTUAL_SCHEMA"
+end
 query([[
     INSERT INTO SYS_SEMANTIC.ENTITY_REPRESENTATIONS (
       MODEL_ID, VERSION_ID, ENTITY_ID, REPRESENTATION_NAME, SOURCE_KIND,
       SOURCE_SCHEMA, SOURCE_OBJECT, SOURCE_ALIAS, REPRESENTATION_ROLE,
       PRIORITY, STATUS
     ) VALUES (
-      :model_id, :version_id, :entity_id, 'primary', 'RELATION',
+      :model_id, :version_id, :entity_id, 'primary', :source_kind,
       :source_schema, :source_object, :source_alias, 'PRIMARY', 1, 'ACTIVE'
     )
-]], {
+]], {source_kind = primary_source_kind, 
     model_id = model.model_id,
     version_id = model.version_id,
     entity_id = entity_id,
@@ -567,6 +580,24 @@ local source_object = normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT")
 local source_kind = missing(SOURCE_KIND) and "RELATION" or upper(trim(SOURCE_KIND))
 if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
     error("SEMANTIC_ADMIN_003: invalid SOURCE_KIND: " .. tostring(SOURCE_KIND))
+end
+-- The catalog settles it, so a declared kind that disagrees is refused rather
+-- than stored. SOURCE_KIND was free text: VIRTUAL_SCHEMA over an ordinary table
+-- and RELATION over a virtual schema were both accepted, and the compiler treats
+-- the distinction as a planning input.
+do
+    local declared_virtual = source_kind == "VIRTUAL_SCHEMA"
+    local actually_virtual = tonumber(scalar([[
+        SELECT COUNT(*) FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS
+        WHERE UPPER(SCHEMA_NAME) = UPPER(:source_schema)
+    ]], {source_schema = source_schema}) or 0) > 0
+    if declared_virtual ~= actually_virtual then
+        error("SEMANTIC_ADMIN_218: SOURCE_KIND " .. source_kind .. " disagrees with"
+            .. " the catalog: " .. tostring(source_schema) .. " is "
+            .. (actually_virtual and "a virtual schema" or "not a virtual schema")
+            .. ". Declare " .. (actually_virtual and "VIRTUAL_SCHEMA" or "RELATION")
+            .. ", or omit SOURCE_KIND and let it default.")
+    end
 end
 local priority = missing(PRIORITY) and 100 or tonumber(PRIORITY)
 if priority == nil or priority < 1 or priority % 1 ~= 0 then
@@ -2500,6 +2531,24 @@ local source_kind = missing(SOURCE_KIND) and "RELATION" or upper(SOURCE_KIND)
 if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
     error("SEMANTIC_ADMIN_003: invalid SOURCE_KIND: " .. tostring(SOURCE_KIND))
 end
+-- The catalog settles it, so a declared kind that disagrees is refused rather
+-- than stored. SOURCE_KIND was free text: VIRTUAL_SCHEMA over an ordinary table
+-- and RELATION over a virtual schema were both accepted, and the compiler treats
+-- the distinction as a planning input.
+do
+    local declared_virtual = source_kind == "VIRTUAL_SCHEMA"
+    local actually_virtual = tonumber(scalar([[
+        SELECT COUNT(*) FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS
+        WHERE UPPER(SCHEMA_NAME) = UPPER(:source_schema)
+    ]], {source_schema = source_schema}) or 0) > 0
+    if declared_virtual ~= actually_virtual then
+        error("SEMANTIC_ADMIN_218: SOURCE_KIND " .. source_kind .. " disagrees with"
+            .. " the catalog: " .. tostring(source_schema) .. " is "
+            .. (actually_virtual and "a virtual schema" or "not a virtual schema")
+            .. ". Declare " .. (actually_virtual and "VIRTUAL_SCHEMA" or "RELATION")
+            .. ", or omit SOURCE_KIND and let it default.")
+    end
+end
 local priority = missing(PRIORITY) and 100 or tonumber(PRIORITY)
 if priority == nil or priority < 1 or priority % 1 ~= 0 then
     error("SEMANTIC_ADMIN_003: PRIORITY must be a positive integer")
@@ -2673,6 +2722,24 @@ end
 local source_kind = missing(SOURCE_KIND) and "RELATION" or upper(SOURCE_KIND)
 if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
     error("SEMANTIC_ADMIN_003: invalid SOURCE_KIND: " .. tostring(SOURCE_KIND))
+end
+-- The catalog settles it, so a declared kind that disagrees is refused rather
+-- than stored. SOURCE_KIND was free text: VIRTUAL_SCHEMA over an ordinary table
+-- and RELATION over a virtual schema were both accepted, and the compiler treats
+-- the distinction as a planning input.
+do
+    local declared_virtual = source_kind == "VIRTUAL_SCHEMA"
+    local actually_virtual = tonumber(scalar([[
+        SELECT COUNT(*) FROM SYS.EXA_ALL_VIRTUAL_SCHEMAS
+        WHERE UPPER(SCHEMA_NAME) = UPPER(:source_schema)
+    ]], {source_schema = source_schema}) or 0) > 0
+    if declared_virtual ~= actually_virtual then
+        error("SEMANTIC_ADMIN_218: SOURCE_KIND " .. source_kind .. " disagrees with"
+            .. " the catalog: " .. tostring(source_schema) .. " is "
+            .. (actually_virtual and "a virtual schema" or "not a virtual schema")
+            .. ". Declare " .. (actually_virtual and "VIRTUAL_SCHEMA" or "RELATION")
+            .. ", or omit SOURCE_KIND and let it default.")
+    end
 end
 local binding_kind = upper(BINDING_KIND)
 if binding_kind ~= "DIRECT" and binding_kind ~= "MAPPED" then
@@ -14303,6 +14370,52 @@ local function validate_metric_plannability(ctx)
         end
     end
     local snapshot = {metric_by_id = ctx.metric_by_id, fact_by_id = fact_by_id}
+
+    -- A metric renders its facts' expressions against its *base* entity's FROM
+    -- clause, and nothing brings a fact's own entity into that plan. So a metric
+    -- whose base entity is not its facts' entity compiles to SQL that references
+    -- an alias it never joins:
+    --
+    --   SELECT SUM((o.freight_amount)) FROM "MART"."ORDER_LINES" ol
+    --
+    -- STATUS = OK, validation clean, and `object O.FREIGHT_AMOUNT not found` at
+    -- execution. Both directions fail the same way -- a coarser fact under a
+    -- finer base and a finer fact under a coarser base -- so this is not about
+    -- fan-out safety, which the grain proofs already cover; it is that the
+    -- metric's declared grain and its inputs' grain must be the same entity.
+    -- Every legitimate metric in the corpus already satisfies it.
+    for _, metric in ipairs(ctx.metrics) do
+        if not missing(metric.base_entity_id) then
+            for _, dependency in ipairs(metric.dependencies or {}) do
+                if upper(dependency.object_type) == "FACT" then
+                    local fact = fact_by_id[key(dependency.object_id)]
+                    if fact ~= nil and not missing(fact.entity_id)
+                        and key(fact.entity_id) ~= key(metric.base_entity_id) then
+                        local base_entity = ctx.entity_by_id[key(metric.base_entity_id)]
+                        local fact_entity = ctx.entity_by_id[key(fact.entity_id)]
+                        add_issue(ctx, "ERROR", "METRIC", metric.name,
+                            "SEMANTIC_MODEL_061",
+                            "Metric is based on entity '"
+                                .. tostring(base_entity and base_entity.name
+                                    or metric.base_entity_id)
+                                .. "' but aggregates fact '" .. tostring(fact.name)
+                                .. "', which belongs to entity '"
+                                .. tostring(fact_entity and fact_entity.name
+                                    or fact.entity_id)
+                                .. "'. The fact's expression would be rendered"
+                                .. " against the base entity's source without"
+                                .. " joining its own, producing SQL that references"
+                                .. " an alias it never joins. Base the metric on '"
+                                .. tostring(fact_entity and fact_entity.name
+                                    or fact.entity_id)
+                                .. "', or aggregate a fact that belongs to '"
+                                .. tostring(base_entity and base_entity.name
+                                    or metric.base_entity_id) .. "'.")
+                    end
+                end
+            end
+        end
+    end
 
     for _, metric in ipairs(ctx.metrics) do
         local dag = metric_plan.build_dag(snapshot, {metric})
@@ -28479,6 +28592,16 @@ local function attribute_policy_matches(query_fn, model, attribute_type,
     return rows ~= nil and #rows > 0
 end
 
+local function entity_exists(query_fn, model, entity_name)
+    local rows = query_fn([[
+        SELECT 1 FROM SYS_SEMANTIC.ENTITIES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE' AND UPPER(ENTITY_NAME) = UPPER(:entity_name)
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_name = entity_name})
+    return rows ~= nil and #rows > 0
+end
+
 local function identity_exists(query_fn, model, identity_name)
     local rows = query_fn([[
         SELECT 1 FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
@@ -28776,6 +28899,20 @@ function M.plan_document(query_fn, model_name, declaration_json)
         names[#names + 1] = tostring(entity_name)
     end
     table.sort(names)
+    local unknown = {}
+    for _, entity_name in ipairs(names) do
+        if not entity_exists(query_fn, model, entity_name) then
+            unknown[#unknown + 1] = entity_name
+        end
+    end
+    if #unknown > 0 then
+        error("SEMANTIC_FUSION_018: document names entit"
+            .. (#unknown == 1 and "y" or "ies") .. " that model '"
+            .. tostring(model.model_name) .. "' does not have: "
+            .. table.concat(unknown, ", ")
+            .. ". Fusion declares how existing entities compose; create the"
+            .. " entity first with ADD_ENTITY.")
+    end
     local operations = {}
     for _, entity_name in ipairs(names) do
         for _, operation in ipairs(

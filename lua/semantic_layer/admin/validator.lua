@@ -3745,6 +3745,52 @@ local function validate_metric_plannability(ctx)
     end
     local snapshot = {metric_by_id = ctx.metric_by_id, fact_by_id = fact_by_id}
 
+    -- A metric renders its facts' expressions against its *base* entity's FROM
+    -- clause, and nothing brings a fact's own entity into that plan. So a metric
+    -- whose base entity is not its facts' entity compiles to SQL that references
+    -- an alias it never joins:
+    --
+    --   SELECT SUM((o.freight_amount)) FROM "MART"."ORDER_LINES" ol
+    --
+    -- STATUS = OK, validation clean, and `object O.FREIGHT_AMOUNT not found` at
+    -- execution. Both directions fail the same way -- a coarser fact under a
+    -- finer base and a finer fact under a coarser base -- so this is not about
+    -- fan-out safety, which the grain proofs already cover; it is that the
+    -- metric's declared grain and its inputs' grain must be the same entity.
+    -- Every legitimate metric in the corpus already satisfies it.
+    for _, metric in ipairs(ctx.metrics) do
+        if not missing(metric.base_entity_id) then
+            for _, dependency in ipairs(metric.dependencies or {}) do
+                if upper(dependency.object_type) == "FACT" then
+                    local fact = fact_by_id[key(dependency.object_id)]
+                    if fact ~= nil and not missing(fact.entity_id)
+                        and key(fact.entity_id) ~= key(metric.base_entity_id) then
+                        local base_entity = ctx.entity_by_id[key(metric.base_entity_id)]
+                        local fact_entity = ctx.entity_by_id[key(fact.entity_id)]
+                        add_issue(ctx, "ERROR", "METRIC", metric.name,
+                            "SEMANTIC_MODEL_061",
+                            "Metric is based on entity '"
+                                .. tostring(base_entity and base_entity.name
+                                    or metric.base_entity_id)
+                                .. "' but aggregates fact '" .. tostring(fact.name)
+                                .. "', which belongs to entity '"
+                                .. tostring(fact_entity and fact_entity.name
+                                    or fact.entity_id)
+                                .. "'. The fact's expression would be rendered"
+                                .. " against the base entity's source without"
+                                .. " joining its own, producing SQL that references"
+                                .. " an alias it never joins. Base the metric on '"
+                                .. tostring(fact_entity and fact_entity.name
+                                    or fact.entity_id)
+                                .. "', or aggregate a fact that belongs to '"
+                                .. tostring(base_entity and base_entity.name
+                                    or metric.base_entity_id) .. "'.")
+                    end
+                end
+            end
+        end
+    end
+
     for _, metric in ipairs(ctx.metrics) do
         local dag = metric_plan.build_dag(snapshot, {metric})
         local node = dag ~= nil and dag.node_by_id[key(metric.id)] or nil

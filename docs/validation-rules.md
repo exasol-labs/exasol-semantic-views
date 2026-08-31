@@ -116,6 +116,7 @@ messages — it may fall, and it may not rise.
 | `SEMANTIC_MODEL_058` | warning | A semantic view exposes metrics and no dimensions, so it publishes as a single grand-total column that can only be grouped by nothing. |
 | `SEMANTIC_MODEL_059` | error | A visible metric aggregates at an entity **coarser** than its object's root, so the join repeats each row and the aggregate is multiplied by the fan-out. See [Metric grain versus object root](#metric-grain-versus-object-root). |
 | `SEMANTIC_MODEL_060` | error | An active representation of an entity that has an F5 semantic identity carries no identity binding, so the representation cannot be joined on the canonical key and is unusable. Split out of `SEMANTIC_MODEL_047` because it is the *cause* of the key, expression and attribute failures reported against that representation, and validation promotes it to the head of the report. |
+| `SEMANTIC_MODEL_061` | error | A metric is based on one entity but aggregates a fact belonging to another. The fact's expression is rendered against the base entity's source without joining its own, so the metric compiles to SQL that references an alias it never joins — `STATUS = OK` and a runtime `object ... not found`. Both directions fail this way, so it is not about fan-out safety: a metric's declared grain and its inputs' grain must be the same entity. |
 
 ## Metric Grain Versus Object Root
 

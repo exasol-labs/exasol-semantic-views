@@ -437,6 +437,15 @@ def main() -> int:
                 f"a document naming another model was applied anyway: {refused}")
         print("ok a document that names a different model is refused")
 
+        unknown_entity = apply_document(
+            con, MODEL, {"entities": {"nosuchentity": {"representations": []}}}, True)
+        if unknown_entity["status"] != "ERROR" or \
+                "SEMANTIC_FUSION_018" not in unknown_entity["message"]:
+            raise AssertionError(
+                "a typo'd entity name was ignored -- the likeliest error in a "
+                f"hand-edited document: {unknown_entity}")
+        print("ok an entity the model does not have is refused by name")
+
         orphan = {"entities": {"customer": {"representations": [{
             "name": "orphan", "source_kind": "RELATION", "source_schema": SCHEMA,
             "source_object": "C_CRM", "priority": 50,

@@ -119,6 +119,13 @@ F5 semantic identity on the same entity, so that pair has no valid outcome to
 reach. Whatever the block declares lands as one candidate, so a validation
 failure removes the representation and everything the call generated.
 
+`SOURCE_KIND` is cross-checked against `SYS.EXA_ALL_VIRTUAL_SCHEMAS`: a declared
+kind that disagrees with the catalog is refused with `SEMANTIC_ADMIN_218` rather
+than stored, because the compiler treats the distinction as a planning input and
+the label was previously free text. The primary representation `ADD_ENTITY`
+creates derives its kind the same way, so a federated entity records
+`VIRTUAL_SCHEMA` without `ADD_ENTITY` needing a new parameter.
+
 Representations support `RELATION` and `VIRTUAL_SCHEMA` sources. All active representations
 must expose the same semantic alias and every column used by attributes that
 have only a compatibility-default binding, filters, unique keys, and
