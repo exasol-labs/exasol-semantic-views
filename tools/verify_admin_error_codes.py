@@ -17,26 +17,21 @@ Requires the sales model installed (tools/install.py --example).
 
 from __future__ import annotations
 
-import os
 import re
-import ssl
 import sys
 from typing import Callable
+import importlib.util
+from pathlib import Path
 
+# Connection defaults, SQL escaping and named result reads live in
+# tools/verify_support.py so 59 verifiers do not each carry their own. See the
+# ratchet in tests/test_conventions.py.
+_SUPPORT = importlib.util.spec_from_file_location(
+    "verify_support", Path(__file__).with_name("verify_support.py"))
+support = importlib.util.module_from_spec(_SUPPORT)
+_SUPPORT.loader.exec_module(support)
 
-def connect():
-    try:
-        import pyexasol  # type: ignore
-    except ImportError:
-        print("pyexasol is required.", file=sys.stderr)
-        raise SystemExit(2)
-    return pyexasol.connect(
-        dsn=f"{os.environ.get('EXASOL_HOST', 'localhost')}:{os.environ.get('EXASOL_PORT', '8563')}",
-        user=os.environ.get("EXASOL_USER", "sys"),
-        password=os.environ.get("EXASOL_PASSWORD", "exasol"),
-        encryption=True,
-        websocket_sslopt={"cert_reqs": ssl.CERT_NONE},
-    )
+connect = support.connect
 
 
 PASSED = 0

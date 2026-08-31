@@ -29,6 +29,8 @@
 -- statement about how sources compose.
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value = ESV_ROWS.missing, ESV_ROWS.row_value
 local rollback = assert(ESV_CATALOG_ROLLBACK,
     "shared catalog rollback runtime is required")
 
@@ -47,11 +49,6 @@ local M = {}
 -- the catalog. An omitted key and an explicit null now mean the same thing,
 -- which is what the round-trip contract requires -- the exporter omits absent
 -- keys rather than writing them as null.
-local function missing(value)
-    return value == nil or value == null or value == json.NULL
-        or tostring(value) == ""
-end
-
 local function trim(value)
     if missing(value) then return "" end
     return tostring(value):match("^%s*(.-)%s*$")
@@ -59,11 +56,6 @@ end
 
 local function upper(value)
     return string.upper(trim(value))
-end
-
-local function row_value(row, name, position)
-    if row == nil then return nil end
-    return row[name] or row[string.lower(name)] or row[position]
 end
 
 -- Absent keys are omitted from the document rather than written as null: the

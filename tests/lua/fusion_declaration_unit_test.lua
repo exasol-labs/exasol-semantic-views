@@ -561,3 +561,85 @@ test("fusion apply reports a malformed document in STATUS, not as a raise", func
     assert_equal(rows[1][4], 0)
     assert_equal(rows[1][5], 0)
 end)
+
+test("fusion export assembles a full document from named catalog rows", function()
+    -- Named rows, on purpose. Every read in the export path carries a column
+    -- name *and* a hand-counted ordinal, and shared/rows.lua now refuses a named
+    -- row that has to answer by ordinal -- so this fixture is simultaneously a
+    -- test of the document and a check that the names and ordinals agree with
+    -- the SELECTs above them. A renamed column in one of those queries fails
+    -- here rather than exporting a document with a field silently missing.
+    local mock = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{MODEL_ID = 1, ACTIVE_VERSION_ID = 2, MODEL_NAME = "sales",
+                STATUS = "PUBLISHED"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
+            return {{ENTITY_NAME = "customer", REPRESENTATION_ID = 11,
+                REPRESENTATION_NAME = "crm", SOURCE_KIND = "RELATION",
+                SOURCE_SCHEMA = "MART", SOURCE_OBJECT = "CRM_CUSTOMERS",
+                SOURCE_ALIAS = "crm", REPRESENTATION_ROLE = "SUPPLEMENTAL",
+                PRIORITY = 20, FRESHNESS_POLICY = "DAILY",
+                COVERAGE_PREDICATE = "crm.region = 'EMEA'",
+                VALID_FROM = null, VALID_TO = null,
+                AUTHORITY_ROLE = "AUTHORITATIVE"}}
+        elseif sql:find("FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES", 1, true) then
+            return {{ENTITY_NAME = "customer", IDENTITY_NAME = "customer_key",
+                IDENTITY_KIND = "NATURAL", DATA_TYPE = "VARCHAR(64)",
+                DESCRIPTION = "the shared customer key"}}
+        elseif sql:find("FROM SYS_SEMANTIC.IDENTITY_BINDINGS", 1, true) then
+            return {{ENTITY_NAME = "customer", REPRESENTATION_NAME = "crm",
+                SOURCE_EXPRESSION = "crm.account_id", BINDING_KIND = "MAPPED",
+                SOURCE_SCHEMA = "MART", SOURCE_OBJECT = "CRM_MAP",
+                SOURCE_LOCAL_COLUMN = "account_id",
+                SEMANTIC_KEY_COLUMN = "customer_key",
+                CERTIFICATION_STATUS = "CERTIFIED"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS", 1, true) then
+            return {{ENTITY_NAME = "customer", ATTRIBUTE_TYPE = "DIMENSION",
+                ATTRIBUTE_NAME = "customer_region", REPRESENTATION_NAME = "crm",
+                SOURCE_EXPRESSION = "crm.region", BINDING_ROLE = "PREFER",
+                BINDING_PRIORITY = 5}}
+        elseif sql:find("FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES", 1, true) then
+            return {{ENTITY_NAME = "customer", ATTRIBUTE_TYPE = "DIMENSION",
+                ATTRIBUTE_NAME = "customer_region", FUSION_STRATEGY = "PREFER"}}
+        end
+        return {}
+    end)
+
+    local document = api.build_document(mock, "sales", nil)
+    assert_equal(document.model, "sales")
+    local entity = document.entities.customer
+    assert_true(entity ~= nil, "the entity was not assembled")
+
+    local representation = entity.representations[1]
+    assert_equal(representation.name, "crm")
+    assert_equal(representation.role, "SUPPLEMENTAL")
+    assert_equal(representation.source_schema, "MART")
+    assert_equal(representation.source_object, "CRM_CUSTOMERS")
+    assert_equal(representation.source_alias, "crm")
+    assert_equal(representation.priority, 20)
+    assert_equal(representation.freshness_policy, "DAILY")
+    assert_equal(representation.authority, "AUTHORITATIVE")
+    assert_equal(representation.coverage.predicate, "crm.region = 'EMEA'")
+
+    assert_equal(entity.identity.name, "customer_key")
+    assert_equal(entity.identity.kind, "NATURAL")
+    assert_equal(entity.identity.data_type, "VARCHAR(64)")
+
+    -- The mapped binding and its two-column mapping relation, which is what F5
+    -- needs to reach a semantic key at all.
+    local binding = representation.identity_binding
+    assert_equal(binding.binding_kind, "MAPPED")
+    assert_equal(binding.source_expression, "crm.account_id")
+    assert_equal(binding.mapping.source_object, "CRM_MAP")
+    assert_equal(binding.mapping.source_local_column, "account_id")
+    assert_equal(binding.mapping.semantic_key_column, "customer_key")
+    assert_equal(binding.mapping.certification_status, "CERTIFIED")
+
+    assert_equal(entity.attribute_bindings[1].attribute_name, "customer_region")
+    assert_equal(entity.attribute_bindings[1].binding_priority, 5)
+    assert_equal(entity.attribute_policies[1].strategy, "PREFER")
+
+    -- And the document round-trips through the codec that writes it.
+    local encoded = api.build_document(mock, "sales", nil)
+    assert_equal(ESV_JSON.encode(document), ESV_JSON.encode(encoded))
+end)

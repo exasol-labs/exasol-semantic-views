@@ -9449,6 +9449,121 @@ end
 
 ESV_JSON = M
 
+-- Reading a driver result row, once.
+--
+-- Every runtime opened with the same four helpers, and the copies had drifted in
+-- one way that matters: `row[name] or row[lower] or row[position]` treats a
+-- boolean FALSE as absent and falls through to an ordinal that is usually nil,
+-- so a FALSE read out of a row could arrive as NULL. shared/catalog_rollback.lua
+-- was given an explicit nil test when it was extracted; the other six modules
+-- kept the `or` chain. This is that fix, in the one place it can now be made.
+--
+-- The bigger reason for the module is what `row_value`'s third argument is.
+--
+-- Exasol returns named rows, so production reads `row[name]`. The offline test
+-- harness stubs `query` with positional arrays (`{{"CUSTOMER_ID"}}`), so tests
+-- read `row[position]`. Both branches are covered; the *agreement* between them
+-- was not, across 763 call sites carrying a hand-counted ordinal. Worse, a
+-- misspelled name in production does not fail -- it falls through to the ordinal
+-- and returns whatever column happens to sit there.
+--
+-- ESV_TEST_MODE makes that reachable. A row that carries names is what
+-- production sees; asking such a row for a name it does not have is the defect,
+-- and the ordinal fallback is what hides it. A row with no names at all is a
+-- positional stub, where the ordinal is the only thing there is. So the check is
+-- not "the ordinal was used" -- it is "the ordinal was used on a row that could
+-- have answered by name".
+
+local M = {}
+
+-- Everything below is inside a `do` block so this module costs the runtime one
+-- main-chunk local instead of five. Exasol caps a function at 200 locals and a
+-- generated runtime script is every source concatenated into one chunk, so a
+-- shared module's top-level names are spent from the same budget as its
+-- callers' -- see CLAUDE.md, "The 200-Local Ceiling Applies to the Sum".
+do
+
+    local json = assert(ESV_JSON, "shared JSON runtime is required")
+    local STRICT = rawget(_G, "ESV_TEST_MODE") == true
+
+    -- A SQL NULL parameter reaches an Exasol Lua script as *userdata*, and userdata
+    -- is truthy, so `value or default` silently yields the address. `null` is the
+    -- script-context global for it; comparing against it is the only reliable test.
+    -- json.NULL is here too because a decoded document's explicit null means the
+    -- same thing as an omitted key everywhere in this runtime.
+    function M.missing(value)
+        return value == nil or value == null or value == json.NULL
+            or tostring(value) == ""
+    end
+
+    function M.null_if_missing(value)
+        if M.missing(value) then
+            return null
+        end
+        return value
+    end
+
+    -- Does this row know its own column names?
+    --
+    -- A named row has at least one string key. A positional row has only integers.
+    -- Both shapes reach this module: the first from Exasol, the second from a test
+    -- stub, and telling them apart is what makes the strict check safe to turn on.
+    local function is_named(row)
+        for key, _ in pairs(row) do
+            if type(key) ~= "number" then return true end
+        end
+        return false
+    end
+
+    local function lookup(row, name, position)
+        local value = row[name]
+        if value == nil then value = row[string.lower(name)] end
+        if value ~= nil then return value, true end
+        return row[position], false
+    end
+
+    -- One column of one row, by name, with its ordinal as the fallback.
+    function M.row_value(row, name, position)
+        if row == nil then return nil end
+        local value, by_name = lookup(row, name, position)
+        -- The defect is narrower than "the ordinal was used". A named row that has
+        -- neither the name nor the ordinal yields nil either way -- no ambiguity, and
+        -- a partially-populated test fixture is allowed to do that. What loses data
+        -- is a named row that lacks the name while *something* sits at the ordinal:
+        -- the caller then gets a different column's value and cannot tell.
+        if STRICT and not by_name and value ~= nil and is_named(row) then
+            error("row_value: row has named columns but not '" .. tostring(name)
+                .. "', so ordinal " .. tostring(position) .. " returned a different "
+                .. "column's value. Fix the name, or the SELECT that was supposed to "
+                .. "project it.", 2)
+        end
+        return value
+    end
+
+    -- The first column of the first row of a single-value query.
+    --
+    -- Deliberately not strict: it probes three conventional aliases before falling
+    -- back to the ordinal, because `SELECT MAX(x)` names its column after the
+    -- expression and no caller wants to spell that out. Missing names are the normal
+    -- case here, which is exactly why it cannot use M.row_value.
+    function M.scalar(sql_text, params)
+        local rows = query(sql_text, params or {})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local row = rows[1]
+        for _, name in ipairs({"VALUE", "COUNT", "MAX"}) do
+            local value = row[name]
+            if value == nil then value = row[string.lower(name)] end
+            if value ~= nil then return value end
+        end
+        return row[1]
+    end
+
+end
+
+ESV_ROWS = M
+
 -- Reading and writing SQL text, shared by every runtime that does either.
 --
 -- `shared/grain_graph.lua` exists because relationship proofs must not drift
@@ -10126,6 +10241,30 @@ function M.attempted_path(all_edges, from_id, to_id)
         return table.concat(paths, " | "), proof.reason
     end
     return nil, proof.reason
+end
+
+-- The first unique key on an entity whose columns are all *physical*.
+--
+-- A key with an expression column cannot be matched against a mapping relation
+-- or a join, so identity and fusion proofs need the column-only one. This lived
+-- in compiler/request_json.lua as `physical_unique_key` and in
+-- admin/validator.lua as `physical_fusion_key`, byte-identical under two names,
+-- which is the shape that let the compiler and the validator disagree about
+-- which key they were proving against. Key matching already lives here.
+function M.physical_unique_key(unique_keys)
+    for _, unique_key in ipairs(unique_keys or {}) do
+        if #(unique_key.columns or {}) > 0 then
+            local physical = true
+            for _, column in ipairs(unique_key.columns) do
+                if missing(column.column_name) or not missing(column.expression) then
+                    physical = false
+                    break
+                end
+            end
+            if physical then return unique_key end
+        end
+    end
+    return nil
 end
 
 function M.canonical_key(unique_key)
@@ -11298,6 +11437,13 @@ ESV_METRIC_PLAN = M
 
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+-- Bound to their own names rather than through a module alias: 763 call sites
+-- read better as `row_value(row, ...)`, a `rows` alias would be shadowed by the
+-- many local `rows` variables these files declare, and four names cost the chunk
+-- exactly what the four function definitions they replace used to.
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value, null_if_missing, scalar =
+    ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
@@ -11500,27 +11646,8 @@ local CAST_TARGET_TYPES = {
     VARCHAR2 = true,
 }
 
-local function missing(value)
-    return value == nil or value == null or tostring(value) == ""
-end
-
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
 end
 
 local function count_query(sql_text, params)
@@ -11538,13 +11665,6 @@ end
 local function nil_if_missing(value)
     if missing(value) then
         return nil
-    end
-    return value
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
     end
     return value
 end
@@ -14195,22 +14315,6 @@ local function fusion_attribute(ctx, policy)
     return nil
 end
 
-local function physical_fusion_key(ctx, entity_id)
-    for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity_id)] or {}) do
-        if #(unique_key.columns or {}) > 0 then
-            local physical = true
-            for _, column in ipairs(unique_key.columns) do
-                if missing(column.column_name) or not missing(column.expression) then
-                    physical = false
-                    break
-                end
-            end
-            if physical then return unique_key end
-        end
-    end
-    return nil
-end
-
 local function validate_fusion_policies(ctx)
     local representation_by_id = {}
     local authoritative_by_entity = {}
@@ -14269,7 +14373,7 @@ local function validate_fusion_policies(ctx)
                     "SEMANTIC_MODEL_044", strategy
                         .. " requires active bindings on at least two representations.")
             end
-            if physical_fusion_key(ctx, attribute.entity_id) == nil
+            if grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) == nil
                 and (entity == nil or complete_semantic_identity(ctx, entity) == nil) then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
                     "SEMANTIC_MODEL_044", strategy
@@ -14364,7 +14468,7 @@ local function validate_fusion_conflicts(ctx)
             local attribute = fusion_attribute(ctx, policy)
             local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
             local bindings = ctx.bindings_by_attribute[attribute_key] or {}
-            local unique_key = attribute and physical_fusion_key(ctx, attribute.entity_id) or nil
+            local unique_key = attribute and grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) or nil
             local entity = attribute and ctx.entity_by_id[key(attribute.entity_id)] or nil
             local semantic_identity = entity and complete_semantic_identity(ctx, entity) or nil
             local conflict_count = 0
@@ -15412,11 +15516,468 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
+-- One JSON implementation for the whole runtime.
+--
+-- There were four. `compiler/request_json.lua` and `admin/semantic_definition.lua`
+-- carried a byte-identical 179-line block (encoder, decoder, `is_array`, escape);
+-- `agent/runtime.lua` carried a third copy of the encoder half; and
+-- `admin/validator.lua` carried a fourth parser of its own for well-formedness
+-- checks. `admin/fusion_declaration.lua` avoided becoming a fifth only by taking
+-- a dependency on the 4 600-line DDL parser to reach an encoder.
+--
+-- The copies had already drifted, and the drift was invisible because nothing
+-- compared them. `compiler/query_spec.lua`'s `is_array` omitted the `JSON_NULL`
+-- guard the other three had -- it had no sentinel in scope to compare against --
+-- so `{"metrics": null}` reached the planner as an empty list on one code path
+-- and as a refusal on another. `admin/fusion_declaration.lua` borrowed a decoder
+-- whose sentinel its own `missing()` did not recognise, so a JSON `null` in a
+-- declaration read as a *present* value that rendered as "table: 0x...".
+--
+-- Both defects are the same defect: a sentinel is only meaningful to code that
+-- shares its identity, and identity cannot be shared across copies. Hence one
+-- module, embedded by tools/package_lua_scripts.py into every runtime script
+-- that needs it, the way shared/identity_join.lua already is.
+--
+-- Two entry points read text, and they are deliberately not the same function:
+--
+--   M.decode(text)    builds a value; lenient about scalar spelling
+--   M.is_valid(text)  answers yes/no; strict RFC 8259 scalar grammar
+--
+-- The difference is real and load-bearing, so it is one parser with one `strict`
+-- flag rather than two files. `M.decode` is applied to payloads this runtime
+-- wrote and must keep accepting what it accepted before; `M.is_valid` backs
+-- SEMANTIC_MODEL validation of user-supplied extension JSON, where "looks close
+-- enough" is the wrong answer. tests/lua/json_unit_test.lua pins each input the
+-- two disagree about.
+
 local M = {}
 
-local function missing(value)
-    return value == nil or value == null or tostring(value) == ""
+-- The decoded spelling of JSON `null`.
+--
+-- A sentinel table, not Lua `nil`: in a Lua table an explicit null and an absent
+-- key are the same thing, and the difference matters wherever a document's
+-- omitted key means "leave alone" and an explicit null means "unset". Callers
+-- test identity (`value == json.NULL`), never `type` or `tostring`, so this
+-- stays a bare table with no metatable -- giving it a `__tostring` would make
+-- the wrong test look like it worked.
+M.NULL = {}
+
+function M.is_array(value)
+    if type(value) ~= "table" or value == M.NULL then
+        return false
+    end
+    local max_index = 0
+    local count = 0
+    for k, _ in pairs(value) do
+        if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then
+            return false
+        end
+        if k > max_index then
+            max_index = k
+        end
+        count = count + 1
+    end
+    return max_index == count
 end
+
+function M.escape(value)
+    local text = tostring(value)
+    text = string.gsub(text, "\\", "\\\\")
+    text = string.gsub(text, '"', '\\"')
+    text = string.gsub(text, "\n", "\\n")
+    text = string.gsub(text, "\r", "\\r")
+    text = string.gsub(text, "\t", "\\t")
+    return text
+end
+
+-- Object keys are emitted in sorted order, which is what makes an exported
+-- document comparable to a re-exported one -- the round-trip contract behind
+-- EXPORT_FUSION_DECLARATION and EXPORT_SEMANTIC_DEFINITION.
+function M.encode(value)
+    local value_type = type(value)
+    if value == nil or value == null or value == M.NULL then
+        return "null"
+    elseif value_type == "string" then
+        return '"' .. M.escape(value) .. '"'
+    elseif value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "true" or "false"
+    elseif value_type == "table" then
+        local parts = {}
+        if M.is_array(value) then
+            for i = 1, #value do
+                parts[#parts + 1] = M.encode(value[i])
+            end
+            return "[" .. table.concat(parts, ",") .. "]"
+        end
+        local keys = {}
+        for k, _ in pairs(value) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            parts[#parts + 1] = M.encode(k) .. ":" .. M.encode(value[k])
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+    end
+    return M.encode(tostring(value))
+end
+
+-- One recursive-descent parser. `strict` selects the scalar grammar:
+--
+--   strict = false  numbers are scanned loosely and handed to tonumber, a \u
+--                   escape is accepted without checking its digits and decodes
+--                   to "?", and a raw control character inside a string passes.
+--   strict = true   numbers follow RFC 8259 exactly (no leading zero, a
+--                   fraction and an exponent must have digits), \u must be four
+--                   hex digits, and a byte below 0x20 inside a string is an
+--                   error.
+--
+-- The structure -- whitespace, arrays, objects, keywords, the trailing-input
+-- check -- is shared, because that half never differed between the two copies
+-- this replaces. Values are built in both modes; is_valid discards them, which
+-- costs less than a second traversal would cost to maintain.
+local function parse(text, strict)
+    if text == nil or text == null or text == M.NULL or tostring(text) == "" then
+        error("empty JSON payload")
+    end
+    text = tostring(text)
+    local pos = 1
+
+    local function peek()
+        return string.sub(text, pos, pos)
+    end
+
+    local function is_digit(c)
+        return string.match(c, "^%d$") ~= nil
+    end
+
+    local function skip_ws()
+        while pos <= #text do
+            local c = peek()
+            if c == " " or c == "\n" or c == "\r" or c == "\t" then
+                pos = pos + 1
+            else
+                return
+            end
+        end
+    end
+
+    local function read_digits()
+        local count = 0
+        while is_digit(peek()) do
+            count = count + 1
+            pos = pos + 1
+        end
+        return count
+    end
+
+    local ESCAPES = {['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b",
+        f = "\f", n = "\n", r = "\r", t = "\t"}
+
+    local function parse_string()
+        if peek() ~= '"' then
+            error("expected string at byte " .. tostring(pos))
+        end
+        pos = pos + 1
+        local out = {}
+        while pos <= #text do
+            local c = peek()
+            if c == '"' then
+                pos = pos + 1
+                return table.concat(out)
+            elseif c == "\\" then
+                local e = string.sub(text, pos + 1, pos + 1)
+                if ESCAPES[e] ~= nil then
+                    out[#out + 1] = ESCAPES[e]
+                    pos = pos + 2
+                elseif e == "u" then
+                    if strict then
+                        for offset = 2, 5 do
+                            local digit = string.sub(text, pos + offset, pos + offset)
+                            if string.match(digit, "^[0-9A-Fa-f]$") == nil then
+                                error("invalid unicode escape at byte " .. tostring(pos))
+                            end
+                        end
+                    end
+                    -- Lossy and long-standing: the runtime stores model metadata
+                    -- as ASCII, and a decoder that expanded escapes would have to
+                    -- encode them again to keep a round-trip stable.
+                    out[#out + 1] = "?"
+                    pos = pos + 6
+                else
+                    error("invalid escape at byte " .. tostring(pos))
+                end
+            elseif strict and (c == "" or string.byte(c) < 32) then
+                error("invalid control character in string at byte " .. tostring(pos))
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+        error("unterminated string")
+    end
+
+    local parse_value
+
+    local function parse_number()
+        local start_pos = pos
+        if peek() == "-" then
+            pos = pos + 1
+        end
+        if strict then
+            if peek() == "0" then
+                pos = pos + 1
+            elseif string.match(peek(), "^[1-9]$") then
+                read_digits()
+            else
+                error("invalid number at byte " .. tostring(start_pos))
+            end
+        else
+            read_digits()
+        end
+        if peek() == "." then
+            pos = pos + 1
+            if read_digits() == 0 and strict then
+                error("invalid number fraction at byte " .. tostring(pos))
+            end
+        end
+        local c = peek()
+        if c == "e" or c == "E" then
+            pos = pos + 1
+            c = peek()
+            if c == "+" or c == "-" then
+                pos = pos + 1
+            end
+            if read_digits() == 0 and strict then
+                error("invalid number exponent at byte " .. tostring(pos))
+            end
+        end
+        local value = tonumber(string.sub(text, start_pos, pos - 1))
+        if value == nil then
+            error("invalid number at byte " .. tostring(start_pos))
+        end
+        return value
+    end
+
+    local function parse_array()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "]" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            out[#out + 1] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "]" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected array comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    local function parse_object()
+        pos = pos + 1
+        local out = {}
+        skip_ws()
+        if peek() == "}" then
+            pos = pos + 1
+            return out
+        end
+        while true do
+            skip_ws()
+            local name = parse_string()
+            skip_ws()
+            if peek() ~= ":" then
+                error("expected object colon at byte " .. tostring(pos))
+            end
+            pos = pos + 1
+            out[name] = parse_value()
+            skip_ws()
+            local c = peek()
+            if c == "}" then
+                pos = pos + 1
+                return out
+            elseif c == "," then
+                pos = pos + 1
+            else
+                error("expected object comma or close at byte " .. tostring(pos))
+            end
+        end
+    end
+
+    function parse_value()
+        skip_ws()
+        local c = peek()
+        if c == '"' then
+            return parse_string()
+        elseif c == "{" then
+            return parse_object()
+        elseif c == "[" then
+            return parse_array()
+        elseif c == "-" or is_digit(c) then
+            return parse_number()
+        elseif string.sub(text, pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif string.sub(text, pos, pos + 4) == "false" then
+            pos = pos + 5
+            return false
+        elseif string.sub(text, pos, pos + 3) == "null" then
+            pos = pos + 4
+            return M.NULL
+        end
+        error("unexpected JSON token at byte " .. tostring(pos))
+    end
+
+    local value = parse_value()
+    skip_ws()
+    if pos <= #text then
+        error("unexpected trailing JSON at byte " .. tostring(pos))
+    end
+    return value
+end
+
+-- Raises on malformed input; the message names the byte offset.
+function M.decode(text)
+    return parse(text, false)
+end
+
+-- Well-formedness only, under the strict scalar grammar. Never raises.
+function M.is_valid(text)
+    local ok = pcall(parse, text, true)
+    return ok
+end
+
+ESV_JSON = M
+
+-- Reading a driver result row, once.
+--
+-- Every runtime opened with the same four helpers, and the copies had drifted in
+-- one way that matters: `row[name] or row[lower] or row[position]` treats a
+-- boolean FALSE as absent and falls through to an ordinal that is usually nil,
+-- so a FALSE read out of a row could arrive as NULL. shared/catalog_rollback.lua
+-- was given an explicit nil test when it was extracted; the other six modules
+-- kept the `or` chain. This is that fix, in the one place it can now be made.
+--
+-- The bigger reason for the module is what `row_value`'s third argument is.
+--
+-- Exasol returns named rows, so production reads `row[name]`. The offline test
+-- harness stubs `query` with positional arrays (`{{"CUSTOMER_ID"}}`), so tests
+-- read `row[position]`. Both branches are covered; the *agreement* between them
+-- was not, across 763 call sites carrying a hand-counted ordinal. Worse, a
+-- misspelled name in production does not fail -- it falls through to the ordinal
+-- and returns whatever column happens to sit there.
+--
+-- ESV_TEST_MODE makes that reachable. A row that carries names is what
+-- production sees; asking such a row for a name it does not have is the defect,
+-- and the ordinal fallback is what hides it. A row with no names at all is a
+-- positional stub, where the ordinal is the only thing there is. So the check is
+-- not "the ordinal was used" -- it is "the ordinal was used on a row that could
+-- have answered by name".
+
+local M = {}
+
+-- Everything below is inside a `do` block so this module costs the runtime one
+-- main-chunk local instead of five. Exasol caps a function at 200 locals and a
+-- generated runtime script is every source concatenated into one chunk, so a
+-- shared module's top-level names are spent from the same budget as its
+-- callers' -- see CLAUDE.md, "The 200-Local Ceiling Applies to the Sum".
+do
+
+    local json = assert(ESV_JSON, "shared JSON runtime is required")
+    local STRICT = rawget(_G, "ESV_TEST_MODE") == true
+
+    -- A SQL NULL parameter reaches an Exasol Lua script as *userdata*, and userdata
+    -- is truthy, so `value or default` silently yields the address. `null` is the
+    -- script-context global for it; comparing against it is the only reliable test.
+    -- json.NULL is here too because a decoded document's explicit null means the
+    -- same thing as an omitted key everywhere in this runtime.
+    function M.missing(value)
+        return value == nil or value == null or value == json.NULL
+            or tostring(value) == ""
+    end
+
+    function M.null_if_missing(value)
+        if M.missing(value) then
+            return null
+        end
+        return value
+    end
+
+    -- Does this row know its own column names?
+    --
+    -- A named row has at least one string key. A positional row has only integers.
+    -- Both shapes reach this module: the first from Exasol, the second from a test
+    -- stub, and telling them apart is what makes the strict check safe to turn on.
+    local function is_named(row)
+        for key, _ in pairs(row) do
+            if type(key) ~= "number" then return true end
+        end
+        return false
+    end
+
+    local function lookup(row, name, position)
+        local value = row[name]
+        if value == nil then value = row[string.lower(name)] end
+        if value ~= nil then return value, true end
+        return row[position], false
+    end
+
+    -- One column of one row, by name, with its ordinal as the fallback.
+    function M.row_value(row, name, position)
+        if row == nil then return nil end
+        local value, by_name = lookup(row, name, position)
+        -- The defect is narrower than "the ordinal was used". A named row that has
+        -- neither the name nor the ordinal yields nil either way -- no ambiguity, and
+        -- a partially-populated test fixture is allowed to do that. What loses data
+        -- is a named row that lacks the name while *something* sits at the ordinal:
+        -- the caller then gets a different column's value and cannot tell.
+        if STRICT and not by_name and value ~= nil and is_named(row) then
+            error("row_value: row has named columns but not '" .. tostring(name)
+                .. "', so ordinal " .. tostring(position) .. " returned a different "
+                .. "column's value. Fix the name, or the SELECT that was supposed to "
+                .. "project it.", 2)
+        end
+        return value
+    end
+
+    -- The first column of the first row of a single-value query.
+    --
+    -- Deliberately not strict: it probes three conventional aliases before falling
+    -- back to the ordinal, because `SELECT MAX(x)` names its column after the
+    -- expression and no caller wants to spell that out. Missing names are the normal
+    -- case here, which is exactly why it cannot use M.row_value.
+    function M.scalar(sql_text, params)
+        local rows = query(sql_text, params or {})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local row = rows[1]
+        for _, name in ipairs({"VALUE", "COUNT", "MAX"}) do
+            local value = row[name]
+            if value == nil then value = row[string.lower(name)] end
+            if value ~= nil then return value end
+        end
+        return row[1]
+    end
+
+end
+
+ESV_ROWS = M
+
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value = ESV_ROWS.missing, ESV_ROWS.row_value
+
+local M = {}
 
 local function upper(value)
     return string.upper(tostring(value))
@@ -15424,13 +15985,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
 end
 
 local function field_key(field)
@@ -16185,6 +16739,121 @@ end
 
 ESV_JSON = M
 
+-- Reading a driver result row, once.
+--
+-- Every runtime opened with the same four helpers, and the copies had drifted in
+-- one way that matters: `row[name] or row[lower] or row[position]` treats a
+-- boolean FALSE as absent and falls through to an ordinal that is usually nil,
+-- so a FALSE read out of a row could arrive as NULL. shared/catalog_rollback.lua
+-- was given an explicit nil test when it was extracted; the other six modules
+-- kept the `or` chain. This is that fix, in the one place it can now be made.
+--
+-- The bigger reason for the module is what `row_value`'s third argument is.
+--
+-- Exasol returns named rows, so production reads `row[name]`. The offline test
+-- harness stubs `query` with positional arrays (`{{"CUSTOMER_ID"}}`), so tests
+-- read `row[position]`. Both branches are covered; the *agreement* between them
+-- was not, across 763 call sites carrying a hand-counted ordinal. Worse, a
+-- misspelled name in production does not fail -- it falls through to the ordinal
+-- and returns whatever column happens to sit there.
+--
+-- ESV_TEST_MODE makes that reachable. A row that carries names is what
+-- production sees; asking such a row for a name it does not have is the defect,
+-- and the ordinal fallback is what hides it. A row with no names at all is a
+-- positional stub, where the ordinal is the only thing there is. So the check is
+-- not "the ordinal was used" -- it is "the ordinal was used on a row that could
+-- have answered by name".
+
+local M = {}
+
+-- Everything below is inside a `do` block so this module costs the runtime one
+-- main-chunk local instead of five. Exasol caps a function at 200 locals and a
+-- generated runtime script is every source concatenated into one chunk, so a
+-- shared module's top-level names are spent from the same budget as its
+-- callers' -- see CLAUDE.md, "The 200-Local Ceiling Applies to the Sum".
+do
+
+    local json = assert(ESV_JSON, "shared JSON runtime is required")
+    local STRICT = rawget(_G, "ESV_TEST_MODE") == true
+
+    -- A SQL NULL parameter reaches an Exasol Lua script as *userdata*, and userdata
+    -- is truthy, so `value or default` silently yields the address. `null` is the
+    -- script-context global for it; comparing against it is the only reliable test.
+    -- json.NULL is here too because a decoded document's explicit null means the
+    -- same thing as an omitted key everywhere in this runtime.
+    function M.missing(value)
+        return value == nil or value == null or value == json.NULL
+            or tostring(value) == ""
+    end
+
+    function M.null_if_missing(value)
+        if M.missing(value) then
+            return null
+        end
+        return value
+    end
+
+    -- Does this row know its own column names?
+    --
+    -- A named row has at least one string key. A positional row has only integers.
+    -- Both shapes reach this module: the first from Exasol, the second from a test
+    -- stub, and telling them apart is what makes the strict check safe to turn on.
+    local function is_named(row)
+        for key, _ in pairs(row) do
+            if type(key) ~= "number" then return true end
+        end
+        return false
+    end
+
+    local function lookup(row, name, position)
+        local value = row[name]
+        if value == nil then value = row[string.lower(name)] end
+        if value ~= nil then return value, true end
+        return row[position], false
+    end
+
+    -- One column of one row, by name, with its ordinal as the fallback.
+    function M.row_value(row, name, position)
+        if row == nil then return nil end
+        local value, by_name = lookup(row, name, position)
+        -- The defect is narrower than "the ordinal was used". A named row that has
+        -- neither the name nor the ordinal yields nil either way -- no ambiguity, and
+        -- a partially-populated test fixture is allowed to do that. What loses data
+        -- is a named row that lacks the name while *something* sits at the ordinal:
+        -- the caller then gets a different column's value and cannot tell.
+        if STRICT and not by_name and value ~= nil and is_named(row) then
+            error("row_value: row has named columns but not '" .. tostring(name)
+                .. "', so ordinal " .. tostring(position) .. " returned a different "
+                .. "column's value. Fix the name, or the SELECT that was supposed to "
+                .. "project it.", 2)
+        end
+        return value
+    end
+
+    -- The first column of the first row of a single-value query.
+    --
+    -- Deliberately not strict: it probes three conventional aliases before falling
+    -- back to the ordinal, because `SELECT MAX(x)` names its column after the
+    -- expression and no caller wants to spell that out. Missing names are the normal
+    -- case here, which is exactly why it cannot use M.row_value.
+    function M.scalar(sql_text, params)
+        local rows = query(sql_text, params or {})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local row = rows[1]
+        for _, name in ipairs({"VALUE", "COUNT", "MAX"}) do
+            local value = row[name]
+            if value == nil then value = row[string.lower(name)] end
+            if value ~= nil then return value end
+        end
+        return row[1]
+    end
+
+end
+
+ESV_ROWS = M
+
 -- Reading and writing SQL text, shared by every runtime that does either.
 --
 -- `shared/grain_graph.lua` exists because relationship proofs must not drift
@@ -16862,6 +17531,30 @@ function M.attempted_path(all_edges, from_id, to_id)
         return table.concat(paths, " | "), proof.reason
     end
     return nil, proof.reason
+end
+
+-- The first unique key on an entity whose columns are all *physical*.
+--
+-- A key with an expression column cannot be matched against a mapping relation
+-- or a join, so identity and fusion proofs need the column-only one. This lived
+-- in compiler/request_json.lua as `physical_unique_key` and in
+-- admin/validator.lua as `physical_fusion_key`, byte-identical under two names,
+-- which is the shape that let the compiler and the validator disagree about
+-- which key they were proving against. Key matching already lives here.
+function M.physical_unique_key(unique_keys)
+    for _, unique_key in ipairs(unique_keys or {}) do
+        if #(unique_key.columns or {}) > 0 then
+            local physical = true
+            for _, column in ipairs(unique_key.columns) do
+                if missing(column.column_name) or not missing(column.expression) then
+                    physical = false
+                    break
+                end
+            end
+            if physical then return unique_key end
+        end
+    end
+    return nil
 end
 
 function M.canonical_key(unique_key)
@@ -19389,6 +20082,13 @@ ESV_GRAIN_SQL = M
 
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+-- Bound to their own names rather than through a module alias: 763 call sites
+-- read better as `row_value(row, ...)`, a `rows` alias would be shadowed by the
+-- many local `rows` variables these files declare, and four names cost the chunk
+-- exactly what the four function definitions they replace used to.
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value, null_if_missing, scalar =
+    ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 
 -- Semantic SQL compares whole comparison operators, so the lexer fuses
@@ -19421,10 +20121,6 @@ local materialization_runtime = materializations
 local JSON_NULL = json.NULL
 local MAX_LIMIT = 10000
 
-local function missing(value)
-    return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
-end
-
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
@@ -19435,28 +20131,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
-    end
-    return value
 end
 
 
@@ -20837,22 +21511,6 @@ local function collect_metric_facts(ctx, metric, required, seen_metrics)
     end
 end
 
-local function physical_unique_key(ctx, entity_id)
-    for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity_id)] or {}) do
-        if #(unique_key.columns or {}) > 0 then
-            local physical = true
-            for _, column in ipairs(unique_key.columns) do
-                if missing(column.column_name) or not missing(column.expression) then
-                    physical = false
-                    break
-                end
-            end
-            if physical then return unique_key end
-        end
-    end
-    return nil
-end
-
 local function complete_semantic_identity(ctx, entity)
     local representations = ctx.representations_by_entity[key(entity.id)] or {}
     for _, identity in ipairs((ctx.identities_by_entity or {})[key(entity.id)] or {}) do
@@ -21002,7 +21660,7 @@ end
 local function fused_attribute_expression(ctx, entity, base_representation,
         attribute_key, strategy)
     ctx._source_column_cache = ctx._source_column_cache or {}
-    local unique_key = physical_unique_key(ctx, entity.id)
+    local unique_key = grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(entity.id)])
     local semantic_identity = complete_semantic_identity(ctx, entity)
     if unique_key == nil and semantic_identity == nil then
         return nil, nil, "Attribute fusion on entity '" .. tostring(entity.name)
@@ -24001,6 +24659,121 @@ end
 
 ESV_JSON = M
 
+-- Reading a driver result row, once.
+--
+-- Every runtime opened with the same four helpers, and the copies had drifted in
+-- one way that matters: `row[name] or row[lower] or row[position]` treats a
+-- boolean FALSE as absent and falls through to an ordinal that is usually nil,
+-- so a FALSE read out of a row could arrive as NULL. shared/catalog_rollback.lua
+-- was given an explicit nil test when it was extracted; the other six modules
+-- kept the `or` chain. This is that fix, in the one place it can now be made.
+--
+-- The bigger reason for the module is what `row_value`'s third argument is.
+--
+-- Exasol returns named rows, so production reads `row[name]`. The offline test
+-- harness stubs `query` with positional arrays (`{{"CUSTOMER_ID"}}`), so tests
+-- read `row[position]`. Both branches are covered; the *agreement* between them
+-- was not, across 763 call sites carrying a hand-counted ordinal. Worse, a
+-- misspelled name in production does not fail -- it falls through to the ordinal
+-- and returns whatever column happens to sit there.
+--
+-- ESV_TEST_MODE makes that reachable. A row that carries names is what
+-- production sees; asking such a row for a name it does not have is the defect,
+-- and the ordinal fallback is what hides it. A row with no names at all is a
+-- positional stub, where the ordinal is the only thing there is. So the check is
+-- not "the ordinal was used" -- it is "the ordinal was used on a row that could
+-- have answered by name".
+
+local M = {}
+
+-- Everything below is inside a `do` block so this module costs the runtime one
+-- main-chunk local instead of five. Exasol caps a function at 200 locals and a
+-- generated runtime script is every source concatenated into one chunk, so a
+-- shared module's top-level names are spent from the same budget as its
+-- callers' -- see CLAUDE.md, "The 200-Local Ceiling Applies to the Sum".
+do
+
+    local json = assert(ESV_JSON, "shared JSON runtime is required")
+    local STRICT = rawget(_G, "ESV_TEST_MODE") == true
+
+    -- A SQL NULL parameter reaches an Exasol Lua script as *userdata*, and userdata
+    -- is truthy, so `value or default` silently yields the address. `null` is the
+    -- script-context global for it; comparing against it is the only reliable test.
+    -- json.NULL is here too because a decoded document's explicit null means the
+    -- same thing as an omitted key everywhere in this runtime.
+    function M.missing(value)
+        return value == nil or value == null or value == json.NULL
+            or tostring(value) == ""
+    end
+
+    function M.null_if_missing(value)
+        if M.missing(value) then
+            return null
+        end
+        return value
+    end
+
+    -- Does this row know its own column names?
+    --
+    -- A named row has at least one string key. A positional row has only integers.
+    -- Both shapes reach this module: the first from Exasol, the second from a test
+    -- stub, and telling them apart is what makes the strict check safe to turn on.
+    local function is_named(row)
+        for key, _ in pairs(row) do
+            if type(key) ~= "number" then return true end
+        end
+        return false
+    end
+
+    local function lookup(row, name, position)
+        local value = row[name]
+        if value == nil then value = row[string.lower(name)] end
+        if value ~= nil then return value, true end
+        return row[position], false
+    end
+
+    -- One column of one row, by name, with its ordinal as the fallback.
+    function M.row_value(row, name, position)
+        if row == nil then return nil end
+        local value, by_name = lookup(row, name, position)
+        -- The defect is narrower than "the ordinal was used". A named row that has
+        -- neither the name nor the ordinal yields nil either way -- no ambiguity, and
+        -- a partially-populated test fixture is allowed to do that. What loses data
+        -- is a named row that lacks the name while *something* sits at the ordinal:
+        -- the caller then gets a different column's value and cannot tell.
+        if STRICT and not by_name and value ~= nil and is_named(row) then
+            error("row_value: row has named columns but not '" .. tostring(name)
+                .. "', so ordinal " .. tostring(position) .. " returned a different "
+                .. "column's value. Fix the name, or the SELECT that was supposed to "
+                .. "project it.", 2)
+        end
+        return value
+    end
+
+    -- The first column of the first row of a single-value query.
+    --
+    -- Deliberately not strict: it probes three conventional aliases before falling
+    -- back to the ordinal, because `SELECT MAX(x)` names its column after the
+    -- expression and no caller wants to spell that out. Missing names are the normal
+    -- case here, which is exactly why it cannot use M.row_value.
+    function M.scalar(sql_text, params)
+        local rows = query(sql_text, params or {})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local row = rows[1]
+        for _, name in ipairs({"VALUE", "COUNT", "MAX"}) do
+            local value = row[name]
+            if value == nil then value = row[string.lower(name)] end
+            if value ~= nil then return value end
+        end
+        return row[1]
+    end
+
+end
+
+ESV_ROWS = M
+
 -- Reading and writing SQL text, shared by every runtime that does either.
 --
 -- `shared/grain_graph.lua` exists because relationship proofs must not drift
@@ -24367,24 +25140,20 @@ ESV_SQL_TEXT = M
 --   * `row[name] or row[lower] or row[position]` treats a boolean FALSE as
 --     absent and falls through to the ordinal, which is usually nil -- so a
 --     restored ATTRIBUTE_BINDINGS.IS_DEFAULT or OBJECT_COLUMNS.IS_VISIBLE could
---     come back NULL instead of FALSE. Reading is explicit about nil here.
+--     come back NULL instead of FALSE. shared/rows.lua now owns that read for
+--     every runtime.
 --   * The DDL path cleared METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX and
 --     never restored them, because they were in the delete list and not the
 --     snapshot. Declaring one list per table makes that impossible to express.
 
-local M = {}
+assert(ESV_ROWS, "shared row runtime is required")
+local row_value = ESV_ROWS.row_value
 
-local function row_value(row, name, position)
-    if row == nil then return nil end
-    local value = row[name]
-    if value == nil then value = row[string.lower(name)] end
-    if value == nil then value = row[position] end
-    return value
-end
+local M = {}
 
 -- A table's columns, in declaration order, as the catalog reports them.
 function M.columns(query_fn, table_name, error_code)
-    local rows = query_fn([[
+    local declared = query_fn([[
         SELECT COLUMN_NAME
         FROM SYS.EXA_ALL_COLUMNS
         WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
@@ -24392,7 +25161,7 @@ function M.columns(query_fn, table_name, error_code)
         ORDER BY COLUMN_ORDINAL_POSITION
     ]], {table_name = table_name})
     local names = {}
-    for _, row in ipairs(rows or {}) do
+    for _, row in ipairs(declared or {}) do
         names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
     end
     if #names == 0 then
@@ -24465,6 +25234,13 @@ ESV_CATALOG_ROLLBACK = M
 local M = {}
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+-- Bound to their own names rather than through a module alias: 763 call sites
+-- read better as `row_value(row, ...)`, a `rows` alias would be shadowed by the
+-- many local `rows` variables these files declare, and four names cost the chunk
+-- exactly what the four function definitions they replace used to.
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value, null_if_missing, scalar =
+    ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local rollback = assert(ESV_CATALOG_ROLLBACK,
     "shared catalog rollback runtime is required")
@@ -24480,10 +25256,6 @@ local SEMANTIC_DDL_LEXER = {upper_identifiers = true}
 -- same sentinel table (see shared/json.lua).
 local JSON_NULL = json.NULL
 
-local function missing(value)
-    return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
-end
-
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
@@ -24494,21 +25266,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
 end
 
 local function sql_string(value)
@@ -24529,13 +25286,6 @@ local function sql_bool(value)
         return true
     end
     return false
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
-    end
-    return value
 end
 
 
@@ -28978,6 +29728,121 @@ end
 
 ESV_JSON = M
 
+-- Reading a driver result row, once.
+--
+-- Every runtime opened with the same four helpers, and the copies had drifted in
+-- one way that matters: `row[name] or row[lower] or row[position]` treats a
+-- boolean FALSE as absent and falls through to an ordinal that is usually nil,
+-- so a FALSE read out of a row could arrive as NULL. shared/catalog_rollback.lua
+-- was given an explicit nil test when it was extracted; the other six modules
+-- kept the `or` chain. This is that fix, in the one place it can now be made.
+--
+-- The bigger reason for the module is what `row_value`'s third argument is.
+--
+-- Exasol returns named rows, so production reads `row[name]`. The offline test
+-- harness stubs `query` with positional arrays (`{{"CUSTOMER_ID"}}`), so tests
+-- read `row[position]`. Both branches are covered; the *agreement* between them
+-- was not, across 763 call sites carrying a hand-counted ordinal. Worse, a
+-- misspelled name in production does not fail -- it falls through to the ordinal
+-- and returns whatever column happens to sit there.
+--
+-- ESV_TEST_MODE makes that reachable. A row that carries names is what
+-- production sees; asking such a row for a name it does not have is the defect,
+-- and the ordinal fallback is what hides it. A row with no names at all is a
+-- positional stub, where the ordinal is the only thing there is. So the check is
+-- not "the ordinal was used" -- it is "the ordinal was used on a row that could
+-- have answered by name".
+
+local M = {}
+
+-- Everything below is inside a `do` block so this module costs the runtime one
+-- main-chunk local instead of five. Exasol caps a function at 200 locals and a
+-- generated runtime script is every source concatenated into one chunk, so a
+-- shared module's top-level names are spent from the same budget as its
+-- callers' -- see CLAUDE.md, "The 200-Local Ceiling Applies to the Sum".
+do
+
+    local json = assert(ESV_JSON, "shared JSON runtime is required")
+    local STRICT = rawget(_G, "ESV_TEST_MODE") == true
+
+    -- A SQL NULL parameter reaches an Exasol Lua script as *userdata*, and userdata
+    -- is truthy, so `value or default` silently yields the address. `null` is the
+    -- script-context global for it; comparing against it is the only reliable test.
+    -- json.NULL is here too because a decoded document's explicit null means the
+    -- same thing as an omitted key everywhere in this runtime.
+    function M.missing(value)
+        return value == nil or value == null or value == json.NULL
+            or tostring(value) == ""
+    end
+
+    function M.null_if_missing(value)
+        if M.missing(value) then
+            return null
+        end
+        return value
+    end
+
+    -- Does this row know its own column names?
+    --
+    -- A named row has at least one string key. A positional row has only integers.
+    -- Both shapes reach this module: the first from Exasol, the second from a test
+    -- stub, and telling them apart is what makes the strict check safe to turn on.
+    local function is_named(row)
+        for key, _ in pairs(row) do
+            if type(key) ~= "number" then return true end
+        end
+        return false
+    end
+
+    local function lookup(row, name, position)
+        local value = row[name]
+        if value == nil then value = row[string.lower(name)] end
+        if value ~= nil then return value, true end
+        return row[position], false
+    end
+
+    -- One column of one row, by name, with its ordinal as the fallback.
+    function M.row_value(row, name, position)
+        if row == nil then return nil end
+        local value, by_name = lookup(row, name, position)
+        -- The defect is narrower than "the ordinal was used". A named row that has
+        -- neither the name nor the ordinal yields nil either way -- no ambiguity, and
+        -- a partially-populated test fixture is allowed to do that. What loses data
+        -- is a named row that lacks the name while *something* sits at the ordinal:
+        -- the caller then gets a different column's value and cannot tell.
+        if STRICT and not by_name and value ~= nil and is_named(row) then
+            error("row_value: row has named columns but not '" .. tostring(name)
+                .. "', so ordinal " .. tostring(position) .. " returned a different "
+                .. "column's value. Fix the name, or the SELECT that was supposed to "
+                .. "project it.", 2)
+        end
+        return value
+    end
+
+    -- The first column of the first row of a single-value query.
+    --
+    -- Deliberately not strict: it probes three conventional aliases before falling
+    -- back to the ordinal, because `SELECT MAX(x)` names its column after the
+    -- expression and no caller wants to spell that out. Missing names are the normal
+    -- case here, which is exactly why it cannot use M.row_value.
+    function M.scalar(sql_text, params)
+        local rows = query(sql_text, params or {})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local row = rows[1]
+        for _, name in ipairs({"VALUE", "COUNT", "MAX"}) do
+            local value = row[name]
+            if value == nil then value = row[string.lower(name)] end
+            if value ~= nil then return value end
+        end
+        return row[1]
+    end
+
+end
+
+ESV_ROWS = M
+
 -- Snapshot and restore a slice of SYS_SEMANTIC, for the two apply paths that
 -- have to undo themselves.
 --
@@ -29004,24 +29869,20 @@ ESV_JSON = M
 --   * `row[name] or row[lower] or row[position]` treats a boolean FALSE as
 --     absent and falls through to the ordinal, which is usually nil -- so a
 --     restored ATTRIBUTE_BINDINGS.IS_DEFAULT or OBJECT_COLUMNS.IS_VISIBLE could
---     come back NULL instead of FALSE. Reading is explicit about nil here.
+--     come back NULL instead of FALSE. shared/rows.lua now owns that read for
+--     every runtime.
 --   * The DDL path cleared METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX and
 --     never restored them, because they were in the delete list and not the
 --     snapshot. Declaring one list per table makes that impossible to express.
 
-local M = {}
+assert(ESV_ROWS, "shared row runtime is required")
+local row_value = ESV_ROWS.row_value
 
-local function row_value(row, name, position)
-    if row == nil then return nil end
-    local value = row[name]
-    if value == nil then value = row[string.lower(name)] end
-    if value == nil then value = row[position] end
-    return value
-end
+local M = {}
 
 -- A table's columns, in declaration order, as the catalog reports them.
 function M.columns(query_fn, table_name, error_code)
-    local rows = query_fn([[
+    local declared = query_fn([[
         SELECT COLUMN_NAME
         FROM SYS.EXA_ALL_COLUMNS
         WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
@@ -29029,7 +29890,7 @@ function M.columns(query_fn, table_name, error_code)
         ORDER BY COLUMN_ORDINAL_POSITION
     ]], {table_name = table_name})
     local names = {}
-    for _, row in ipairs(rows or {}) do
+    for _, row in ipairs(declared or {}) do
         names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
     end
     if #names == 0 then
@@ -29130,6 +29991,8 @@ ESV_CATALOG_ROLLBACK = M
 -- statement about how sources compose.
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value = ESV_ROWS.missing, ESV_ROWS.row_value
 local rollback = assert(ESV_CATALOG_ROLLBACK,
     "shared catalog rollback runtime is required")
 
@@ -29148,11 +30011,6 @@ local M = {}
 -- the catalog. An omitted key and an explicit null now mean the same thing,
 -- which is what the round-trip contract requires -- the exporter omits absent
 -- keys rather than writing them as null.
-local function missing(value)
-    return value == nil or value == null or value == json.NULL
-        or tostring(value) == ""
-end
-
 local function trim(value)
     if missing(value) then return "" end
     return tostring(value):match("^%s*(.-)%s*$")
@@ -29160,11 +30018,6 @@ end
 
 local function upper(value)
     return string.upper(trim(value))
-end
-
-local function row_value(row, name, position)
-    if row == nil then return nil end
-    return row[name] or row[string.lower(name)] or row[position]
 end
 
 -- Absent keys are omitted from the document rather than written as null: the

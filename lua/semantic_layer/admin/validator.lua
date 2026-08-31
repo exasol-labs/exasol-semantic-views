@@ -1,5 +1,12 @@
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+-- Bound to their own names rather than through a module alias: 763 call sites
+-- read better as `row_value(row, ...)`, a `rows` alias would be shadowed by the
+-- many local `rows` variables these files declare, and four names cost the chunk
+-- exactly what the four function definitions they replace used to.
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value, null_if_missing, scalar =
+    ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
@@ -202,27 +209,8 @@ local CAST_TARGET_TYPES = {
     VARCHAR2 = true,
 }
 
-local function missing(value)
-    return value == nil or value == null or tostring(value) == ""
-end
-
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
 end
 
 local function count_query(sql_text, params)
@@ -240,13 +228,6 @@ end
 local function nil_if_missing(value)
     if missing(value) then
         return nil
-    end
-    return value
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
     end
     return value
 end
@@ -2897,22 +2878,6 @@ local function fusion_attribute(ctx, policy)
     return nil
 end
 
-local function physical_fusion_key(ctx, entity_id)
-    for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity_id)] or {}) do
-        if #(unique_key.columns or {}) > 0 then
-            local physical = true
-            for _, column in ipairs(unique_key.columns) do
-                if missing(column.column_name) or not missing(column.expression) then
-                    physical = false
-                    break
-                end
-            end
-            if physical then return unique_key end
-        end
-    end
-    return nil
-end
-
 local function validate_fusion_policies(ctx)
     local representation_by_id = {}
     local authoritative_by_entity = {}
@@ -2971,7 +2936,7 @@ local function validate_fusion_policies(ctx)
                     "SEMANTIC_MODEL_044", strategy
                         .. " requires active bindings on at least two representations.")
             end
-            if physical_fusion_key(ctx, attribute.entity_id) == nil
+            if grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) == nil
                 and (entity == nil or complete_semantic_identity(ctx, entity) == nil) then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
                     "SEMANTIC_MODEL_044", strategy
@@ -3066,7 +3031,7 @@ local function validate_fusion_conflicts(ctx)
             local attribute = fusion_attribute(ctx, policy)
             local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
             local bindings = ctx.bindings_by_attribute[attribute_key] or {}
-            local unique_key = attribute and physical_fusion_key(ctx, attribute.entity_id) or nil
+            local unique_key = attribute and grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) or nil
             local entity = attribute and ctx.entity_by_id[key(attribute.entity_id)] or nil
             local semantic_identity = entity and complete_semantic_identity(ctx, entity) or nil
             local conflict_count = 0

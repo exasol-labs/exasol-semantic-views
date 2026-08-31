@@ -1198,3 +1198,63 @@ test("normalized OSI import refuses a target it cannot dispatch", function()
     assert_equal(bound.model_name, null)
     assert_equal(bound.owner_role, null)
 end)
+
+test("metric metadata surfaces a filter, an owner and a private metric", function()
+    -- The governed fields the agent contract exposes, on a metric that actually
+    -- has them. The fixture above leaves SEMANTIC_FILTER_EXPR, FILTER_EXPR and
+    -- OWNER_ROLE nil, so describe / explain / export were only ever exercised on
+    -- the branch where each is absent -- and a filtered metric is the shape the
+    -- FILTER (WHERE ...) clause exists for.
+    local filtered = {}
+    for key, value in pairs(metric_row) do filtered[key] = value end
+    filtered.METRIC_NAME = "completed_revenue"
+    filtered.METRIC_KIND = "FILTERED"
+    filtered.SEMANTIC_FILTER_EXPR = "order_status = 'COMPLETE'"
+    filtered.FILTER_EXPR = "o.order_status = 'COMPLETE'"
+    filtered.OWNER_ROLE = "REVENUE_OPS"
+    filtered.IS_PRIVATE = true
+    filtered.SYNONYMS = nil
+
+    local result = with_query(function(sql)
+        local normalized = tostring(sql):gsub("%s+", " ")
+        if normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            return {filtered}
+        elseif normalized:find("FROM SEMANTIC_CATALOG.METRIC_LINEAGE", 1, true) then
+            return {{"MEASURE", "FACT", "net_revenue"}}
+        elseif normalized:find("FROM SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS", 1, true) then
+            return {{"customer_region"}}
+        elseif normalized:find("SELECT STATUS FROM SYS_SEMANTIC.VALIDATION_RUNS", 1, true) then
+            return {{"STALE"}}
+        end
+        error("unexpected metric metadata query: " .. normalized)
+    end, function()
+        return {
+            described = describe_semantic_metric("sales", "SALES", "completed_revenue"),
+            explained = explain_semantic_metric("sales", "SALES", "completed_revenue"),
+            exported = export_semantic_definition("sales", "SALES", "completed_revenue"),
+        }
+    end)
+
+    local described = {}
+    for _, row in ipairs(result.described) do
+        described[tostring(row[2])] = tostring(row[3])
+    end
+    assert_equal(described.semantic_filter, "order_status = 'COMPLETE'")
+    assert_equal(described.sql_filter, "o.order_status = 'COMPLETE'")
+    assert_equal(described.owner_role, "REVENUE_OPS")
+    assert_equal(described.metric_kind, "FILTERED")
+    -- A private metric is reported as private, which is the whole point of the
+    -- field: an agent must not offer it.
+    assert_equal(described.visibility, "PRIVATE")
+
+    -- A stale validation run is reported as stale rather than as OK: the metric
+    -- is describable and not currently trustworthy, and those are different
+    -- answers for an agent deciding whether to use it.
+    assert_equal(result.explained[#result.explained][3], "STALE")
+
+    -- The exported DDL is re-runnable, so the filter has to survive the round
+    -- trip into FILTER (WHERE ...) rather than being described and dropped.
+    local ddl = result.exported[1][3]
+    assert_contains(ddl, "ADD OR REPLACE METRIC completed_revenue")
+    assert_contains(ddl, "FILTER (WHERE order_status = 'COMPLETE')")
+end)

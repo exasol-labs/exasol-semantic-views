@@ -42,6 +42,9 @@ end
 load_runtime("lua/semantic_layer/shared/json.lua", function()
     return {ESV_JSON}
 end)
+load_runtime("lua/semantic_layer/shared/rows.lua", function()
+    return {ESV_ROWS}
+end)
 load_runtime("lua/semantic_layer/shared/sql_text.lua", function()
     return {ESV_SQL_TEXT}
 end)
@@ -176,6 +179,7 @@ end
 
 local specs = {
     "tests/lua/json_unit_test.lua",
+    "tests/lua/rows_unit_test.lua",
     "tests/lua/sql_text_unit_test.lua",
     "tests/lua/grain_graph_unit_test.lua",
     "tests/lua/grain_planner_unit_test.lua",

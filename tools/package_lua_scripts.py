@@ -14,6 +14,7 @@ COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
 VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
 JSON_SOURCE = ROOT / "lua/semantic_layer/shared/json.lua"
+ROWS_SOURCE = ROOT / "lua/semantic_layer/shared/rows.lua"
 SQL_TEXT_SOURCE = ROOT / "lua/semantic_layer/shared/sql_text.lua"
 CATALOG_ROLLBACK_SOURCE = ROOT / "lua/semantic_layer/shared/catalog_rollback.lua"
 GRAIN_GRAPH_SOURCE = ROOT / "lua/semantic_layer/shared/grain_graph.lua"
@@ -246,6 +247,7 @@ FROM (VALUES
 
 def validator_block() -> str:
     json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
+    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
     sql_text_source = SQL_TEXT_SOURCE.read_text(encoding="utf-8").rstrip()
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
     source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -258,6 +260,8 @@ def validator_block() -> str:
     return f"""{VALIDATOR_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 {json_source}
+
+{rows_source}
 
 {sql_text_source}
 
@@ -276,6 +280,7 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 
 def compiler_block() -> str:
     json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
+    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
     sql_text_source = SQL_TEXT_SOURCE.read_text(encoding="utf-8").rstrip()
     graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
     source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -289,11 +294,17 @@ def compiler_block() -> str:
     materializations_source = MATERIALIZATIONS_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
+{json_source}
+
+{rows_source}
+
 {materializations_source}
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
 {json_source}
+
+{rows_source}
 
 {sql_text_source}
 
@@ -436,12 +447,15 @@ exit(rows or {{}}, [[
 
 def semantic_definition_block() -> str:
     json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
+    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
     rollback_source = CATALOG_ROLLBACK_SOURCE.read_text(encoding="utf-8").rstrip()
     sql_text_source = SQL_TEXT_SOURCE.read_text(encoding="utf-8").rstrip()
     source = SEMANTIC_DEFINITION_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{SEMANTIC_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME AS
 {json_source}
+
+{rows_source}
 
 {sql_text_source}
 
@@ -641,11 +655,14 @@ def fusion_declaration_block() -> str:
     this chunk's budget buy back both.
     """
     json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
+    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
     rollback_source = CATALOG_ROLLBACK_SOURCE.read_text(encoding="utf-8").rstrip()
     source = FUSION_DECLARATION_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{FUSION_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.FUSION_RUNTIME AS
 {json_source}
+
+{rows_source}
 
 {rollback_source}
 
@@ -692,10 +709,13 @@ exit(rows or {{}}, [[
 
 def agent_block() -> str:
     json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
+    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
     source = AGENT_SOURCE.read_text(encoding="utf-8").rstrip()
     return f"""{AGENT_BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.AGENT_RUNTIME AS
 {json_source}
+
+{rows_source}
 
 {source}
 /

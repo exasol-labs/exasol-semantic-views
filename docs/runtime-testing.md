@@ -77,13 +77,13 @@ python3 tools/verify_fusion_f4.py
 python3 tools/verify_fusion_f5.py
 python3 tools/verify_fusion_f51.py
 python3 tools/verify_fusion_f7.py
-python3 tools/verify_bug24_promotion_gate.py
-python3 tools/verify_bug20_published_authoring_isolation.py
-python3 tools/verify_bug25_published_mutation_protection.py
-python3 tools/verify_bug26_published_f3_batch.py
-python3 tools/verify_bug27_published_multistep_declarations.py
-python3 tools/verify_bug28_composite_removal_and_recertification.py
-python3 tools/verify_bug31_representation_with_identity.py
+python3 tools/verify_promotion_gate.py
+python3 tools/verify_published_authoring_isolation.py
+python3 tools/verify_published_mutation_protection.py
+python3 tools/verify_published_f3_batch.py
+python3 tools/verify_published_multistep_declarations.py
+python3 tools/verify_composite_removal_and_recertification.py
+python3 tools/verify_representation_with_identity.py
 python3 tools/verify_json_table_relationship_mapping.py
 ```
 

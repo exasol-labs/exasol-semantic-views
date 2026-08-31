@@ -25,4 +25,4 @@ export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
   sql/examples/sales_model_seed.sql \
   sql/examples/sales_semantic_queries.sql
 
-"$PYTHON_BIN" tools/verify_milestone3.py
+"$PYTHON_BIN" tools/verify_structured_request_compiler.py

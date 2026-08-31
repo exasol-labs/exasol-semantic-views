@@ -1,8 +1,7 @@
-local M = {}
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value = ESV_ROWS.missing, ESV_ROWS.row_value
 
-local function missing(value)
-    return value == nil or value == null or tostring(value) == ""
-end
+local M = {}
 
 local function upper(value)
     return string.upper(tostring(value))
@@ -10,13 +9,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
 end
 
 local function field_key(field)

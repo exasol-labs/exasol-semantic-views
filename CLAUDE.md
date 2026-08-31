@@ -70,8 +70,8 @@ python3 tools/verify_runtime_performance.py
 
 **Run a focused verification:**
 ```sh
-python3 tools/verify_milestone3.py   # structured request compiler
-python3 tools/verify_milestone6.py   # materialization selection
+python3 tools/verify_structured_request_compiler.py  # structured request compiler
+python3 tools/verify_materialization_selection.py    # materialization selection
 python3 tools/verify_semantic_sql_phase1.py   # ORDER BY ordinals, BETWEEN
 python3 tools/verify_semantic_sql_phase2.py   # HAVING, metric WHERE predicates
 ```
@@ -105,6 +105,7 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/compiler/materializations.lua` | same | `SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME` |
 | `lua/semantic_layer/shared/grain_graph.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/shared/json.lua` | same, plus `006_…` | shared codec, embedded in every runtime |
+| `lua/semantic_layer/shared/rows.lua` | same, plus `006_…` | shared driver-row reader, `missing`, `scalar` |
 | `lua/semantic_layer/shared/sql_text.lua` | same | shared quoting, rewriting and lexing |
 | `lua/semantic_layer/shared/catalog_rollback.lua` | same | shared snapshot/restore for the two apply paths |
 | `lua/semantic_layer/shared/identity_join.lua` | same | shared validator/compiler module |
@@ -357,7 +358,7 @@ check `missing` *before* normalizing, not after.
 This matters most through `CALL_ADMIN_JSON`, which renders every omitted key as
 SQL NULL. Two tests hold the line: `NullNormalisationTest` in
 `tests/test_install.py` rejects the idiom statically, and
-`tools/verify_g02_named_admin_api.py` calls every model-scoped script with only
+`tools/verify_named_admin_api.py` calls every model-scoped script with only
 `MODEL_NAME` set and fails if any refusal mentions `userdata`.
 
 ### The 200-Local Ceiling Applies to the Sum, Not to a File
@@ -398,7 +399,7 @@ contain its definition.
 
 ## Conventions
 
-Five rules with no correctness consequence, so nothing else fails when one is
+Six rules with no correctness consequence, so nothing else fails when one is
 broken. `tests/test_conventions.py` enforces each as a ratchet — the current
 state is pinned, may shrink, and may not grow. The first two both govern the
 error-code namespace.
@@ -421,25 +422,32 @@ numbering: nine `SEMANTIC_MODEL_*` codes are warnings and none is spelled
 second convention into one namespace to say what the column already said.
 
 **Name a verifier for the invariant, not the ticket.** `verify_fanout_guardrails.py`,
-not `verify_bug26_published_f3_batch.py`. 24 of 58 verifiers are named after bug
-IDs and are grandfathered in the test; adding a 25th fails. Fold a bug-specific
-case into the file that owns the behaviour — `verify_fusion_f5.py` absorbed
-BUG-G03's lower-case mapping column rather than growing a `verify_g03_*.py`.
+not `verify_bug26_published_f3_batch.py`. The grandfather list held 24 names for
+a week and is **now empty**: eighteen needed only the ticket prefix removed —
+the rest of `verify_bug26_published_f3_batch` was already the invariant — and the
+six `verify_milestoneN` files are named for what they protect. What made the
+rename safe was removing its risk first: `tests/test_conventions.py` now requires
+every verifier to be wired into `tools/run_smoke.sh` **and** `run_smoke.sh` to
+name no verifier that is gone, so a rename that misses one fails instead of
+silently dropping coverage.
 
-**A routine is written once.** A function body that is byte-identical in two
-modules is pinned in `DUPLICATED_LUA_BODIES`; the pin may shrink and may not
-grow. BUG-G03 was one defect in five copies of the same F5 join, and the JSON
-codec was the same story without the bug report — four private copies whose null
-sentinel is a bare table with no meaning beyond its identity, so a null decoded
-by one module was an anonymous empty table to the others. `query_spec.lua` read
-it as an empty array while `request_json.lua` refused it; `fusion_declaration.lua`
-read it as a present declaration and wrote its address to the catalog. Nothing
-failed, because nothing compared the copies. Put it in
+**A verifier shares its host-side plumbing.** `tools/verify_support.py` owns
+`connect()`, `sql_string()`, reading a script result *by column name*, and
+calling an admin script by keyword. 59 verifiers each had their own `connect()`,
+29 identically; `PRIVATE_CONNECT` pins how many still do, and it only shrinks.
+Convert one when you next touch it.
+
+**A routine is written once.** `DUPLICATED_LUA_BODIES` pins every function body
+that is byte-identical in two modules. **It is now empty**, which is the
+strongest form of the rule: the next copy fails immediately instead of being
+grandfathered. BUG-G03 was one defect in five copies of the same F5 join; the
+JSON codec was the same story without a bug report, four private copies whose
+null sentinel is a bare table with no meaning beyond its identity, so a null
+decoded by one module was an anonymous empty table to the others. Nothing failed,
+because nothing compared the copies. Put a shared routine in
 `lua/semantic_layer/shared/` and add it to every packager block that needs it —
-`json.lua`, `sql_text.lua`, `catalog_rollback.lua` and `identity_join.lua` are
-the worked examples. The pin is down from seven bodies to four; what remains is
-the row-reading prelude (`row_value`, `null_if_missing`, `scalar`), where a
-divergence yields a nil rather than a wrong answer.
+`json.lua`, `rows.lua`, `sql_text.lua`, `catalog_rollback.lua`,
+`identity_join.lua` and `grain_graph.lua` are the worked examples.
 
 **Derive a surface, do not restate it.** `CATALOG_COLUMNS`,
 `ADMIN_SCRIPT_PARAMETERS` and `CATALOG_RELATIONSHIPS` read `EXA_ALL_*`, so they

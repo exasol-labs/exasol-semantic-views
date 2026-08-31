@@ -337,6 +337,30 @@ function M.attempted_path(all_edges, from_id, to_id)
     return nil, proof.reason
 end
 
+-- The first unique key on an entity whose columns are all *physical*.
+--
+-- A key with an expression column cannot be matched against a mapping relation
+-- or a join, so identity and fusion proofs need the column-only one. This lived
+-- in compiler/request_json.lua as `physical_unique_key` and in
+-- admin/validator.lua as `physical_fusion_key`, byte-identical under two names,
+-- which is the shape that let the compiler and the validator disagree about
+-- which key they were proving against. Key matching already lives here.
+function M.physical_unique_key(unique_keys)
+    for _, unique_key in ipairs(unique_keys or {}) do
+        if #(unique_key.columns or {}) > 0 then
+            local physical = true
+            for _, column in ipairs(unique_key.columns) do
+                if missing(column.column_name) or not missing(column.expression) then
+                    physical = false
+                    break
+                end
+            end
+            if physical then return unique_key end
+        end
+    end
+    return nil
+end
+
 function M.canonical_key(unique_key)
     local columns = {}
     for _, column in ipairs((unique_key or {}).columns or {}) do

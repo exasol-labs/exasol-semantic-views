@@ -1,6 +1,6 @@
 -- Milestone 2 validator fixture manifest.
 --
--- The executable integration coverage lives in tools/verify_milestone2.py
+-- The executable integration coverage lives in tools/verify_model_validation.py
 -- because the validator depends on Exasol's CREATE SCRIPT runtime, query(),
 -- null sentinel, and catalog tables. Keep this manifest aligned with that
 -- verifier so future Lua test harnesses can reuse the same expectations.

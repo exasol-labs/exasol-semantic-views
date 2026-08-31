@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify Milestone 3 structured request compilation on Exasol."""
+"""Verify structured (JSON) request compilation on Exasol.
+
+The COMPILE_REQUEST_JSON lane: canonical request, plan, generated SQL, and the
+refusals a malformed or ungrounded request earns.
+"""
 
 from __future__ import annotations
 
@@ -117,7 +121,7 @@ def main() -> int:
                 "order_by": [{"field": "total_revenue", "direction": "desc"}],
                 "limit": 2,
                 "purpose": "milestone3_smoke",
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_status_ok("revenue by region compile", revenue_by_region)
@@ -152,7 +156,7 @@ def main() -> int:
                 "metrics": ["revenue"],
                 "dimensions": ["region"],
                 "limit": 1,
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_status_ok("synonym compile", synonym_request)
@@ -168,7 +172,7 @@ def main() -> int:
                 "dimensions": ["customer_region"],
                 "filters": [{"field": "order_status", "op": "=", "value": "COMPLETE"}],
                 "order_by": [{"field": "customer_region", "direction": "asc"}],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_status_ok("gross margin pct compile", margin_pct)
@@ -193,7 +197,7 @@ def main() -> int:
                 "dimensions": ["product_category"],
                 "filters": [{"field": "order_month", "op": ">=", "value": "2026-02-01"}],
                 "order_by": [{"field": "completed_revenue", "direction": "desc"}],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_status_ok("filtered metric compile", completed)
@@ -211,7 +215,7 @@ def main() -> int:
                 "object": "SALES",
                 "metrics": ["not_a_metric"],
                 "dimensions": ["customer_region"],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_equal("unknown field status", unknown["status"], "ERROR")
@@ -225,7 +229,7 @@ def main() -> int:
                 "metrics": ["total_revenue"],
                 "dimensions": ["customer_region"],
                 "output": {"shape": "nested"},
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_equal("unknown request key status", unknown_key["status"], "ERROR")
@@ -240,7 +244,7 @@ def main() -> int:
                 "metrics": ["total_revenue"],
                 "dimensions": ["customer_region"],
                 "limit": 10001,
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_equal("bad limit status", bad_limit["status"], "ERROR")
@@ -258,7 +262,7 @@ def main() -> int:
                 "metrics": ["total_revenue"],
                 "dimensions": ["customer_region"],
                 "filters": [{"field": "order_status"}],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_equal("missing filter value status", missing_value["status"], "ERROR")
@@ -272,7 +276,7 @@ def main() -> int:
                 "metrics": ["total_revenue"],
                 "dimensions": ["customer_region"],
                 "filters": [{"field": "customer_region", "op": "IS NULL"}],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_status_ok("IS NULL structured filter", null_filter)
@@ -288,7 +292,7 @@ def main() -> int:
                 "dimensions": ["customer_region"],
                 "filters": [{"field": "customer_region", "op": "IS NOT NULL"}],
                 "having": [{"field": "total_revenue", "op": "IS NOT NULL"}],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_status_ok("IS NOT NULL structured filters", non_null_filter)
@@ -303,7 +307,7 @@ def main() -> int:
                 "metrics": ["total_revenue"],
                 "dimensions": ["customer_region"],
                 "having": [{"op": ">", "value": 1000}],
-                "client": "verify_milestone3",
+                "client": "verify_structured_request_compiler",
             },
         )
         assert_equal("bad having structure status", bad_having["status"], "ERROR")

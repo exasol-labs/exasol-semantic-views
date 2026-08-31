@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify Milestone 4 SQL compiler, surface views, and preprocessor on Exasol."""
+"""Verify the Semantic SQL compiler, published surfaces, and preprocessor.
+
+The COMPILE_SQL lane and what publishing exposes: guarded views, the surface
+helpers, and ENABLE_SEMANTIC_SQL rewriting a statement in place.
+"""
 
 from __future__ import annotations
 
@@ -259,7 +263,7 @@ def main() -> int:
         )
 
         query_log_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.QUERY_LOG")
-        debug = compile_sql_debug(con, semantic_sql, "verify_milestone4")
+        debug = compile_sql_debug(con, semantic_sql, "verify_sql_compiler_and_surfaces")
         assert_status_ok("COMPILE_SQL_DEBUG semantic query", debug)
         if debug["query_log_id"] is None:
             raise AssertionError("COMPILE_SQL_DEBUG did not return a query log id")

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify Milestone 2 validation behavior on Exasol."""
+"""Verify model validation behaviour on Exasol.
+
+VALIDATE_MODEL writes its runs, results, dependency graph and dimension matrix,
+and refuses what it should refuse. This asserts all four.
+"""
 
 from __future__ import annotations
 

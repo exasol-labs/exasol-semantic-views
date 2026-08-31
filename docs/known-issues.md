@@ -33,7 +33,7 @@ is `NULL` for JSON requests but the column is present, so positional indices ali
 
 Earlier docs claimed an 8-column layout (`GENERATED_SQL` at index 3); a consumer following that read
 `NULL`. The docs and the one stale test (`tools/verify_semantic_sql_phase1.py`) have been corrected.
-The rest of the tooling (`tools/semantic_client.py`, `verify_milestone3.py`,
+The rest of the tooling (`tools/semantic_client.py`, `verify_structured_request_compiler.py`,
 `verify_dimension_discovery.py`, `verify_claude_study_issues.py`) already used the correct mapping.
 
 The durable fix is not to restate the layout correctly but to stop reading it by index: the result

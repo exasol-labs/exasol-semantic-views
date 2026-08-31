@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify Milestone 1 catalog and sales seed on Exasol."""
+"""Verify the SYS_SEMANTIC catalog and the sales seed on Exasol.
+
+The first thing a fresh install has to get right: the tables exist, the demo
+model loads into them, and the catalog views read it back.
+"""
 
 from __future__ import annotations
 

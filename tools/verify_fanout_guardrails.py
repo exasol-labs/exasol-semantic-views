@@ -157,7 +157,7 @@ def main() -> None:
     # whatever dimensions the object exposes. SEMANTIC_MODEL_059 proves the
     # aggregation direction (leaf -> root) directly and leads instead. The
     # metric/dimension rule is still asserted for the shapes it owns, in
-    # tools/verify_f18_metric_grain_positions.py and the validator unit tests.
+    # tools/verify_metric_grain_positions.py and the validator unit tests.
     before = con.execute(
         "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales'"
     ).fetchall()[0][0]

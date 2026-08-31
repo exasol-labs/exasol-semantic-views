@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify Milestone 5 agent context and feedback workflow on Exasol."""
+"""Verify the agent context and feedback workflow on Exasol.
+
+What an autonomous caller sees and writes back: discovery, glossary, verified
+queries, instructions, and the feedback it records against a compile.
+"""
 
 from __future__ import annotations
 
@@ -257,7 +261,7 @@ def main() -> int:
             "dimensions": ["customer_region"],
             "order_by": [{"field": "total_revenue", "direction": "desc"}],
             "limit": 2,
-            "client": "verify_milestone5",
+            "client": "verify_agent_context_and_feedback",
         }
         verified_rows = fetchall(
             con,
@@ -319,7 +323,7 @@ def main() -> int:
             "ORDER BY total_revenue DESC "
             "LIMIT 2"
         )
-        debug = compile_sql_debug(con, semantic_sql, "verify_milestone5")
+        debug = compile_sql_debug(con, semantic_sql, "verify_agent_context_and_feedback")
         assert_equal("sql debug status", debug["status"], "OK")
         explain_query = fetchall(
             con,

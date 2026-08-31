@@ -1,5 +1,12 @@
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+-- Bound to their own names rather than through a module alias: 763 call sites
+-- read better as `row_value(row, ...)`, a `rows` alias would be shadowed by the
+-- many local `rows` variables these files declare, and four names cost the chunk
+-- exactly what the four function definitions they replace used to.
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value, null_if_missing, scalar =
+    ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 
 -- Semantic SQL compares whole comparison operators, so the lexer fuses
@@ -32,10 +39,6 @@ local materialization_runtime = materializations
 local JSON_NULL = json.NULL
 local MAX_LIMIT = 10000
 
-local function missing(value)
-    return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
-end
-
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
@@ -46,28 +49,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
-    end
-    return value
 end
 
 
@@ -1448,22 +1429,6 @@ local function collect_metric_facts(ctx, metric, required, seen_metrics)
     end
 end
 
-local function physical_unique_key(ctx, entity_id)
-    for _, unique_key in ipairs(ctx.unique_keys_by_entity[key(entity_id)] or {}) do
-        if #(unique_key.columns or {}) > 0 then
-            local physical = true
-            for _, column in ipairs(unique_key.columns) do
-                if missing(column.column_name) or not missing(column.expression) then
-                    physical = false
-                    break
-                end
-            end
-            if physical then return unique_key end
-        end
-    end
-    return nil
-end
-
 local function complete_semantic_identity(ctx, entity)
     local representations = ctx.representations_by_entity[key(entity.id)] or {}
     for _, identity in ipairs((ctx.identities_by_entity or {})[key(entity.id)] or {}) do
@@ -1613,7 +1578,7 @@ end
 local function fused_attribute_expression(ctx, entity, base_representation,
         attribute_key, strategy)
     ctx._source_column_cache = ctx._source_column_cache or {}
-    local unique_key = physical_unique_key(ctx, entity.id)
+    local unique_key = grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(entity.id)])
     local semantic_identity = complete_semantic_identity(ctx, entity)
     if unique_key == nil and semantic_identity == nil then
         return nil, nil, "Attribute fusion on entity '" .. tostring(entity.name)

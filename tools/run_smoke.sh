@@ -27,11 +27,11 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/run_sql_files.py sql/examples/sales_semantic_queries.sql
 
 # Milestone verification (before materializations, so the compiler uses base SQL).
-"$PYTHON_BIN" tools/verify_milestone1.py
-"$PYTHON_BIN" tools/verify_milestone2.py
-"$PYTHON_BIN" tools/verify_milestone3.py
-"$PYTHON_BIN" tools/verify_milestone4.py
-"$PYTHON_BIN" tools/verify_milestone5.py
+"$PYTHON_BIN" tools/verify_catalog_and_seed.py
+"$PYTHON_BIN" tools/verify_model_validation.py
+"$PYTHON_BIN" tools/verify_structured_request_compiler.py
+"$PYTHON_BIN" tools/verify_sql_compiler_and_surfaces.py
+"$PYTHON_BIN" tools/verify_agent_context_and_feedback.py
 "$PYTHON_BIN" tools/verify_semantic_sql_phase1.py
 "$PYTHON_BIN" tools/verify_group_by_inference.py
 "$PYTHON_BIN" tools/run_sql_files.py tests/sql/validation_smoke.sql tests/sql/compile_request_smoke.sql
@@ -94,7 +94,7 @@ sh tools/run_lua_tests.sh
 # Phase 2: register pre-built aggregates and verify materialization selection.
 "$PYTHON_BIN" tools/run_sql_files.py sql/examples/sales_materializations.sql
 
-"$PYTHON_BIN" tools/verify_milestone6.py
+"$PYTHON_BIN" tools/verify_materialization_selection.py
 "$PYTHON_BIN" tools/verify_sql_native_metrics.py
 "$PYTHON_BIN" tools/verify_semantic_sql_phase2.py
 "$PYTHON_BIN" tools/run_sql_files.py tests/sql/materialization_smoke.sql
@@ -164,29 +164,29 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # F18 is the structural one: the earlier suites only ever placed a metric's
 # facts *on* the object root, which is the position that works. The other three
 # positions had no test, and one of them returned a silently inflated number.
-"$PYTHON_BIN" tools/verify_f13_verified_query_scope.py
-"$PYTHON_BIN" tools/verify_f18_metric_grain_positions.py
-"$PYTHON_BIN" tools/verify_g01_partitioned_join_hop.py
-"$PYTHON_BIN" tools/verify_g02_named_admin_api.py
-"$PYTHON_BIN" tools/verify_g04_identity_binding_diagnostic.py
+"$PYTHON_BIN" tools/verify_verified_query_scope.py
+"$PYTHON_BIN" tools/verify_metric_grain_positions.py
+"$PYTHON_BIN" tools/verify_partitioned_join_hop.py
+"$PYTHON_BIN" tools/verify_named_admin_api.py
+"$PYTHON_BIN" tools/verify_identity_binding_diagnostic.py
 
 # Feedback-driven behavior tests.
-"$PYTHON_BIN" tools/verify_fb015_replace_attribute_binding.py
-"$PYTHON_BIN" tools/verify_fb018_agent_session_instructions.py
-"$PYTHON_BIN" tools/verify_fb019_query_timeout_precondition.py
+"$PYTHON_BIN" tools/verify_replace_attribute_binding.py
+"$PYTHON_BIN" tools/verify_agent_session_instructions.py
+"$PYTHON_BIN" tools/verify_query_timeout_precondition.py
 
 # Historical bug regressions: each script isolates a specific past failure and
 # reasserts the fixed behavior. Running them here is cheap insurance.
-"$PYTHON_BIN" tools/verify_bug20_published_authoring_isolation.py
-"$PYTHON_BIN" tools/verify_bug24_promotion_gate.py
-"$PYTHON_BIN" tools/verify_bug25_published_mutation_protection.py
-"$PYTHON_BIN" tools/verify_bug26_published_f3_batch.py
-"$PYTHON_BIN" tools/verify_bug27_published_multistep_declarations.py
-"$PYTHON_BIN" tools/verify_bug28_composite_removal_and_recertification.py
-"$PYTHON_BIN" tools/verify_bug30_published_identity_setup.py
-"$PYTHON_BIN" tools/verify_bug31_representation_with_identity.py
-"$PYTHON_BIN" tools/verify_bug32_relationship_types_and_removal.py
-"$PYTHON_BIN" tools/verify_bug37_attribute_with_bindings.py
+"$PYTHON_BIN" tools/verify_published_authoring_isolation.py
+"$PYTHON_BIN" tools/verify_promotion_gate.py
+"$PYTHON_BIN" tools/verify_published_mutation_protection.py
+"$PYTHON_BIN" tools/verify_published_f3_batch.py
+"$PYTHON_BIN" tools/verify_published_multistep_declarations.py
+"$PYTHON_BIN" tools/verify_composite_removal_and_recertification.py
+"$PYTHON_BIN" tools/verify_published_identity_setup.py
+"$PYTHON_BIN" tools/verify_representation_with_identity.py
+"$PYTHON_BIN" tools/verify_relationship_types_and_removal.py
+"$PYTHON_BIN" tools/verify_attribute_with_bindings.py
 
 # Live-DB negative-path coverage for SEMANTIC_ADMIN_* / SEMANTIC_SURFACE_*
 # error codes that the emitter grep found were untested. Cheap: every case is

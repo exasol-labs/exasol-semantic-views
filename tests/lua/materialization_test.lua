@@ -1,6 +1,6 @@
 -- Milestone 6 materialization fixture manifest.
 --
--- Executable coverage lives in tools/verify_milestone6.py because materialized
+-- Executable coverage lives in tools/verify_materialization_selection.py because materialized
 -- planning depends on Exasol catalog tables and the installed compiler runtime.
 
 return {

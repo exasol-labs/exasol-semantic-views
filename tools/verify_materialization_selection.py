@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Verify Milestone 6 materialization selection on Exasol."""
+"""Verify materialization selection on Exasol.
+
+A registered aggregate is chosen when it covers the request, rejected with a
+reason when it does not, and the choice is recorded in plan provenance.
+
+Order-dependent: tools/run_smoke.sh loads sql/examples/sales_materializations.sql
+immediately before this script, which is what registers the aggregate.
+"""
 
 from __future__ import annotations
 
@@ -177,7 +184,7 @@ def main() -> int:
             2,
         )
 
-        materialized = compile_request(con, revenue_request("verify_milestone6"))
+        materialized = compile_request(con, revenue_request("verify_materialization_selection"))
         assert_status_ok("eligible revenue compile", materialized)
         assert_equal("selected materialization", selected_materialization(materialized), "sales_revenue_by_region")
         assert_contains("materialized SQL relation", materialized["generated_sql"], '"MART"."SALES_REVENUE_BY_REGION"')
@@ -195,7 +202,7 @@ def main() -> int:
                 "object": "SALES",
                 "metrics": ["total_revenue"],
                 "dimensions": ["product_category"],
-                "client": "verify_milestone6",
+                "client": "verify_materialization_selection",
             },
         )
         assert_status_ok("missing dimension fallback", product)
@@ -209,7 +216,7 @@ def main() -> int:
                 "object": "SALES",
                 "metrics": ["gross_margin_pct"],
                 "dimensions": ["customer_region"],
-                "client": "verify_milestone6",
+                "client": "verify_materialization_selection",
             },
         )
         assert_status_ok("non-additive fallback", non_additive)
@@ -223,7 +230,7 @@ def main() -> int:
                 "metrics": ["total_revenue"],
                 "dimensions": ["customer_region"],
                 "filters": [{"field": "order_status", "op": "=", "value": "COMPLETE"}],
-                "client": "verify_milestone6",
+                "client": "verify_materialization_selection",
             },
         )
         assert_status_ok("filtered dimension fallback", filtered)
@@ -232,7 +239,7 @@ def main() -> int:
 
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS('sales', 'sales_revenue_by_region', 'INACTIVE')")
         try:
-            inactive = compile_request(con, revenue_request("verify_milestone6_inactive"))
+            inactive = compile_request(con, revenue_request("verify_materialization_selection_inactive"))
             assert_status_ok("inactive materialization fallback", inactive)
             assert_equal("inactive selected materialization", selected_materialization(inactive), None)
             assert_contains("inactive fallback SQL relation", inactive["generated_sql"], '"MART"."ORDER_LINES"')
@@ -259,7 +266,7 @@ def main() -> int:
         assert_equal("preprocessor validation hot path", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.VALIDATION_RUNS"), validation_runs_before)
         assert_equal("preprocessor query log hot path", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.QUERY_LOG"), query_logs_before)
 
-        debug = compile_sql_debug(con, semantic_sql, "verify_milestone6")
+        debug = compile_sql_debug(con, semantic_sql, "verify_materialization_selection")
         assert_status_ok("COMPILE_SQL_DEBUG materialization", debug)
         assert_equal("debug selected materialization", selected_materialization(debug), "sales_revenue_by_region")
         assert_equal(

@@ -1,6 +1,6 @@
 -- Milestone 3 compiler fixture manifest.
 --
--- Executable coverage lives in tools/verify_milestone3.py because the compiler
+-- Executable coverage lives in tools/verify_structured_request_compiler.py because the compiler
 -- depends on Exasol query(), CREATE SCRIPT import(), and catalog tables.
 
 return {

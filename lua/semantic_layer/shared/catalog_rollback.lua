@@ -24,24 +24,20 @@
 --   * `row[name] or row[lower] or row[position]` treats a boolean FALSE as
 --     absent and falls through to the ordinal, which is usually nil -- so a
 --     restored ATTRIBUTE_BINDINGS.IS_DEFAULT or OBJECT_COLUMNS.IS_VISIBLE could
---     come back NULL instead of FALSE. Reading is explicit about nil here.
+--     come back NULL instead of FALSE. shared/rows.lua now owns that read for
+--     every runtime.
 --   * The DDL path cleared METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX and
 --     never restored them, because they were in the delete list and not the
 --     snapshot. Declaring one list per table makes that impossible to express.
 
-local M = {}
+assert(ESV_ROWS, "shared row runtime is required")
+local row_value = ESV_ROWS.row_value
 
-local function row_value(row, name, position)
-    if row == nil then return nil end
-    local value = row[name]
-    if value == nil then value = row[string.lower(name)] end
-    if value == nil then value = row[position] end
-    return value
-end
+local M = {}
 
 -- A table's columns, in declaration order, as the catalog reports them.
 function M.columns(query_fn, table_name, error_code)
-    local rows = query_fn([[
+    local declared = query_fn([[
         SELECT COLUMN_NAME
         FROM SYS.EXA_ALL_COLUMNS
         WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
@@ -49,7 +45,7 @@ function M.columns(query_fn, table_name, error_code)
         ORDER BY COLUMN_ORDINAL_POSITION
     ]], {table_name = table_name})
     local names = {}
-    for _, row in ipairs(rows or {}) do
+    for _, row in ipairs(declared or {}) do
         names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
     end
     if #names == 0 then

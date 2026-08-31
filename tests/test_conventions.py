@@ -1,7 +1,22 @@
+# Drained from seven to zero on 2026-08-31, in three steps.
+#
+#   replace_qualified_alias, strip_string_literals, token_upper -> shared/sql_text.lua
+#   row_value, scalar, null_if_missing                          -> shared/rows.lua
+#   physical_unique_key / physical_fusion_key                   -> shared/grain_graph.lua
+#
+# The first two mattered most: the validator proved an expression safe with one
+# copy of `replace_qualified_alias` while the compiler emitted SQL with the
+# other, and a divergence there is wrong SQL that validates. The last pair was
+# one function under two names, which is how the compiler and the validator came
+# to describe the same key check differently.
+#
+# The pin stays here, empty, because an empty pin is the strongest form of this
+# rule: the next copy fails immediately rather than being grandfathered.
+
 #!/usr/bin/env python3
 """The conventions this codebase holds itself to.
 
-Five rules that cost nothing to follow and compound if they are not. None is a
+Six rules that cost nothing to follow and compound if they are not. None is a
 correctness property, so nothing else will ever fail because one was broken --
 which is exactly why they need a test. Each is a *ratchet*: the current state is
 pinned, the pinned state may shrink, and it may not grow. Same discipline as
@@ -13,6 +28,7 @@ pinned, the pinned state may shrink, and it may not grow. Same discipline as
      prompted them.
   4. A catalog surface derives what it can look up instead of restating it.
   5. A routine is written once; a copy in a second module is pinned and shrinks.
+  6. A verifier uses the shared host-side helpers, and the suite runs all of them.
 
 Each rule records what it cost when it was broken, because a convention with no
 story attached is the first thing dropped under deadline.
@@ -236,35 +252,26 @@ class OneConditionOneRuleCode(unittest.TestCase):
 # new ticket name instead of extending the file that owns the behaviour.
 TICKET_NAMED = re.compile(r"^verify_(?:bug\d+|g\d+|fb\d+|f\d+_|milestone\d+)")
 
-# Grandfathered. This set may shrink -- fold a case into the file that owns the
-# behaviour, as verify_fusion_f5.py did for BUG-G03's lower-case mapping column
-# rather than growing a verify_g03_*.py of its own -- and it may not grow.
-LEGACY_TICKET_NAMED = {
-    "verify_bug20_published_authoring_isolation.py",
-    "verify_bug24_promotion_gate.py",
-    "verify_bug25_published_mutation_protection.py",
-    "verify_bug26_published_f3_batch.py",
-    "verify_bug27_published_multistep_declarations.py",
-    "verify_bug28_composite_removal_and_recertification.py",
-    "verify_bug30_published_identity_setup.py",
-    "verify_bug31_representation_with_identity.py",
-    "verify_bug32_relationship_types_and_removal.py",
-    "verify_bug37_attribute_with_bindings.py",
-    "verify_f13_verified_query_scope.py",
-    "verify_f18_metric_grain_positions.py",
-    "verify_fb015_replace_attribute_binding.py",
-    "verify_fb018_agent_session_instructions.py",
-    "verify_fb019_query_timeout_precondition.py",
-    "verify_g01_partitioned_join_hop.py",
-    "verify_g02_named_admin_api.py",
-    "verify_g04_identity_binding_diagnostic.py",
-    "verify_milestone1.py",
-    "verify_milestone2.py",
-    "verify_milestone3.py",
-    "verify_milestone4.py",
-    "verify_milestone5.py",
-    "verify_milestone6.py",
-}
+# Drained to empty on 2026-08-31. The 2026-08-25 review pinned 24 names and
+# declined to rename them, for a good reason: a rename touches run_smoke.sh,
+# tests/test_install.py and the docs for no behaviour change, and "carries real
+# risk of silently dropping a verifier from the suite".
+#
+# That risk is checkable, so it is now checked -- see
+# VerifiersShareTheirPlumbing, which requires every verifier to be wired into
+# run_smoke.sh and run_smoke.sh to name no verifier that is gone. With both
+# directions pinned, the rename stopped being a gamble and became a rename.
+#
+# Eighteen of the 24 needed only the ticket prefix removed: the rest of
+# `verify_bug26_published_f3_batch` was already the invariant. The six
+# `verify_milestoneN` files were named for a delivery phase and are now named for
+# what they protect -- the catalog and seed, model validation, the structured
+# request compiler, the SQL compiler and surfaces, agent context and feedback,
+# materialization selection.
+#
+# The set stays here, empty, because an empty pin is the strongest form of this
+# rule: any ticket-named verifier now fails.
+LEGACY_TICKET_NAMED: set[str] = set()
 
 
 class VerifiersNamedByInvariant(unittest.TestCase):
@@ -285,12 +292,12 @@ class VerifiersNamedByInvariant(unittest.TestCase):
             "verify_fanout_guardrails.py, verify_path_ambiguity.py); if you "
             "renamed or folded one in, drop it from LEGACY_TICKET_NAMED")
 
-    def test_the_convention_is_already_the_local_majority(self):
-        """So it is the norm to follow, not an aspiration to argue with."""
-        self.assertGreater(len(self.verifiers) - len(LEGACY_TICKET_NAMED),
-                           len(LEGACY_TICKET_NAMED))
+    def test_the_grandfather_list_is_empty_and_stays_that_way(self):
+        """It drained. Re-adding a name is a decision, not a default."""
+        self.assertEqual(set(), LEGACY_TICKET_NAMED)
 
     def test_the_pattern_recognises_the_shapes_that_exist(self):
+        # Illustrative names, not files -- the shapes the pattern has to catch.
         for name in ("verify_bug26_published_f3_batch.py", "verify_g04_x.py",
                      "verify_fb015_x.py", "verify_f13_x.py", "verify_milestone3.py"):
             self.assertRegex(name, TICKET_NAMED, name)
@@ -411,12 +418,12 @@ class DerivedNotDeclared(unittest.TestCase):
     def test_the_library_exclusion_list_is_declared_once(self):
         """`NON_CALLABLE_SCRIPTS` lives in the packager and is read, not copied.
 
-        `tools/verify_g02_named_admin_api.py` used to carry a second copy with a
+        `tools/verify_named_admin_api.py` used to carry a second copy with a
         comment claiming the two "cannot drift apart silently". They then did:
         FUSION_RUNTIME was added to the packager's set and not the copy, and
         nothing failed until a full smoke run reached that verifier.
         """
-        verifier = (ROOT / "tools/verify_g02_named_admin_api.py").read_text(
+        verifier = (ROOT / "tools/verify_named_admin_api.py").read_text(
             encoding="utf-8")
         self.assertIn("_PACKAGER.NON_CALLABLE_SCRIPTS", verifier)
         for library in ("COMPILER_RUNTIME", "VALIDATOR_RUNTIME", "FUSION_RUNTIME"):
@@ -490,15 +497,7 @@ MIN_DUPLICATE_BODY_LINES = 3
 # produces a nil, not a wrong answer. Moving them needs a `shared/rows.lua` that
 # also owns the `query` global each runtime binds differently, which is a larger
 # change than the risk justifies today.
-DUPLICATED_LUA_BODIES = {
-    "null_if_missing": ("request_json.lua", "runtime.lua",
-                        "semantic_definition.lua", "validator.lua"),
-    "physical_fusion_key/physical_unique_key": ("request_json.lua", "validator.lua"),
-    "row_value": ("materializations.lua", "request_json.lua", "runtime.lua",
-                  "semantic_definition.lua", "validator.lua"),
-    "scalar": ("request_json.lua", "runtime.lua", "semantic_definition.lua",
-               "validator.lua"),
-}
+DUPLICATED_LUA_BODIES: dict[str, tuple[str, ...]] = {}
 
 # Modules that must not grow a private JSON codec again. The sentinel makes this
 # stricter than the body-identity rule above can be: a *reworded* second decoder
@@ -663,6 +662,86 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
             "embedding the module that defines it, so they would fail to "
             "install; add its source to their block in "
             "tools/package_lua_scripts.py")
+
+
+# ---------------------------------------------------------------------------
+# 6. Verifiers share their host-side plumbing, and the suite runs all of them
+# ---------------------------------------------------------------------------
+
+# `tools/semantic_client.py` has existed for a while: 119 lines, tested, and it
+# reads an EXECUTE SCRIPT result *by column name* — the thing docs/known-issues.md
+# says to do, after a documented column layout drifted and positional readers
+# silently returned NULL. Exactly one of 59 verifiers imported it. The other 58
+# each defined `connect()`, 29 of them character-for-character, and 26 defined
+# their own `sql_string()`.
+#
+# A helper nobody imports is not a fix, so this is a ratchet rather than an
+# announcement: the count of verifiers still rolling their own is pinned, may
+# shrink, and may not grow. Convert one when you next touch it —
+# `tools/verify_support.py` is the target and six verifiers already use it.
+PRIVATE_CONNECT = 53
+
+# The reason renaming a verifier used to be risky, removed.
+#
+# The 2026-08-25 review declined to drain LEGACY_TICKET_NAMED because a rename
+# "carries real risk of silently dropping a verifier from the suite" — a file
+# renamed but not renamed in run_smoke.sh simply stops running, and nothing says
+# so. That is checkable, so it is checked here, and the rename stops being a
+# gamble.
+SMOKE_SUITE = ROOT / "tools/run_smoke.sh"
+
+
+class VerifiersShareTheirPlumbing(unittest.TestCase):
+    """Connection defaults and result reading belong to tools/verify_support.py."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.verifiers = {path.name: path.read_text(encoding="utf-8")
+                         for path in (ROOT / "tools").glob("verify_*.py")
+                         if path.name != "verify_support.py"}
+
+    def test_the_directory_is_being_read(self):
+        self.assertGreater(len(self.verifiers), 40, sorted(self.verifiers)[:5])
+
+    def test_no_new_verifier_rolls_its_own_connection(self):
+        private = sorted(name for name, text in self.verifiers.items()
+                         if "def connect(" in text)
+        self.assertLessEqual(
+            len(private), PRIVATE_CONNECT,
+            f"{len(private)} verifiers define their own connect() against a pin "
+            f"of {PRIVATE_CONNECT}. Import tools/verify_support.py instead")
+        self.assertEqual(
+            PRIVATE_CONNECT, len(private),
+            "the pin is stale — lower PRIVATE_CONNECT to "
+            f"{len(private)} so the next copy is still caught")
+
+    def test_the_shared_helpers_exist_and_read_results_by_name(self):
+        """Deriving the rule from an empty module would pass silently."""
+        support = (ROOT / "tools/verify_support.py").read_text(encoding="utf-8")
+        for helper in ("def connect(", "def sql_string(", "def named_row(",
+                       "def named_rows(", "def call_admin(", "def validate_model("):
+            self.assertIn(helper, support)
+        self.assertIn("statement.columns().keys()", support,
+                      "named_rows must read the result set's own column names")
+
+    def test_every_verifier_is_wired_into_the_smoke_suite(self):
+        """A verifier nobody runs is a file, not a test.
+
+        This is also what makes renaming one safe: a rename that misses
+        run_smoke.sh fails here instead of quietly removing coverage.
+        """
+        smoke = SMOKE_SUITE.read_text(encoding="utf-8")
+        unwired = sorted(name for name in self.verifiers if name not in smoke)
+        self.assertEqual([], unwired,
+                         "these verifiers are never run by tools/run_smoke.sh")
+
+    def test_the_smoke_suite_names_no_verifier_that_is_gone(self):
+        """The other half of a rename: a stale name is a step that cannot run."""
+        smoke = SMOKE_SUITE.read_text(encoding="utf-8")
+        named = set(re.findall(r"verify_[a-z0-9_]+\.py", smoke))
+        missing = sorted(named - set(self.verifiers) - {"verify_support.py"})
+        self.assertEqual([], missing,
+                         "tools/run_smoke.sh names verifiers that do not exist")
 
 
 if __name__ == "__main__":

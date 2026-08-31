@@ -1,6 +1,13 @@
 local M = {}
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+-- Bound to their own names rather than through a module alias: 763 call sites
+-- read better as `row_value(row, ...)`, a `rows` alias would be shadowed by the
+-- many local `rows` variables these files declare, and four names cost the chunk
+-- exactly what the four function definitions they replace used to.
+assert(ESV_ROWS, "shared row runtime is required")
+local missing, row_value, null_if_missing, scalar =
+    ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local rollback = assert(ESV_CATALOG_ROLLBACK,
     "shared catalog rollback runtime is required")
@@ -16,10 +23,6 @@ local SEMANTIC_DDL_LEXER = {upper_identifiers = true}
 -- same sentinel table (see shared/json.lua).
 local JSON_NULL = json.NULL
 
-local function missing(value)
-    return value == nil or value == null or value == JSON_NULL or tostring(value) == ""
-end
-
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
@@ -30,21 +33,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function row_value(row, name, position)
-    if row == nil then
-        return nil
-    end
-    return row[name] or row[string.lower(name)] or row[position]
-end
-
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return row_value(rows[1], "VALUE", 1) or row_value(rows[1], "COUNT", 1) or row_value(rows[1], "MAX", 1) or rows[1][1]
 end
 
 local function sql_string(value)
@@ -65,13 +53,6 @@ local function sql_bool(value)
         return true
     end
     return false
-end
-
-local function null_if_missing(value)
-    if missing(value) then
-        return null
-    end
-    return value
 end
 
 

@@ -8,6 +8,96 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Changed
 
+#### Reading a driver row has one implementation: `shared/rows.lua`
+
+- `missing`, `row_value`, `null_if_missing` and `scalar` opened six runtimes, and
+  the copies had drifted where it mattered: `row[name] or row[lower] or
+  row[position]` treats a boolean `FALSE` as absent and falls through to an
+  ordinal that is usually nil, so a `FALSE` read out of a row could arrive as
+  `NULL`. `shared/catalog_rollback.lua` got an explicit nil test when it was
+  extracted; the other six modules kept the `or` chain. Now none of them do.
+- **A mistyped column name is an error in test mode instead of a wrong value.**
+  763 call sites carry a hand-counted ordinal alongside a column name. Exasol
+  returns named rows so production reads by name; the offline harness stubs
+  positional arrays so tests read by ordinal — both branches covered, their
+  *agreement* not. Under `ESV_TEST_MODE`, a row that carries names but not the
+  one asked for, *while something sits at the ordinal*, is now an error: that is
+  exactly the case that returns a different column's value and hides it. A named
+  row missing both is still nil, so a partially-populated fixture stays legal.
+- Measured rather than assumed: 554 reads in the offline suite go against named
+  rows, 20 of them miss the name (all legal partial fixtures), and **none**
+  currently returns a wrong value. So this found no existing defect — what it
+  buys is that a renamed catalog column or a typo now fails in any test using a
+  named row, where before it would have returned a neighbouring column.
+- The helpers keep their own names in each module (`row_value(...)`, not
+  `rows.row_value(...)`): 763 call sites read better that way, a `rows` alias
+  would be shadowed by the many local `rows` variables these files declare, and
+  four bound names cost the chunk exactly what the four definitions they replace
+  did. `shared/rows.lua` itself sits behind a `do` block so it costs one
+  main-chunk local instead of five.
+
+#### `physical_unique_key` and `physical_fusion_key` were one function
+
+- Byte-identical bodies under two names in `compiler/request_json.lua` and
+  `admin/validator.lua` — which is how the compiler and the validator came to
+  describe the same key check differently. Now `grain_graph.physical_unique_key`,
+  beside the key matching that module already owns.
+
+#### Verifiers share their host-side plumbing
+
+- `tools/verify_support.py` owns `connect()`, `sql_string()`, reading a script
+  result **by column name**, and calling an admin script by keyword through
+  `CALL_ADMIN_JSON`. 59 verifiers each defined their own `connect()`, 29
+  character-for-character, and 26 their own `sql_string()`; exactly one imported
+  the tested `semantic_client.py` that already read results by name. Six are
+  converted and `PRIVATE_CONNECT` pins the remaining 53, shrink-only.
+
+#### Every verifier is named for the invariant it protects
+
+- The 24-name grandfather list is **empty**. Eighteen needed only the ticket
+  prefix removed — the rest of `verify_bug26_published_f3_batch` was already the
+  invariant — and the six `verify_milestoneN` files are now
+  `verify_catalog_and_seed`, `verify_model_validation`,
+  `verify_structured_request_compiler`, `verify_sql_compiler_and_surfaces`,
+  `verify_agent_context_and_feedback` and `verify_materialization_selection`.
+- Their docstrings were the same defect one layer down — every one still opened
+  *"Verify Milestone 4 …"* — and were rewritten to say what the file protects.
+  `verify_materialization_selection` now also records that it is order-dependent
+  on `sql/examples/sales_materializations.sql` being loaded immediately before it,
+  which had never been written down anywhere.
+- What made this safe was removing its risk first. The 2026-08-25 review declined
+  the rename because it "carries real risk of silently dropping a verifier from
+  the suite" — a file renamed but not renamed in `run_smoke.sh` simply stops
+  running. That is checkable, so it is now checked in both directions: every
+  verifier must be wired into `run_smoke.sh`, and `run_smoke.sh` must name no
+  verifier that is gone.
+
+### Testing
+
+- `tests/lua/rows_unit_test.lua` (5 tests, 100 % of the module) pins the FALSE
+  case, the positional fallback, the strict mismatch and its deliberate
+  narrowness, and why `scalar` is exempt — `SELECT MAX(x)` names its column after
+  the expression, so a missing name there is normal rather than a defect.
+- `admin/fusion_declaration.lua` gained a full export test built from **named**
+  rows, which under the new strict reader is simultaneously a check that every
+  column name and hand-counted ordinal in the export path agrees with the SELECT
+  above it.
+- `admin/semantic_definition.lua` gained metric metadata coverage for a filtered,
+  owned, private metric — the branches the existing fixture skipped by leaving
+  `SEMANTIC_FILTER_EXPR`, `FILTER_EXPR` and `OWNER_ROLE` nil.
+- **`DUPLICATED_LUA_BODIES` is empty.** Seven bodies at the start of the week,
+  four after `sql_text.lua`, one after `rows.lua`, none after
+  `grain_graph.physical_unique_key`. An empty pin is the strongest form of the
+  rule: the next copy fails immediately instead of being grandfathered.
+
+### Documentation
+
+- `CLAUDE.md` gains a sixth convention (verifiers share their plumbing), records
+  that two ratchets drained to empty, and lists `shared/rows.lua` in the module
+  table.
+
+### Changed
+
 #### SQL text has one owner: `shared/sql_text.lua`
 
 - `quote_ident`, `quote_qualified`, `sql_string`, `sql_literal`,
@@ -501,7 +591,7 @@ All notable changes to Exasol Semantic Views are documented here.
   against the database, so a runtime upgrade stays visible afterwards.
 - The installer prints the same line on completion.
 - `RUNTIME_CHECKSUM` is the discriminator that survives a tarball, a vendored
-  copy, or uncommitted edits, where git provenance does not. `verify_milestone1`
+  copy, or uncommitted edits, where git provenance does not. `verify_catalog_and_seed`
   asserts the recorded checksum matches the install SQL on disk.
 
 #### `SET_RELATIONSHIP`
@@ -1086,7 +1176,7 @@ All notable changes to Exasol Semantic Views are documented here.
   relative snowflake paths and binds expressions to the deepest matching join
   entity, so fields such as `customer.nation.n_name` resolve to the nested
   `nation` entity instead of the parent join.
-- `lua/semantic_layer/compiler/request_json.lua` — `parse_semantic_sql` no longer requires a `GROUP BY` clause when dimensions are selected; the `GROUP BY` coverage validation now runs only when a `GROUP BY` is supplied (`SEMANTIC_QUERY_007` removed). `tools/verify_milestone4.py` updated to assert the inferred-GROUP BY query now succeeds.
+- `lua/semantic_layer/compiler/request_json.lua` — `parse_semantic_sql` no longer requires a `GROUP BY` clause when dimensions are selected; the `GROUP BY` coverage validation now runs only when a `GROUP BY` is supplied (`SEMANTIC_QUERY_007` removed). `tools/verify_sql_compiler_and_surfaces.py` updated to assert the inferred-GROUP BY query now succeeds.
 - `lua/semantic_layer/compiler/request_json.lua` — `find_top_level_clauses`, `clause_end`, `build_sql`, `compile_request_table`, and `parse_semantic_sql` updated for Phase 2; `parse_having_filters` added (~95 lines total). `parse_where_filters` and `parse_order_by` updated for Phase 1. Source file is the canonical implementation; `sql/install/003_create_semantic_admin_scripts.sql` is generated by `python3 tools/package_lua_scripts.py`.
 - `sql/install/006_create_semantic_agent_views.sql` — `COMPILE_REQUEST_SCHEMA_FOR_AGENT` view updated with `HAVING_KEYS` documentation row.
 
