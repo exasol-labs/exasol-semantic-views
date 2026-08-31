@@ -6,6 +6,113 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+#### SQL text has one owner: `shared/sql_text.lua`
+
+- `quote_ident`, `quote_qualified`, `sql_string`, `sql_literal`,
+  `replace_qualified_alias`, `strip_string_literals`, `token_upper`,
+  `decode_quoted_identifier` and the dialect lexer had between two and five
+  copies across `compiler/request_json.lua`, `admin/validator.lua`,
+  `admin/semantic_definition.lua`, `compiler/physical_plan.lua`,
+  `compiler/grain_sql.lua` and `shared/identity_join.lua`.
+- Two of them mattered. `replace_qualified_alias` rewrites a table alias inside
+  an expression while respecting string literals — it is how a representation's
+  expression is re-pointed at a different source — and `strip_string_literals`
+  backs the alias analysis the validator proves expressions with. They were
+  byte-identical in the validator and the compiler, so the validator proved an
+  expression safe with one copy while the compiler emitted SQL from the other. A
+  divergence there is not a crash; it is SQL that is wrong and validates.
+- `shared/identity_join.lua`'s header had named this module as the thing it
+  could not yet call ("a shared SQL module is a bigger change than this one
+  earns"). It calls it now.
+- **One lexer, two flags.** `compiler/request_json.lua`'s `sql_tokens` and
+  `admin/semantic_definition.lua`'s `tokenize` were the same ~95 lines with two
+  real differences, and both are now named options rather than two files:
+  `operators` fuses `>=`/`<=`/`<>`/`!=` (semantic SQL compares whole operators;
+  the DDL parser slices by byte offset and has always seen two symbols), and
+  `upper_identifiers` folds a quoted identifier's decoded value (the DDL parser
+  reads names out of quoted tokens; the semantic-SQL parser must not, or a
+  column quoted as `"AND"` would parse as a conjunction). Every token now carries
+  `start_pos`, `end_pos` and `depth`; the semantic-SQL parser ignores them.
+- Verified byte-equivalent to both originals before landing: a differential
+  harness ran the pre-change lexers and the merged one over a hand-built corpus
+  and 4 000 random inputs, comparing every field of every token. Zero
+  differences.
+
+#### `WHERE` and `HAVING` are parsed once
+
+- `parse_where_filters` and `parse_having_filters` were two ~110-line functions
+  whose diff was 72 lines of 123, almost all of it the clause noun in three
+  messages. Everything else — the top-level `AND` split that skips `BETWEEN`'s
+  own `AND`, the operator scan, `IS NULL` / `IN` / `BETWEEN`, the
+  literal-or-raw-SQL fallback — was written twice, so a predicate form added to
+  one and forgotten in the other passed every test.
+- One `parse_predicates`, with `WHERE_CLAUSE` and `HAVING_CLAUSE` carrying the
+  only two real differences: HAVING resolves the field and refuses a non-metric
+  (`SEMANTIC_QUERY_040`), and stores the resolved name where WHERE stores what
+  the author typed. Each clause's three messages sit together in its table.
+- `SEMANTIC_QUERY_030`, `_031` and `_033` left the overloaded-code pin as a
+  result: their extra "meanings" were the same condition written once per clause.
+
+#### The two apply paths share one rollback
+
+- `APPLY_SEMANTIC_DEFINITION` and `APPLY_FUSION_DECLARATION` both snapshot a
+  slice of `SYS_SEMANTIC`, apply, validate and restore on refusal.
+  `admin/fusion_declaration.lua` did it in 45 lines by reading column lists from
+  `EXA_ALL_COLUMNS`; `admin/semantic_definition.lua` did it in 335 lines with
+  every column written out four times per table — snapshot `SELECT`, restore
+  `INSERT` list, `VALUES` list, and a parameter map carrying ordinals that had to
+  stay in step with the first. Nothing checked that the four agreed, and
+  `METRICS` grew five columns after it was written.
+- Both now use `shared/catalog_rollback.lua`. A table is declared once, parent to
+  child; deletes run in reverse and inserts forward from that one order.
+
+### Fixed
+
+- **A restored boolean `FALSE` came back as `NULL`.** Both rollbacks read a
+  captured value with `row[name] or row[lower] or row[position]`, which treats
+  `false` as absent and falls through to an ordinal that is usually nil — so
+  `ATTRIBUTE_BINDINGS.IS_DEFAULT` and `OBJECT_COLUMNS.IS_VISIBLE` could be
+  restored as NULL. The shared reader tests for nil explicitly.
+- **The DDL rollback cleared two tables it never restored.**
+  `METRIC_DEPENDENCIES` and `METRIC_DIMENSION_MATRIX` were in the delete list and
+  not the snapshot. One list per table makes that unexpressible. Both are
+  validator output that the `VALIDATE_MODEL` run following a restore rewrites, so
+  this closes a window rather than changing an outcome.
+
+### Testing
+
+- `tests/lua/sql_text_unit_test.lua` (6 tests, 99.4 % of the module — the one
+  uncovered line is the `end` of a `while` loop that this interpreter never
+  reports, traced rather than assumed). It pins the alias rewriter's literal
+  handling, the offset-preserving literal strip, and *exactly* the two ways the
+  lexer's modes differ, so the difference is a contract instead of a fork.
+- `admin/semantic_definition.lua` 76.1 → 78.5: `batch_call`, the 176-line
+  dispatch that is the third place an admin script's parameter list is written
+  down, is now driven for all thirteen targets with every placeholder required to
+  be bound from its own key. Exasol checks arity, not names, so a mistyped
+  binding there arrives as NULL and imports a row with a field missing.
+- `admin/fusion_declaration.lua` 67.0 → 74.1: the apply path end to end —
+  validation refusing an already-written document and the catalog being restored
+  (including the compile cache, which the dispatched scripts cannot clear for
+  it), a dispatched script refusing mid-sequence, a dry run that validates and
+  commits nothing, and a malformed document reported in `STATUS` rather than
+  raised.
+- `shared/catalog_rollback.lua` at 100 %, including the refusal when a table's
+  columns cannot be read — deriving from an empty answer would capture nothing,
+  restore nothing, and report success.
+- The `DUPLICATED_LUA_BODIES` ratchet drained from seven bodies to four, and a
+  second ownership rule now guards `shared/sql_text.lua` the way one already
+  guarded `shared/json.lua`: a *reworded* copy would pass the body check and
+  still let the validator prove an expression the compiler renders differently.
+
+### Documentation
+
+- `CLAUDE.md`: the grain-graph invariant now has a sibling for SQL text. Quoting,
+  literal rendering, alias rewriting, literal stripping and lexing delegate to
+  `shared/sql_text.lua`; the F5 mapping join to `shared/identity_join.lua`.
+
 ### Added
 
 #### `osi.py export --profile lossless` refuses to be quietly lossy

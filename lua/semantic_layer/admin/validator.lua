@@ -1,5 +1,6 @@
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -437,88 +438,12 @@ local function simple_relationship_equality(expression)
     return shape == "REF=REF"
 end
 
-local function quote_ident(value)
-    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
-
-local function replace_qualified_alias(expression, source_alias, target_alias)
-    local source = upper(source_alias)
-    local text = tostring(expression)
-    local out = {}
-    local i = 1
-    local in_quote = false
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if c == "'" then
-            out[#out + 1] = c
-            if in_quote and n == "'" then
-                out[#out + 1] = n
-                i = i + 2
-            else
-                in_quote = not in_quote
-                i = i + 1
-            end
-        elseif not in_quote and string.match(c, "[A-Za-z_]") then
-            local j = i + 1
-            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
-                j = j + 1
-            end
-            local cursor = j
-            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
-            local token = string.sub(text, i, j - 1)
-            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
-                out[#out + 1] = target_alias
-            else
-                out[#out + 1] = token
-            end
-            i = j
-        else
-            out[#out + 1] = c
-            i = i + 1
-        end
-    end
-    return table.concat(out)
-end
-
-local function strip_string_literals(text)
-    local out = {}
-    local in_quote = false
-    local i = 1
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if c == "'" then
-            if in_quote and n == "'" then
-                out[#out + 1] = " "
-                out[#out + 1] = " "
-                i = i + 2
-            else
-                in_quote = not in_quote
-                out[#out + 1] = " "
-                i = i + 1
-            end
-        elseif in_quote then
-            out[#out + 1] = " "
-            i = i + 1
-        else
-            out[#out + 1] = c
-            i = i + 1
-        end
-    end
-    return table.concat(out)
-end
-
 local function qualified_column_refs(expression)
     local refs = {}
     if missing(expression) then
         return refs
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     local pos = 1
     while pos <= #text do
         local start_pos, alias_end, alias = string.find(
@@ -599,7 +524,7 @@ local function schema_qualified_functions(expression)
     if missing(expression) then
         return functions
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     for schema_name, function_name in string.gmatch(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)%s*%(") do
         functions[upper(schema_name) .. "." .. upper(function_name)] = true
     end
@@ -611,7 +536,7 @@ local function unsupported_functions(expression)
     if missing(expression) then
         return found
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     local pos = 1
     while true do
         local start_pos, end_pos, fn = string.find(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%(", pos)
@@ -636,7 +561,7 @@ local function dependency_tokens(expression)
     if missing(expression) then
         return tokens
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     text = string.gsub(text, "[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*", " ")
     for token in string.gmatch(text, "[A-Za-z_][A-Za-z0-9_]*") do
         local normalized = upper(token)
@@ -2019,13 +1944,13 @@ local function representation_key_query(representation, unique_key)
                 representation, column.column_name)
             if physical_name == nil then return nil, resolution_error end
             expressions[#expressions + 1] = tostring(representation.alias)
-                .. "." .. quote_ident(physical_name)
+                .. "." .. sql_text.quote_ident(physical_name)
         elseif not missing(column.expression) then
             expressions[#expressions + 1] = tostring(column.expression)
         end
     end
     if #expressions == 0 then return nil, "declared key has no executable columns" end
-    local source = quote_qualified(representation.source_schema,
+    local source = sql_text.quote_qualified(representation.source_schema,
         representation.source_object) .. " " .. tostring(representation.alias)
     return "SELECT " .. table.concat(expressions, ", ")
         .. " FROM " .. source
@@ -2160,7 +2085,7 @@ end
 
 local function identity_grouped_key_query(representation, binding)
     local semantic_expression
-    local from_sql = quote_qualified(representation.source_schema,
+    local from_sql = sql_text.quote_qualified(representation.source_schema,
         representation.source_object) .. " " .. tostring(representation.alias)
     if upper(binding.kind) == "DIRECT" then
         semantic_expression = tostring(binding.expression)
@@ -2190,12 +2115,12 @@ local function validate_semantic_identity_data(ctx)
                 local object_name = tostring(entity.name) .. "." .. tostring(identity.name)
                     .. "@" .. tostring(representation.name)
                 local total, total_error = probe_count("SELECT COUNT(*) AS PROBE_COUNT FROM "
-                    .. quote_qualified(representation.source_schema,
+                    .. sql_text.quote_qualified(representation.source_schema,
                         representation.source_object))
                 local local_distinct, local_error = probe_count(
                     "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
                     .. tostring(binding.expression) .. " FROM "
-                    .. quote_qualified(representation.source_schema,
+                    .. sql_text.quote_qualified(representation.source_schema,
                         representation.source_object) .. " " .. tostring(representation.alias)
                     .. " WHERE " .. tostring(binding.expression) .. " IS NOT NULL GROUP BY "
                     .. tostring(binding.expression) .. ") f5_local_keys")
@@ -2217,24 +2142,24 @@ local function validate_semantic_identity_data(ctx)
                         "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
                     local map_local, map_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(map_local_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(map_local_column) .. ") f5_map_local")
+                        .. sql_text.quote_ident(map_local_column) .. " FROM " .. map_source
+                        .. " WHERE " .. sql_text.quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. sql_text.quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. sql_text.quote_ident(map_local_column) .. ") f5_map_local")
                     local map_semantic, map_semantic_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(map_semantic_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(map_semantic_column) .. ") f5_map_semantic")
+                        .. sql_text.quote_ident(map_semantic_column) .. " FROM " .. map_source
+                        .. " WHERE " .. sql_text.quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. sql_text.quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. sql_text.quote_ident(map_semantic_column) .. ") f5_map_semantic")
                     local mapped_local, mapped_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
                         .. tostring(binding.expression) .. " FROM "
-                        .. quote_qualified(representation.source_schema,
+                        .. sql_text.quote_qualified(representation.source_schema,
                             representation.source_object) .. " " .. tostring(representation.alias)
                         .. " JOIN " .. map_source .. " f5_total_map ON "
                         .. tostring(binding.expression) .. " = f5_total_map."
-                        .. quote_ident(map_local_column) .. " GROUP BY "
+                        .. sql_text.quote_ident(map_local_column) .. " GROUP BY "
                         .. tostring(binding.expression) .. ") f5_mapped_local_keys")
                     if map_total_error ~= nil or map_local_error ~= nil
                         or map_semantic_error ~= nil or mapped_local_error ~= nil then
@@ -2388,7 +2313,7 @@ local function validate_representation_data_equivalence(ctx)
                     end
                     if grouped_keys ~= nil then
                         local total_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM "
-                            .. quote_qualified(representation.source_schema,
+                            .. sql_text.quote_qualified(representation.source_schema,
                                 representation.source_object)
                             .. " " .. tostring(representation.alias)
                         local distinct_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM ("
@@ -3068,14 +2993,14 @@ end
 
 local function identity_conflict_source(representation, identity_binding, alias)
     if upper(identity_binding.kind) == "DIRECT" then
-        return quote_qualified(representation.source_schema,
+        return sql_text.quote_qualified(representation.source_schema,
             representation.source_object),
-            replace_qualified_alias(identity_binding.expression,
+            sql_text.replace_qualified_alias(identity_binding.expression,
                 representation.alias, alias)
     end
     local source_alias = "f5_conflict_src_" .. tostring(representation.id)
     local mapping = identity_binding.mapping
-    local local_expression = replace_qualified_alias(identity_binding.expression,
+    local local_expression = sql_text.replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = identity_join.semantic_key_view(query, representation,
         mapping, source_alias,
@@ -3088,9 +3013,9 @@ local function fusion_conflict_query(left_representation, left_binding,
     local left_alias = "f4_left"
     local right_alias = "f4_right"
     local predicates = {}
-    local left_source = quote_qualified(left_representation.source_schema,
+    local left_source = sql_text.quote_qualified(left_representation.source_schema,
         left_representation.source_object)
-    local right_source = quote_qualified(right_representation.source_schema,
+    local right_source = sql_text.quote_qualified(right_representation.source_schema,
         right_representation.source_object)
     if semantic_identity ~= nil then
         local left_identity = semantic_identity.binding_by_representation[
@@ -3112,13 +3037,13 @@ local function fusion_conflict_query(left_representation, left_binding,
             if left_column == nil or right_column == nil then
                 return nil, left_error or right_error
             end
-            predicates[#predicates + 1] = left_alias .. "." .. quote_ident(left_column)
-                .. " = " .. right_alias .. "." .. quote_ident(right_column)
+            predicates[#predicates + 1] = left_alias .. "." .. sql_text.quote_ident(left_column)
+                .. " = " .. right_alias .. "." .. sql_text.quote_ident(right_column)
         end
     end
-    local left_expression = replace_qualified_alias(left_binding.expression,
+    local left_expression = sql_text.replace_qualified_alias(left_binding.expression,
         left_representation.alias, left_alias)
-    local right_expression = replace_qualified_alias(right_binding.expression,
+    local right_expression = sql_text.replace_qualified_alias(right_binding.expression,
         right_representation.alias, right_alias)
     return "SELECT COUNT(*) AS PROBE_COUNT FROM "
         .. left_source .. " " .. left_alias
@@ -4119,7 +4044,7 @@ validate_model = M.validate_model
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
         valid_json_text = valid_json_text,
-        strip_string_literals = strip_string_literals,
+        strip_string_literals = sql_text.strip_string_literals,
         aliases_in_expression = aliases_in_expression,
         column_refs_in_expression = column_refs_in_expression,
         schema_qualified_functions = schema_qualified_functions,

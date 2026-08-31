@@ -29,6 +29,8 @@
 -- statement about how sources compose.
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local rollback = assert(ESV_CATALOG_ROLLBACK,
+    "shared catalog rollback runtime is required")
 
 local M = {}
 
@@ -468,77 +470,32 @@ local function required(value, label)
     return trim(value)
 end
 
--- The seven tables the fusion layer lives in. A partial sequence has to be
--- undoable, and the dispatched scripts each unwind only themselves.
+-- The seven tables the fusion layer lives in, parent to child. A partial
+-- sequence has to be undoable, and the dispatched scripts each unwind only
+-- themselves. Column lists come from the catalog, not from here -- see
+-- shared/catalog_rollback.lua.
+local MODEL_SCOPE = "MODEL_ID = :model_id AND VERSION_ID = :version_id"
 local SNAPSHOT_TABLES = {
-    {name = "ENTITY_REPRESENTATIONS", scope = "MODEL"},
-    {name = "REPRESENTATION_AUTHORITIES", scope = "MODEL"},
-    {name = "SEMANTIC_IDENTITIES", scope = "MODEL"},
-    {name = "IDENTITY_BINDINGS", scope = "MODEL"},
-    {name = "IDENTITY_MAPPING_RELATIONS", scope = "MODEL"},
-    {name = "ATTRIBUTE_BINDINGS", scope = "MODEL"},
-    {name = "ATTRIBUTE_FUSION_POLICIES", scope = "MODEL"},
+    {name = "ENTITY_REPRESENTATIONS", where = MODEL_SCOPE},
+    {name = "REPRESENTATION_AUTHORITIES", where = MODEL_SCOPE},
+    {name = "SEMANTIC_IDENTITIES", where = MODEL_SCOPE},
+    {name = "IDENTITY_BINDINGS", where = MODEL_SCOPE},
+    {name = "IDENTITY_MAPPING_RELATIONS", where = MODEL_SCOPE},
+    {name = "ATTRIBUTE_BINDINGS", where = MODEL_SCOPE},
+    {name = "ATTRIBUTE_FUSION_POLICIES", where = MODEL_SCOPE},
 }
 
-local function table_columns(query_fn, table_name)
-    local rows = query_fn([[
-        SELECT COLUMN_NAME
-        FROM SYS.EXA_ALL_COLUMNS
-        WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
-          AND COLUMN_TABLE = :table_name
-        ORDER BY COLUMN_ORDINAL_POSITION
-    ]], {table_name = table_name})
-    local names = {}
-    for _, row in ipairs(rows or {}) do
-        names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
-    end
-    if #names == 0 then
-        error("SEMANTIC_FUSION_013: cannot read the columns of SYS_SEMANTIC."
-            .. tostring(table_name))
-    end
-    return names
+local function model_scope(model)
+    return {model_id = model.model_id, version_id = model.version_id}
 end
 
--- Column lists are read from EXA_ALL_COLUMNS rather than restated here, so a
--- new column is carried by the rollback without this module being edited --
--- the alternative is a snapshot that silently drops whatever was added last.
 local function snapshot_fusion_state(query_fn, model)
-    local snapshot = {}
-    for _, spec in ipairs(SNAPSHOT_TABLES) do
-        local columns = table_columns(query_fn, spec.name)
-        snapshot[#snapshot + 1] = {
-            name = spec.name,
-            columns = columns,
-            rows = query_fn("SELECT " .. table.concat(columns, ", ")
-                .. " FROM SYS_SEMANTIC." .. spec.name
-                .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id",
-                {model_id = model.model_id, version_id = model.version_id}) or {},
-        }
-    end
-    return snapshot
+    return rollback.snapshot(query_fn, SNAPSHOT_TABLES, model_scope(model),
+        "SEMANTIC_FUSION_013")
 end
 
 local function restore_fusion_state(query_fn, model, snapshot)
-    -- Reverse order for the delete so a child never outlives its parent, then
-    -- forward order for the insert.
-    for index = #snapshot, 1, -1 do
-        query_fn("DELETE FROM SYS_SEMANTIC." .. snapshot[index].name
-            .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id",
-            {model_id = model.model_id, version_id = model.version_id})
-    end
-    for _, entry in ipairs(snapshot) do
-        for _, row in ipairs(entry.rows) do
-            local placeholders, params = {}, {}
-            for position, column in ipairs(entry.columns) do
-                local key = "c" .. position
-                placeholders[#placeholders + 1] = ":" .. key
-                params[key] = row[column] or row[string.lower(column)] or row[position]
-            end
-            query_fn("INSERT INTO SYS_SEMANTIC." .. entry.name .. " ("
-                .. table.concat(entry.columns, ", ") .. ") VALUES ("
-                .. table.concat(placeholders, ", ") .. ")", params)
-        end
-    end
+    rollback.restore(query_fn, SNAPSHOT_TABLES, snapshot, model_scope(model))
     -- The dispatched scripts each clear the compile cache when they mutate, but
     -- this restore writes SYS_SEMANTIC directly -- so entries compiled during
     -- the attempt being abandoned would otherwise survive it and answer from a

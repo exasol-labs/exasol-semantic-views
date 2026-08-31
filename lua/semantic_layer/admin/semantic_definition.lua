@@ -1,6 +1,16 @@
 local M = {}
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
+local rollback = assert(ESV_CATALOG_ROLLBACK,
+    "shared catalog rollback runtime is required")
+
+-- Semantic DDL reads names out of quoted tokens, so the lexer folds a
+-- quoted identifier to upper case; it must NOT fuse `>=`/`<=`/`<>`/`!=`,
+-- because this parser slices expressions by byte offset and has always
+-- seen two symbols there. The semantic-SQL parser wants the opposite of
+-- both; see shared/sql_text.lua.
+local SEMANTIC_DDL_LEXER = {upper_identifiers = true}
 
 -- Identity, not a copy: a decoded null is only recognisable to code holding the
 -- same sentinel table (see shared/json.lua).
@@ -86,105 +96,6 @@ local function normalize_name(value, label)
     return name
 end
 
-local function decode_quoted_identifier(token_text)
-    local raw = string.sub(token_text, 2, -2)
-    return string.gsub(raw, '""', '"')
-end
-
-local function tokenize(text)
-    local tokens = {}
-    local i = 1
-    local depth = 0
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if string.match(c, "%s") then
-            i = i + 1
-        elseif c == "-" and n == "-" then
-            i = i + 2
-            while i <= #text and string.sub(text, i, i) ~= "\n" do
-                i = i + 1
-            end
-        elseif c == "/" and n == "*" then
-            i = i + 2
-            while i <= #text - 1 and string.sub(text, i, i + 1) ~= "*/" do
-                i = i + 1
-            end
-            i = math.min(i + 2, #text + 1)
-        elseif c == "'" then
-            local start_pos = i
-            i = i + 1
-            while i <= #text do
-                c = string.sub(text, i, i)
-                n = string.sub(text, i + 1, i + 1)
-                if c == "'" and n == "'" then
-                    i = i + 2
-                elseif c == "'" then
-                    i = i + 1
-                    break
-                else
-                    i = i + 1
-                end
-            end
-            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1), kind = "literal", start_pos = start_pos, end_pos = i - 1, depth = depth}
-        elseif c == '"' then
-            local start_pos = i
-            i = i + 1
-            while i <= #text do
-                c = string.sub(text, i, i)
-                n = string.sub(text, i + 1, i + 1)
-                if c == '"' and n == '"' then
-                    i = i + 2
-                elseif c == '"' then
-                    i = i + 1
-                    break
-                else
-                    i = i + 1
-                end
-            end
-            local token_text = string.sub(text, start_pos, i - 1)
-            tokens[#tokens + 1] = {text = token_text, kind = "identifier", value = decode_quoted_identifier(token_text), upper = upper(decode_quoted_identifier(token_text)), start_pos = start_pos, end_pos = i - 1, depth = depth}
-        elseif string.match(c, "[A-Za-z_]") then
-            local start_pos = i
-            i = i + 1
-            while i <= #text and string.match(string.sub(text, i, i), "[A-Za-z0-9_]") do
-                i = i + 1
-            end
-            local token_text = string.sub(text, start_pos, i - 1)
-            tokens[#tokens + 1] = {text = token_text, kind = "word", value = token_text, upper = upper(token_text), start_pos = start_pos, end_pos = i - 1, depth = depth}
-        elseif string.match(c, "%d") then
-            local start_pos = i
-            i = i + 1
-            while i <= #text and string.match(string.sub(text, i, i), "[0-9.]") do
-                i = i + 1
-            end
-            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1), kind = "number", start_pos = start_pos, end_pos = i - 1, depth = depth}
-        else
-            local token_depth = depth
-            if c == ")" then
-                depth = math.max(depth - 1, 0)
-                token_depth = depth
-            end
-            tokens[#tokens + 1] = {text = c, kind = "symbol", upper = c, start_pos = i, end_pos = i, depth = token_depth}
-            if c == "(" then
-                depth = depth + 1
-            end
-            i = i + 1
-        end
-    end
-    if #tokens > 0 and tokens[#tokens].text == ";" then
-        table.remove(tokens, #tokens)
-    end
-    return tokens
-end
-
-local function token_upper(token)
-    if token == nil then
-        return nil
-    end
-    return token.upper or upper(token.text)
-end
-
 local function token_identifier(token)
     if token == nil then
         return nil
@@ -211,7 +122,7 @@ local function find_sequence(tokens, words, start_index, depth)
         end
         if ok then
             for j, word in ipairs(words) do
-                if token_upper(tokens[i + j - 1]) ~= word then
+                if sql_text.token_upper(tokens[i + j - 1]) ~= word then
                     ok = false
                     break
                 end
@@ -296,7 +207,7 @@ local function clause_positions(tokens, start_index)
             for _, words in ipairs(CLAUSES) do
                 local ok = true
                 for j, word in ipairs(words) do
-                    if token_upper(tokens[i + j - 1]) ~= word then
+                    if sql_text.token_upper(tokens[i + j - 1]) ~= word then
                         ok = false
                         break
                     end
@@ -382,8 +293,8 @@ local function parse_clause_scalar(text)
 end
 
 local function parse_fact(text)
-    local tokens = tokenize(text)
-    if token_upper(tokens[1]) ~= "FACT" then
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
+    if sql_text.token_upper(tokens[1]) ~= "FACT" then
         error("SEMANTIC_DDL_020: expected FACT entry")
     end
     local name = normalize_name(token_identifier(tokens[2]), "FACT_NAME")
@@ -426,8 +337,8 @@ end
 -- FORMAT is the one clause a fact does not use and a dimension does; it was
 -- already in CLAUSES for metrics.
 local function parse_dimension(text)
-    local tokens = tokenize(text)
-    if token_upper(tokens[1]) ~= "DIMENSION" then
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
+    if sql_text.token_upper(tokens[1]) ~= "DIMENSION" then
         error("SEMANTIC_DDL_025: expected DIMENSION entry")
     end
     local name = normalize_name(token_identifier(tokens[2]), "DIMENSION_NAME")
@@ -457,7 +368,7 @@ end
 
 local function aggregate_parts(expression)
     local text = trim(expression)
-    local tokens = tokenize(text)
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
     if #tokens < 3 or tokens[1].kind ~= "word" or tokens[2].text ~= "(" then
         return nil, nil
     end
@@ -477,7 +388,7 @@ local function aggregate_parts(expression)
 end
 
 local function parse_metric(text, leading_metric_seen)
-    local tokens = tokenize(text)
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
     local name_index = 2
     if not leading_metric_seen then
         local metric_index = find_sequence(tokens, {"METRIC"}, 1, 0)
@@ -485,7 +396,7 @@ local function parse_metric(text, leading_metric_seen)
             error("SEMANTIC_DDL_030: expected METRIC entry")
         end
         name_index = metric_index + 1
-    elseif token_upper(tokens[1]) ~= "METRIC" then
+    elseif sql_text.token_upper(tokens[1]) ~= "METRIC" then
         error("SEMANTIC_DDL_030: expected METRIC entry")
     end
     local name = normalize_name(token_identifier(tokens[name_index]), "METRIC_NAME")
@@ -577,11 +488,11 @@ end
 
 local function parse_definition(definition_sql)
     local source = tostring(definition_sql or "")
-    local tokens = tokenize(source)
+    local tokens = sql_text.tokenize(source, SEMANTIC_DDL_LEXER)
     if #tokens == 0 then
         error("SEMANTIC_DDL_001: definition SQL is required")
     end
-    if token_upper(tokens[1]) ~= "ALTER" or token_upper(tokens[2]) ~= "SEMANTIC" or token_upper(tokens[3]) ~= "VIEW" then
+    if sql_text.token_upper(tokens[1]) ~= "ALTER" or sql_text.token_upper(tokens[2]) ~= "SEMANTIC" or sql_text.token_upper(tokens[3]) ~= "VIEW" then
         error("SEMANTIC_DDL_010: expected ALTER SEMANTIC VIEW")
     end
     local model_name, object_name, _, next_index = parse_qualified(tokens, 4)
@@ -622,7 +533,7 @@ local function parse_definition(definition_sql)
 
     if rename_metric ~= nil then
         local old_name = token_identifier(tokens[rename_metric + 2])
-        local to_keyword = token_upper(tokens[rename_metric + 3])
+        local to_keyword = sql_text.token_upper(tokens[rename_metric + 3])
         local new_name = token_identifier(tokens[rename_metric + 4])
         if old_name == nil or to_keyword ~= "TO" or new_name == nil or tokens[rename_metric + 5] ~= nil then
             error("SEMANTIC_DDL_036: RENAME METRIC requires <old_name> TO <new_name>")
@@ -781,7 +692,7 @@ local function replace_semantic_identifiers(model, expression)
     if missing(expression) then
         return nil
     end
-    local tokens = tokenize(expression)
+    local tokens = sql_text.tokenize(expression, SEMANTIC_DDL_LEXER)
     local out = {}
     local last = 1
     for _, token in ipairs(tokens) do
@@ -1158,7 +1069,7 @@ local SQL_WORDS = {
 local function identifiers_in_expression(expression)
     local identifiers = {}
     local seen = {}
-    for _, token in ipairs(tokenize(expression or "")) do
+    for _, token in ipairs(sql_text.tokenize(expression or "", SEMANTIC_DDL_LEXER)) do
         if token.kind == "word" or token.kind == "identifier" then
             local name = token.value or token.text
             local normalized = upper(name)
@@ -1176,7 +1087,7 @@ local AGGREGATE_FUNCTIONS = {
 }
 
 local function contains_aggregate_call(expression)
-    local tokens = tokenize(expression or "")
+    local tokens = sql_text.tokenize(expression or "", SEMANTIC_DDL_LEXER)
     for index, token in ipairs(tokens) do
         if token.kind == "word"
                 and AGGREGATE_FUNCTIONS[upper(token.text)]
@@ -1190,7 +1101,7 @@ end
 
 local function inline_ratio_parts(expression)
     local text = tostring(expression or "")
-    local tokens = tokenize(text)
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
     local depth = 0
     local division = nil
     local division_depth = nil
@@ -1501,7 +1412,7 @@ local function rewrite_identifier(expression, old_name, new_name)
     end
     local source = tostring(expression)
     local replacements = {}
-    for _, token in ipairs(tokenize(source)) do
+    for _, token in ipairs(sql_text.tokenize(source, SEMANTIC_DDL_LEXER)) do
         if (token.kind == "word" or token.kind == "identifier")
                 and upper(token.value or token.text) == upper(old_name) then
             local replacement = new_name
@@ -1831,352 +1742,62 @@ local function validate_definition_model(model, model_name)
     return validation_rows, error_count, warning_count, validation_run_id
 end
 
-local function snapshot_model_state(model)
-    return {
-        attribute_bindings = query([[
-            SELECT ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
-                   ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
-                   SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
-                   IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
-            FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        dimensions = query([[
-            SELECT DIMENSION_ID, MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION,
-                   DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-                   SENSITIVITY_LABEL, DISPLAY_POLICY, IS_HIDDEN, IS_CERTIFIED, STATUS
-            FROM SYS_SEMANTIC.DIMENSIONS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        facts = query([[
-            SELECT FACT_ID, MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
-                   ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-                   SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE, IS_CERTIFIED, STATUS
-            FROM SYS_SEMANTIC.FACTS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        metrics = query([[
-            SELECT METRIC_ID, MODEL_ID, VERSION_ID, METRIC_NAME, EXPRESSION, FILTER_EXPR,
-                   METRIC_TYPE, BASE_ENTITY_ID, DATA_TYPE, DISPLAY_NAME, DESCRIPTION,
-                   FORMAT_HINT, UNIT_HINT, SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE,
-                   IS_CERTIFIED, OWNER_ROLE, METRIC_KIND, AGGREGATION_FUNCTION, MEASURE_EXPR,
-                   SEMANTIC_FILTER_EXPR, SQL_FILTER_EXPR, DISTINCT_KEY_EXPR,
-                   NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON, TYPE_PARAMS_JSON,
-                   DEFINITION_SOURCE_ID, STATUS
-            FROM SYS_SEMANTIC.METRICS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        object_columns = query([[
-            SELECT oc.OBJECT_ID, oc.COLUMN_KIND, oc.OBJECT_REF_ID, oc.COLUMN_NAME,
-                   oc.ORDINAL_POSITION, oc.IS_VISIBLE
-            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
-            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
-              ON so.OBJECT_ID = oc.OBJECT_ID
-            WHERE so.MODEL_ID = :model_id
-              AND so.VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        metric_inputs = query([[
-            SELECT mi.METRIC_ID, mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE, mi.INPUT_OBJECT_ID,
-                   mi.EXPRESSION_ALIAS, mi.OFFSET_WINDOW, mi.FILTER_EXPR, mi.ORDINAL_POSITION
-            FROM SYS_SEMANTIC.METRIC_INPUTS mi
-            JOIN SYS_SEMANTIC.METRICS mt
-              ON mt.METRIC_ID = mi.METRIC_ID
-            WHERE mt.MODEL_ID = :model_id
-              AND mt.VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        metric_filters = query([[
-            SELECT mf.METRIC_ID, mf.FILTER_KIND, mf.FILTER_EXPR, mf.RESOLVED_SQL_EXPR,
-                   mf.REQUIRED_DIMENSION_ID, mf.REQUIRED_ENTITY_ID, mf.ORDINAL_POSITION
-            FROM SYS_SEMANTIC.METRIC_FILTERS mf
-            JOIN SYS_SEMANTIC.METRICS mt
-              ON mt.METRIC_ID = mf.METRIC_ID
-            WHERE mt.MODEL_ID = :model_id
-              AND mt.VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        synonyms = query([[
-            SELECT SYNONYM_ID, MODEL_ID, VERSION_ID, OBJECT_TYPE, OBJECT_ID, SYNONYM, SYNONYM_SOURCE
-            FROM SYS_SEMANTIC.SYNONYMS
-            WHERE MODEL_ID = :model_id
-              AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-    }
+-- The eight tables an ALTER SEMANTIC VIEW apply can touch, parent to child.
+--
+-- This was 335 lines: every column written out four times per table, in the
+-- snapshot SELECT, the restore INSERT list, its VALUES list, and the parameter
+-- map, the last carrying ordinals that had to stay in step with the first.
+-- Nothing checked that the four agreed, and METRICS grew five columns after it
+-- was written. Column lists now come from the catalog -- see
+-- shared/catalog_rollback.lua, which admin/fusion_declaration.lua already used.
+--
+-- METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX are new to the *snapshot*.
+-- They were cleared on rollback and never restored, because they were in the
+-- delete list and not the capture list; one list per table makes that
+-- unexpressible. Both are validator output that the VALIDATE_MODEL run
+-- following a restore rewrites anyway, so this closes a window rather than
+-- changing an outcome.
+local MODEL_SCOPE = "MODEL_ID = :model_id AND VERSION_ID = :version_id"
+local METRIC_SCOPE = "METRIC_ID IN (SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS"
+    .. " WHERE " .. MODEL_SCOPE .. ")"
+local SNAPSHOT_TABLES = {
+    {name = "DIMENSIONS", where = MODEL_SCOPE},
+    {name = "FACTS", where = MODEL_SCOPE},
+    {name = "METRICS", where = MODEL_SCOPE},
+    {name = "ATTRIBUTE_BINDINGS", where = MODEL_SCOPE},
+    {name = "SYNONYMS", where = MODEL_SCOPE},
+    {name = "METRIC_DIMENSION_MATRIX", where = MODEL_SCOPE},
+    -- Scoped through a parent, so the capture joins and the delete cannot.
+    {name = "OBJECT_COLUMNS", alias = "oc",
+     join = "JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID",
+     where = "so.MODEL_ID = :model_id AND so.VERSION_ID = :version_id",
+     delete_where = "OBJECT_ID IN (SELECT OBJECT_ID FROM"
+         .. " SYS_SEMANTIC.SEMANTIC_OBJECTS WHERE " .. MODEL_SCOPE .. ")"},
+    {name = "METRIC_INPUTS", alias = "mi",
+     join = "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = mi.METRIC_ID",
+     where = "mt.MODEL_ID = :model_id AND mt.VERSION_ID = :version_id",
+     delete_where = METRIC_SCOPE},
+    {name = "METRIC_FILTERS", alias = "mf",
+     join = "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = mf.METRIC_ID",
+     where = "mt.MODEL_ID = :model_id AND mt.VERSION_ID = :version_id",
+     delete_where = METRIC_SCOPE},
+    {name = "METRIC_DEPENDENCIES", alias = "md",
+     join = "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = md.METRIC_ID",
+     where = "mt.MODEL_ID = :model_id AND mt.VERSION_ID = :version_id",
+     delete_where = METRIC_SCOPE},
+}
+
+local function model_scope(model)
+    return {model_id = model.model_id, version_id = model.version_id}
 end
 
-local function clear_model_state(model)
-    query([[
-        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_INPUTS
-        WHERE METRIC_ID IN (
-          SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_FILTERS
-        WHERE METRIC_ID IN (
-          SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
-        WHERE METRIC_ID IN (
-          SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.SYNONYMS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
-        WHERE OBJECT_ID IN (
-          SELECT OBJECT_ID FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRICS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.FACTS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.DIMENSIONS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
+local function snapshot_model_state(model)
+    return rollback.snapshot(query, SNAPSHOT_TABLES, model_scope(model),
+        "SEMANTIC_DDL_091")
 end
 
 local function restore_model_state(model, snapshot)
-    clear_model_state(model)
-    -- Dimensions first: ATTRIBUTE_BINDINGS and OBJECT_COLUMNS rows restored
-    -- below point at these ids.
-    for _, row in ipairs(snapshot.dimensions or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.DIMENSIONS (
-              DIMENSION_ID, MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION,
-              DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-              SENSITIVITY_LABEL, DISPLAY_POLICY, IS_HIDDEN, IS_CERTIFIED, STATUS
-            ) VALUES (
-              :dimension_id, :model_id, :version_id, :entity_id, :dimension_name, :expression,
-              :data_type, :display_name, :description, :format_hint, :unit_hint,
-              :sensitivity_label, :display_policy, :is_hidden, :is_certified, :status
-            )
-        ]], {
-            dimension_id = row_value(row, "DIMENSION_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            entity_id = row_value(row, "ENTITY_ID", 4),
-            dimension_name = row_value(row, "DIMENSION_NAME", 5),
-            expression = row_value(row, "EXPRESSION", 6),
-            data_type = row_value(row, "DATA_TYPE", 7),
-            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 8)),
-            description = null_if_missing(row_value(row, "DESCRIPTION", 9)),
-            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 10)),
-            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 11)),
-            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 12)),
-            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 13)),
-            is_hidden = row_value(row, "IS_HIDDEN", 14),
-            is_certified = row_value(row, "IS_CERTIFIED", 15),
-            status = row_value(row, "STATUS", 16),
-        })
-    end
-    for _, row in ipairs(snapshot.facts or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.FACTS (
-              FACT_ID, MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
-              ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-              SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE, IS_CERTIFIED, STATUS
-            ) VALUES (
-              :fact_id, :model_id, :version_id, :entity_id, :fact_name, :expression, :data_type,
-              :additive_policy, :display_name, :description, :format_hint, :unit_hint,
-              :sensitivity_label, :display_policy, :is_private, :is_certified, :status
-            )
-        ]], {
-            fact_id = row_value(row, "FACT_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            entity_id = row_value(row, "ENTITY_ID", 4),
-            fact_name = row_value(row, "FACT_NAME", 5),
-            expression = row_value(row, "EXPRESSION", 6),
-            data_type = row_value(row, "DATA_TYPE", 7),
-            additive_policy = row_value(row, "ADDITIVE_POLICY", 8),
-            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 9)),
-            description = null_if_missing(row_value(row, "DESCRIPTION", 10)),
-            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 11)),
-            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 12)),
-            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 13)),
-            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 14)),
-            is_private = row_value(row, "IS_PRIVATE", 15),
-            is_certified = row_value(row, "IS_CERTIFIED", 16),
-            status = row_value(row, "STATUS", 17),
-        })
-    end
-    for _, row in ipairs(snapshot.attribute_bindings or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
-              ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
-              ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
-              SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
-              IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
-            ) VALUES (
-              :binding_id, :model_id, :version_id, :entity_id,
-              :attribute_type, :attribute_id, :representation_id,
-              :source_expression, :binding_role, :binding_priority,
-              :is_default, :status, :created_at, :created_by, :updated_at, :updated_by
-            )
-        ]], {
-            binding_id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            entity_id = row_value(row, "ENTITY_ID", 4),
-            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 5),
-            attribute_id = row_value(row, "ATTRIBUTE_ID", 6),
-            representation_id = row_value(row, "REPRESENTATION_ID", 7),
-            source_expression = row_value(row, "SOURCE_EXPRESSION", 8),
-            binding_role = row_value(row, "BINDING_ROLE", 9),
-            binding_priority = row_value(row, "BINDING_PRIORITY", 10),
-            is_default = row_value(row, "IS_DEFAULT", 11),
-            status = row_value(row, "STATUS", 12),
-            created_at = null_if_missing(row_value(row, "CREATED_AT", 13)),
-            created_by = null_if_missing(row_value(row, "CREATED_BY", 14)),
-            updated_at = null_if_missing(row_value(row, "UPDATED_AT", 15)),
-            updated_by = null_if_missing(row_value(row, "UPDATED_BY", 16)),
-        })
-    end
-    for _, row in ipairs(snapshot.metrics or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRICS (
-              METRIC_ID, MODEL_ID, VERSION_ID, METRIC_NAME, EXPRESSION, FILTER_EXPR,
-              METRIC_TYPE, BASE_ENTITY_ID, DATA_TYPE, DISPLAY_NAME, DESCRIPTION,
-              FORMAT_HINT, UNIT_HINT, SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE,
-              IS_CERTIFIED, OWNER_ROLE, METRIC_KIND, AGGREGATION_FUNCTION, MEASURE_EXPR,
-              SEMANTIC_FILTER_EXPR, SQL_FILTER_EXPR, DISTINCT_KEY_EXPR,
-              NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON, TYPE_PARAMS_JSON,
-              DEFINITION_SOURCE_ID, STATUS
-            ) VALUES (
-              :metric_id, :model_id, :version_id, :metric_name, :expression, :filter_expr,
-              :metric_type, :base_entity_id, :data_type, :display_name, :description,
-              :format_hint, :unit_hint, :sensitivity_label, :display_policy, :is_private,
-              :is_certified, :owner_role, :metric_kind, :aggregation_function, :measure_expr,
-              :semantic_filter_expr, :sql_filter_expr, :distinct_key_expr,
-              :non_additive_dimension_id, :window_spec_json, :type_params_json,
-              :definition_source_id, :status
-            )
-        ]], {
-            metric_id = row_value(row, "METRIC_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            metric_name = row_value(row, "METRIC_NAME", 4),
-            expression = row_value(row, "EXPRESSION", 5),
-            filter_expr = null_if_missing(row_value(row, "FILTER_EXPR", 6)),
-            metric_type = row_value(row, "METRIC_TYPE", 7),
-            base_entity_id = null_if_missing(row_value(row, "BASE_ENTITY_ID", 8)),
-            data_type = row_value(row, "DATA_TYPE", 9),
-            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 10)),
-            description = null_if_missing(row_value(row, "DESCRIPTION", 11)),
-            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 12)),
-            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 13)),
-            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 14)),
-            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 15)),
-            is_private = row_value(row, "IS_PRIVATE", 16),
-            is_certified = row_value(row, "IS_CERTIFIED", 17),
-            owner_role = null_if_missing(row_value(row, "OWNER_ROLE", 18)),
-            metric_kind = null_if_missing(row_value(row, "METRIC_KIND", 19)),
-            aggregation_function = null_if_missing(row_value(row, "AGGREGATION_FUNCTION", 20)),
-            measure_expr = null_if_missing(row_value(row, "MEASURE_EXPR", 21)),
-            semantic_filter_expr = null_if_missing(row_value(row, "SEMANTIC_FILTER_EXPR", 22)),
-            sql_filter_expr = null_if_missing(row_value(row, "SQL_FILTER_EXPR", 23)),
-            distinct_key_expr = null_if_missing(row_value(row, "DISTINCT_KEY_EXPR", 24)),
-            non_additive_dimension_id = null_if_missing(row_value(row, "NON_ADDITIVE_DIMENSION_ID", 25)),
-            window_spec_json = null_if_missing(row_value(row, "WINDOW_SPEC_JSON", 26)),
-            type_params_json = null_if_missing(row_value(row, "TYPE_PARAMS_JSON", 27)),
-            definition_source_id = null_if_missing(row_value(row, "DEFINITION_SOURCE_ID", 28)),
-            status = row_value(row, "STATUS", 29),
-        })
-    end
-    for _, row in ipairs(snapshot.object_columns or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.OBJECT_COLUMNS (
-              OBJECT_ID, COLUMN_KIND, OBJECT_REF_ID, COLUMN_NAME, ORDINAL_POSITION, IS_VISIBLE
-            ) VALUES (
-              :object_id, :column_kind, :object_ref_id, :column_name, :ordinal_position, :is_visible
-            )
-        ]], {
-            object_id = row_value(row, "OBJECT_ID", 1),
-            column_kind = row_value(row, "COLUMN_KIND", 2),
-            object_ref_id = row_value(row, "OBJECT_REF_ID", 3),
-            column_name = row_value(row, "COLUMN_NAME", 4),
-            ordinal_position = row_value(row, "ORDINAL_POSITION", 5),
-            is_visible = row_value(row, "IS_VISIBLE", 6),
-        })
-    end
-    for _, row in ipairs(snapshot.metric_inputs or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRIC_INPUTS (
-              METRIC_ID, INPUT_ROLE, INPUT_OBJECT_TYPE, INPUT_OBJECT_ID,
-              EXPRESSION_ALIAS, OFFSET_WINDOW, FILTER_EXPR, ORDINAL_POSITION
-            ) VALUES (
-              :metric_id, :input_role, :input_object_type, :input_object_id,
-              :expression_alias, :offset_window, :filter_expr, :ordinal_position
-            )
-        ]], {
-            metric_id = row_value(row, "METRIC_ID", 1),
-            input_role = row_value(row, "INPUT_ROLE", 2),
-            input_object_type = row_value(row, "INPUT_OBJECT_TYPE", 3),
-            input_object_id = null_if_missing(row_value(row, "INPUT_OBJECT_ID", 4)),
-            expression_alias = null_if_missing(row_value(row, "EXPRESSION_ALIAS", 5)),
-            offset_window = null_if_missing(row_value(row, "OFFSET_WINDOW", 6)),
-            filter_expr = null_if_missing(row_value(row, "FILTER_EXPR", 7)),
-            ordinal_position = row_value(row, "ORDINAL_POSITION", 8),
-        })
-    end
-    for _, row in ipairs(snapshot.metric_filters or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRIC_FILTERS (
-              METRIC_ID, FILTER_KIND, FILTER_EXPR, RESOLVED_SQL_EXPR,
-              REQUIRED_DIMENSION_ID, REQUIRED_ENTITY_ID, ORDINAL_POSITION
-            ) VALUES (
-              :metric_id, :filter_kind, :filter_expr, :resolved_sql_expr,
-              :required_dimension_id, :required_entity_id, :ordinal_position
-            )
-        ]], {
-            metric_id = row_value(row, "METRIC_ID", 1),
-            filter_kind = row_value(row, "FILTER_KIND", 2),
-            filter_expr = row_value(row, "FILTER_EXPR", 3),
-            resolved_sql_expr = null_if_missing(row_value(row, "RESOLVED_SQL_EXPR", 4)),
-            required_dimension_id = null_if_missing(row_value(row, "REQUIRED_DIMENSION_ID", 5)),
-            required_entity_id = null_if_missing(row_value(row, "REQUIRED_ENTITY_ID", 6)),
-            ordinal_position = row_value(row, "ORDINAL_POSITION", 7),
-        })
-    end
-    for _, row in ipairs(snapshot.synonyms or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.SYNONYMS (
-              SYNONYM_ID, MODEL_ID, VERSION_ID, OBJECT_TYPE, OBJECT_ID, SYNONYM, SYNONYM_SOURCE
-            ) VALUES (
-              :synonym_id, :model_id, :version_id, :object_type, :object_id, :synonym, :synonym_source
-            )
-        ]], {
-            synonym_id = row_value(row, "SYNONYM_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            object_type = row_value(row, "OBJECT_TYPE", 4),
-            object_id = row_value(row, "OBJECT_ID", 5),
-            synonym = row_value(row, "SYNONYM", 6),
-            synonym_source = null_if_missing(row_value(row, "SYNONYM_SOURCE", 7)),
-        })
-    end
+    rollback.restore(query, SNAPSHOT_TABLES, snapshot, model_scope(model))
 end
 
 local function batch_arg(args, name)
@@ -3645,7 +3266,7 @@ local DBX_SQL_WORDS = {
 -- name. When present, a resolved column that matches is emitted as the
 -- dimension name (used for FILTER predicates).
 local function dbx_rewrite_expr(expr, alias_paths, default_alias, dimension_lookup, diags, path)
-    local tokens = tokenize(tostring(expr or ""))
+    local tokens = sql_text.tokenize(tostring(expr or ""), SEMANTIC_DDL_LEXER)
     local parts = {}
     local attach_next = false
     local function emit(text, tight)
@@ -3752,7 +3373,7 @@ end
 -- Split "<agg> FILTER (WHERE <pred>)" into the aggregate expression and the
 -- raw predicate (or nil). Returns agg_expr, filter_pred.
 local function dbx_split_filter(expr)
-    local tokens = tokenize(expr)
+    local tokens = sql_text.tokenize(expr, SEMANTIC_DDL_LEXER)
     for i, tok in ipairs(tokens) do
         if (tok.upper == "FILTER") and tokens[i + 1] ~= nil and tokens[i + 1].text == "(" then
             local close = nil
@@ -3782,7 +3403,7 @@ end
 
 -- Detect a leading aggregate call: returns AGG_FUNC, inner_text, has_distinct.
 local function dbx_aggregate(expr)
-    local tokens = tokenize(expr)
+    local tokens = sql_text.tokenize(expr, SEMANTIC_DDL_LEXER)
     if #tokens < 3 or tokens[1].kind ~= "word" or tokens[2].text ~= "(" then
         return nil, nil, false
     end
@@ -3954,7 +3575,7 @@ local function dbx_translate(doc, model_name, published_schema, diags)
 
     -- Resolve which entity an expression primarily references (for member binding).
     local function entity_for_expr(expr)
-        local tokens = tokenize(tostring(expr or ""))
+        local tokens = sql_text.tokenize(tostring(expr or ""), SEMANTIC_DDL_LEXER)
         local best_entity = nil
         local best_depth = 0
         for i = 1, #tokens - 1 do
@@ -4340,7 +3961,7 @@ if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {
         json_encode = json.encode,
         json_decode = json.decode,
-        tokenize = tokenize,
+        tokenize = function(text) return sql_text.tokenize(text, SEMANTIC_DDL_LEXER) end,
         split_top_level_text = split_top_level_text,
         parse_literal_list = parse_literal_list,
         parse_filter = parse_filter,
@@ -4356,6 +3977,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         upsert_metric = upsert_metric,
         upsert_dimension = upsert_dimension,
         snapshot_model_state = snapshot_model_state,
+        batch_call = batch_call,
         restore_model_state = restore_model_state,
         drop_metric = drop_metric,
         rename_metric = rename_metric,

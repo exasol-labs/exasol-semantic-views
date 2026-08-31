@@ -21,20 +21,9 @@
 
 local source_columns = assert(ESV_SOURCE_COLUMNS,
     "shared source column runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 
 local M = {}
-
--- Quoting is duplicated from the caller runtimes deliberately: three lines each,
--- against a module that would otherwise have to receive them as arguments at
--- every call. The alternative -- a shared SQL module -- is a bigger change than
--- this one earns.
-local function quote_ident(name)
-    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
 
 -- The column a semantic-key view projects. Callers reference it through
 -- M.semantic_key_reference so the name is written once.
@@ -53,19 +42,19 @@ end
 
 -- `"SCHEMA"."OBJECT"` for the mapping relation.
 function M.mapping_source(mapping)
-    return quote_qualified(mapping.source_schema, mapping.source_object)
+    return sql_text.quote_qualified(mapping.source_schema, mapping.source_object)
 end
 
 -- The semantic key as read from the mapping relation: `alias."SEMANTIC_COLUMN"`.
 function M.key(map_alias, semantic_column)
-    return tostring(map_alias) .. "." .. quote_ident(semantic_column)
+    return tostring(map_alias) .. "." .. sql_text.quote_ident(semantic_column)
 end
 
 -- The join predicate onto the mapping relation:
 -- `<local expression> = alias."LOCAL_COLUMN"`.
 function M.predicate(local_expression, map_alias, local_column)
     return tostring(local_expression) .. " = " .. tostring(map_alias) .. "."
-        .. quote_ident(local_column)
+        .. sql_text.quote_ident(local_column)
 end
 
 -- A representation projected alongside its resolved semantic key.
@@ -79,8 +68,8 @@ function M.semantic_key_view(query_fn, representation, mapping, source_alias,
     local local_column, semantic_column = M.columns(query_fn, mapping, cache)
     return "(SELECT " .. tostring(source_alias) .. ".*, "
         .. M.key(map_alias, semantic_column) .. " AS "
-        .. quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
-        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. sql_text.quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
+        .. sql_text.quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. tostring(source_alias) .. " JOIN "
         .. M.mapping_source(mapping) .. " " .. tostring(map_alias)
         .. " ON " .. M.predicate(local_expression, map_alias, local_column) .. ")"
@@ -88,7 +77,7 @@ end
 
 -- How a caller refers to the column M.semantic_key_view projected.
 function M.semantic_key_reference(alias)
-    return tostring(alias) .. "." .. quote_ident(M.SEMANTIC_KEY_COLUMN)
+    return tostring(alias) .. "." .. sql_text.quote_ident(M.SEMANTIC_KEY_COLUMN)
 end
 
 ESV_IDENTITY_JOIN = M

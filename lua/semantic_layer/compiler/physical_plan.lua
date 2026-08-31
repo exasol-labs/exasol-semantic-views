@@ -1,5 +1,7 @@
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
+
 local M = {
     VERSION = 6,
     DEFAULT_MAX_BRANCHES = 8,
@@ -9,41 +11,6 @@ local M = {
 local function key(value) return tostring(value) end
 local function upper(value) return string.upper(tostring(value or "")) end
 local function missing(value) return value == nil or value == null or tostring(value) == "" end
-
-local function quote_ident(value)
-    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
-
-local function sql_string(value)
-    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
-end
-
-local function sql_literal(value, data_type)
-    if value == nil or value == null then return "NULL" end
-    if type(value) == "number" then return tostring(value) end
-    if type(value) == "boolean" then return value and "TRUE" or "FALSE" end
-    local text = tostring(value)
-    local dtype = upper(data_type)
-    if string.sub(dtype, 1, 4) == "DATE"
-        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
-        return "DATE " .. sql_string(text)
-    end
-    if string.find(dtype, "TIMESTAMP", 1, true) == 1
-        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
-        return "TIMESTAMP " .. sql_string(text)
-    end
-    if string.find(dtype, "DECIMAL", 1, true)
-        or string.find(dtype, "INT", 1, true)
-        or string.find(dtype, "NUMBER", 1, true)
-        or string.find(dtype, "DOUBLE", 1, true) then
-        if string.match(text, "^%-?%d+%.?%d*$") then return text end
-    end
-    return sql_string(text)
-end
 
 local function is_text_type(data_type)
     local dtype = upper(data_type)
@@ -114,7 +81,7 @@ local function source_sql(entity)
         or missing(entity.alias) then
         return nil
     end
-    return quote_qualified(entity.source_schema, entity.source_object)
+    return sql_text.quote_qualified(entity.source_schema, entity.source_object)
         .. " " .. tostring(entity.alias)
 end
 
@@ -122,7 +89,7 @@ local function predicate_sql(filter, dimension)
     local expression = dimension and dimension.expression
     if missing(expression) then return nil, "DIMENSION_EXPRESSION_MISSING" end
     local operator = upper(filter.operator)
-    local rhs = filter.value_sql or sql_literal(filter.value, filter.data_type)
+    local rhs = filter.value_sql or sql_text.sql_literal(filter.value, filter.data_type)
     if operator == "IS NULL" or operator == "IS NOT NULL" then
         return tostring(expression) .. " " .. operator
     end
@@ -133,7 +100,7 @@ local function predicate_sql(filter, dimension)
         end
         local literals = {}
         for _, value in ipairs(values) do
-            local literal = sql_literal(value, filter.data_type)
+            local literal = sql_text.sql_literal(value, filter.data_type)
             if is_text_type(filter.data_type) then literal = "UPPER(" .. literal .. ")" end
             literals[#literals + 1] = literal
         end
@@ -147,8 +114,8 @@ local function predicate_sql(filter, dimension)
             return nil, "FILTER_VALUE_INVALID"
         end
         return tostring(expression) .. " BETWEEN "
-            .. sql_literal(values[1], filter.data_type) .. " AND "
-            .. sql_literal(values[2], filter.data_type)
+            .. sql_text.sql_literal(values[1], filter.data_type) .. " AND "
+            .. sql_text.sql_literal(values[2], filter.data_type)
     end
     if operator == "=" or operator == "!=" or operator == "<>"
         or operator == ">" or operator == ">=" or operator == "<"
@@ -308,7 +275,7 @@ local function append_fusion_joins(joins, joined_fusion_joins, entity)
         if not joined_fusion_joins[join_id] then
             local target_sql = fusion_join.source_sql
             if missing(target_sql) and fusion_join.representation ~= nil then
-                target_sql = quote_qualified(
+                target_sql = sql_text.quote_qualified(
                     fusion_join.representation.source_schema,
                     fusion_join.representation.source_object)
             end
@@ -446,7 +413,7 @@ local function metric_column_alias(metric_id)
 end
 
 local function qualified_column(source_alias, column_alias)
-    return tostring(source_alias) .. "." .. quote_ident(column_alias)
+    return tostring(source_alias) .. "." .. sql_text.quote_ident(column_alias)
 end
 
 local function collect_finalization(logical_plan, states, dimensions, options)
@@ -815,7 +782,7 @@ function M.apply_partitioned_sources(physical_plan, snapshot)
                     valid_from = representation.valid_from,
                     valid_to = representation.valid_to,
                 }
-                partition.from_sql = quote_qualified(representation.source_schema,
+                partition.from_sql = sql_text.quote_qualified(representation.source_schema,
                     representation.source_object) .. " " .. tostring(representation.alias)
                 for _, dimension in ipairs(partition.dimensions or {}) do
                     if key(dimension.entity_id) == key(entity.id) then
@@ -896,7 +863,7 @@ function M.apply_partitioned_sources(physical_plan, snapshot)
 end
 
 local function materialized_column_expression(source_alias, column)
-    return tostring(source_alias) .. "." .. quote_ident(column.physical_column)
+    return tostring(source_alias) .. "." .. sql_text.quote_ident(column.physical_column)
 end
 
 -- Rebind only complete, pre-selected leaf sources. The selector is deliberately
@@ -916,7 +883,7 @@ function M.apply_branch_sources(physical_plan, selections)
                 physical_object = candidate.physical_object,
                 extra_dimension_count = selected.extra_dimension_count,
             }
-            branch.from_sql = quote_qualified(candidate.physical_schema,
+            branch.from_sql = sql_text.quote_qualified(candidate.physical_schema,
                 candidate.physical_object) .. " " .. source_alias
             branch.joins = {}
 

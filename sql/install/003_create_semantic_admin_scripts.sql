@@ -9449,6 +9449,346 @@ end
 
 ESV_JSON = M
 
+-- Reading and writing SQL text, shared by every runtime that does either.
+--
+-- `shared/grain_graph.lua` exists because relationship proofs must not drift
+-- between the validator and the compiler, and CLAUDE.md states that invariant.
+-- Nothing stated it for *SQL rendering*, and the rendering drifted the same way:
+-- BUG-G03 was one defect -- a declared column name quoted verbatim -- living
+-- independently in five copies of the F5 mapping join, and fixing it meant
+-- finding all five.
+--
+-- `shared/identity_join.lua` closed that instance and, in its own header,
+-- named this module as the thing it could not yet call:
+--
+--   > Quoting is duplicated from the caller runtimes deliberately: three lines
+--   > each, against a module that would otherwise have to receive them as
+--   > arguments at every call. The alternative -- a shared SQL module -- is a
+--   > bigger change than this one earns.
+--
+-- This is that module, so identity_join now calls it instead.
+--
+-- Two of the routines here are the ones worth the move. `replace_qualified_alias`
+-- rewrites a table alias inside an expression while respecting string literals --
+-- it is how a representation's expression gets re-pointed at a different source --
+-- and `strip_string_literals` backs the alias and column analysis the validator
+-- proves expressions with. They were byte-identical in admin/validator.lua and
+-- compiler/request_json.lua, which means the validator proved an expression safe
+-- with one copy while the compiler emitted SQL with the other. A divergence
+-- there is not a crash; it is SQL that is wrong and validates.
+
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
+local M = {}
+
+local function upper(value)
+    return string.upper(tostring(value))
+end
+
+-- ---------------------------------------------------------------------------
+-- Quoting
+-- ---------------------------------------------------------------------------
+
+-- Exasol resolves an unquoted identifier case-insensitively and a quoted one
+-- exactly, so everything the compiler emits is quoted and everything it quotes
+-- has to be the physical spelling (see shared/source_columns.lua).
+function M.quote_ident(value)
+    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
+end
+
+function M.quote_qualified(schema_name, object_name)
+    return M.quote_ident(schema_name) .. "." .. M.quote_ident(object_name)
+end
+
+function M.sql_string(value)
+    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
+end
+
+-- A filter value rendered for its declared column type.
+--
+-- The type matters because Exasol will not silently coerce a string to a DATE in
+-- every position, and an unadorned numeric literal compares differently from a
+-- quoted one. `data_type` may be absent; an unknown type falls through to a
+-- quoted string, which is the safe default.
+function M.sql_literal(value, data_type)
+    if value == nil or value == null or value == json.NULL then
+        return "NULL"
+    end
+    local value_type = type(value)
+    if value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "TRUE" or "FALSE"
+    end
+    local text = tostring(value)
+    local dtype = upper(data_type or "")
+    if string.sub(dtype, 1, 4) == "DATE"
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
+        return "DATE " .. M.sql_string(text)
+    end
+    if string.find(dtype, "TIMESTAMP", 1, true) == 1
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
+        return "TIMESTAMP " .. M.sql_string(text)
+    end
+    if string.find(dtype, "DECIMAL", 1, true)
+        or string.find(dtype, "INT", 1, true)
+        or string.find(dtype, "NUMBER", 1, true)
+        or string.find(dtype, "DOUBLE", 1, true) then
+        if string.match(text, "^%-?%d+%.?%d*$") then
+            return text
+        end
+    end
+    return M.sql_string(text)
+end
+
+-- ---------------------------------------------------------------------------
+-- Expression rewriting
+-- ---------------------------------------------------------------------------
+
+-- Replace `source_alias.` with `target_alias.` throughout an expression, without
+-- touching anything inside a string literal.
+--
+-- This is how an attribute bound to one representation is re-pointed at another,
+-- so it runs on every fusion path. The literal handling is the part that has to
+-- be right: `'o.name'` is data, `o.name` is a column reference, and a naive
+-- gsub cannot tell them apart.
+function M.replace_qualified_alias(expression, source_alias, target_alias)
+    local source = upper(source_alias)
+    local text = tostring(expression)
+    local out = {}
+    local i = 1
+    local in_quote = false
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            out[#out + 1] = c
+            if in_quote and n == "'" then
+                out[#out + 1] = n
+                i = i + 2
+            else
+                in_quote = not in_quote
+                i = i + 1
+            end
+        elseif not in_quote and string.match(c, "[A-Za-z_]") then
+            local j = i + 1
+            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
+                j = j + 1
+            end
+            local cursor = j
+            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
+            local token = string.sub(text, i, j - 1)
+            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
+                out[#out + 1] = target_alias
+            else
+                out[#out + 1] = token
+            end
+            i = j
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+-- Blank out the contents of every string literal, preserving byte offsets.
+--
+-- Offsets are preserved so a caller can scan the result for aliases, column
+-- references or function calls and still index back into the original text.
+function M.strip_string_literals(text)
+    local out = {}
+    local in_quote = false
+    local i = 1
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            if in_quote and n == "'" then
+                out[#out + 1] = " "
+                out[#out + 1] = " "
+                i = i + 2
+            else
+                in_quote = not in_quote
+                out[#out + 1] = " "
+                i = i + 1
+            end
+        elseif in_quote then
+            out[#out + 1] = " "
+            i = i + 1
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+-- ---------------------------------------------------------------------------
+-- Lexing
+-- ---------------------------------------------------------------------------
+
+function M.decode_quoted_identifier(token_text)
+    return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
+end
+
+-- The uppercase form of a token for keyword comparison.
+--
+-- Falls back to the token's raw `text`, which for a quoted identifier still
+-- carries its quotes -- so `"AND"` never compares equal to the keyword AND
+-- unless the lexer was asked to fold identifiers (see `upper_identifiers`).
+function M.token_upper(token)
+    if token == nil then
+        return nil
+    end
+    return token.upper or upper(token.text)
+end
+
+-- One lexer for the Exasol dialect, with two options where its two callers
+-- genuinely disagree.
+--
+-- Everything else -- whitespace, `--` and `/* */` comments, single-quoted
+-- literals with `''` escapes, double-quoted identifiers with `""` escapes,
+-- words, numbers, symbols, the trailing semicolon -- was character-for-character
+-- identical in compiler/request_json.lua's `sql_tokens` and
+-- admin/semantic_definition.lua's `tokenize`. A new literal form or comment
+-- syntax had to be taught twice.
+--
+--   options.operators          fuse `>=`, `<=`, `<>`, `!=` into one token. The
+--                              semantic-SQL parser compares whole operators; the
+--                              DDL parser slices expressions by byte offset and
+--                              never looks at them, and has always seen two
+--                              symbols. Changing that for the DDL would alter a
+--                              4 600-line parser for no gain.
+--
+--   options.upper_identifiers  set `upper` on a quoted identifier from its
+--                              *decoded* value. The DDL parser wants it, because
+--                              it reads names out of quoted tokens. The
+--                              semantic-SQL parser must not have it: `token_upper`
+--                              is what its clause scanner compares against
+--                              keywords, so folding `"AND"` to `AND` would make a
+--                              quoted column named "and" parse as a conjunction.
+--
+-- Every token carries `start_pos`, `end_pos` and `depth` regardless. The
+-- semantic-SQL parser ignores them; that costs three assignments and removes the
+-- reason to keep a second lexer.
+function M.tokenize(text, options)
+    options = options or {}
+    local fuse_operators = options.operators == true
+    local fold_identifiers = options.upper_identifiers == true
+    local tokens = {}
+    text = tostring(text)
+    local i = 1
+    local depth = 0
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if string.match(c, "%s") then
+            i = i + 1
+        elseif c == "-" and n == "-" then
+            i = i + 2
+            while i <= #text and string.sub(text, i, i) ~= "\n" do
+                i = i + 1
+            end
+        elseif c == "/" and n == "*" then
+            i = i + 2
+            while i <= #text - 1 and string.sub(text, i, i + 1) ~= "*/" do
+                i = i + 1
+            end
+            i = math.min(i + 2, #text + 1)
+        elseif c == "'" then
+            local start_pos = i
+            i = i + 1
+            while i <= #text do
+                c = string.sub(text, i, i)
+                n = string.sub(text, i + 1, i + 1)
+                if c == "'" and n == "'" then
+                    i = i + 2
+                elseif c == "'" then
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1),
+                kind = "literal", start_pos = start_pos, end_pos = i - 1,
+                depth = depth}
+        elseif c == '"' then
+            local start_pos = i
+            i = i + 1
+            while i <= #text do
+                c = string.sub(text, i, i)
+                n = string.sub(text, i + 1, i + 1)
+                if c == '"' and n == '"' then
+                    i = i + 2
+                elseif c == '"' then
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            local token_text = string.sub(text, start_pos, i - 1)
+            local decoded = M.decode_quoted_identifier(token_text)
+            tokens[#tokens + 1] = {text = token_text, kind = "identifier",
+                value = decoded,
+                upper = fold_identifiers and upper(decoded) or nil,
+                start_pos = start_pos, end_pos = i - 1, depth = depth}
+        elseif string.match(c, "[A-Za-z_]") then
+            local start_pos = i
+            i = i + 1
+            while i <= #text and string.match(string.sub(text, i, i), "[A-Za-z0-9_]") do
+                i = i + 1
+            end
+            local token_text = string.sub(text, start_pos, i - 1)
+            tokens[#tokens + 1] = {text = token_text, kind = "word",
+                value = token_text, upper = upper(token_text),
+                start_pos = start_pos, end_pos = i - 1, depth = depth}
+        elseif string.match(c, "%d") then
+            local start_pos = i
+            i = i + 1
+            while i <= #text and string.match(string.sub(text, i, i), "[0-9.]") do
+                i = i + 1
+            end
+            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1),
+                kind = "number", start_pos = start_pos, end_pos = i - 1,
+                depth = depth}
+        else
+            local two = string.sub(text, i, i + 1)
+            if fuse_operators and (two == ">=" or two == "<=" or two == "<>"
+                or two == "!=") then
+                tokens[#tokens + 1] = {text = two, kind = "operator", upper = two,
+                    start_pos = i, end_pos = i + 1, depth = depth}
+                i = i + 2
+            else
+                -- A closing paren carries the depth it returns to, which is the
+                -- depth its matching opening paren was emitted at. Both
+                -- parentheses of a top-level group therefore sit at 0 and only
+                -- their contents are nested, which is what lets a clause scanner
+                -- find top-level commas by reading `depth == 0`.
+                local token_depth = depth
+                if c == ")" then
+                    depth = math.max(depth - 1, 0)
+                    token_depth = depth
+                end
+                tokens[#tokens + 1] = {text = c, kind = "symbol", upper = c,
+                    start_pos = i, end_pos = i, depth = token_depth}
+                if c == "(" then
+                    depth = depth + 1
+                end
+                i = i + 1
+            end
+        end
+    end
+    if #tokens > 0 and tokens[#tokens].text == ";" then
+        table.remove(tokens, #tokens)
+    end
+    return tokens
+end
+
+ESV_SQL_TEXT = M
+
 -- Canonical relationship graph and path-proof implementation shared by the
 -- validator and compiler runtimes. The packaging step embeds this source into
 -- both Exasol scripts so the installed runtime has no external dependency.
@@ -10031,20 +10371,9 @@ ESV_SOURCE_COLUMNS = M
 
 local source_columns = assert(ESV_SOURCE_COLUMNS,
     "shared source column runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 
 local M = {}
-
--- Quoting is duplicated from the caller runtimes deliberately: three lines each,
--- against a module that would otherwise have to receive them as arguments at
--- every call. The alternative -- a shared SQL module -- is a bigger change than
--- this one earns.
-local function quote_ident(name)
-    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
 
 -- The column a semantic-key view projects. Callers reference it through
 -- M.semantic_key_reference so the name is written once.
@@ -10063,19 +10392,19 @@ end
 
 -- `"SCHEMA"."OBJECT"` for the mapping relation.
 function M.mapping_source(mapping)
-    return quote_qualified(mapping.source_schema, mapping.source_object)
+    return sql_text.quote_qualified(mapping.source_schema, mapping.source_object)
 end
 
 -- The semantic key as read from the mapping relation: `alias."SEMANTIC_COLUMN"`.
 function M.key(map_alias, semantic_column)
-    return tostring(map_alias) .. "." .. quote_ident(semantic_column)
+    return tostring(map_alias) .. "." .. sql_text.quote_ident(semantic_column)
 end
 
 -- The join predicate onto the mapping relation:
 -- `<local expression> = alias."LOCAL_COLUMN"`.
 function M.predicate(local_expression, map_alias, local_column)
     return tostring(local_expression) .. " = " .. tostring(map_alias) .. "."
-        .. quote_ident(local_column)
+        .. sql_text.quote_ident(local_column)
 end
 
 -- A representation projected alongside its resolved semantic key.
@@ -10089,8 +10418,8 @@ function M.semantic_key_view(query_fn, representation, mapping, source_alias,
     local local_column, semantic_column = M.columns(query_fn, mapping, cache)
     return "(SELECT " .. tostring(source_alias) .. ".*, "
         .. M.key(map_alias, semantic_column) .. " AS "
-        .. quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
-        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. sql_text.quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
+        .. sql_text.quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. tostring(source_alias) .. " JOIN "
         .. M.mapping_source(mapping) .. " " .. tostring(map_alias)
         .. " ON " .. M.predicate(local_expression, map_alias, local_column) .. ")"
@@ -10098,7 +10427,7 @@ end
 
 -- How a caller refers to the column M.semantic_key_view projected.
 function M.semantic_key_reference(alias)
-    return tostring(alias) .. "." .. quote_ident(M.SEMANTIC_KEY_COLUMN)
+    return tostring(alias) .. "." .. sql_text.quote_ident(M.SEMANTIC_KEY_COLUMN)
 end
 
 ESV_IDENTITY_JOIN = M
@@ -10969,6 +11298,7 @@ ESV_METRIC_PLAN = M
 
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -11406,88 +11736,12 @@ local function simple_relationship_equality(expression)
     return shape == "REF=REF"
 end
 
-local function quote_ident(value)
-    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
-
-local function replace_qualified_alias(expression, source_alias, target_alias)
-    local source = upper(source_alias)
-    local text = tostring(expression)
-    local out = {}
-    local i = 1
-    local in_quote = false
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if c == "'" then
-            out[#out + 1] = c
-            if in_quote and n == "'" then
-                out[#out + 1] = n
-                i = i + 2
-            else
-                in_quote = not in_quote
-                i = i + 1
-            end
-        elseif not in_quote and string.match(c, "[A-Za-z_]") then
-            local j = i + 1
-            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
-                j = j + 1
-            end
-            local cursor = j
-            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
-            local token = string.sub(text, i, j - 1)
-            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
-                out[#out + 1] = target_alias
-            else
-                out[#out + 1] = token
-            end
-            i = j
-        else
-            out[#out + 1] = c
-            i = i + 1
-        end
-    end
-    return table.concat(out)
-end
-
-local function strip_string_literals(text)
-    local out = {}
-    local in_quote = false
-    local i = 1
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if c == "'" then
-            if in_quote and n == "'" then
-                out[#out + 1] = " "
-                out[#out + 1] = " "
-                i = i + 2
-            else
-                in_quote = not in_quote
-                out[#out + 1] = " "
-                i = i + 1
-            end
-        elseif in_quote then
-            out[#out + 1] = " "
-            i = i + 1
-        else
-            out[#out + 1] = c
-            i = i + 1
-        end
-    end
-    return table.concat(out)
-end
-
 local function qualified_column_refs(expression)
     local refs = {}
     if missing(expression) then
         return refs
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     local pos = 1
     while pos <= #text do
         local start_pos, alias_end, alias = string.find(
@@ -11568,7 +11822,7 @@ local function schema_qualified_functions(expression)
     if missing(expression) then
         return functions
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     for schema_name, function_name in string.gmatch(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%.%s*([A-Za-z_][A-Za-z0-9_]*)%s*%(") do
         functions[upper(schema_name) .. "." .. upper(function_name)] = true
     end
@@ -11580,7 +11834,7 @@ local function unsupported_functions(expression)
     if missing(expression) then
         return found
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     local pos = 1
     while true do
         local start_pos, end_pos, fn = string.find(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%(", pos)
@@ -11605,7 +11859,7 @@ local function dependency_tokens(expression)
     if missing(expression) then
         return tokens
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     text = string.gsub(text, "[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*", " ")
     for token in string.gmatch(text, "[A-Za-z_][A-Za-z0-9_]*") do
         local normalized = upper(token)
@@ -12988,13 +13242,13 @@ local function representation_key_query(representation, unique_key)
                 representation, column.column_name)
             if physical_name == nil then return nil, resolution_error end
             expressions[#expressions + 1] = tostring(representation.alias)
-                .. "." .. quote_ident(physical_name)
+                .. "." .. sql_text.quote_ident(physical_name)
         elseif not missing(column.expression) then
             expressions[#expressions + 1] = tostring(column.expression)
         end
     end
     if #expressions == 0 then return nil, "declared key has no executable columns" end
-    local source = quote_qualified(representation.source_schema,
+    local source = sql_text.quote_qualified(representation.source_schema,
         representation.source_object) .. " " .. tostring(representation.alias)
     return "SELECT " .. table.concat(expressions, ", ")
         .. " FROM " .. source
@@ -13129,7 +13383,7 @@ end
 
 local function identity_grouped_key_query(representation, binding)
     local semantic_expression
-    local from_sql = quote_qualified(representation.source_schema,
+    local from_sql = sql_text.quote_qualified(representation.source_schema,
         representation.source_object) .. " " .. tostring(representation.alias)
     if upper(binding.kind) == "DIRECT" then
         semantic_expression = tostring(binding.expression)
@@ -13159,12 +13413,12 @@ local function validate_semantic_identity_data(ctx)
                 local object_name = tostring(entity.name) .. "." .. tostring(identity.name)
                     .. "@" .. tostring(representation.name)
                 local total, total_error = probe_count("SELECT COUNT(*) AS PROBE_COUNT FROM "
-                    .. quote_qualified(representation.source_schema,
+                    .. sql_text.quote_qualified(representation.source_schema,
                         representation.source_object))
                 local local_distinct, local_error = probe_count(
                     "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
                     .. tostring(binding.expression) .. " FROM "
-                    .. quote_qualified(representation.source_schema,
+                    .. sql_text.quote_qualified(representation.source_schema,
                         representation.source_object) .. " " .. tostring(representation.alias)
                     .. " WHERE " .. tostring(binding.expression) .. " IS NOT NULL GROUP BY "
                     .. tostring(binding.expression) .. ") f5_local_keys")
@@ -13186,24 +13440,24 @@ local function validate_semantic_identity_data(ctx)
                         "SELECT COUNT(*) AS PROBE_COUNT FROM " .. map_source)
                     local map_local, map_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(map_local_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(map_local_column) .. ") f5_map_local")
+                        .. sql_text.quote_ident(map_local_column) .. " FROM " .. map_source
+                        .. " WHERE " .. sql_text.quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. sql_text.quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. sql_text.quote_ident(map_local_column) .. ") f5_map_local")
                     local map_semantic, map_semantic_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
-                        .. quote_ident(map_semantic_column) .. " FROM " .. map_source
-                        .. " WHERE " .. quote_ident(map_local_column) .. " IS NOT NULL"
-                        .. " AND " .. quote_ident(map_semantic_column) .. " IS NOT NULL"
-                        .. " GROUP BY " .. quote_ident(map_semantic_column) .. ") f5_map_semantic")
+                        .. sql_text.quote_ident(map_semantic_column) .. " FROM " .. map_source
+                        .. " WHERE " .. sql_text.quote_ident(map_local_column) .. " IS NOT NULL"
+                        .. " AND " .. sql_text.quote_ident(map_semantic_column) .. " IS NOT NULL"
+                        .. " GROUP BY " .. sql_text.quote_ident(map_semantic_column) .. ") f5_map_semantic")
                     local mapped_local, mapped_local_error = probe_count(
                         "SELECT COUNT(*) AS PROBE_COUNT FROM (SELECT "
                         .. tostring(binding.expression) .. " FROM "
-                        .. quote_qualified(representation.source_schema,
+                        .. sql_text.quote_qualified(representation.source_schema,
                             representation.source_object) .. " " .. tostring(representation.alias)
                         .. " JOIN " .. map_source .. " f5_total_map ON "
                         .. tostring(binding.expression) .. " = f5_total_map."
-                        .. quote_ident(map_local_column) .. " GROUP BY "
+                        .. sql_text.quote_ident(map_local_column) .. " GROUP BY "
                         .. tostring(binding.expression) .. ") f5_mapped_local_keys")
                     if map_total_error ~= nil or map_local_error ~= nil
                         or map_semantic_error ~= nil or mapped_local_error ~= nil then
@@ -13357,7 +13611,7 @@ local function validate_representation_data_equivalence(ctx)
                     end
                     if grouped_keys ~= nil then
                         local total_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM "
-                            .. quote_qualified(representation.source_schema,
+                            .. sql_text.quote_qualified(representation.source_schema,
                                 representation.source_object)
                             .. " " .. tostring(representation.alias)
                         local distinct_sql = "SELECT COUNT(*) AS PROBE_COUNT FROM ("
@@ -14037,14 +14291,14 @@ end
 
 local function identity_conflict_source(representation, identity_binding, alias)
     if upper(identity_binding.kind) == "DIRECT" then
-        return quote_qualified(representation.source_schema,
+        return sql_text.quote_qualified(representation.source_schema,
             representation.source_object),
-            replace_qualified_alias(identity_binding.expression,
+            sql_text.replace_qualified_alias(identity_binding.expression,
                 representation.alias, alias)
     end
     local source_alias = "f5_conflict_src_" .. tostring(representation.id)
     local mapping = identity_binding.mapping
-    local local_expression = replace_qualified_alias(identity_binding.expression,
+    local local_expression = sql_text.replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = identity_join.semantic_key_view(query, representation,
         mapping, source_alias,
@@ -14057,9 +14311,9 @@ local function fusion_conflict_query(left_representation, left_binding,
     local left_alias = "f4_left"
     local right_alias = "f4_right"
     local predicates = {}
-    local left_source = quote_qualified(left_representation.source_schema,
+    local left_source = sql_text.quote_qualified(left_representation.source_schema,
         left_representation.source_object)
-    local right_source = quote_qualified(right_representation.source_schema,
+    local right_source = sql_text.quote_qualified(right_representation.source_schema,
         right_representation.source_object)
     if semantic_identity ~= nil then
         local left_identity = semantic_identity.binding_by_representation[
@@ -14081,13 +14335,13 @@ local function fusion_conflict_query(left_representation, left_binding,
             if left_column == nil or right_column == nil then
                 return nil, left_error or right_error
             end
-            predicates[#predicates + 1] = left_alias .. "." .. quote_ident(left_column)
-                .. " = " .. right_alias .. "." .. quote_ident(right_column)
+            predicates[#predicates + 1] = left_alias .. "." .. sql_text.quote_ident(left_column)
+                .. " = " .. right_alias .. "." .. sql_text.quote_ident(right_column)
         end
     end
-    local left_expression = replace_qualified_alias(left_binding.expression,
+    local left_expression = sql_text.replace_qualified_alias(left_binding.expression,
         left_representation.alias, left_alias)
-    local right_expression = replace_qualified_alias(right_binding.expression,
+    local right_expression = sql_text.replace_qualified_alias(right_binding.expression,
         right_representation.alias, right_alias)
     return "SELECT COUNT(*) AS PROBE_COUNT FROM "
         .. left_source .. " " .. left_alias
@@ -15088,7 +15342,7 @@ validate_model = M.validate_model
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
         valid_json_text = valid_json_text,
-        strip_string_literals = strip_string_literals,
+        strip_string_literals = sql_text.strip_string_literals,
         aliases_in_expression = aliases_in_expression,
         column_refs_in_expression = column_refs_in_expression,
         schema_qualified_functions = schema_qualified_functions,
@@ -15931,6 +16185,346 @@ end
 
 ESV_JSON = M
 
+-- Reading and writing SQL text, shared by every runtime that does either.
+--
+-- `shared/grain_graph.lua` exists because relationship proofs must not drift
+-- between the validator and the compiler, and CLAUDE.md states that invariant.
+-- Nothing stated it for *SQL rendering*, and the rendering drifted the same way:
+-- BUG-G03 was one defect -- a declared column name quoted verbatim -- living
+-- independently in five copies of the F5 mapping join, and fixing it meant
+-- finding all five.
+--
+-- `shared/identity_join.lua` closed that instance and, in its own header,
+-- named this module as the thing it could not yet call:
+--
+--   > Quoting is duplicated from the caller runtimes deliberately: three lines
+--   > each, against a module that would otherwise have to receive them as
+--   > arguments at every call. The alternative -- a shared SQL module -- is a
+--   > bigger change than this one earns.
+--
+-- This is that module, so identity_join now calls it instead.
+--
+-- Two of the routines here are the ones worth the move. `replace_qualified_alias`
+-- rewrites a table alias inside an expression while respecting string literals --
+-- it is how a representation's expression gets re-pointed at a different source --
+-- and `strip_string_literals` backs the alias and column analysis the validator
+-- proves expressions with. They were byte-identical in admin/validator.lua and
+-- compiler/request_json.lua, which means the validator proved an expression safe
+-- with one copy while the compiler emitted SQL with the other. A divergence
+-- there is not a crash; it is SQL that is wrong and validates.
+
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
+local M = {}
+
+local function upper(value)
+    return string.upper(tostring(value))
+end
+
+-- ---------------------------------------------------------------------------
+-- Quoting
+-- ---------------------------------------------------------------------------
+
+-- Exasol resolves an unquoted identifier case-insensitively and a quoted one
+-- exactly, so everything the compiler emits is quoted and everything it quotes
+-- has to be the physical spelling (see shared/source_columns.lua).
+function M.quote_ident(value)
+    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
+end
+
+function M.quote_qualified(schema_name, object_name)
+    return M.quote_ident(schema_name) .. "." .. M.quote_ident(object_name)
+end
+
+function M.sql_string(value)
+    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
+end
+
+-- A filter value rendered for its declared column type.
+--
+-- The type matters because Exasol will not silently coerce a string to a DATE in
+-- every position, and an unadorned numeric literal compares differently from a
+-- quoted one. `data_type` may be absent; an unknown type falls through to a
+-- quoted string, which is the safe default.
+function M.sql_literal(value, data_type)
+    if value == nil or value == null or value == json.NULL then
+        return "NULL"
+    end
+    local value_type = type(value)
+    if value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "TRUE" or "FALSE"
+    end
+    local text = tostring(value)
+    local dtype = upper(data_type or "")
+    if string.sub(dtype, 1, 4) == "DATE"
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
+        return "DATE " .. M.sql_string(text)
+    end
+    if string.find(dtype, "TIMESTAMP", 1, true) == 1
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
+        return "TIMESTAMP " .. M.sql_string(text)
+    end
+    if string.find(dtype, "DECIMAL", 1, true)
+        or string.find(dtype, "INT", 1, true)
+        or string.find(dtype, "NUMBER", 1, true)
+        or string.find(dtype, "DOUBLE", 1, true) then
+        if string.match(text, "^%-?%d+%.?%d*$") then
+            return text
+        end
+    end
+    return M.sql_string(text)
+end
+
+-- ---------------------------------------------------------------------------
+-- Expression rewriting
+-- ---------------------------------------------------------------------------
+
+-- Replace `source_alias.` with `target_alias.` throughout an expression, without
+-- touching anything inside a string literal.
+--
+-- This is how an attribute bound to one representation is re-pointed at another,
+-- so it runs on every fusion path. The literal handling is the part that has to
+-- be right: `'o.name'` is data, `o.name` is a column reference, and a naive
+-- gsub cannot tell them apart.
+function M.replace_qualified_alias(expression, source_alias, target_alias)
+    local source = upper(source_alias)
+    local text = tostring(expression)
+    local out = {}
+    local i = 1
+    local in_quote = false
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            out[#out + 1] = c
+            if in_quote and n == "'" then
+                out[#out + 1] = n
+                i = i + 2
+            else
+                in_quote = not in_quote
+                i = i + 1
+            end
+        elseif not in_quote and string.match(c, "[A-Za-z_]") then
+            local j = i + 1
+            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
+                j = j + 1
+            end
+            local cursor = j
+            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
+            local token = string.sub(text, i, j - 1)
+            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
+                out[#out + 1] = target_alias
+            else
+                out[#out + 1] = token
+            end
+            i = j
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+-- Blank out the contents of every string literal, preserving byte offsets.
+--
+-- Offsets are preserved so a caller can scan the result for aliases, column
+-- references or function calls and still index back into the original text.
+function M.strip_string_literals(text)
+    local out = {}
+    local in_quote = false
+    local i = 1
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            if in_quote and n == "'" then
+                out[#out + 1] = " "
+                out[#out + 1] = " "
+                i = i + 2
+            else
+                in_quote = not in_quote
+                out[#out + 1] = " "
+                i = i + 1
+            end
+        elseif in_quote then
+            out[#out + 1] = " "
+            i = i + 1
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+-- ---------------------------------------------------------------------------
+-- Lexing
+-- ---------------------------------------------------------------------------
+
+function M.decode_quoted_identifier(token_text)
+    return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
+end
+
+-- The uppercase form of a token for keyword comparison.
+--
+-- Falls back to the token's raw `text`, which for a quoted identifier still
+-- carries its quotes -- so `"AND"` never compares equal to the keyword AND
+-- unless the lexer was asked to fold identifiers (see `upper_identifiers`).
+function M.token_upper(token)
+    if token == nil then
+        return nil
+    end
+    return token.upper or upper(token.text)
+end
+
+-- One lexer for the Exasol dialect, with two options where its two callers
+-- genuinely disagree.
+--
+-- Everything else -- whitespace, `--` and `/* */` comments, single-quoted
+-- literals with `''` escapes, double-quoted identifiers with `""` escapes,
+-- words, numbers, symbols, the trailing semicolon -- was character-for-character
+-- identical in compiler/request_json.lua's `sql_tokens` and
+-- admin/semantic_definition.lua's `tokenize`. A new literal form or comment
+-- syntax had to be taught twice.
+--
+--   options.operators          fuse `>=`, `<=`, `<>`, `!=` into one token. The
+--                              semantic-SQL parser compares whole operators; the
+--                              DDL parser slices expressions by byte offset and
+--                              never looks at them, and has always seen two
+--                              symbols. Changing that for the DDL would alter a
+--                              4 600-line parser for no gain.
+--
+--   options.upper_identifiers  set `upper` on a quoted identifier from its
+--                              *decoded* value. The DDL parser wants it, because
+--                              it reads names out of quoted tokens. The
+--                              semantic-SQL parser must not have it: `token_upper`
+--                              is what its clause scanner compares against
+--                              keywords, so folding `"AND"` to `AND` would make a
+--                              quoted column named "and" parse as a conjunction.
+--
+-- Every token carries `start_pos`, `end_pos` and `depth` regardless. The
+-- semantic-SQL parser ignores them; that costs three assignments and removes the
+-- reason to keep a second lexer.
+function M.tokenize(text, options)
+    options = options or {}
+    local fuse_operators = options.operators == true
+    local fold_identifiers = options.upper_identifiers == true
+    local tokens = {}
+    text = tostring(text)
+    local i = 1
+    local depth = 0
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if string.match(c, "%s") then
+            i = i + 1
+        elseif c == "-" and n == "-" then
+            i = i + 2
+            while i <= #text and string.sub(text, i, i) ~= "\n" do
+                i = i + 1
+            end
+        elseif c == "/" and n == "*" then
+            i = i + 2
+            while i <= #text - 1 and string.sub(text, i, i + 1) ~= "*/" do
+                i = i + 1
+            end
+            i = math.min(i + 2, #text + 1)
+        elseif c == "'" then
+            local start_pos = i
+            i = i + 1
+            while i <= #text do
+                c = string.sub(text, i, i)
+                n = string.sub(text, i + 1, i + 1)
+                if c == "'" and n == "'" then
+                    i = i + 2
+                elseif c == "'" then
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1),
+                kind = "literal", start_pos = start_pos, end_pos = i - 1,
+                depth = depth}
+        elseif c == '"' then
+            local start_pos = i
+            i = i + 1
+            while i <= #text do
+                c = string.sub(text, i, i)
+                n = string.sub(text, i + 1, i + 1)
+                if c == '"' and n == '"' then
+                    i = i + 2
+                elseif c == '"' then
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            local token_text = string.sub(text, start_pos, i - 1)
+            local decoded = M.decode_quoted_identifier(token_text)
+            tokens[#tokens + 1] = {text = token_text, kind = "identifier",
+                value = decoded,
+                upper = fold_identifiers and upper(decoded) or nil,
+                start_pos = start_pos, end_pos = i - 1, depth = depth}
+        elseif string.match(c, "[A-Za-z_]") then
+            local start_pos = i
+            i = i + 1
+            while i <= #text and string.match(string.sub(text, i, i), "[A-Za-z0-9_]") do
+                i = i + 1
+            end
+            local token_text = string.sub(text, start_pos, i - 1)
+            tokens[#tokens + 1] = {text = token_text, kind = "word",
+                value = token_text, upper = upper(token_text),
+                start_pos = start_pos, end_pos = i - 1, depth = depth}
+        elseif string.match(c, "%d") then
+            local start_pos = i
+            i = i + 1
+            while i <= #text and string.match(string.sub(text, i, i), "[0-9.]") do
+                i = i + 1
+            end
+            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1),
+                kind = "number", start_pos = start_pos, end_pos = i - 1,
+                depth = depth}
+        else
+            local two = string.sub(text, i, i + 1)
+            if fuse_operators and (two == ">=" or two == "<=" or two == "<>"
+                or two == "!=") then
+                tokens[#tokens + 1] = {text = two, kind = "operator", upper = two,
+                    start_pos = i, end_pos = i + 1, depth = depth}
+                i = i + 2
+            else
+                -- A closing paren carries the depth it returns to, which is the
+                -- depth its matching opening paren was emitted at. Both
+                -- parentheses of a top-level group therefore sit at 0 and only
+                -- their contents are nested, which is what lets a clause scanner
+                -- find top-level commas by reading `depth == 0`.
+                local token_depth = depth
+                if c == ")" then
+                    depth = math.max(depth - 1, 0)
+                    token_depth = depth
+                end
+                tokens[#tokens + 1] = {text = c, kind = "symbol", upper = c,
+                    start_pos = i, end_pos = i, depth = token_depth}
+                if c == "(" then
+                    depth = depth + 1
+                end
+                i = i + 1
+            end
+        end
+    end
+    if #tokens > 0 and tokens[#tokens].text == ";" then
+        table.remove(tokens, #tokens)
+    end
+    return tokens
+end
+
+ESV_SQL_TEXT = M
+
 -- Canonical relationship graph and path-proof implementation shared by the
 -- validator and compiler runtimes. The packaging step embeds this source into
 -- both Exasol scripts so the installed runtime has no external dependency.
@@ -16513,20 +17107,9 @@ ESV_SOURCE_COLUMNS = M
 
 local source_columns = assert(ESV_SOURCE_COLUMNS,
     "shared source column runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 
 local M = {}
-
--- Quoting is duplicated from the caller runtimes deliberately: three lines each,
--- against a module that would otherwise have to receive them as arguments at
--- every call. The alternative -- a shared SQL module -- is a bigger change than
--- this one earns.
-local function quote_ident(name)
-    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
 
 -- The column a semantic-key view projects. Callers reference it through
 -- M.semantic_key_reference so the name is written once.
@@ -16545,19 +17128,19 @@ end
 
 -- `"SCHEMA"."OBJECT"` for the mapping relation.
 function M.mapping_source(mapping)
-    return quote_qualified(mapping.source_schema, mapping.source_object)
+    return sql_text.quote_qualified(mapping.source_schema, mapping.source_object)
 end
 
 -- The semantic key as read from the mapping relation: `alias."SEMANTIC_COLUMN"`.
 function M.key(map_alias, semantic_column)
-    return tostring(map_alias) .. "." .. quote_ident(semantic_column)
+    return tostring(map_alias) .. "." .. sql_text.quote_ident(semantic_column)
 end
 
 -- The join predicate onto the mapping relation:
 -- `<local expression> = alias."LOCAL_COLUMN"`.
 function M.predicate(local_expression, map_alias, local_column)
     return tostring(local_expression) .. " = " .. tostring(map_alias) .. "."
-        .. quote_ident(local_column)
+        .. sql_text.quote_ident(local_column)
 end
 
 -- A representation projected alongside its resolved semantic key.
@@ -16571,8 +17154,8 @@ function M.semantic_key_view(query_fn, representation, mapping, source_alias,
     local local_column, semantic_column = M.columns(query_fn, mapping, cache)
     return "(SELECT " .. tostring(source_alias) .. ".*, "
         .. M.key(map_alias, semantic_column) .. " AS "
-        .. quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
-        .. quote_qualified(representation.source_schema, representation.source_object)
+        .. sql_text.quote_ident(M.SEMANTIC_KEY_COLUMN) .. " FROM "
+        .. sql_text.quote_qualified(representation.source_schema, representation.source_object)
         .. " " .. tostring(source_alias) .. " JOIN "
         .. M.mapping_source(mapping) .. " " .. tostring(map_alias)
         .. " ON " .. M.predicate(local_expression, map_alias, local_column) .. ")"
@@ -16580,7 +17163,7 @@ end
 
 -- How a caller refers to the column M.semantic_key_view projected.
 function M.semantic_key_reference(alias)
-    return tostring(alias) .. "." .. quote_ident(M.SEMANTIC_KEY_COLUMN)
+    return tostring(alias) .. "." .. sql_text.quote_ident(M.SEMANTIC_KEY_COLUMN)
 end
 
 ESV_IDENTITY_JOIN = M
@@ -17656,6 +18239,8 @@ ESV_METRIC_PLAN = M
 
 -- Typed physical planning for proven multi-branch aggregate-state plans.
 
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
+
 local M = {
     VERSION = 6,
     DEFAULT_MAX_BRANCHES = 8,
@@ -17665,41 +18250,6 @@ local M = {
 local function key(value) return tostring(value) end
 local function upper(value) return string.upper(tostring(value or "")) end
 local function missing(value) return value == nil or value == null or tostring(value) == "" end
-
-local function quote_ident(value)
-    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
-
-local function sql_string(value)
-    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
-end
-
-local function sql_literal(value, data_type)
-    if value == nil or value == null then return "NULL" end
-    if type(value) == "number" then return tostring(value) end
-    if type(value) == "boolean" then return value and "TRUE" or "FALSE" end
-    local text = tostring(value)
-    local dtype = upper(data_type)
-    if string.sub(dtype, 1, 4) == "DATE"
-        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
-        return "DATE " .. sql_string(text)
-    end
-    if string.find(dtype, "TIMESTAMP", 1, true) == 1
-        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
-        return "TIMESTAMP " .. sql_string(text)
-    end
-    if string.find(dtype, "DECIMAL", 1, true)
-        or string.find(dtype, "INT", 1, true)
-        or string.find(dtype, "NUMBER", 1, true)
-        or string.find(dtype, "DOUBLE", 1, true) then
-        if string.match(text, "^%-?%d+%.?%d*$") then return text end
-    end
-    return sql_string(text)
-end
 
 local function is_text_type(data_type)
     local dtype = upper(data_type)
@@ -17770,7 +18320,7 @@ local function source_sql(entity)
         or missing(entity.alias) then
         return nil
     end
-    return quote_qualified(entity.source_schema, entity.source_object)
+    return sql_text.quote_qualified(entity.source_schema, entity.source_object)
         .. " " .. tostring(entity.alias)
 end
 
@@ -17778,7 +18328,7 @@ local function predicate_sql(filter, dimension)
     local expression = dimension and dimension.expression
     if missing(expression) then return nil, "DIMENSION_EXPRESSION_MISSING" end
     local operator = upper(filter.operator)
-    local rhs = filter.value_sql or sql_literal(filter.value, filter.data_type)
+    local rhs = filter.value_sql or sql_text.sql_literal(filter.value, filter.data_type)
     if operator == "IS NULL" or operator == "IS NOT NULL" then
         return tostring(expression) .. " " .. operator
     end
@@ -17789,7 +18339,7 @@ local function predicate_sql(filter, dimension)
         end
         local literals = {}
         for _, value in ipairs(values) do
-            local literal = sql_literal(value, filter.data_type)
+            local literal = sql_text.sql_literal(value, filter.data_type)
             if is_text_type(filter.data_type) then literal = "UPPER(" .. literal .. ")" end
             literals[#literals + 1] = literal
         end
@@ -17803,8 +18353,8 @@ local function predicate_sql(filter, dimension)
             return nil, "FILTER_VALUE_INVALID"
         end
         return tostring(expression) .. " BETWEEN "
-            .. sql_literal(values[1], filter.data_type) .. " AND "
-            .. sql_literal(values[2], filter.data_type)
+            .. sql_text.sql_literal(values[1], filter.data_type) .. " AND "
+            .. sql_text.sql_literal(values[2], filter.data_type)
     end
     if operator == "=" or operator == "!=" or operator == "<>"
         or operator == ">" or operator == ">=" or operator == "<"
@@ -17964,7 +18514,7 @@ local function append_fusion_joins(joins, joined_fusion_joins, entity)
         if not joined_fusion_joins[join_id] then
             local target_sql = fusion_join.source_sql
             if missing(target_sql) and fusion_join.representation ~= nil then
-                target_sql = quote_qualified(
+                target_sql = sql_text.quote_qualified(
                     fusion_join.representation.source_schema,
                     fusion_join.representation.source_object)
             end
@@ -18102,7 +18652,7 @@ local function metric_column_alias(metric_id)
 end
 
 local function qualified_column(source_alias, column_alias)
-    return tostring(source_alias) .. "." .. quote_ident(column_alias)
+    return tostring(source_alias) .. "." .. sql_text.quote_ident(column_alias)
 end
 
 local function collect_finalization(logical_plan, states, dimensions, options)
@@ -18471,7 +19021,7 @@ function M.apply_partitioned_sources(physical_plan, snapshot)
                     valid_from = representation.valid_from,
                     valid_to = representation.valid_to,
                 }
-                partition.from_sql = quote_qualified(representation.source_schema,
+                partition.from_sql = sql_text.quote_qualified(representation.source_schema,
                     representation.source_object) .. " " .. tostring(representation.alias)
                 for _, dimension in ipairs(partition.dimensions or {}) do
                     if key(dimension.entity_id) == key(entity.id) then
@@ -18552,7 +19102,7 @@ function M.apply_partitioned_sources(physical_plan, snapshot)
 end
 
 local function materialized_column_expression(source_alias, column)
-    return tostring(source_alias) .. "." .. quote_ident(column.physical_column)
+    return tostring(source_alias) .. "." .. sql_text.quote_ident(column.physical_column)
 end
 
 -- Rebind only complete, pre-selected leaf sources. The selector is deliberately
@@ -18572,7 +19122,7 @@ function M.apply_branch_sources(physical_plan, selections)
                 physical_object = candidate.physical_object,
                 extra_dimension_count = selected.extra_dimension_count,
             }
-            branch.from_sql = quote_qualified(candidate.physical_schema,
+            branch.from_sql = sql_text.quote_qualified(candidate.physical_schema,
                 candidate.physical_object) .. " " .. source_alias
             branch.joins = {}
 
@@ -18668,6 +19218,8 @@ ESV_PHYSICAL_PLAN = M
 
 -- Decision-free SQL renderer for validated single- and multi-branch plans.
 
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
+
 local M = {VERSION = 1}
 
 function M.render_single_branch(plan)
@@ -18691,24 +19243,20 @@ function M.render_single_branch(plan)
     return table.concat(sql, "\n")
 end
 
-local function quote_ident(value)
-    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
-end
-
 local function render_branch(branch)
     local select_parts = {}
     local group_parts = {}
     for _, dimension in ipairs(branch.dimensions or {}) do
         select_parts[#select_parts + 1] = tostring(dimension.expression)
-            .. " AS " .. quote_ident(dimension.column_alias)
+            .. " AS " .. sql_text.quote_ident(dimension.column_alias)
         group_parts[#group_parts + 1] = tostring(dimension.expression)
     end
     for _, state in ipairs(branch.state_columns or {}) do
         select_parts[#select_parts + 1] = tostring(state.expression)
-            .. " AS " .. quote_ident(state.column_alias)
+            .. " AS " .. sql_text.quote_ident(state.column_alias)
     end
     local sql = {
-        quote_ident(branch.cte_alias) .. " AS (",
+        sql_text.quote_ident(branch.cte_alias) .. " AS (",
         "  SELECT " .. table.concat(select_parts, ", "),
         "  FROM " .. tostring(branch.from_sql),
     }
@@ -18738,36 +19286,36 @@ function M.render_multi_branch(plan)
 
     local union_columns = {}
     for _, dimension in ipairs(plan.dimensions or {}) do
-        union_columns[#union_columns + 1] = quote_ident(dimension.column_alias)
+        union_columns[#union_columns + 1] = sql_text.quote_ident(dimension.column_alias)
     end
     for _, state in ipairs(plan.states or {}) do
-        union_columns[#union_columns + 1] = quote_ident(state.column_alias)
+        union_columns[#union_columns + 1] = sql_text.quote_ident(state.column_alias)
     end
     local union_queries = {}
     for _, branch in ipairs(plan.branches or {}) do
         union_queries[#union_queries + 1] = "  SELECT "
             .. table.concat(union_columns, ", ") .. " FROM "
-            .. quote_ident(branch.cte_alias)
+            .. sql_text.quote_ident(branch.cte_alias)
     end
-    ctes[#ctes + 1] = quote_ident(plan.union.cte_alias) .. " AS (\n"
+    ctes[#ctes + 1] = sql_text.quote_ident(plan.union.cte_alias) .. " AS (\n"
         .. table.concat(union_queries, "\n  UNION ALL\n") .. "\n)"
 
     local merge_parts = {}
     local group_parts = {}
     for _, dimension in ipairs(plan.dimensions or {}) do
-        local alias = quote_ident(dimension.column_alias)
+        local alias = sql_text.quote_ident(dimension.column_alias)
         merge_parts[#merge_parts + 1] = alias
         group_parts[#group_parts + 1] = alias
     end
     for _, state in ipairs(plan.states or {}) do
-        local alias = quote_ident(state.column_alias)
+        local alias = sql_text.quote_ident(state.column_alias)
         merge_parts[#merge_parts + 1] = tostring(state.merge_operator)
             .. "(" .. alias .. ") AS " .. alias
     end
     local merge_sql = {
-        quote_ident(plan.merge.cte_alias) .. " AS (",
+        sql_text.quote_ident(plan.merge.cte_alias) .. " AS (",
         "  SELECT " .. table.concat(merge_parts, ", "),
-        "  FROM " .. quote_ident(plan.union.cte_alias),
+        "  FROM " .. sql_text.quote_ident(plan.union.cte_alias),
     }
     if #group_parts > 0 then
         merge_sql[#merge_sql + 1] = "  GROUP BY " .. table.concat(group_parts, ", ")
@@ -18778,45 +19326,45 @@ function M.render_multi_branch(plan)
     local finalization = plan.finalization
     if finalization == nil then
         return "WITH\n" .. table.concat(ctes, ",\n")
-            .. "\nSELECT * FROM " .. quote_ident(plan.merge.cte_alias)
+            .. "\nSELECT * FROM " .. sql_text.quote_ident(plan.merge.cte_alias)
     end
 
     local base_parts = {}
     for _, dimension in ipairs(plan.dimensions or {}) do
-        local alias = quote_ident(dimension.column_alias)
+        local alias = sql_text.quote_ident(dimension.column_alias)
         base_parts[#base_parts + 1] = tostring(finalization.base.source_alias)
             .. "." .. alias .. " AS " .. alias
     end
     for _, metric in ipairs(finalization.base.metric_columns or {}) do
         base_parts[#base_parts + 1] = tostring(metric.expression)
-            .. " AS " .. quote_ident(metric.column_alias)
+            .. " AS " .. sql_text.quote_ident(metric.column_alias)
     end
-    ctes[#ctes + 1] = quote_ident(finalization.base.cte_alias) .. " AS (\n"
+    ctes[#ctes + 1] = sql_text.quote_ident(finalization.base.cte_alias) .. " AS (\n"
         .. "  SELECT " .. table.concat(base_parts, ", ") .. "\n"
-        .. "  FROM " .. quote_ident(plan.merge.cte_alias) .. " "
+        .. "  FROM " .. sql_text.quote_ident(plan.merge.cte_alias) .. " "
         .. tostring(finalization.base.source_alias) .. "\n)"
 
     for _, layer in ipairs(finalization.layers or {}) do
-        ctes[#ctes + 1] = quote_ident(layer.cte_alias) .. " AS (\n"
+        ctes[#ctes + 1] = sql_text.quote_ident(layer.cte_alias) .. " AS (\n"
             .. "  SELECT " .. tostring(layer.source_alias) .. ".*, "
             .. tostring(layer.metric_column.expression) .. " AS "
-            .. quote_ident(layer.metric_column.column_alias) .. "\n"
-            .. "  FROM " .. quote_ident(layer.input_cte_alias) .. " "
+            .. sql_text.quote_ident(layer.metric_column.column_alias) .. "\n"
+            .. "  FROM " .. sql_text.quote_ident(layer.input_cte_alias) .. " "
             .. tostring(layer.source_alias) .. "\n)"
     end
 
     local output_parts = {}
     for _, dimension in ipairs(finalization.outputs.dimensions or {}) do
         output_parts[#output_parts + 1] = tostring(dimension.source_expression)
-            .. " AS " .. quote_ident(dimension.output_alias)
+            .. " AS " .. sql_text.quote_ident(dimension.output_alias)
     end
     for _, metric in ipairs(finalization.outputs.metrics or {}) do
         output_parts[#output_parts + 1] = tostring(metric.source_expression)
-            .. " AS " .. quote_ident(metric.output_alias)
+            .. " AS " .. sql_text.quote_ident(metric.output_alias)
     end
     local final_sql = {
         "SELECT " .. table.concat(output_parts, ", "),
-        "FROM " .. quote_ident(finalization.result_cte_alias) .. " "
+        "FROM " .. sql_text.quote_ident(finalization.result_cte_alias) .. " "
             .. tostring(finalization.result_source_alias),
     }
     local having = {}
@@ -18841,6 +19389,14 @@ ESV_GRAIN_SQL = M
 
 local M = {}
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
+
+-- Semantic SQL compares whole comparison operators, so the lexer fuses
+-- `>=`/`<=`/`<>`/`!=`; it must NOT fold quoted identifiers to upper case,
+-- because token_upper is what the clause scanner compares against keywords
+-- and a column quoted as "AND" would then parse as a conjunction. The DDL
+-- parser wants the opposite of both; see shared/sql_text.lua.
+local SEMANTIC_SQL_LEXER = {operators = true}
 local grain_graph = assert(ESV_GRAIN_GRAPH, "shared grain graph runtime is required")
 local identity_join = assert(ESV_IDENTITY_JOIN,
     "shared identity join runtime is required")
@@ -18904,54 +19460,12 @@ local function null_if_missing(value)
 end
 
 
-local function quote_ident(name)
-    local text = tostring(name)
-    text = string.gsub(text, '"', '""')
-    return '"' .. text .. '"'
-end
-
-local function quote_qualified(schema_name, object_name)
-    return quote_ident(schema_name) .. "." .. quote_ident(object_name)
-end
-
 local function quote_column(alias, column_name)
-    return tostring(alias) .. "." .. quote_ident(column_name)
+    return tostring(alias) .. "." .. sql_text.quote_ident(column_name)
 end
 
 local function quote_alias(name)
-    return quote_ident(name)
-end
-
-local function sql_string(value)
-    local text = tostring(value)
-    text = string.gsub(text, "'", "''")
-    return "'" .. text .. "'"
-end
-
-local function sql_literal(value, data_type)
-    if value == JSON_NULL or value == nil or value == null then
-        return "NULL"
-    end
-    local value_type = type(value)
-    if value_type == "number" then
-        return tostring(value)
-    elseif value_type == "boolean" then
-        return value and "TRUE" or "FALSE"
-    end
-    local text = tostring(value)
-    local dtype = upper(data_type or "")
-    if string.sub(dtype, 1, 4) == "DATE" and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
-        return "DATE " .. sql_string(text)
-    end
-    if string.find(dtype, "TIMESTAMP", 1, true) == 1 and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
-        return "TIMESTAMP " .. sql_string(text)
-    end
-    if string.find(dtype, "DECIMAL", 1, true) or string.find(dtype, "INT", 1, true) or string.find(dtype, "NUMBER", 1, true) or string.find(dtype, "DOUBLE", 1, true) then
-        if string.match(text, "^%-?%d+%.?%d*$") then
-            return text
-        end
-    end
-    return sql_string(text)
+    return sql_text.quote_ident(name)
 end
 
 local function is_text_type(data_type)
@@ -20225,40 +20739,12 @@ local function find_path(ctx, from_id, to_id)
     return path
 end
 
-local function strip_string_literals(text)
-    local out = {}
-    local in_quote = false
-    local i = 1
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if c == "'" then
-            if in_quote and n == "'" then
-                out[#out + 1] = " "
-                out[#out + 1] = " "
-                i = i + 2
-            else
-                in_quote = not in_quote
-                out[#out + 1] = " "
-                i = i + 1
-            end
-        elseif in_quote then
-            out[#out + 1] = " "
-            i = i + 1
-        else
-            out[#out + 1] = c
-            i = i + 1
-        end
-    end
-    return table.concat(out)
-end
-
 local function aliases_in_expression(expression)
     local aliases = {}
     if missing(expression) then
         return aliases
     end
-    local text = strip_string_literals(tostring(expression))
+    local text = sql_text.strip_string_literals(tostring(expression))
     for alias in string.gmatch(text, "([A-Za-z_][A-Za-z0-9_]*)%s*%.") do
         aliases[upper(alias)] = true
     end
@@ -20349,46 +20835,6 @@ local function collect_metric_facts(ctx, metric, required, seen_metrics)
             if nested ~= nil then collect_metric_facts(ctx, nested, required, seen_metrics) end
         end
     end
-end
-
-local function replace_qualified_alias(expression, source_alias, target_alias)
-    local source = upper(source_alias)
-    local text = tostring(expression)
-    local out = {}
-    local i = 1
-    local in_quote = false
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if c == "'" then
-            out[#out + 1] = c
-            if in_quote and n == "'" then
-                out[#out + 1] = n
-                i = i + 2
-            else
-                in_quote = not in_quote
-                i = i + 1
-            end
-        elseif not in_quote and string.match(c, "[A-Za-z_]") then
-            local j = i + 1
-            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
-                j = j + 1
-            end
-            local cursor = j
-            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
-            local token = string.sub(text, i, j - 1)
-            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
-                out[#out + 1] = target_alias
-            else
-                out[#out + 1] = token
-            end
-            i = j
-        else
-            out[#out + 1] = c
-            i = i + 1
-        end
-    end
-    return table.concat(out)
 end
 
 local function physical_unique_key(ctx, entity_id)
@@ -20506,14 +20952,14 @@ end
 local function alternate_identity_source(ctx, representation, identity_binding,
         lookup_alias)
     if upper(identity_binding.kind) == "DIRECT" then
-        return quote_qualified(representation.source_schema,
+        return sql_text.quote_qualified(representation.source_schema,
             representation.source_object),
-            replace_qualified_alias(identity_binding.expression,
+            sql_text.replace_qualified_alias(identity_binding.expression,
                 representation.alias, lookup_alias), nil
     end
     local mapping = identity_binding.mapping
     local source_alias = "f5_src_" .. tostring(representation.id)
-    local local_expression = replace_qualified_alias(identity_binding.expression,
+    local local_expression = sql_text.replace_qualified_alias(identity_binding.expression,
         representation.alias, source_alias)
     local source_sql = identity_join.semantic_key_view(query, representation,
         mapping, source_alias, "f5_map_" .. tostring(identity_binding.id),
@@ -20585,7 +21031,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
             else
                 local lookup_alias = "f4_rep_" .. tostring(representation.id)
                 local predicates = {}
-                local source_sql = quote_qualified(representation.source_schema,
+                local source_sql = sql_text.quote_qualified(representation.source_schema,
                     representation.source_object)
                 local identity_mapping = nil
                 if semantic_identity ~= nil then
@@ -20639,7 +21085,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                     }
                     entity.fusion_join_by_representation[key(representation.id)] = true
                 end
-                expression = replace_qualified_alias(binding.expression,
+                expression = sql_text.replace_qualified_alias(binding.expression,
                     representation.alias, lookup_alias)
             end
             expressions[#expressions + 1] = expression
@@ -20934,7 +21380,7 @@ local function build_dimension_predicate(expression, op, value, data_type, value
     if op == "IS NULL" or op == "IS NOT NULL" then
         return expression .. " " .. op, nil
     end
-    local rhs = value_sql or sql_literal(value, data_type)
+    local rhs = value_sql or sql_text.sql_literal(value, data_type)
     local text_compare = value_sql == nil and is_text_type(data_type)
     if op == "=" or op == "!=" or op == "<>" or op == ">" or op == ">=" or op == "<" or op == "<=" or op == "LIKE" then
         if text_compare and (op == "=" or op == "!=" or op == "<>" or op == "LIKE") then
@@ -20948,7 +21394,7 @@ local function build_dimension_predicate(expression, op, value, data_type, value
         end
         local literals = {}
         for _, item in ipairs(values) do
-            local literal = sql_literal(item, data_type)
+            local literal = sql_text.sql_literal(item, data_type)
             if is_text_type(data_type) then
                 literal = "UPPER(" .. literal .. ")"
             end
@@ -20963,7 +21409,7 @@ local function build_dimension_predicate(expression, op, value, data_type, value
         if #values ~= 2 then
             return nil, error_result("SEMANTIC_REQUEST_032", "BETWEEN filter requires exactly two values.")
         end
-        return expression .. " BETWEEN " .. sql_literal(values[1], data_type) .. " AND " .. sql_literal(values[2], data_type), nil
+        return expression .. " BETWEEN " .. sql_text.sql_literal(values[1], data_type) .. " AND " .. sql_text.sql_literal(values[2], data_type), nil
     end
     return nil, error_result("SEMANTIC_REQUEST_033", "Unsupported filter operator: " .. tostring(op) .. ". Supported operators: =, !=, <>, >, >=, <, <=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL.")
 end
@@ -21346,7 +21792,7 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
         for _, fusion_join in ipairs(entity.fusion_joins or {}) do
             local representation = fusion_join.representation
             join_sql[#join_sql + 1] = "LEFT JOIN "
-                .. (fusion_join.source_sql or quote_qualified(
+                .. (fusion_join.source_sql or sql_text.quote_qualified(
                     representation.source_schema, representation.source_object))
                 .. " " .. fusion_join.alias
                 .. " ON " .. table.concat(fusion_join.predicates, " AND ")
@@ -21360,7 +21806,7 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
             ctx.relationship_identity_remaps[#ctx.relationship_identity_remaps + 1] = remap
         end
         join_sql[#join_sql + 1] = tostring(join.relationship.join_type or "LEFT") .. " JOIN "
-            .. quote_qualified(join.entity.source_schema, join.entity.source_object)
+            .. sql_text.quote_qualified(join.entity.source_schema, join.entity.source_object)
             .. " " .. tostring(join.entity.alias)
             .. " ON " .. join_condition
         append_fusion_joins(join.entity)
@@ -21370,7 +21816,7 @@ local function build_sql(ctx, dimensions, metrics, filters, joins, order_by, lim
     end
     return grain_sql_runtime.render_single_branch({
         select_parts = select_parts,
-        from_sql = quote_qualified(root.source_schema, root.source_object)
+        from_sql = sql_text.quote_qualified(root.source_schema, root.source_object)
             .. " " .. tostring(root.alias),
         join_sql = join_sql,
         where_predicates = where_predicates,
@@ -21416,7 +21862,7 @@ local function build_materialized_sql(ctx, dimensions, metrics, filters, order_b
 
     local sql_parts = {}
     sql_parts[#sql_parts + 1] = "SELECT " .. table.concat(select_parts, ", ")
-    sql_parts[#sql_parts + 1] = "FROM " .. quote_qualified(materialization.physical_schema, materialization.physical_object) .. " " .. alias
+    sql_parts[#sql_parts + 1] = "FROM " .. sql_text.quote_qualified(materialization.physical_schema, materialization.physical_object) .. " " .. alias
     if #filters > 0 then
         local predicates = {}
         for _, filter in ipairs(filters) do
@@ -22173,107 +22619,6 @@ local function compile_internal(request_json)
     return compile_request_table(request, {validate = false, error_prefix = "SEMANTIC_REQUEST"})
 end
 
-local function decode_quoted_identifier(token)
-    local text = tostring(token)
-    if string.sub(text, 1, 1) ~= '"' then
-        return text
-    end
-    local inner = string.sub(text, 2, -2)
-    return string.gsub(inner, '""', '"')
-end
-
-local function sql_tokens(sql_text)
-    local tokens = {}
-    local text = tostring(sql_text)
-    local i = 1
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if string.match(c, "%s") then
-            i = i + 1
-        elseif c == "-" and n == "-" then
-            i = i + 2
-            while i <= #text and string.sub(text, i, i) ~= "\n" do
-                i = i + 1
-            end
-        elseif c == "/" and n == "*" then
-            i = i + 2
-            while i <= #text - 1 and string.sub(text, i, i + 1) ~= "*/" do
-                i = i + 1
-            end
-            i = math.min(i + 2, #text + 1)
-        elseif c == "'" then
-            local start_pos = i
-            i = i + 1
-            while i <= #text do
-                c = string.sub(text, i, i)
-                n = string.sub(text, i + 1, i + 1)
-                if c == "'" and n == "'" then
-                    i = i + 2
-                elseif c == "'" then
-                    i = i + 1
-                    break
-                else
-                    i = i + 1
-                end
-            end
-            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1), kind = "literal"}
-        elseif c == '"' then
-            local start_pos = i
-            i = i + 1
-            while i <= #text do
-                c = string.sub(text, i, i)
-                n = string.sub(text, i + 1, i + 1)
-                if c == '"' and n == '"' then
-                    i = i + 2
-                elseif c == '"' then
-                    i = i + 1
-                    break
-                else
-                    i = i + 1
-                end
-            end
-            local token_text = string.sub(text, start_pos, i - 1)
-            tokens[#tokens + 1] = {text = token_text, kind = "identifier", value = decode_quoted_identifier(token_text)}
-        elseif string.match(c, "[A-Za-z_]") then
-            local start_pos = i
-            i = i + 1
-            while i <= #text and string.match(string.sub(text, i, i), "[A-Za-z0-9_]") do
-                i = i + 1
-            end
-            local token_text = string.sub(text, start_pos, i - 1)
-            tokens[#tokens + 1] = {text = token_text, kind = "word", value = token_text, upper = upper(token_text)}
-        elseif string.match(c, "%d") then
-            local start_pos = i
-            i = i + 1
-            while i <= #text and string.match(string.sub(text, i, i), "[0-9.]") do
-                i = i + 1
-            end
-            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1), kind = "number"}
-        else
-            local two = string.sub(text, i, i + 1)
-            if two == ">=" or two == "<=" or two == "<>" or two == "!=" then
-                tokens[#tokens + 1] = {text = two, kind = "operator", upper = two}
-                i = i + 2
-            else
-                tokens[#tokens + 1] = {text = c, kind = "symbol", upper = c}
-                i = i + 1
-            end
-        end
-    end
-    if #tokens > 0 and tokens[#tokens].text == ";" then
-        table.remove(tokens, #tokens)
-    end
-    return tokens
-end
-
-local function token_upper(token)
-    if token == nil then
-        return nil
-    end
-    return token.upper or upper(token.text)
-end
-
 local function token_identifier_value(token)
     if token == nil then
         return nil
@@ -22316,7 +22661,7 @@ local function unwrap_measure_part(part)
     if part == nil or #part < 4 then
         return part, false
     end
-    local head = token_upper(part[1])
+    local head = sql_text.token_upper(part[1])
     if (head ~= "MEASURE" and head ~= "AGG") or part[2].text ~= "(" then
         return part, false
     end
@@ -22355,7 +22700,7 @@ local function identifier_from_part(part)
     end
     local end_index = #part
     for i, token in ipairs(part) do
-        if token_upper(token) == "AS" then
+        if sql_text.token_upper(token) == "AS" then
             end_index = i - 1
             break
         end
@@ -22376,7 +22721,7 @@ end
 
 local function alias_from_select_part(part)
     for i, token in ipairs(part) do
-        if token_upper(token) == "AS" and part[i + 1] ~= nil then
+        if sql_text.token_upper(token) == "AS" and part[i + 1] ~= nil then
             return token_identifier_value(part[i + 1])
         end
     end
@@ -22397,10 +22742,10 @@ local function literal_from_tokens(tokens)
         elseif token.kind == "word" then
             return token.value
         end
-    elseif #tokens == 2 and token_upper(tokens[1]) == "DATE" and tokens[2].kind == "literal" then
+    elseif #tokens == 2 and sql_text.token_upper(tokens[1]) == "DATE" and tokens[2].kind == "literal" then
         local raw = string.sub(tokens[2].text, 2, -2)
         return string.gsub(raw, "''", "'")
-    elseif #tokens == 2 and token_upper(tokens[1]) == "TIMESTAMP" and tokens[2].kind == "literal" then
+    elseif #tokens == 2 and sql_text.token_upper(tokens[1]) == "TIMESTAMP" and tokens[2].kind == "literal" then
         local raw = string.sub(tokens[2].text, 2, -2)
         return string.gsub(raw, "''", "'")
     end
@@ -22416,12 +22761,12 @@ local function find_top_level_clauses(tokens)
         elseif token.text == ")" then
             depth = depth - 1
         elseif depth == 0 then
-            local u = token_upper(token)
+            local u = sql_text.token_upper(token)
             if u == "FROM" or u == "WHERE" or u == "LIMIT" or u == "HAVING" then
                 clauses[u] = clauses[u] or i
-            elseif u == "GROUP" and token_upper(tokens[i + 1]) == "BY" then
+            elseif u == "GROUP" and sql_text.token_upper(tokens[i + 1]) == "BY" then
                 clauses.GROUP_BY = clauses.GROUP_BY or i
-            elseif u == "ORDER" and token_upper(tokens[i + 1]) == "BY" then
+            elseif u == "ORDER" and sql_text.token_upper(tokens[i + 1]) == "BY" then
                 clauses.ORDER_BY = clauses.ORDER_BY or i
             end
         end
@@ -22464,13 +22809,13 @@ local binary_predicate_operators = {
 }
 
 local function predicate_operator_at(tokens, index)
-    local current = token_upper(tokens[index])
+    local current = sql_text.token_upper(tokens[index])
     if current == "IS" then
-        if token_upper(tokens[index + 1]) == "NULL" then
+        if sql_text.token_upper(tokens[index + 1]) == "NULL" then
             return "IS NULL"
         end
-        if token_upper(tokens[index + 1]) == "NOT"
-            and token_upper(tokens[index + 2]) == "NULL" then
+        if sql_text.token_upper(tokens[index + 1]) == "NOT"
+            and sql_text.token_upper(tokens[index + 2]) == "NULL" then
             return "IS NOT NULL"
         end
         return "IS"
@@ -22481,7 +22826,18 @@ local function predicate_operator_at(tokens, index)
     return nil
 end
 
-local function parse_where_filters(tokens, start_index, end_index)
+-- One predicate parser for both WHERE and HAVING.
+--
+-- These were two ~110-line functions whose diff was 72 lines of 123, and almost
+-- all of it was the clause noun in three messages. The top-level AND split that
+-- skips BETWEEN's own AND, the operator scan, IS NULL / IS NOT NULL / IN /
+-- BETWEEN, the literal-or-raw-SQL fallback -- all of it was written twice, so a
+-- predicate form added to one and forgotten in the other passed every test.
+--
+-- The real differences are two, and they are what `clause` carries: HAVING
+-- resolves the field and refuses anything that is not a metric, and stores the
+-- resolved name where WHERE stores what the author typed.
+local function parse_predicates(ctx, tokens, start_index, end_index, clause)
     local filters = {}
     local chunks = {}
     -- Split on top-level AND conjunctions, but skip the AND that belongs to a
@@ -22497,7 +22853,7 @@ local function parse_where_filters(tokens, start_index, end_index)
         elseif token.text == ")" then
             depth = depth - 1
         elseif depth == 0 then
-            local u = token_upper(token)
+            local u = sql_text.token_upper(token)
             if u == "BETWEEN" then
                 after_between = true
             elseif u == "AND" then
@@ -22527,11 +22883,19 @@ local function parse_where_filters(tokens, start_index, end_index)
             end
         end
         if op_index == nil then
-            return nil, error_result("SEMANTIC_QUERY_030", "Unsupported WHERE predicate.")
+            return nil, error_result("SEMANTIC_QUERY_030", clause.unsupported)
         end
         local field = identifier_from_part(token_slice(tokens, first, op_index - 1))
         if field == nil then
-            return nil, error_result("SEMANTIC_QUERY_031", "WHERE predicate must start with a semantic dimension.")
+            return nil, error_result("SEMANTIC_QUERY_031", clause.subject_required)
+        end
+        -- WHERE keeps the author's spelling and resolves later, against the
+        -- dimensions actually selected; HAVING has to resolve here, because a
+        -- non-metric predicate is a different refusal rather than a lookup miss.
+        if clause.resolve ~= nil then
+            local resolved, resolve_error = clause.resolve(ctx, field)
+            if resolve_error ~= nil then return nil, resolve_error end
+            field = resolved
         end
         if op == "IS NULL" or op == "IS NOT NULL" then
             local expected_last = op_index + (op == "IS NULL" and 1 or 2)
@@ -22544,14 +22908,17 @@ local function parse_where_filters(tokens, start_index, end_index)
             return nil, error_result("SEMANTIC_QUERY_036",
                 "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
         elseif op == "IN" then
-            if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "(" or tokens[last].text ~= ")" then
-                return nil, error_result("SEMANTIC_QUERY_032", "IN predicate requires a literal list.")
+            if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "("
+                or tokens[last].text ~= ")" then
+                return nil, error_result("SEMANTIC_QUERY_032",
+                    "IN predicate requires a literal list.")
             end
             local values = {}
             for _, part in ipairs(split_top_level(tokens, op_index + 2, last - 1, ",")) do
                 local value = literal_from_tokens(part)
                 if value == nil then
-                    return nil, error_result("SEMANTIC_QUERY_033", "IN predicate supports literal values only.")
+                    return nil, error_result("SEMANTIC_QUERY_033",
+                        "IN predicate supports literal values only.")
                 end
                 values[#values + 1] = value
             end
@@ -22559,18 +22926,20 @@ local function parse_where_filters(tokens, start_index, end_index)
         elseif op == "BETWEEN" then
             local and_index = nil
             for idx = op_index + 1, last do
-                if token_upper(tokens[idx]) == "AND" then
+                if sql_text.token_upper(tokens[idx]) == "AND" then
                     and_index = idx
                     break
                 end
             end
             if and_index == nil then
-                return nil, error_result("SEMANTIC_QUERY_034", "BETWEEN predicate requires 'field BETWEEN value1 AND value2'.")
+                return nil, error_result("SEMANTIC_QUERY_034",
+                    "BETWEEN predicate requires 'field BETWEEN value1 AND value2'.")
             end
             local v1 = literal_from_tokens(token_slice(tokens, op_index + 1, and_index - 1))
             local v2 = literal_from_tokens(token_slice(tokens, and_index + 1, last))
             if v1 == nil or v2 == nil then
-                return nil, error_result("SEMANTIC_QUERY_035", "BETWEEN predicate requires two literal values.")
+                return nil, error_result("SEMANTIC_QUERY_035",
+                    "BETWEEN predicate requires two literal values.")
             end
             filters[#filters + 1] = {field = field, op = "BETWEEN", value = {v1, v2}}
         else
@@ -22579,9 +22948,10 @@ local function parse_where_filters(tokens, start_index, end_index)
             if value == nil then
                 local value_sql = trim(render_token_slice(value_tokens))
                 if value_sql == "" then
-                    return nil, error_result("SEMANTIC_QUERY_033", "WHERE predicate requires a right-hand value.")
+                    return nil, error_result("SEMANTIC_QUERY_033", clause.missing_value)
                 end
-                filters[#filters + 1] = {field = field, op = op, value = null, value_sql = value_sql}
+                filters[#filters + 1] = {field = field, op = op, value = null,
+                    value_sql = value_sql}
             else
                 filters[#filters + 1] = {field = field, op = op, value = value}
             end
@@ -22590,118 +22960,37 @@ local function parse_where_filters(tokens, start_index, end_index)
     return filters, nil
 end
 
-local function parse_having_filters(ctx, tokens, start_index, end_index)
-    local filters = {}
-    local chunks = {}
-    local current_start = start_index
-    local depth = 0
-    local after_between = false
-    local i = start_index
-    while i <= end_index do
-        local token = tokens[i]
-        if token.text == "(" then
-            depth = depth + 1
-        elseif token.text == ")" then
-            depth = depth - 1
-        elseif depth == 0 then
-            local u = token_upper(token)
-            if u == "BETWEEN" then
-                after_between = true
-            elseif u == "AND" then
-                if after_between then
-                    after_between = false
-                else
-                    chunks[#chunks + 1] = {current_start, i - 1}
-                    current_start = i + 1
-                end
-            end
-        end
-        i = i + 1
-    end
-    chunks[#chunks + 1] = {current_start, end_index}
+-- The whole difference between the two clauses, in one place. It used to be
+-- three interpolated nouns scattered through two copies of the same 110 lines.
+local WHERE_CLAUSE = {
+    unsupported = "Unsupported WHERE predicate.",
+    subject_required = "WHERE predicate must start with a semantic dimension.",
+    missing_value = "WHERE predicate requires a right-hand value.",
+}
 
-    for _, chunk in ipairs(chunks) do
-        local first = chunk[1]
-        local last = chunk[2]
-        local op_index = nil
-        local op = nil
-        for idx = first, last do
-            local candidate = predicate_operator_at(tokens, idx)
-            if candidate ~= nil then
-                op_index = idx
-                op = candidate
-                break
-            end
-        end
-        if op_index == nil then
-            return nil, error_result("SEMANTIC_QUERY_030", "Unsupported HAVING predicate.")
-        end
-        local field = identifier_from_part(token_slice(tokens, first, op_index - 1))
-        if field == nil then
-            return nil, error_result("SEMANTIC_QUERY_031", "HAVING predicate must start with a semantic metric.")
-        end
-        local resolved, resolve_err = resolve_field(ctx, field, nil)
-        if resolve_err ~= nil then
-            return nil, envelope.recode_error_prefix(resolve_err, "SEMANTIC_QUERY")
+local HAVING_CLAUSE = {
+    unsupported = "Unsupported HAVING predicate.",
+    subject_required = "HAVING predicate must start with a semantic metric.",
+    missing_value = "HAVING predicate requires a right-hand value.",
+    resolve = function(ctx, field)
+        local resolved, resolve_error = resolve_field(ctx, field, nil)
+        if resolve_error ~= nil then
+            return nil, envelope.recode_error_prefix(resolve_error, "SEMANTIC_QUERY")
         end
         if resolved.kind ~= "METRIC" then
-            return nil, error_result("SEMANTIC_QUERY_040", "HAVING supports metric predicates only. Use WHERE for dimension filters.")
+            return nil, error_result("SEMANTIC_QUERY_040",
+                "HAVING supports metric predicates only. Use WHERE for dimension filters.")
         end
-        if op == "IS NULL" or op == "IS NOT NULL" then
-            local expected_last = op_index + (op == "IS NULL" and 1 or 2)
-            if last ~= expected_last then
-                return nil, error_result("SEMANTIC_QUERY_036",
-                    "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
-            end
-            filters[#filters + 1] = {field = resolved.name, op = op}
-        elseif op == "IS" then
-            return nil, error_result("SEMANTIC_QUERY_036",
-                "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
-        elseif op == "IN" then
-            if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "(" or tokens[last].text ~= ")" then
-                return nil, error_result("SEMANTIC_QUERY_032", "IN predicate requires a literal list.")
-            end
-            local values = {}
-            for _, part in ipairs(split_top_level(tokens, op_index + 2, last - 1, ",")) do
-                local value = literal_from_tokens(part)
-                if value == nil then
-                    return nil, error_result("SEMANTIC_QUERY_033", "IN predicate supports literal values only.")
-                end
-                values[#values + 1] = value
-            end
-            filters[#filters + 1] = {field = resolved.name, op = "IN", value = values}
-        elseif op == "BETWEEN" then
-            local and_index = nil
-            for idx = op_index + 1, last do
-                if token_upper(tokens[idx]) == "AND" then
-                    and_index = idx
-                    break
-                end
-            end
-            if and_index == nil then
-                return nil, error_result("SEMANTIC_QUERY_034", "BETWEEN predicate requires 'field BETWEEN value1 AND value2'.")
-            end
-            local v1 = literal_from_tokens(token_slice(tokens, op_index + 1, and_index - 1))
-            local v2 = literal_from_tokens(token_slice(tokens, and_index + 1, last))
-            if v1 == nil or v2 == nil then
-                return nil, error_result("SEMANTIC_QUERY_035", "BETWEEN predicate requires two literal values.")
-            end
-            filters[#filters + 1] = {field = resolved.name, op = "BETWEEN", value = {v1, v2}}
-        else
-            local value_tokens = token_slice(tokens, op_index + 1, last)
-            local value = literal_from_tokens(value_tokens)
-            if value == nil then
-                local value_sql = trim(render_token_slice(value_tokens))
-                if value_sql == "" then
-                    return nil, error_result("SEMANTIC_QUERY_033", "HAVING predicate requires a right-hand value.")
-                end
-                filters[#filters + 1] = {field = resolved.name, op = op, value = null, value_sql = value_sql}
-            else
-                filters[#filters + 1] = {field = resolved.name, op = op, value = value}
-            end
-        end
-    end
-    return filters, nil
+        return resolved.name, nil
+    end,
+}
+
+local function parse_where_filters(tokens, start_index, end_index)
+    return parse_predicates(nil, tokens, start_index, end_index, WHERE_CLAUSE)
+end
+
+local function parse_having_filters(ctx, tokens, start_index, end_index)
+    return parse_predicates(ctx, tokens, start_index, end_index, HAVING_CLAUSE)
 end
 
 local function parse_order_by(tokens, start_index, end_index, select_aliases, selected_output)
@@ -22709,7 +22998,7 @@ local function parse_order_by(tokens, start_index, end_index, select_aliases, se
     for _, part in ipairs(split_top_level(tokens, start_index, end_index, ",")) do
         local direction = "ASC"
         if #part > 1 then
-            local last = token_upper(part[#part])
+            local last = sql_text.token_upper(part[#part])
             if last == "ASC" or last == "DESC" then
                 direction = last
                 table.remove(part, #part)
@@ -22733,18 +23022,18 @@ local function parse_order_by(tokens, start_index, end_index, select_aliases, se
     return order_by, nil
 end
 
-local function parse_semantic_sql(sql_text, options)
+local function parse_semantic_sql(statement_text, options)
     options = options or {}
-    local tokens = sql_tokens(sql_text)
+    local tokens = sql_text.tokenize(statement_text, SEMANTIC_SQL_LEXER)
     if #tokens == 0 then
         if options.unchanged_nonsemantic then
-            return envelope.unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(statement_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_001", "SQL text is required.")
     end
-    if token_upper(tokens[1]) ~= "SELECT" then
+    if sql_text.token_upper(tokens[1]) ~= "SELECT" then
         if options.unchanged_nonsemantic then
-            return envelope.unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(statement_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_009", "Only top-level SELECT semantic SQL is supported.")
     end
@@ -22757,7 +23046,7 @@ local function parse_semantic_sql(sql_text, options)
     local from_tokens = token_slice(tokens, clauses.FROM + 1, from_end)
     if #from_tokens < 3 or from_tokens[2].text ~= "." then
         if options.unchanged_unknown_schema then
-            return envelope.unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(statement_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
@@ -22765,7 +23054,7 @@ local function parse_semantic_sql(sql_text, options)
     local object_name = token_identifier_value(from_tokens[3])
     if published_schema == nil or object_name == nil then
         if options.unchanged_unknown_schema then
-            return envelope.unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(statement_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
@@ -22787,16 +23076,16 @@ local function parse_semantic_sql(sql_text, options)
                         .. " and publish the model, or drop schema "
                         .. tostring(published_schema) .. ".")
             end
-            return envelope.unchanged_result(sql_text), nil, nil
+            return envelope.unchanged_result(statement_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_004", "No semantic model is published to schema " .. tostring(published_schema) .. ".")
     end
     if options.unchanged_unknown_schema and upper(object_name) == "SEMANTIC_DISCOVERY" then
-        return envelope.unchanged_result(sql_text), nil, model
+        return envelope.unchanged_result(statement_text), nil, model
     end
     if #from_tokens > 3 then
         local alias_ok = #from_tokens == 4 and token_identifier_value(from_tokens[4]) ~= nil
-        local as_alias_ok = #from_tokens == 5 and token_upper(from_tokens[4]) == "AS" and token_identifier_value(from_tokens[5]) ~= nil
+        local as_alias_ok = #from_tokens == 5 and sql_text.token_upper(from_tokens[4]) == "AS" and token_identifier_value(from_tokens[5]) ~= nil
         if not alias_ok and not as_alias_ok then
             return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
         end
@@ -22891,7 +23180,7 @@ local function parse_semantic_sql(sql_text, options)
     if clauses.GROUP_BY ~= nil then
         local gb_start = clauses.GROUP_BY + 2
         local gb_end = clause_end(tokens, clauses, "GROUP_BY")
-        is_group_by_all = (gb_end == gb_start) and token_upper(tokens[gb_start]) == "ALL"
+        is_group_by_all = (gb_end == gb_start) and sql_text.token_upper(tokens[gb_start]) == "ALL"
     end
 
     if #request.dimensions > 0 and not wildcard_select then
@@ -23214,13 +23503,13 @@ if rawget(_G, "ESV_TEST_MODE") then
         json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,
         compile_cache_key = compile_cache.compile_cache_key,
-        quote_ident = quote_ident,
-        quote_qualified = quote_qualified,
-        sql_literal = sql_literal,
+        quote_ident = sql_text.quote_ident,
+        quote_qualified = sql_text.quote_qualified,
+        sql_literal = sql_text.sql_literal,
         resolve_field = resolve_field,
         relationship_edges = relationship_edges,
         find_path = find_path,
-        strip_string_literals = strip_string_literals,
+        strip_string_literals = sql_text.strip_string_literals,
         aliases_in_expression = aliases_in_expression,
         replace_identifiers = replace_identifiers,
         expand_metric = expand_metric,
@@ -23233,7 +23522,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_order_by = build_order_by,
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,
-        sql_tokens = sql_tokens,
+        sql_tokens = function(text) return sql_text.tokenize(text, SEMANTIC_SQL_LEXER) end,
         split_top_level = split_top_level,
         unwrap_measure_part = unwrap_measure_part,
         identifier_from_part = identifier_from_part,
@@ -23712,9 +24001,480 @@ end
 
 ESV_JSON = M
 
+-- Reading and writing SQL text, shared by every runtime that does either.
+--
+-- `shared/grain_graph.lua` exists because relationship proofs must not drift
+-- between the validator and the compiler, and CLAUDE.md states that invariant.
+-- Nothing stated it for *SQL rendering*, and the rendering drifted the same way:
+-- BUG-G03 was one defect -- a declared column name quoted verbatim -- living
+-- independently in five copies of the F5 mapping join, and fixing it meant
+-- finding all five.
+--
+-- `shared/identity_join.lua` closed that instance and, in its own header,
+-- named this module as the thing it could not yet call:
+--
+--   > Quoting is duplicated from the caller runtimes deliberately: three lines
+--   > each, against a module that would otherwise have to receive them as
+--   > arguments at every call. The alternative -- a shared SQL module -- is a
+--   > bigger change than this one earns.
+--
+-- This is that module, so identity_join now calls it instead.
+--
+-- Two of the routines here are the ones worth the move. `replace_qualified_alias`
+-- rewrites a table alias inside an expression while respecting string literals --
+-- it is how a representation's expression gets re-pointed at a different source --
+-- and `strip_string_literals` backs the alias and column analysis the validator
+-- proves expressions with. They were byte-identical in admin/validator.lua and
+-- compiler/request_json.lua, which means the validator proved an expression safe
+-- with one copy while the compiler emitted SQL with the other. A divergence
+-- there is not a crash; it is SQL that is wrong and validates.
+
+local json = assert(ESV_JSON, "shared JSON runtime is required")
+
+local M = {}
+
+local function upper(value)
+    return string.upper(tostring(value))
+end
+
+-- ---------------------------------------------------------------------------
+-- Quoting
+-- ---------------------------------------------------------------------------
+
+-- Exasol resolves an unquoted identifier case-insensitively and a quoted one
+-- exactly, so everything the compiler emits is quoted and everything it quotes
+-- has to be the physical spelling (see shared/source_columns.lua).
+function M.quote_ident(value)
+    return '"' .. string.gsub(tostring(value), '"', '""') .. '"'
+end
+
+function M.quote_qualified(schema_name, object_name)
+    return M.quote_ident(schema_name) .. "." .. M.quote_ident(object_name)
+end
+
+function M.sql_string(value)
+    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
+end
+
+-- A filter value rendered for its declared column type.
+--
+-- The type matters because Exasol will not silently coerce a string to a DATE in
+-- every position, and an unadorned numeric literal compares differently from a
+-- quoted one. `data_type` may be absent; an unknown type falls through to a
+-- quoted string, which is the safe default.
+function M.sql_literal(value, data_type)
+    if value == nil or value == null or value == json.NULL then
+        return "NULL"
+    end
+    local value_type = type(value)
+    if value_type == "number" then
+        return tostring(value)
+    elseif value_type == "boolean" then
+        return value and "TRUE" or "FALSE"
+    end
+    local text = tostring(value)
+    local dtype = upper(data_type or "")
+    if string.sub(dtype, 1, 4) == "DATE"
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d$") then
+        return "DATE " .. M.sql_string(text)
+    end
+    if string.find(dtype, "TIMESTAMP", 1, true) == 1
+        and string.match(text, "^%d%d%d%d%-%d%d%-%d%d") then
+        return "TIMESTAMP " .. M.sql_string(text)
+    end
+    if string.find(dtype, "DECIMAL", 1, true)
+        or string.find(dtype, "INT", 1, true)
+        or string.find(dtype, "NUMBER", 1, true)
+        or string.find(dtype, "DOUBLE", 1, true) then
+        if string.match(text, "^%-?%d+%.?%d*$") then
+            return text
+        end
+    end
+    return M.sql_string(text)
+end
+
+-- ---------------------------------------------------------------------------
+-- Expression rewriting
+-- ---------------------------------------------------------------------------
+
+-- Replace `source_alias.` with `target_alias.` throughout an expression, without
+-- touching anything inside a string literal.
+--
+-- This is how an attribute bound to one representation is re-pointed at another,
+-- so it runs on every fusion path. The literal handling is the part that has to
+-- be right: `'o.name'` is data, `o.name` is a column reference, and a naive
+-- gsub cannot tell them apart.
+function M.replace_qualified_alias(expression, source_alias, target_alias)
+    local source = upper(source_alias)
+    local text = tostring(expression)
+    local out = {}
+    local i = 1
+    local in_quote = false
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            out[#out + 1] = c
+            if in_quote and n == "'" then
+                out[#out + 1] = n
+                i = i + 2
+            else
+                in_quote = not in_quote
+                i = i + 1
+            end
+        elseif not in_quote and string.match(c, "[A-Za-z_]") then
+            local j = i + 1
+            while j <= #text and string.match(string.sub(text, j, j), "[A-Za-z0-9_]") do
+                j = j + 1
+            end
+            local cursor = j
+            while string.match(string.sub(text, cursor, cursor), "%s") do cursor = cursor + 1 end
+            local token = string.sub(text, i, j - 1)
+            if upper(token) == source and string.sub(text, cursor, cursor) == "." then
+                out[#out + 1] = target_alias
+            else
+                out[#out + 1] = token
+            end
+            i = j
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+-- Blank out the contents of every string literal, preserving byte offsets.
+--
+-- Offsets are preserved so a caller can scan the result for aliases, column
+-- references or function calls and still index back into the original text.
+function M.strip_string_literals(text)
+    local out = {}
+    local in_quote = false
+    local i = 1
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if c == "'" then
+            if in_quote and n == "'" then
+                out[#out + 1] = " "
+                out[#out + 1] = " "
+                i = i + 2
+            else
+                in_quote = not in_quote
+                out[#out + 1] = " "
+                i = i + 1
+            end
+        elseif in_quote then
+            out[#out + 1] = " "
+            i = i + 1
+        else
+            out[#out + 1] = c
+            i = i + 1
+        end
+    end
+    return table.concat(out)
+end
+
+-- ---------------------------------------------------------------------------
+-- Lexing
+-- ---------------------------------------------------------------------------
+
+function M.decode_quoted_identifier(token_text)
+    return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
+end
+
+-- The uppercase form of a token for keyword comparison.
+--
+-- Falls back to the token's raw `text`, which for a quoted identifier still
+-- carries its quotes -- so `"AND"` never compares equal to the keyword AND
+-- unless the lexer was asked to fold identifiers (see `upper_identifiers`).
+function M.token_upper(token)
+    if token == nil then
+        return nil
+    end
+    return token.upper or upper(token.text)
+end
+
+-- One lexer for the Exasol dialect, with two options where its two callers
+-- genuinely disagree.
+--
+-- Everything else -- whitespace, `--` and `/* */` comments, single-quoted
+-- literals with `''` escapes, double-quoted identifiers with `""` escapes,
+-- words, numbers, symbols, the trailing semicolon -- was character-for-character
+-- identical in compiler/request_json.lua's `sql_tokens` and
+-- admin/semantic_definition.lua's `tokenize`. A new literal form or comment
+-- syntax had to be taught twice.
+--
+--   options.operators          fuse `>=`, `<=`, `<>`, `!=` into one token. The
+--                              semantic-SQL parser compares whole operators; the
+--                              DDL parser slices expressions by byte offset and
+--                              never looks at them, and has always seen two
+--                              symbols. Changing that for the DDL would alter a
+--                              4 600-line parser for no gain.
+--
+--   options.upper_identifiers  set `upper` on a quoted identifier from its
+--                              *decoded* value. The DDL parser wants it, because
+--                              it reads names out of quoted tokens. The
+--                              semantic-SQL parser must not have it: `token_upper`
+--                              is what its clause scanner compares against
+--                              keywords, so folding `"AND"` to `AND` would make a
+--                              quoted column named "and" parse as a conjunction.
+--
+-- Every token carries `start_pos`, `end_pos` and `depth` regardless. The
+-- semantic-SQL parser ignores them; that costs three assignments and removes the
+-- reason to keep a second lexer.
+function M.tokenize(text, options)
+    options = options or {}
+    local fuse_operators = options.operators == true
+    local fold_identifiers = options.upper_identifiers == true
+    local tokens = {}
+    text = tostring(text)
+    local i = 1
+    local depth = 0
+    while i <= #text do
+        local c = string.sub(text, i, i)
+        local n = string.sub(text, i + 1, i + 1)
+        if string.match(c, "%s") then
+            i = i + 1
+        elseif c == "-" and n == "-" then
+            i = i + 2
+            while i <= #text and string.sub(text, i, i) ~= "\n" do
+                i = i + 1
+            end
+        elseif c == "/" and n == "*" then
+            i = i + 2
+            while i <= #text - 1 and string.sub(text, i, i + 1) ~= "*/" do
+                i = i + 1
+            end
+            i = math.min(i + 2, #text + 1)
+        elseif c == "'" then
+            local start_pos = i
+            i = i + 1
+            while i <= #text do
+                c = string.sub(text, i, i)
+                n = string.sub(text, i + 1, i + 1)
+                if c == "'" and n == "'" then
+                    i = i + 2
+                elseif c == "'" then
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1),
+                kind = "literal", start_pos = start_pos, end_pos = i - 1,
+                depth = depth}
+        elseif c == '"' then
+            local start_pos = i
+            i = i + 1
+            while i <= #text do
+                c = string.sub(text, i, i)
+                n = string.sub(text, i + 1, i + 1)
+                if c == '"' and n == '"' then
+                    i = i + 2
+                elseif c == '"' then
+                    i = i + 1
+                    break
+                else
+                    i = i + 1
+                end
+            end
+            local token_text = string.sub(text, start_pos, i - 1)
+            local decoded = M.decode_quoted_identifier(token_text)
+            tokens[#tokens + 1] = {text = token_text, kind = "identifier",
+                value = decoded,
+                upper = fold_identifiers and upper(decoded) or nil,
+                start_pos = start_pos, end_pos = i - 1, depth = depth}
+        elseif string.match(c, "[A-Za-z_]") then
+            local start_pos = i
+            i = i + 1
+            while i <= #text and string.match(string.sub(text, i, i), "[A-Za-z0-9_]") do
+                i = i + 1
+            end
+            local token_text = string.sub(text, start_pos, i - 1)
+            tokens[#tokens + 1] = {text = token_text, kind = "word",
+                value = token_text, upper = upper(token_text),
+                start_pos = start_pos, end_pos = i - 1, depth = depth}
+        elseif string.match(c, "%d") then
+            local start_pos = i
+            i = i + 1
+            while i <= #text and string.match(string.sub(text, i, i), "[0-9.]") do
+                i = i + 1
+            end
+            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1),
+                kind = "number", start_pos = start_pos, end_pos = i - 1,
+                depth = depth}
+        else
+            local two = string.sub(text, i, i + 1)
+            if fuse_operators and (two == ">=" or two == "<=" or two == "<>"
+                or two == "!=") then
+                tokens[#tokens + 1] = {text = two, kind = "operator", upper = two,
+                    start_pos = i, end_pos = i + 1, depth = depth}
+                i = i + 2
+            else
+                -- A closing paren carries the depth it returns to, which is the
+                -- depth its matching opening paren was emitted at. Both
+                -- parentheses of a top-level group therefore sit at 0 and only
+                -- their contents are nested, which is what lets a clause scanner
+                -- find top-level commas by reading `depth == 0`.
+                local token_depth = depth
+                if c == ")" then
+                    depth = math.max(depth - 1, 0)
+                    token_depth = depth
+                end
+                tokens[#tokens + 1] = {text = c, kind = "symbol", upper = c,
+                    start_pos = i, end_pos = i, depth = token_depth}
+                if c == "(" then
+                    depth = depth + 1
+                end
+                i = i + 1
+            end
+        end
+    end
+    if #tokens > 0 and tokens[#tokens].text == ";" then
+        table.remove(tokens, #tokens)
+    end
+    return tokens
+end
+
+ESV_SQL_TEXT = M
+
+-- Snapshot and restore a slice of SYS_SEMANTIC, for the two apply paths that
+-- have to undo themselves.
+--
+-- `APPLY_SEMANTIC_DEFINITION` and `APPLY_FUSION_DECLARATION` need the same
+-- thing: capture the rows a multi-step change is about to touch, run the steps,
+-- validate, and put the rows back if anything refused. They arrived at it in
+-- opposite ways.
+--
+-- admin/fusion_declaration.lua read its column lists from EXA_ALL_COLUMNS -- 45
+-- lines, generic over a table list. admin/semantic_definition.lua wrote every
+-- column out by hand, four times per table: in the snapshot SELECT, the restore
+-- INSERT column list, its VALUES list, and the parameter map, the last carrying
+-- ordinals that had to stay in lockstep with the first. 335 lines for eight
+-- tables, and nothing checked that the four agreed. All four happened to agree
+-- when this was written -- five of METRICS' 29 columns were added after it, and
+-- somebody remembered each time. The next one restores as NULL.
+--
+-- So this is the fusion module's shape, lifted, and the DDL path now uses it.
+-- The catalog is the source of truth for what a table's columns are; nothing
+-- here restates them.
+--
+-- Two things the lift fixed rather than moved:
+--
+--   * `row[name] or row[lower] or row[position]` treats a boolean FALSE as
+--     absent and falls through to the ordinal, which is usually nil -- so a
+--     restored ATTRIBUTE_BINDINGS.IS_DEFAULT or OBJECT_COLUMNS.IS_VISIBLE could
+--     come back NULL instead of FALSE. Reading is explicit about nil here.
+--   * The DDL path cleared METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX and
+--     never restored them, because they were in the delete list and not the
+--     snapshot. Declaring one list per table makes that impossible to express.
+
+local M = {}
+
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    local value = row[name]
+    if value == nil then value = row[string.lower(name)] end
+    if value == nil then value = row[position] end
+    return value
+end
+
+-- A table's columns, in declaration order, as the catalog reports them.
+function M.columns(query_fn, table_name, error_code)
+    local rows = query_fn([[
+        SELECT COLUMN_NAME
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
+          AND COLUMN_TABLE = :table_name
+        ORDER BY COLUMN_ORDINAL_POSITION
+    ]], {table_name = table_name})
+    local names = {}
+    for _, row in ipairs(rows or {}) do
+        names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
+    end
+    if #names == 0 then
+        error(tostring(error_code) .. ": cannot read the columns of SYS_SEMANTIC."
+            .. tostring(table_name))
+    end
+    return names
+end
+
+-- Capture every row each table contributes, in the order the tables are declared.
+--
+-- A spec is `{name = "METRICS", where = "..."}`, plus for a table that is scoped
+-- through a parent rather than by its own columns:
+--
+--   alias         the base table's alias, so the projection can qualify columns
+--   join          the JOIN that reaches the parent carrying MODEL_ID
+--   delete_where  the predicate for DELETE, which cannot see the join
+--
+-- `params` is bound to every statement, so the same `:model_id` / `:version_id`
+-- reaches the scoped and unscoped forms alike.
+function M.snapshot(query_fn, tables, params, error_code)
+    local snapshot = {}
+    for _, spec in ipairs(tables) do
+        local columns = M.columns(query_fn, spec.name, error_code)
+        local projection = {}
+        for _, column in ipairs(columns) do
+            projection[#projection + 1] =
+                (spec.alias and (spec.alias .. ".") or "") .. column
+        end
+        snapshot[#snapshot + 1] = {
+            name = spec.name,
+            columns = columns,
+            rows = query_fn("SELECT " .. table.concat(projection, ", ")
+                .. " FROM SYS_SEMANTIC." .. spec.name
+                .. (spec.alias and (" " .. spec.alias) or "")
+                .. (spec.join and (" " .. spec.join) or "")
+                .. " WHERE " .. spec.where, params) or {},
+        }
+    end
+    return snapshot
+end
+
+-- Put the captured rows back, exactly.
+--
+-- Deletes run in reverse declaration order and inserts in forward order, so the
+-- table list is read as parent-to-child once and both directions follow from it.
+function M.restore(query_fn, tables, snapshot, params)
+    for index = #tables, 1, -1 do
+        local spec = tables[index]
+        query_fn("DELETE FROM SYS_SEMANTIC." .. spec.name
+            .. " WHERE " .. (spec.delete_where or spec.where), params)
+    end
+    for _, entry in ipairs(snapshot) do
+        for _, row in ipairs(entry.rows) do
+            local placeholders, bound = {}, {}
+            for position, column in ipairs(entry.columns) do
+                local key = "c" .. position
+                placeholders[#placeholders + 1] = ":" .. key
+                bound[key] = row_value(row, column, position)
+            end
+            query_fn("INSERT INTO SYS_SEMANTIC." .. entry.name .. " ("
+                .. table.concat(entry.columns, ", ") .. ") VALUES ("
+                .. table.concat(placeholders, ", ") .. ")", bound)
+        end
+    end
+end
+
+ESV_CATALOG_ROLLBACK = M
+
 local M = {}
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
+local rollback = assert(ESV_CATALOG_ROLLBACK,
+    "shared catalog rollback runtime is required")
+
+-- Semantic DDL reads names out of quoted tokens, so the lexer folds a
+-- quoted identifier to upper case; it must NOT fuse `>=`/`<=`/`<>`/`!=`,
+-- because this parser slices expressions by byte offset and has always
+-- seen two symbols there. The semantic-SQL parser wants the opposite of
+-- both; see shared/sql_text.lua.
+local SEMANTIC_DDL_LEXER = {upper_identifiers = true}
 
 -- Identity, not a copy: a decoded null is only recognisable to code holding the
 -- same sentinel table (see shared/json.lua).
@@ -23800,105 +24560,6 @@ local function normalize_name(value, label)
     return name
 end
 
-local function decode_quoted_identifier(token_text)
-    local raw = string.sub(token_text, 2, -2)
-    return string.gsub(raw, '""', '"')
-end
-
-local function tokenize(text)
-    local tokens = {}
-    local i = 1
-    local depth = 0
-    while i <= #text do
-        local c = string.sub(text, i, i)
-        local n = string.sub(text, i + 1, i + 1)
-        if string.match(c, "%s") then
-            i = i + 1
-        elseif c == "-" and n == "-" then
-            i = i + 2
-            while i <= #text and string.sub(text, i, i) ~= "\n" do
-                i = i + 1
-            end
-        elseif c == "/" and n == "*" then
-            i = i + 2
-            while i <= #text - 1 and string.sub(text, i, i + 1) ~= "*/" do
-                i = i + 1
-            end
-            i = math.min(i + 2, #text + 1)
-        elseif c == "'" then
-            local start_pos = i
-            i = i + 1
-            while i <= #text do
-                c = string.sub(text, i, i)
-                n = string.sub(text, i + 1, i + 1)
-                if c == "'" and n == "'" then
-                    i = i + 2
-                elseif c == "'" then
-                    i = i + 1
-                    break
-                else
-                    i = i + 1
-                end
-            end
-            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1), kind = "literal", start_pos = start_pos, end_pos = i - 1, depth = depth}
-        elseif c == '"' then
-            local start_pos = i
-            i = i + 1
-            while i <= #text do
-                c = string.sub(text, i, i)
-                n = string.sub(text, i + 1, i + 1)
-                if c == '"' and n == '"' then
-                    i = i + 2
-                elseif c == '"' then
-                    i = i + 1
-                    break
-                else
-                    i = i + 1
-                end
-            end
-            local token_text = string.sub(text, start_pos, i - 1)
-            tokens[#tokens + 1] = {text = token_text, kind = "identifier", value = decode_quoted_identifier(token_text), upper = upper(decode_quoted_identifier(token_text)), start_pos = start_pos, end_pos = i - 1, depth = depth}
-        elseif string.match(c, "[A-Za-z_]") then
-            local start_pos = i
-            i = i + 1
-            while i <= #text and string.match(string.sub(text, i, i), "[A-Za-z0-9_]") do
-                i = i + 1
-            end
-            local token_text = string.sub(text, start_pos, i - 1)
-            tokens[#tokens + 1] = {text = token_text, kind = "word", value = token_text, upper = upper(token_text), start_pos = start_pos, end_pos = i - 1, depth = depth}
-        elseif string.match(c, "%d") then
-            local start_pos = i
-            i = i + 1
-            while i <= #text and string.match(string.sub(text, i, i), "[0-9.]") do
-                i = i + 1
-            end
-            tokens[#tokens + 1] = {text = string.sub(text, start_pos, i - 1), kind = "number", start_pos = start_pos, end_pos = i - 1, depth = depth}
-        else
-            local token_depth = depth
-            if c == ")" then
-                depth = math.max(depth - 1, 0)
-                token_depth = depth
-            end
-            tokens[#tokens + 1] = {text = c, kind = "symbol", upper = c, start_pos = i, end_pos = i, depth = token_depth}
-            if c == "(" then
-                depth = depth + 1
-            end
-            i = i + 1
-        end
-    end
-    if #tokens > 0 and tokens[#tokens].text == ";" then
-        table.remove(tokens, #tokens)
-    end
-    return tokens
-end
-
-local function token_upper(token)
-    if token == nil then
-        return nil
-    end
-    return token.upper or upper(token.text)
-end
-
 local function token_identifier(token)
     if token == nil then
         return nil
@@ -23925,7 +24586,7 @@ local function find_sequence(tokens, words, start_index, depth)
         end
         if ok then
             for j, word in ipairs(words) do
-                if token_upper(tokens[i + j - 1]) ~= word then
+                if sql_text.token_upper(tokens[i + j - 1]) ~= word then
                     ok = false
                     break
                 end
@@ -24010,7 +24671,7 @@ local function clause_positions(tokens, start_index)
             for _, words in ipairs(CLAUSES) do
                 local ok = true
                 for j, word in ipairs(words) do
-                    if token_upper(tokens[i + j - 1]) ~= word then
+                    if sql_text.token_upper(tokens[i + j - 1]) ~= word then
                         ok = false
                         break
                     end
@@ -24096,8 +24757,8 @@ local function parse_clause_scalar(text)
 end
 
 local function parse_fact(text)
-    local tokens = tokenize(text)
-    if token_upper(tokens[1]) ~= "FACT" then
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
+    if sql_text.token_upper(tokens[1]) ~= "FACT" then
         error("SEMANTIC_DDL_020: expected FACT entry")
     end
     local name = normalize_name(token_identifier(tokens[2]), "FACT_NAME")
@@ -24140,8 +24801,8 @@ end
 -- FORMAT is the one clause a fact does not use and a dimension does; it was
 -- already in CLAUSES for metrics.
 local function parse_dimension(text)
-    local tokens = tokenize(text)
-    if token_upper(tokens[1]) ~= "DIMENSION" then
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
+    if sql_text.token_upper(tokens[1]) ~= "DIMENSION" then
         error("SEMANTIC_DDL_025: expected DIMENSION entry")
     end
     local name = normalize_name(token_identifier(tokens[2]), "DIMENSION_NAME")
@@ -24171,7 +24832,7 @@ end
 
 local function aggregate_parts(expression)
     local text = trim(expression)
-    local tokens = tokenize(text)
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
     if #tokens < 3 or tokens[1].kind ~= "word" or tokens[2].text ~= "(" then
         return nil, nil
     end
@@ -24191,7 +24852,7 @@ local function aggregate_parts(expression)
 end
 
 local function parse_metric(text, leading_metric_seen)
-    local tokens = tokenize(text)
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
     local name_index = 2
     if not leading_metric_seen then
         local metric_index = find_sequence(tokens, {"METRIC"}, 1, 0)
@@ -24199,7 +24860,7 @@ local function parse_metric(text, leading_metric_seen)
             error("SEMANTIC_DDL_030: expected METRIC entry")
         end
         name_index = metric_index + 1
-    elseif token_upper(tokens[1]) ~= "METRIC" then
+    elseif sql_text.token_upper(tokens[1]) ~= "METRIC" then
         error("SEMANTIC_DDL_030: expected METRIC entry")
     end
     local name = normalize_name(token_identifier(tokens[name_index]), "METRIC_NAME")
@@ -24291,11 +24952,11 @@ end
 
 local function parse_definition(definition_sql)
     local source = tostring(definition_sql or "")
-    local tokens = tokenize(source)
+    local tokens = sql_text.tokenize(source, SEMANTIC_DDL_LEXER)
     if #tokens == 0 then
         error("SEMANTIC_DDL_001: definition SQL is required")
     end
-    if token_upper(tokens[1]) ~= "ALTER" or token_upper(tokens[2]) ~= "SEMANTIC" or token_upper(tokens[3]) ~= "VIEW" then
+    if sql_text.token_upper(tokens[1]) ~= "ALTER" or sql_text.token_upper(tokens[2]) ~= "SEMANTIC" or sql_text.token_upper(tokens[3]) ~= "VIEW" then
         error("SEMANTIC_DDL_010: expected ALTER SEMANTIC VIEW")
     end
     local model_name, object_name, _, next_index = parse_qualified(tokens, 4)
@@ -24336,7 +24997,7 @@ local function parse_definition(definition_sql)
 
     if rename_metric ~= nil then
         local old_name = token_identifier(tokens[rename_metric + 2])
-        local to_keyword = token_upper(tokens[rename_metric + 3])
+        local to_keyword = sql_text.token_upper(tokens[rename_metric + 3])
         local new_name = token_identifier(tokens[rename_metric + 4])
         if old_name == nil or to_keyword ~= "TO" or new_name == nil or tokens[rename_metric + 5] ~= nil then
             error("SEMANTIC_DDL_036: RENAME METRIC requires <old_name> TO <new_name>")
@@ -24495,7 +25156,7 @@ local function replace_semantic_identifiers(model, expression)
     if missing(expression) then
         return nil
     end
-    local tokens = tokenize(expression)
+    local tokens = sql_text.tokenize(expression, SEMANTIC_DDL_LEXER)
     local out = {}
     local last = 1
     for _, token in ipairs(tokens) do
@@ -24872,7 +25533,7 @@ local SQL_WORDS = {
 local function identifiers_in_expression(expression)
     local identifiers = {}
     local seen = {}
-    for _, token in ipairs(tokenize(expression or "")) do
+    for _, token in ipairs(sql_text.tokenize(expression or "", SEMANTIC_DDL_LEXER)) do
         if token.kind == "word" or token.kind == "identifier" then
             local name = token.value or token.text
             local normalized = upper(name)
@@ -24890,7 +25551,7 @@ local AGGREGATE_FUNCTIONS = {
 }
 
 local function contains_aggregate_call(expression)
-    local tokens = tokenize(expression or "")
+    local tokens = sql_text.tokenize(expression or "", SEMANTIC_DDL_LEXER)
     for index, token in ipairs(tokens) do
         if token.kind == "word"
                 and AGGREGATE_FUNCTIONS[upper(token.text)]
@@ -24904,7 +25565,7 @@ end
 
 local function inline_ratio_parts(expression)
     local text = tostring(expression or "")
-    local tokens = tokenize(text)
+    local tokens = sql_text.tokenize(text, SEMANTIC_DDL_LEXER)
     local depth = 0
     local division = nil
     local division_depth = nil
@@ -25215,7 +25876,7 @@ local function rewrite_identifier(expression, old_name, new_name)
     end
     local source = tostring(expression)
     local replacements = {}
-    for _, token in ipairs(tokenize(source)) do
+    for _, token in ipairs(sql_text.tokenize(source, SEMANTIC_DDL_LEXER)) do
         if (token.kind == "word" or token.kind == "identifier")
                 and upper(token.value or token.text) == upper(old_name) then
             local replacement = new_name
@@ -25545,352 +26206,62 @@ local function validate_definition_model(model, model_name)
     return validation_rows, error_count, warning_count, validation_run_id
 end
 
-local function snapshot_model_state(model)
-    return {
-        attribute_bindings = query([[
-            SELECT ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
-                   ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
-                   SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
-                   IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
-            FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        dimensions = query([[
-            SELECT DIMENSION_ID, MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION,
-                   DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-                   SENSITIVITY_LABEL, DISPLAY_POLICY, IS_HIDDEN, IS_CERTIFIED, STATUS
-            FROM SYS_SEMANTIC.DIMENSIONS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        facts = query([[
-            SELECT FACT_ID, MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
-                   ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-                   SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE, IS_CERTIFIED, STATUS
-            FROM SYS_SEMANTIC.FACTS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        metrics = query([[
-            SELECT METRIC_ID, MODEL_ID, VERSION_ID, METRIC_NAME, EXPRESSION, FILTER_EXPR,
-                   METRIC_TYPE, BASE_ENTITY_ID, DATA_TYPE, DISPLAY_NAME, DESCRIPTION,
-                   FORMAT_HINT, UNIT_HINT, SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE,
-                   IS_CERTIFIED, OWNER_ROLE, METRIC_KIND, AGGREGATION_FUNCTION, MEASURE_EXPR,
-                   SEMANTIC_FILTER_EXPR, SQL_FILTER_EXPR, DISTINCT_KEY_EXPR,
-                   NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON, TYPE_PARAMS_JSON,
-                   DEFINITION_SOURCE_ID, STATUS
-            FROM SYS_SEMANTIC.METRICS
-            WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        object_columns = query([[
-            SELECT oc.OBJECT_ID, oc.COLUMN_KIND, oc.OBJECT_REF_ID, oc.COLUMN_NAME,
-                   oc.ORDINAL_POSITION, oc.IS_VISIBLE
-            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
-            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
-              ON so.OBJECT_ID = oc.OBJECT_ID
-            WHERE so.MODEL_ID = :model_id
-              AND so.VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        metric_inputs = query([[
-            SELECT mi.METRIC_ID, mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE, mi.INPUT_OBJECT_ID,
-                   mi.EXPRESSION_ALIAS, mi.OFFSET_WINDOW, mi.FILTER_EXPR, mi.ORDINAL_POSITION
-            FROM SYS_SEMANTIC.METRIC_INPUTS mi
-            JOIN SYS_SEMANTIC.METRICS mt
-              ON mt.METRIC_ID = mi.METRIC_ID
-            WHERE mt.MODEL_ID = :model_id
-              AND mt.VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        metric_filters = query([[
-            SELECT mf.METRIC_ID, mf.FILTER_KIND, mf.FILTER_EXPR, mf.RESOLVED_SQL_EXPR,
-                   mf.REQUIRED_DIMENSION_ID, mf.REQUIRED_ENTITY_ID, mf.ORDINAL_POSITION
-            FROM SYS_SEMANTIC.METRIC_FILTERS mf
-            JOIN SYS_SEMANTIC.METRICS mt
-              ON mt.METRIC_ID = mf.METRIC_ID
-            WHERE mt.MODEL_ID = :model_id
-              AND mt.VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-        synonyms = query([[
-            SELECT SYNONYM_ID, MODEL_ID, VERSION_ID, OBJECT_TYPE, OBJECT_ID, SYNONYM, SYNONYM_SOURCE
-            FROM SYS_SEMANTIC.SYNONYMS
-            WHERE MODEL_ID = :model_id
-              AND VERSION_ID = :version_id
-        ]], {model_id = model.model_id, version_id = model.version_id}) or {},
-    }
+-- The eight tables an ALTER SEMANTIC VIEW apply can touch, parent to child.
+--
+-- This was 335 lines: every column written out four times per table, in the
+-- snapshot SELECT, the restore INSERT list, its VALUES list, and the parameter
+-- map, the last carrying ordinals that had to stay in step with the first.
+-- Nothing checked that the four agreed, and METRICS grew five columns after it
+-- was written. Column lists now come from the catalog -- see
+-- shared/catalog_rollback.lua, which admin/fusion_declaration.lua already used.
+--
+-- METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX are new to the *snapshot*.
+-- They were cleared on rollback and never restored, because they were in the
+-- delete list and not the capture list; one list per table makes that
+-- unexpressible. Both are validator output that the VALIDATE_MODEL run
+-- following a restore rewrites anyway, so this closes a window rather than
+-- changing an outcome.
+local MODEL_SCOPE = "MODEL_ID = :model_id AND VERSION_ID = :version_id"
+local METRIC_SCOPE = "METRIC_ID IN (SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS"
+    .. " WHERE " .. MODEL_SCOPE .. ")"
+local SNAPSHOT_TABLES = {
+    {name = "DIMENSIONS", where = MODEL_SCOPE},
+    {name = "FACTS", where = MODEL_SCOPE},
+    {name = "METRICS", where = MODEL_SCOPE},
+    {name = "ATTRIBUTE_BINDINGS", where = MODEL_SCOPE},
+    {name = "SYNONYMS", where = MODEL_SCOPE},
+    {name = "METRIC_DIMENSION_MATRIX", where = MODEL_SCOPE},
+    -- Scoped through a parent, so the capture joins and the delete cannot.
+    {name = "OBJECT_COLUMNS", alias = "oc",
+     join = "JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID",
+     where = "so.MODEL_ID = :model_id AND so.VERSION_ID = :version_id",
+     delete_where = "OBJECT_ID IN (SELECT OBJECT_ID FROM"
+         .. " SYS_SEMANTIC.SEMANTIC_OBJECTS WHERE " .. MODEL_SCOPE .. ")"},
+    {name = "METRIC_INPUTS", alias = "mi",
+     join = "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = mi.METRIC_ID",
+     where = "mt.MODEL_ID = :model_id AND mt.VERSION_ID = :version_id",
+     delete_where = METRIC_SCOPE},
+    {name = "METRIC_FILTERS", alias = "mf",
+     join = "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = mf.METRIC_ID",
+     where = "mt.MODEL_ID = :model_id AND mt.VERSION_ID = :version_id",
+     delete_where = METRIC_SCOPE},
+    {name = "METRIC_DEPENDENCIES", alias = "md",
+     join = "JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = md.METRIC_ID",
+     where = "mt.MODEL_ID = :model_id AND mt.VERSION_ID = :version_id",
+     delete_where = METRIC_SCOPE},
+}
+
+local function model_scope(model)
+    return {model_id = model.model_id, version_id = model.version_id}
 end
 
-local function clear_model_state(model)
-    query([[
-        DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_INPUTS
-        WHERE METRIC_ID IN (
-          SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_FILTERS
-        WHERE METRIC_ID IN (
-          SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
-        WHERE METRIC_ID IN (
-          SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.SYNONYMS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
-        WHERE OBJECT_ID IN (
-          SELECT OBJECT_ID FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
-          WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-        )
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.METRICS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.FACTS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
-    query([[
-        DELETE FROM SYS_SEMANTIC.DIMENSIONS
-        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
-    ]], {model_id = model.model_id, version_id = model.version_id})
+local function snapshot_model_state(model)
+    return rollback.snapshot(query, SNAPSHOT_TABLES, model_scope(model),
+        "SEMANTIC_DDL_091")
 end
 
 local function restore_model_state(model, snapshot)
-    clear_model_state(model)
-    -- Dimensions first: ATTRIBUTE_BINDINGS and OBJECT_COLUMNS rows restored
-    -- below point at these ids.
-    for _, row in ipairs(snapshot.dimensions or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.DIMENSIONS (
-              DIMENSION_ID, MODEL_ID, VERSION_ID, ENTITY_ID, DIMENSION_NAME, EXPRESSION,
-              DATA_TYPE, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-              SENSITIVITY_LABEL, DISPLAY_POLICY, IS_HIDDEN, IS_CERTIFIED, STATUS
-            ) VALUES (
-              :dimension_id, :model_id, :version_id, :entity_id, :dimension_name, :expression,
-              :data_type, :display_name, :description, :format_hint, :unit_hint,
-              :sensitivity_label, :display_policy, :is_hidden, :is_certified, :status
-            )
-        ]], {
-            dimension_id = row_value(row, "DIMENSION_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            entity_id = row_value(row, "ENTITY_ID", 4),
-            dimension_name = row_value(row, "DIMENSION_NAME", 5),
-            expression = row_value(row, "EXPRESSION", 6),
-            data_type = row_value(row, "DATA_TYPE", 7),
-            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 8)),
-            description = null_if_missing(row_value(row, "DESCRIPTION", 9)),
-            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 10)),
-            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 11)),
-            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 12)),
-            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 13)),
-            is_hidden = row_value(row, "IS_HIDDEN", 14),
-            is_certified = row_value(row, "IS_CERTIFIED", 15),
-            status = row_value(row, "STATUS", 16),
-        })
-    end
-    for _, row in ipairs(snapshot.facts or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.FACTS (
-              FACT_ID, MODEL_ID, VERSION_ID, ENTITY_ID, FACT_NAME, EXPRESSION, DATA_TYPE,
-              ADDITIVE_POLICY, DISPLAY_NAME, DESCRIPTION, FORMAT_HINT, UNIT_HINT,
-              SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE, IS_CERTIFIED, STATUS
-            ) VALUES (
-              :fact_id, :model_id, :version_id, :entity_id, :fact_name, :expression, :data_type,
-              :additive_policy, :display_name, :description, :format_hint, :unit_hint,
-              :sensitivity_label, :display_policy, :is_private, :is_certified, :status
-            )
-        ]], {
-            fact_id = row_value(row, "FACT_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            entity_id = row_value(row, "ENTITY_ID", 4),
-            fact_name = row_value(row, "FACT_NAME", 5),
-            expression = row_value(row, "EXPRESSION", 6),
-            data_type = row_value(row, "DATA_TYPE", 7),
-            additive_policy = row_value(row, "ADDITIVE_POLICY", 8),
-            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 9)),
-            description = null_if_missing(row_value(row, "DESCRIPTION", 10)),
-            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 11)),
-            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 12)),
-            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 13)),
-            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 14)),
-            is_private = row_value(row, "IS_PRIVATE", 15),
-            is_certified = row_value(row, "IS_CERTIFIED", 16),
-            status = row_value(row, "STATUS", 17),
-        })
-    end
-    for _, row in ipairs(snapshot.attribute_bindings or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
-              ATTRIBUTE_BINDING_ID, MODEL_ID, VERSION_ID, ENTITY_ID,
-              ATTRIBUTE_TYPE, ATTRIBUTE_ID, REPRESENTATION_ID,
-              SOURCE_EXPRESSION, BINDING_ROLE, BINDING_PRIORITY,
-              IS_DEFAULT, STATUS, CREATED_AT, CREATED_BY, UPDATED_AT, UPDATED_BY
-            ) VALUES (
-              :binding_id, :model_id, :version_id, :entity_id,
-              :attribute_type, :attribute_id, :representation_id,
-              :source_expression, :binding_role, :binding_priority,
-              :is_default, :status, :created_at, :created_by, :updated_at, :updated_by
-            )
-        ]], {
-            binding_id = row_value(row, "ATTRIBUTE_BINDING_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            entity_id = row_value(row, "ENTITY_ID", 4),
-            attribute_type = row_value(row, "ATTRIBUTE_TYPE", 5),
-            attribute_id = row_value(row, "ATTRIBUTE_ID", 6),
-            representation_id = row_value(row, "REPRESENTATION_ID", 7),
-            source_expression = row_value(row, "SOURCE_EXPRESSION", 8),
-            binding_role = row_value(row, "BINDING_ROLE", 9),
-            binding_priority = row_value(row, "BINDING_PRIORITY", 10),
-            is_default = row_value(row, "IS_DEFAULT", 11),
-            status = row_value(row, "STATUS", 12),
-            created_at = null_if_missing(row_value(row, "CREATED_AT", 13)),
-            created_by = null_if_missing(row_value(row, "CREATED_BY", 14)),
-            updated_at = null_if_missing(row_value(row, "UPDATED_AT", 15)),
-            updated_by = null_if_missing(row_value(row, "UPDATED_BY", 16)),
-        })
-    end
-    for _, row in ipairs(snapshot.metrics or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRICS (
-              METRIC_ID, MODEL_ID, VERSION_ID, METRIC_NAME, EXPRESSION, FILTER_EXPR,
-              METRIC_TYPE, BASE_ENTITY_ID, DATA_TYPE, DISPLAY_NAME, DESCRIPTION,
-              FORMAT_HINT, UNIT_HINT, SENSITIVITY_LABEL, DISPLAY_POLICY, IS_PRIVATE,
-              IS_CERTIFIED, OWNER_ROLE, METRIC_KIND, AGGREGATION_FUNCTION, MEASURE_EXPR,
-              SEMANTIC_FILTER_EXPR, SQL_FILTER_EXPR, DISTINCT_KEY_EXPR,
-              NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON, TYPE_PARAMS_JSON,
-              DEFINITION_SOURCE_ID, STATUS
-            ) VALUES (
-              :metric_id, :model_id, :version_id, :metric_name, :expression, :filter_expr,
-              :metric_type, :base_entity_id, :data_type, :display_name, :description,
-              :format_hint, :unit_hint, :sensitivity_label, :display_policy, :is_private,
-              :is_certified, :owner_role, :metric_kind, :aggregation_function, :measure_expr,
-              :semantic_filter_expr, :sql_filter_expr, :distinct_key_expr,
-              :non_additive_dimension_id, :window_spec_json, :type_params_json,
-              :definition_source_id, :status
-            )
-        ]], {
-            metric_id = row_value(row, "METRIC_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            metric_name = row_value(row, "METRIC_NAME", 4),
-            expression = row_value(row, "EXPRESSION", 5),
-            filter_expr = null_if_missing(row_value(row, "FILTER_EXPR", 6)),
-            metric_type = row_value(row, "METRIC_TYPE", 7),
-            base_entity_id = null_if_missing(row_value(row, "BASE_ENTITY_ID", 8)),
-            data_type = row_value(row, "DATA_TYPE", 9),
-            display_name = null_if_missing(row_value(row, "DISPLAY_NAME", 10)),
-            description = null_if_missing(row_value(row, "DESCRIPTION", 11)),
-            format_hint = null_if_missing(row_value(row, "FORMAT_HINT", 12)),
-            unit_hint = null_if_missing(row_value(row, "UNIT_HINT", 13)),
-            sensitivity_label = null_if_missing(row_value(row, "SENSITIVITY_LABEL", 14)),
-            display_policy = null_if_missing(row_value(row, "DISPLAY_POLICY", 15)),
-            is_private = row_value(row, "IS_PRIVATE", 16),
-            is_certified = row_value(row, "IS_CERTIFIED", 17),
-            owner_role = null_if_missing(row_value(row, "OWNER_ROLE", 18)),
-            metric_kind = null_if_missing(row_value(row, "METRIC_KIND", 19)),
-            aggregation_function = null_if_missing(row_value(row, "AGGREGATION_FUNCTION", 20)),
-            measure_expr = null_if_missing(row_value(row, "MEASURE_EXPR", 21)),
-            semantic_filter_expr = null_if_missing(row_value(row, "SEMANTIC_FILTER_EXPR", 22)),
-            sql_filter_expr = null_if_missing(row_value(row, "SQL_FILTER_EXPR", 23)),
-            distinct_key_expr = null_if_missing(row_value(row, "DISTINCT_KEY_EXPR", 24)),
-            non_additive_dimension_id = null_if_missing(row_value(row, "NON_ADDITIVE_DIMENSION_ID", 25)),
-            window_spec_json = null_if_missing(row_value(row, "WINDOW_SPEC_JSON", 26)),
-            type_params_json = null_if_missing(row_value(row, "TYPE_PARAMS_JSON", 27)),
-            definition_source_id = null_if_missing(row_value(row, "DEFINITION_SOURCE_ID", 28)),
-            status = row_value(row, "STATUS", 29),
-        })
-    end
-    for _, row in ipairs(snapshot.object_columns or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.OBJECT_COLUMNS (
-              OBJECT_ID, COLUMN_KIND, OBJECT_REF_ID, COLUMN_NAME, ORDINAL_POSITION, IS_VISIBLE
-            ) VALUES (
-              :object_id, :column_kind, :object_ref_id, :column_name, :ordinal_position, :is_visible
-            )
-        ]], {
-            object_id = row_value(row, "OBJECT_ID", 1),
-            column_kind = row_value(row, "COLUMN_KIND", 2),
-            object_ref_id = row_value(row, "OBJECT_REF_ID", 3),
-            column_name = row_value(row, "COLUMN_NAME", 4),
-            ordinal_position = row_value(row, "ORDINAL_POSITION", 5),
-            is_visible = row_value(row, "IS_VISIBLE", 6),
-        })
-    end
-    for _, row in ipairs(snapshot.metric_inputs or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRIC_INPUTS (
-              METRIC_ID, INPUT_ROLE, INPUT_OBJECT_TYPE, INPUT_OBJECT_ID,
-              EXPRESSION_ALIAS, OFFSET_WINDOW, FILTER_EXPR, ORDINAL_POSITION
-            ) VALUES (
-              :metric_id, :input_role, :input_object_type, :input_object_id,
-              :expression_alias, :offset_window, :filter_expr, :ordinal_position
-            )
-        ]], {
-            metric_id = row_value(row, "METRIC_ID", 1),
-            input_role = row_value(row, "INPUT_ROLE", 2),
-            input_object_type = row_value(row, "INPUT_OBJECT_TYPE", 3),
-            input_object_id = null_if_missing(row_value(row, "INPUT_OBJECT_ID", 4)),
-            expression_alias = null_if_missing(row_value(row, "EXPRESSION_ALIAS", 5)),
-            offset_window = null_if_missing(row_value(row, "OFFSET_WINDOW", 6)),
-            filter_expr = null_if_missing(row_value(row, "FILTER_EXPR", 7)),
-            ordinal_position = row_value(row, "ORDINAL_POSITION", 8),
-        })
-    end
-    for _, row in ipairs(snapshot.metric_filters or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRIC_FILTERS (
-              METRIC_ID, FILTER_KIND, FILTER_EXPR, RESOLVED_SQL_EXPR,
-              REQUIRED_DIMENSION_ID, REQUIRED_ENTITY_ID, ORDINAL_POSITION
-            ) VALUES (
-              :metric_id, :filter_kind, :filter_expr, :resolved_sql_expr,
-              :required_dimension_id, :required_entity_id, :ordinal_position
-            )
-        ]], {
-            metric_id = row_value(row, "METRIC_ID", 1),
-            filter_kind = row_value(row, "FILTER_KIND", 2),
-            filter_expr = row_value(row, "FILTER_EXPR", 3),
-            resolved_sql_expr = null_if_missing(row_value(row, "RESOLVED_SQL_EXPR", 4)),
-            required_dimension_id = null_if_missing(row_value(row, "REQUIRED_DIMENSION_ID", 5)),
-            required_entity_id = null_if_missing(row_value(row, "REQUIRED_ENTITY_ID", 6)),
-            ordinal_position = row_value(row, "ORDINAL_POSITION", 7),
-        })
-    end
-    for _, row in ipairs(snapshot.synonyms or {}) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.SYNONYMS (
-              SYNONYM_ID, MODEL_ID, VERSION_ID, OBJECT_TYPE, OBJECT_ID, SYNONYM, SYNONYM_SOURCE
-            ) VALUES (
-              :synonym_id, :model_id, :version_id, :object_type, :object_id, :synonym, :synonym_source
-            )
-        ]], {
-            synonym_id = row_value(row, "SYNONYM_ID", 1),
-            model_id = row_value(row, "MODEL_ID", 2),
-            version_id = row_value(row, "VERSION_ID", 3),
-            object_type = row_value(row, "OBJECT_TYPE", 4),
-            object_id = row_value(row, "OBJECT_ID", 5),
-            synonym = row_value(row, "SYNONYM", 6),
-            synonym_source = null_if_missing(row_value(row, "SYNONYM_SOURCE", 7)),
-        })
-    end
+    rollback.restore(query, SNAPSHOT_TABLES, snapshot, model_scope(model))
 end
 
 local function batch_arg(args, name)
@@ -27359,7 +27730,7 @@ local DBX_SQL_WORDS = {
 -- name. When present, a resolved column that matches is emitted as the
 -- dimension name (used for FILTER predicates).
 local function dbx_rewrite_expr(expr, alias_paths, default_alias, dimension_lookup, diags, path)
-    local tokens = tokenize(tostring(expr or ""))
+    local tokens = sql_text.tokenize(tostring(expr or ""), SEMANTIC_DDL_LEXER)
     local parts = {}
     local attach_next = false
     local function emit(text, tight)
@@ -27466,7 +27837,7 @@ end
 -- Split "<agg> FILTER (WHERE <pred>)" into the aggregate expression and the
 -- raw predicate (or nil). Returns agg_expr, filter_pred.
 local function dbx_split_filter(expr)
-    local tokens = tokenize(expr)
+    local tokens = sql_text.tokenize(expr, SEMANTIC_DDL_LEXER)
     for i, tok in ipairs(tokens) do
         if (tok.upper == "FILTER") and tokens[i + 1] ~= nil and tokens[i + 1].text == "(" then
             local close = nil
@@ -27496,7 +27867,7 @@ end
 
 -- Detect a leading aggregate call: returns AGG_FUNC, inner_text, has_distinct.
 local function dbx_aggregate(expr)
-    local tokens = tokenize(expr)
+    local tokens = sql_text.tokenize(expr, SEMANTIC_DDL_LEXER)
     if #tokens < 3 or tokens[1].kind ~= "word" or tokens[2].text ~= "(" then
         return nil, nil, false
     end
@@ -27668,7 +28039,7 @@ local function dbx_translate(doc, model_name, published_schema, diags)
 
     -- Resolve which entity an expression primarily references (for member binding).
     local function entity_for_expr(expr)
-        local tokens = tokenize(tostring(expr or ""))
+        local tokens = sql_text.tokenize(tostring(expr or ""), SEMANTIC_DDL_LEXER)
         local best_entity = nil
         local best_depth = 0
         for i = 1, #tokens - 1 do
@@ -28054,7 +28425,7 @@ if rawget(_G, "ESV_TEST_MODE") then
     ESV_SEMANTIC_DEFINITION_TEST_API = {
         json_encode = json.encode,
         json_decode = json.decode,
-        tokenize = tokenize,
+        tokenize = function(text) return sql_text.tokenize(text, SEMANTIC_DDL_LEXER) end,
         split_top_level_text = split_top_level_text,
         parse_literal_list = parse_literal_list,
         parse_filter = parse_filter,
@@ -28070,6 +28441,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         upsert_metric = upsert_metric,
         upsert_dimension = upsert_dimension,
         snapshot_model_state = snapshot_model_state,
+        batch_call = batch_call,
         restore_model_state = restore_model_state,
         drop_metric = drop_metric,
         rename_metric = rename_metric,
@@ -28606,6 +28978,127 @@ end
 
 ESV_JSON = M
 
+-- Snapshot and restore a slice of SYS_SEMANTIC, for the two apply paths that
+-- have to undo themselves.
+--
+-- `APPLY_SEMANTIC_DEFINITION` and `APPLY_FUSION_DECLARATION` need the same
+-- thing: capture the rows a multi-step change is about to touch, run the steps,
+-- validate, and put the rows back if anything refused. They arrived at it in
+-- opposite ways.
+--
+-- admin/fusion_declaration.lua read its column lists from EXA_ALL_COLUMNS -- 45
+-- lines, generic over a table list. admin/semantic_definition.lua wrote every
+-- column out by hand, four times per table: in the snapshot SELECT, the restore
+-- INSERT column list, its VALUES list, and the parameter map, the last carrying
+-- ordinals that had to stay in lockstep with the first. 335 lines for eight
+-- tables, and nothing checked that the four agreed. All four happened to agree
+-- when this was written -- five of METRICS' 29 columns were added after it, and
+-- somebody remembered each time. The next one restores as NULL.
+--
+-- So this is the fusion module's shape, lifted, and the DDL path now uses it.
+-- The catalog is the source of truth for what a table's columns are; nothing
+-- here restates them.
+--
+-- Two things the lift fixed rather than moved:
+--
+--   * `row[name] or row[lower] or row[position]` treats a boolean FALSE as
+--     absent and falls through to the ordinal, which is usually nil -- so a
+--     restored ATTRIBUTE_BINDINGS.IS_DEFAULT or OBJECT_COLUMNS.IS_VISIBLE could
+--     come back NULL instead of FALSE. Reading is explicit about nil here.
+--   * The DDL path cleared METRIC_DEPENDENCIES and METRIC_DIMENSION_MATRIX and
+--     never restored them, because they were in the delete list and not the
+--     snapshot. Declaring one list per table makes that impossible to express.
+
+local M = {}
+
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    local value = row[name]
+    if value == nil then value = row[string.lower(name)] end
+    if value == nil then value = row[position] end
+    return value
+end
+
+-- A table's columns, in declaration order, as the catalog reports them.
+function M.columns(query_fn, table_name, error_code)
+    local rows = query_fn([[
+        SELECT COLUMN_NAME
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
+          AND COLUMN_TABLE = :table_name
+        ORDER BY COLUMN_ORDINAL_POSITION
+    ]], {table_name = table_name})
+    local names = {}
+    for _, row in ipairs(rows or {}) do
+        names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
+    end
+    if #names == 0 then
+        error(tostring(error_code) .. ": cannot read the columns of SYS_SEMANTIC."
+            .. tostring(table_name))
+    end
+    return names
+end
+
+-- Capture every row each table contributes, in the order the tables are declared.
+--
+-- A spec is `{name = "METRICS", where = "..."}`, plus for a table that is scoped
+-- through a parent rather than by its own columns:
+--
+--   alias         the base table's alias, so the projection can qualify columns
+--   join          the JOIN that reaches the parent carrying MODEL_ID
+--   delete_where  the predicate for DELETE, which cannot see the join
+--
+-- `params` is bound to every statement, so the same `:model_id` / `:version_id`
+-- reaches the scoped and unscoped forms alike.
+function M.snapshot(query_fn, tables, params, error_code)
+    local snapshot = {}
+    for _, spec in ipairs(tables) do
+        local columns = M.columns(query_fn, spec.name, error_code)
+        local projection = {}
+        for _, column in ipairs(columns) do
+            projection[#projection + 1] =
+                (spec.alias and (spec.alias .. ".") or "") .. column
+        end
+        snapshot[#snapshot + 1] = {
+            name = spec.name,
+            columns = columns,
+            rows = query_fn("SELECT " .. table.concat(projection, ", ")
+                .. " FROM SYS_SEMANTIC." .. spec.name
+                .. (spec.alias and (" " .. spec.alias) or "")
+                .. (spec.join and (" " .. spec.join) or "")
+                .. " WHERE " .. spec.where, params) or {},
+        }
+    end
+    return snapshot
+end
+
+-- Put the captured rows back, exactly.
+--
+-- Deletes run in reverse declaration order and inserts in forward order, so the
+-- table list is read as parent-to-child once and both directions follow from it.
+function M.restore(query_fn, tables, snapshot, params)
+    for index = #tables, 1, -1 do
+        local spec = tables[index]
+        query_fn("DELETE FROM SYS_SEMANTIC." .. spec.name
+            .. " WHERE " .. (spec.delete_where or spec.where), params)
+    end
+    for _, entry in ipairs(snapshot) do
+        for _, row in ipairs(entry.rows) do
+            local placeholders, bound = {}, {}
+            for position, column in ipairs(entry.columns) do
+                local key = "c" .. position
+                placeholders[#placeholders + 1] = ":" .. key
+                bound[key] = row_value(row, column, position)
+            end
+            query_fn("INSERT INTO SYS_SEMANTIC." .. entry.name .. " ("
+                .. table.concat(entry.columns, ", ") .. ") VALUES ("
+                .. table.concat(placeholders, ", ") .. ")", bound)
+        end
+    end
+end
+
+ESV_CATALOG_ROLLBACK = M
+
 -- The fusion layer as one document.
 --
 -- Tier 1 -- what one source says about itself -- has a document format already:
@@ -28637,6 +29130,8 @@ ESV_JSON = M
 -- statement about how sources compose.
 
 local json = assert(ESV_JSON, "shared JSON runtime is required")
+local rollback = assert(ESV_CATALOG_ROLLBACK,
+    "shared catalog rollback runtime is required")
 
 local M = {}
 
@@ -29076,77 +29571,32 @@ local function required(value, label)
     return trim(value)
 end
 
--- The seven tables the fusion layer lives in. A partial sequence has to be
--- undoable, and the dispatched scripts each unwind only themselves.
+-- The seven tables the fusion layer lives in, parent to child. A partial
+-- sequence has to be undoable, and the dispatched scripts each unwind only
+-- themselves. Column lists come from the catalog, not from here -- see
+-- shared/catalog_rollback.lua.
+local MODEL_SCOPE = "MODEL_ID = :model_id AND VERSION_ID = :version_id"
 local SNAPSHOT_TABLES = {
-    {name = "ENTITY_REPRESENTATIONS", scope = "MODEL"},
-    {name = "REPRESENTATION_AUTHORITIES", scope = "MODEL"},
-    {name = "SEMANTIC_IDENTITIES", scope = "MODEL"},
-    {name = "IDENTITY_BINDINGS", scope = "MODEL"},
-    {name = "IDENTITY_MAPPING_RELATIONS", scope = "MODEL"},
-    {name = "ATTRIBUTE_BINDINGS", scope = "MODEL"},
-    {name = "ATTRIBUTE_FUSION_POLICIES", scope = "MODEL"},
+    {name = "ENTITY_REPRESENTATIONS", where = MODEL_SCOPE},
+    {name = "REPRESENTATION_AUTHORITIES", where = MODEL_SCOPE},
+    {name = "SEMANTIC_IDENTITIES", where = MODEL_SCOPE},
+    {name = "IDENTITY_BINDINGS", where = MODEL_SCOPE},
+    {name = "IDENTITY_MAPPING_RELATIONS", where = MODEL_SCOPE},
+    {name = "ATTRIBUTE_BINDINGS", where = MODEL_SCOPE},
+    {name = "ATTRIBUTE_FUSION_POLICIES", where = MODEL_SCOPE},
 }
 
-local function table_columns(query_fn, table_name)
-    local rows = query_fn([[
-        SELECT COLUMN_NAME
-        FROM SYS.EXA_ALL_COLUMNS
-        WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
-          AND COLUMN_TABLE = :table_name
-        ORDER BY COLUMN_ORDINAL_POSITION
-    ]], {table_name = table_name})
-    local names = {}
-    for _, row in ipairs(rows or {}) do
-        names[#names + 1] = tostring(row_value(row, "COLUMN_NAME", 1))
-    end
-    if #names == 0 then
-        error("SEMANTIC_FUSION_013: cannot read the columns of SYS_SEMANTIC."
-            .. tostring(table_name))
-    end
-    return names
+local function model_scope(model)
+    return {model_id = model.model_id, version_id = model.version_id}
 end
 
--- Column lists are read from EXA_ALL_COLUMNS rather than restated here, so a
--- new column is carried by the rollback without this module being edited --
--- the alternative is a snapshot that silently drops whatever was added last.
 local function snapshot_fusion_state(query_fn, model)
-    local snapshot = {}
-    for _, spec in ipairs(SNAPSHOT_TABLES) do
-        local columns = table_columns(query_fn, spec.name)
-        snapshot[#snapshot + 1] = {
-            name = spec.name,
-            columns = columns,
-            rows = query_fn("SELECT " .. table.concat(columns, ", ")
-                .. " FROM SYS_SEMANTIC." .. spec.name
-                .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id",
-                {model_id = model.model_id, version_id = model.version_id}) or {},
-        }
-    end
-    return snapshot
+    return rollback.snapshot(query_fn, SNAPSHOT_TABLES, model_scope(model),
+        "SEMANTIC_FUSION_013")
 end
 
 local function restore_fusion_state(query_fn, model, snapshot)
-    -- Reverse order for the delete so a child never outlives its parent, then
-    -- forward order for the insert.
-    for index = #snapshot, 1, -1 do
-        query_fn("DELETE FROM SYS_SEMANTIC." .. snapshot[index].name
-            .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id",
-            {model_id = model.model_id, version_id = model.version_id})
-    end
-    for _, entry in ipairs(snapshot) do
-        for _, row in ipairs(entry.rows) do
-            local placeholders, params = {}, {}
-            for position, column in ipairs(entry.columns) do
-                local key = "c" .. position
-                placeholders[#placeholders + 1] = ":" .. key
-                params[key] = row[column] or row[string.lower(column)] or row[position]
-            end
-            query_fn("INSERT INTO SYS_SEMANTIC." .. entry.name .. " ("
-                .. table.concat(entry.columns, ", ") .. ") VALUES ("
-                .. table.concat(placeholders, ", ") .. ")", params)
-        end
-    end
+    rollback.restore(query_fn, SNAPSHOT_TABLES, snapshot, model_scope(model))
     -- The dispatched scripts each clear the compile cache when they mutate, but
     -- this restore writes SYS_SEMANTIC directly -- so entries compiled during
     -- the attempt being abandoned would otherwise survive it and answer from a

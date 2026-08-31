@@ -412,3 +412,152 @@ test("fusion document reads an explicit JSON null as absent, not as a value", fu
     assert_contains(tostring(null_err), "must be a JSON object")
     assert_branch("fusion.document.closed_contract", null_ok, false)
 end)
+
+-- A mock catalog that answers just enough for apply_fusion_declaration to run:
+-- one model, one entity, catalog columns for the rollback, and a validation
+-- result the caller chooses. Statements are recorded in order so a test can say
+-- what ran and what ran after a failure.
+local function applying_catalog(options)
+    local log = {}
+    local validation_calls = 0
+    local mock = function(sql, params)
+        local text = tostring(sql)
+        log[#log + 1] = text
+        if text:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{MODEL_ID = 1, ACTIVE_VERSION_ID = 2, MODEL_NAME = "sales",
+                STATUS = options.status or "DRAFT"}}
+        elseif text:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
+        elseif text:find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
+            return {{COLUMN_NAME = "MODEL_ID"}, {COLUMN_NAME = "VERSION_ID"},
+                {COLUMN_NAME = "A_COLUMN"}}
+        elseif text:find("VALIDATE_MODEL", 1, true) then
+            validation_calls = validation_calls + 1
+            return options.validation or {}
+        elseif text:find("^SELECT MODEL_ID, VERSION_ID, A_COLUMN") then
+            return {{1, 2, "captured"}}
+        elseif options.fail_on ~= nil and text:find(options.fail_on, 1, true) then
+            error("SEMANTIC_ADMIN_099: refused by the dispatched script")
+        end
+        return {}
+    end
+    return mock, log
+end
+
+local function with_global_query(mock, fn)
+    local original = query
+    query = mock
+    local ok, result = xpcall(fn, debug.traceback)
+    query = original
+    if not ok then error(result, 0) end
+    return result
+end
+
+local DOCUMENT = ESV_JSON.encode({
+    model = "sales",
+    entities = {CUSTOMER = {representations = {{name = "crm",
+        source_kind = "RELATION", source_schema = "MART",
+        source_object = "CRM_CUSTOMERS", authority = "AUTHORITATIVE"}}}},
+})
+
+test("fusion apply restores the catalog when validation refuses the result", function()
+    -- The document is applied first and judged second, because fusion validation
+    -- runs *data* probes -- overlap, conflict, key coverage -- that cannot be
+    -- answered from metadata. So a rejected declaration is one that has already
+    -- been written, and the restore is the only thing standing between a refusal
+    -- and a half-applied governance change.
+    local mock, log = applying_catalog({validation = {
+        {"ERROR", "ENTITY", "CUSTOMER", "SEMANTIC_MODEL_047",
+         "identity binding is incomplete"},
+    }})
+    local rows = with_global_query(mock, function()
+        return apply_fusion_declaration("sales", DOCUMENT, false)
+    end)
+    assert_equal(rows[1][1], "ERROR")
+    assert_equal(rows[1][2], "SEMANTIC_FUSION_091")
+    -- The refusal quotes the rule that blocked it, not just that something did.
+    assert_contains(rows[1][3], "SEMANTIC_MODEL_047")
+    assert_contains(rows[1][3], "identity binding is incomplete")
+    assert_contains(rows[1][3], "Catalog state was restored")
+    assert_branch("fusion.apply.validated", rows[1][1] == "OK", false)
+
+    local validated, deleted, inserted, cache_cleared = false, false, false, false
+    for _, statement in ipairs(log) do
+        if statement:find("VALIDATE_MODEL", 1, true) then validated = true
+        elseif validated and statement:find("DELETE FROM SYS_SEMANTIC.", 1, true) then
+            deleted = true
+            if statement:find("COMPILE_CACHE", 1, true) then cache_cleared = true end
+        elseif validated and statement:find("INSERT INTO SYS_SEMANTIC.", 1, true) then
+            inserted = true
+        end
+    end
+    assert_true(deleted, "nothing was cleared after validation failed")
+    assert_true(inserted, "the captured rows were not written back")
+    -- The dispatched scripts invalidate the compile cache when they mutate, but
+    -- the restore writes SYS_SEMANTIC directly, so it has to do it itself.
+    assert_true(cache_cleared, "the compile cache survived the rollback")
+end)
+
+test("fusion apply reports what it ran, and a dry run commits none of it", function()
+    local mock = applying_catalog({})
+    local applied = with_global_query(mock, function()
+        return apply_fusion_declaration("sales", DOCUMENT, false)
+    end)
+    assert_equal(applied[1][1], "OK")
+    assert_equal(applied[1][2], null)
+    assert_contains(applied[1][3], "Fusion declaration applied")
+    assert_true(applied[1][4] > 0, "no operations were planned")
+    assert_equal(applied[1][5], applied[1][4])
+    assert_branch("fusion.apply.validated", applied[1][1] == "OK", true)
+
+    local dry_mock, dry_log = applying_catalog({})
+    local dry = with_global_query(dry_mock, function()
+        return apply_fusion_declaration("sales", DOCUMENT, "TRUE")
+    end)
+    assert_equal(dry[1][1], "DRY_RUN")
+    assert_contains(dry[1][3], "no catalog changes were committed")
+    -- A dry run is an apply followed by a restore, so it must both validate and
+    -- put the rows back -- a dry run that skipped the apply would not be able to
+    -- answer the data probes it exists to answer.
+    local validated, restored = false, false
+    for _, statement in ipairs(dry_log) do
+        if statement:find("VALIDATE_MODEL", 1, true) then validated = true
+        elseif validated and statement:find("INSERT INTO SYS_SEMANTIC.", 1, true) then
+            restored = true
+        end
+    end
+    assert_true(validated, "a dry run must still validate")
+    assert_true(restored, "a dry run must put the captured rows back")
+end)
+
+test("fusion apply unwinds when a dispatched script refuses mid-sequence", function()
+    -- The scripts each unwind only themselves, so a sequence that stops halfway
+    -- leaves the model in a state no single script owns.
+    local mock, log = applying_catalog({fail_on = "ADD_ENTITY_REPRESENTATION"})
+    local rows = with_global_query(mock, function()
+        return apply_fusion_declaration("sales", DOCUMENT, false)
+    end)
+    assert_equal(rows[1][1], "ERROR")
+    -- The dispatched script's own code is carried through rather than replaced
+    -- by a generic fusion code, so the caller sees why it was refused.
+    assert_equal(rows[1][2], "SEMANTIC_ADMIN_099")
+    assert_equal(rows[1][5], 0, "nothing should be reported as applied")
+    local restored = false
+    for _, statement in ipairs(log) do
+        if statement:find("INSERT INTO SYS_SEMANTIC.", 1, true) then restored = true end
+    end
+    assert_true(restored, "the captured rows were not written back")
+end)
+
+test("fusion apply reports a malformed document in STATUS, not as a raise", function()
+    -- A caller checks one column for every kind of failure; splitting parse
+    -- errors out would mean a caller that checks STATUS still misses them.
+    local mock = applying_catalog({})
+    local rows = with_global_query(mock, function()
+        return apply_fusion_declaration("sales", "{not json", false)
+    end)
+    assert_equal(rows[1][1], "ERROR")
+    assert_equal(rows[1][2], "SEMANTIC_FUSION_010")
+    assert_equal(rows[1][4], 0)
+    assert_equal(rows[1][5], 0)
+end)

@@ -84,7 +84,6 @@ OVERLOADED_RULE_CODES = {
     "SEMANTIC_MODEL_013": 3,
     "SEMANTIC_MODEL_040": 3,
     "SEMANTIC_MODEL_048": 3,
-    "SEMANTIC_QUERY_033": 3,
     "SEMANTIC_REQUEST_020": 3,
     "SEMANTIC_AGENT_010": 2,
     "SEMANTIC_AGENT_011": 2,
@@ -99,8 +98,6 @@ OVERLOADED_RULE_CODES = {
     "SEMANTIC_MODEL_056": 2,
     "SEMANTIC_QUERY_005": 2,
     "SEMANTIC_QUERY_006": 2,
-    "SEMANTIC_QUERY_030": 2,
-    "SEMANTIC_QUERY_031": 2,
     "SEMANTIC_REQUEST_001": 2,
     "SEMANTIC_REQUEST_015": 2,
     "SEMANTIC_REQUEST_030": 2,
@@ -118,6 +115,14 @@ RETIRED_MESSAGE_MATCH = "no binding for active representation"
 # SEMANTIC_MODEL_* codes are warnings and none is spelled with a W.
 SEVERITY_PREFIXED_CODE = re.compile(r"SEMANTIC_[A-Z]+_[A-Z]\d+")
 
+# SEMANTIC_QUERY_030, _031 and _033 left this list on 2026-08-31, when
+# parse_where_filters and parse_having_filters became one function. Each had
+# carried two or three "meanings" that were the same condition written twice,
+# once per clause; the clause's noun now comes from a table beside the parser
+# (WHERE_CLAUSE / HAVING_CLAUSE) instead of from a second copy of the code. This
+# is the shape a pin is meant to shrink by: not by renumbering, but because the
+# duplication that made one code look overloaded is gone.
+#
 # The overloading pins above are scoped to `lua/`, which is where the validator,
 # compiler and agent runtimes emit from. The severity rule cannot be: the two
 # codes that broke it lived in a *hand-written* admin script in the install SQL,
@@ -473,22 +478,26 @@ MIN_DUPLICATE_BODY_LINES = 3
 # identity_join.lua and json.lua both did. Adding an entry is the thing this
 # test exists to stop.
 #
-# Two of these are worth more than the others, and are the next to go:
-# `replace_qualified_alias` rewrites a table alias inside a SQL expression while
-# respecting string literals, so the validator proves an expression safe with one
-# copy and the compiler emits SQL with the other -- a divergence there is wrong
-# SQL that validates. `strip_string_literals` backs the same analysis.
+# Drained from seven to four on 2026-08-31: `replace_qualified_alias`,
+# `strip_string_literals` and `token_upper` moved to shared/sql_text.lua. The
+# first two were the ones that mattered -- the validator proved an expression
+# safe with one copy while the compiler emitted SQL with the other, and a
+# divergence there is wrong SQL that validates.
+#
+# What is left is the four-line row prelude every runtime opens with. It is the
+# cheapest kind of duplication and the least dangerous: `row_value`,
+# `null_if_missing` and `scalar` read a driver result row, and a divergence
+# produces a nil, not a wrong answer. Moving them needs a `shared/rows.lua` that
+# also owns the `query` global each runtime binds differently, which is a larger
+# change than the risk justifies today.
 DUPLICATED_LUA_BODIES = {
     "null_if_missing": ("request_json.lua", "runtime.lua",
                         "semantic_definition.lua", "validator.lua"),
     "physical_fusion_key/physical_unique_key": ("request_json.lua", "validator.lua"),
-    "replace_qualified_alias": ("request_json.lua", "validator.lua"),
     "row_value": ("materializations.lua", "request_json.lua", "runtime.lua",
                   "semantic_definition.lua", "validator.lua"),
     "scalar": ("request_json.lua", "runtime.lua", "semantic_definition.lua",
                "validator.lua"),
-    "strip_string_literals": ("request_json.lua", "validator.lua"),
-    "token_upper": ("request_json.lua", "semantic_definition.lua"),
 }
 
 # Modules that must not grow a private JSON codec again. The sentinel makes this
@@ -498,6 +507,15 @@ JSON_OWNER = "lua/semantic_layer/shared/json.lua"
 JSON_PRIVATE_NAMES = re.compile(
     r"^local (?:function )?(json_encode|json_decode|json_escape|is_array"
     r"|parse_json_text)\b|^local JSON_NULL\s*=\s*\{", re.MULTILINE)
+
+# Same rule for SQL text, for the same reason: a reworded second copy of
+# `replace_qualified_alias` would pass the body check above and still let the
+# validator prove an expression the compiler renders differently.
+SQL_TEXT_OWNER = "lua/semantic_layer/shared/sql_text.lua"
+SQL_TEXT_PRIVATE_NAMES = re.compile(
+    r"^local function (quote_ident|quote_qualified|sql_literal|token_upper"
+    r"|replace_qualified_alias|strip_string_literals|sql_tokens|tokenize"
+    r"|decode_quoted_identifier)\b", re.MULTILINE)
 
 
 def _lua_function_bodies():
@@ -574,6 +592,26 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
             f"JSON belongs to {JSON_OWNER}; use ESV_JSON rather than declaring "
             "a private codec or sentinel")
 
+    def test_sql_text_has_exactly_one_owner(self):
+        """The rendering half of the same rule the grain graph has for proofs.
+
+        `CLAUDE.md` states that relationship proofs must delegate to
+        shared/grain_graph.lua. Nothing stated it for SQL rendering, and BUG-G03
+        was one defect living in five copies of the same join.
+        """
+        offenders = {
+            str(path.relative_to(ROOT)): sorted(
+                m.group(1) for m in SQL_TEXT_PRIVATE_NAMES.finditer(
+                    path.read_text(encoding="utf-8")))
+            for path in LUA_SOURCES
+            if str(path.relative_to(ROOT)) != SQL_TEXT_OWNER
+            and SQL_TEXT_PRIVATE_NAMES.search(path.read_text(encoding="utf-8"))
+        }
+        self.assertEqual(
+            {}, offenders,
+            f"SQL quoting, rewriting and lexing belong to {SQL_TEXT_OWNER}; "
+            "use ESV_SQL_TEXT rather than declaring a private copy")
+
     def test_the_owner_actually_owns_it(self):
         """Deriving the rule from a module that had been emptied would pass silently."""
         owner = (ROOT / JSON_OWNER).read_text(encoding="utf-8")
@@ -581,6 +619,15 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
                          "function M.is_valid", "function M.is_array"):
             self.assertIn(exported, owner)
         self.assertIn("ESV_JSON = M", owner)
+
+        sql_owner = (ROOT / SQL_TEXT_OWNER).read_text(encoding="utf-8")
+        for exported in ("function M.quote_ident", "function M.quote_qualified",
+                         "function M.sql_literal", "function M.tokenize",
+                         "function M.token_upper",
+                         "function M.replace_qualified_alias",
+                         "function M.strip_string_literals"):
+            self.assertIn(exported, sql_owner)
+        self.assertIn("ESV_SQL_TEXT = M", sql_owner)
 
     def test_every_runtime_that_uses_a_shared_module_carries_it(self):
         """A shared module only helps where the packager actually embeds it.
@@ -600,20 +647,22 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
                           ROOT / "sql/install/006_create_semantic_agent_views.sql"):
             for match in script.finditer(generated.read_text(encoding="utf-8")):
                 name, body = match.group(1), match.group(2)
-                if "ESV_JSON" not in body:
-                    continue
-                consumers.add(name)
-                if "ESV_JSON = M" in body:
-                    providers.add(name)
+                for global_name in ("ESV_JSON", "ESV_SQL_TEXT"):
+                    if global_name not in body:
+                        continue
+                    consumers.add((global_name, name))
+                    if f"{global_name} = M" in body:
+                        providers.add((global_name, name))
         self.assertGreaterEqual(
             len(consumers), 5,
-            f"only {sorted(consumers)} runtimes reference ESV_JSON; the scan is "
-            "not finding the generated scripts")
+            f"only {sorted(consumers)} runtime/module pairs reference a shared "
+            "global; the scan is not finding the generated scripts")
         self.assertEqual(
             set(), consumers - providers,
-            "these generated scripts reference ESV_JSON without embedding "
-            "lua/semantic_layer/shared/json.lua, so they would fail to install; "
-            "add json_source to their block in tools/package_lua_scripts.py")
+            "these generated scripts reference a shared global without "
+            "embedding the module that defines it, so they would fail to "
+            "install; add its source to their block in "
+            "tools/package_lua_scripts.py")
 
 
 if __name__ == "__main__":

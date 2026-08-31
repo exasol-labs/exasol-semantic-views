@@ -286,6 +286,23 @@ test("dimension upsert writes the catalog columns DIMENSIONS actually has", func
     assert_equal(column_params.column_name, "freight_band")
 end)
 
+-- Answer the catalog-column lookup the shared rollback makes for every table it
+-- captures, so a test drives the derivation rather than a hard-coded list.
+local function catalog_columns(columns_by_table, handler)
+    return function(sql, params)
+        local text = tostring(sql)
+        if text:find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
+            local rows = {}
+            for _, column in ipairs(columns_by_table[params.table_name]
+                    or {"MODEL_ID", "VERSION_ID"}) do
+                rows[#rows + 1] = {COLUMN_NAME = column}
+            end
+            return rows
+        end
+        return handler(text, params)
+    end
+end
+
 test("apply rollback carries dimensions, or a dry run leaks one", function()
     -- The dry run and the failed-apply path both work by applying, validating,
     -- and restoring a snapshot. Until dimensions were authorable through the DDL
@@ -293,41 +310,46 @@ test("apply rollback carries dimensions, or a dry run leaks one", function()
     -- never touched it. The moment it did, a dry run inserted a dimension the
     -- restore could not remove: the row survived, catalogued and visible, from a
     -- statement that reported committing nothing.
+    local DIMENSION_COLUMNS = {"DIMENSION_ID", "MODEL_ID", "VERSION_ID",
+        "DIMENSION_NAME", "FORMAT_HINT", "IS_HIDDEN", "STATUS"}
     local snapshot_tables, restore_inserts, cleared = {}, {}, {}
-    with_query(function(sql, params)
-        local text = tostring(sql)
-        local selected = text:match("FROM SYS_SEMANTIC%.([A-Z_]+)")
-        if text:find("SELECT", 1, true) == 1 or text:find("^%s*SELECT") then
-            if selected ~= nil then snapshot_tables[selected] = true end
-            if selected == "DIMENSIONS" then
-                return {{55, 1, 2, 20, "freight_band", "o.freight_amount",
-                         "VARCHAR(10)", "Freight Band", "Bucketed", "text", null,
-                         null, null, false, true, "ACTIVE"}}
+    with_query(catalog_columns({DIMENSIONS = DIMENSION_COLUMNS},
+        function(text, params)
+            local selected = text:match("FROM SYS_SEMANTIC%.([A-Z_]+)")
+            if text:find("^SELECT") then
+                if selected ~= nil then snapshot_tables[selected] = true end
+                if selected == "DIMENSIONS" then
+                    return {{55, 1, 2, "freight_band", "text", false, "ACTIVE"}}
+                end
+                return {}
             end
+            local inserted = text:match("INSERT INTO SYS_SEMANTIC%.([A-Z_]+)")
+            if inserted ~= nil then restore_inserts[inserted] = params end
+            local deleted = text:match("DELETE FROM SYS_SEMANTIC%.([A-Z_]+)")
+            if deleted ~= nil then cleared[deleted] = true end
             return {}
-        end
-        local inserted = text:match("INSERT INTO SYS_SEMANTIC%.([A-Z_]+)")
-        if inserted ~= nil then
-            restore_inserts[inserted] = params
-        end
-        local deleted = text:match("DELETE FROM SYS_SEMANTIC%.([A-Z_]+)")
-        if deleted ~= nil then cleared[deleted] = true end
-        return {}
-    end, function()
+        end), function()
         local snapshot = api.snapshot_model_state({model_id = 1, version_id = 2})
-        assert_true(snapshot.dimensions ~= nil)
-        assert_equal(#snapshot.dimensions, 1)
+        local dimensions = nil
+        for _, entry in ipairs(snapshot) do
+            if entry.name == "DIMENSIONS" then dimensions = entry end
+        end
+        assert_true(dimensions ~= nil, "DIMENSIONS was not captured")
+        assert_equal(#dimensions.rows, 1)
+        assert_equal(#dimensions.columns, #DIMENSION_COLUMNS)
         api.restore_model_state({model_id = 1, version_id = 2}, snapshot)
     end)
     -- Captured, cleared and put back -- all three, or the rollback is partial.
     assert_true(snapshot_tables.DIMENSIONS == true)
     assert_true(cleared.DIMENSIONS == true)
     assert_true(restore_inserts.DIMENSIONS ~= nil)
-    assert_equal(restore_inserts.DIMENSIONS.dimension_id, 55)
-    assert_equal(restore_inserts.DIMENSIONS.dimension_name, "freight_band")
-    assert_equal(restore_inserts.DIMENSIONS.format_hint, "text")
-    assert_equal(restore_inserts.DIMENSIONS.is_hidden, false)
-    assert_equal(restore_inserts.DIMENSIONS.status, "ACTIVE")
+    assert_equal(restore_inserts.DIMENSIONS.c1, 55)
+    assert_equal(restore_inserts.DIMENSIONS.c4, "freight_band")
+    assert_equal(restore_inserts.DIMENSIONS.c5, "text")
+    -- A boolean FALSE, which the old `row[name] or ...` read as absent and
+    -- restored as NULL.
+    assert_equal(restore_inserts.DIMENSIONS.c6, false)
+    assert_equal(restore_inserts.DIMENSIONS.c7, "ACTIVE")
     -- Facts were already covered; the point is that both are now.
     assert_true(cleared.FACTS == true)
 end)
@@ -757,7 +779,11 @@ test("semantic definition public dry-run and error results preserve catalog", fu
         local validation_calls = 0
         return with_query(function(sql)
             local text = tostring(sql)
-            if text:find("SELECT MODEL_ID, ACTIVE_VERSION_ID", 1, true) then
+            if text:find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
+                -- The rollback snapshot derives its column lists from the
+                -- catalog, so a dry run reaches this before it applies anything.
+                return {{COLUMN_NAME = "MODEL_ID"}, {COLUMN_NAME = "VERSION_ID"}}
+            elseif text:find("SELECT MODEL_ID, ACTIVE_VERSION_ID", 1, true) then
                 return {{1, 2}}
             elseif text:find("SELECT OBJECT_ID", 1, true)
                     and text:find("SEMANTIC_OBJECTS", 1, true) then
@@ -1022,120 +1048,153 @@ test("Databricks public API returns dry-run plans and stable diagnostics", funct
     assert_equal(missing[1][2], "DBX_IMPORT_020")
 end)
 
--- The DDL apply path rolls back by hand: snapshot_model_state SELECTs eleven
--- tables and restore_model_state re-INSERTs them, with every column written out
--- four times per table -- in the SELECT, the INSERT column list, its VALUES
--- list, and the parameter map, the last carrying ordinals that must stay in
--- lockstep with the first. Nothing checked that the four agreed, so a column
--- added to SYS_SEMANTIC and wired into only three of them would restore as
--- NULL: a rollback that quietly loses whatever was added last.
---
--- admin/fusion_declaration.lua does the same job in 45 lines by reading its
--- column lists from EXA_ALL_COLUMNS, which is why it needs no test like this.
--- Until this one is lifted to the same shape, these two tests are what stands
--- in for that: what the snapshot reads, the restore writes back, unchanged.
-test("DDL rollback restores every column its snapshot captured", function()
-    local model = {model_id = 7, version_id = 3, model_name = "rollback_model"}
-
-    -- One fabricated row per snapshotted table, keyed by the column names the
-    -- snapshot asks for, so the fixture cannot silently disagree with the code.
-    local selected = {}
-    local snapshot = with_query(function(sql)
-        local table_name = string.match(sql, "FROM SYS_SEMANTIC%.([A-Z_]+)")
-        local column_text = string.match(sql, "SELECT%s+(.-)%s+FROM")
-        if table_name == nil or column_text == nil then return {} end
-        local row = {}
-        local names = {}
-        for column in string.gmatch(column_text, "[%w_%.]+") do
-            local bare = string.match(column, "([A-Z_0-9]+)$")
-            if bare ~= nil and bare ~= "SYS_SEMANTIC" then
-                names[#names + 1] = bare
-                row[bare] = string.lower(table_name) .. ":" .. bare
-            end
+-- The DDL apply path used to roll back by hand: 335 lines that wrote every
+-- column out four times per table, with nothing checking that the four agreed.
+-- It now uses shared/catalog_rollback.lua, which admin/fusion_declaration.lua
+-- already used, so the column lists come from the catalog. These two tests are
+-- what makes that claim checkable: what the catalog reports is what gets
+-- captured, cleared and put back, byte for byte.
+test("DDL rollback captures, clears and restores every table it declares", function()
+    local COLUMNS = {"A_ID", "MODEL_ID", "VERSION_ID", "A_FLAG", "A_TEXT"}
+    local asked, selected, deleted, inserted = {}, {}, {}, {}
+    with_query(catalog_columns(setmetatable({}, {__index = function()
+        return COLUMNS
+    end}), function(text, params)
+        local from = text:match("FROM SYS_SEMANTIC%.([A-Z_]+)")
+        if text:find("^SELECT") then
+            selected[#selected + 1] = from
+            -- One row whose values are recognisable per column, including a
+            -- boolean false: `row[name] or ...` read that as absent and
+            -- restored it as NULL.
+            return {{101, 1, 2, false, from .. ":text"}}
         end
-        row.MODEL_ID = model.model_id
-        row.VERSION_ID = model.version_id
-        selected[table_name] = names
-        return {row}
-    end, function()
-        return api.snapshot_model_state(model)
+        local target = text:match("DELETE FROM SYS_SEMANTIC%.([A-Z_]+)")
+        if target ~= nil then deleted[#deleted + 1] = target return {} end
+        target = text:match("INSERT INTO SYS_SEMANTIC%.([A-Z_]+)")
+        if target ~= nil then inserted[#inserted + 1] = {name = target,
+            sql = text, params = params} end
+        return {}
+    end), function()
+        local model = {model_id = 1, version_id = 2}
+        local snapshot = api.snapshot_model_state(model)
+        api.restore_model_state(model, snapshot)
+        for _, entry in ipairs(snapshot) do asked[#asked + 1] = entry.name end
     end)
 
-    assert_true(selected.METRICS ~= nil, "METRICS was not snapshotted")
-    assert_true(#selected.METRICS >= 29, "METRICS snapshot lost columns")
+    -- Whatever the table list declares is captured, and each entry carries the
+    -- catalog's columns rather than a list written here.
+    assert_true(#asked >= 10, "fewer tables captured than declared: " .. #asked)
+    assert_equal(selected[1], asked[1])
+    assert_equal(#selected, #asked)
 
-    local inserted = {}
-    with_query(function(sql, params)
-        local table_name = string.match(sql, "INSERT INTO SYS_SEMANTIC%.([A-Z_]+)")
-        if table_name == nil then return {} end
-        local column_text = string.match(sql, "%(%s*(.-)%s*%)%s*VALUES")
-        local placeholder_text = string.match(sql, "VALUES%s*%(%s*(.-)%s*%)%s*$")
-        local names, placeholders = {}, {}
-        for column in string.gmatch(column_text or "", "[A-Z_0-9]+") do
-            names[#names + 1] = column
+    -- Deleted in reverse and inserted forward, from one declaration order, so a
+    -- child never outlives its parent and a parent is never inserted after one.
+    assert_equal(deleted[1], asked[#asked])
+    assert_equal(deleted[#deleted], asked[1])
+    assert_equal(#deleted, #asked)
+
+    -- Every captured row is written back with every column and the values it
+    -- was read with.
+    assert_equal(#inserted, #asked)
+    for index, write in ipairs(inserted) do
+        assert_equal(write.name, asked[index])
+        for _, column in ipairs(COLUMNS) do
+            assert_contains(write.sql, column, write.name)
         end
-        for placeholder in string.gmatch(placeholder_text or "", ":([%w_]+)") do
+        assert_equal(write.params.c1, 101, write.name)
+        assert_equal(write.params.c4, false, write.name .. " lost a FALSE")
+        assert_equal(write.params.c5, write.name .. ":text", write.name)
+    end
+
+    -- The two tables the hand-written version cleared and never restored.
+    local captured = {}
+    for _, name in ipairs(asked) do captured[name] = true end
+    assert_true(captured.METRIC_DEPENDENCIES == true)
+    assert_true(captured.METRIC_DIMENSION_MATRIX == true)
+end)
+
+test("DDL rollback refuses a table whose columns it cannot read", function()
+    -- Deriving from an empty answer would capture nothing, restore nothing, and
+    -- report success -- the failure mode the derivation exists to avoid.
+    assert_error(function()
+        with_query(function(sql)
+            if tostring(sql):find("FROM SYS.EXA_ALL_COLUMNS", 1, true) then
+                return {}
+            end
+            return {}
+        end, function()
+            api.snapshot_model_state({model_id = 1, version_id = 2})
+        end)
+    end, "SEMANTIC_DDL_091")
+end)
+
+test("normalized OSI import dispatches every target with its own arguments", function()
+    -- batch_call is the third place an admin script's parameter list is written
+    -- down -- after the script itself and SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS,
+    -- which is derived from it. A mistyped binding here is invisible: Exasol
+    -- checks arity, not names, so a `:desciption` placeholder bound from a
+    -- `description` key would simply arrive as NULL and the row would be
+    -- imported with a field missing.
+    --
+    -- This drives all thirteen and requires every placeholder in the rendered
+    -- statement to be bound, and every binding to reach a placeholder.
+    local targets = {
+        "CREATE_MODEL", "ADD_ENTITY", "ADD_SEMANTIC_OBJECT", "ADD_RELATIONSHIP",
+        "ADD_RELATIONSHIP_KEY_MAPPING", "ADD_DIMENSION", "ADD_FACT", "ADD_METRIC",
+        "ADD_CUSTOM_EXTENSION", "ADD_UNIQUE_KEY", "ADD_UNIQUE_KEY_COLUMN",
+        "ADD_SYNONYM", "ADD_AGENT_INSTRUCTION",
+    }
+    for _, name in ipairs(targets) do
+        local statement, bound = nil, nil
+        with_query(function(sql, params)
+            statement, bound = tostring(sql), params or {}
+            return {}
+        end, function()
+            -- Every argument set to its own name, so a binding that reaches the
+            -- wrong placeholder is visible in the value rather than only absent.
+            local args = setmetatable({}, {__index = function(_, key)
+                return "value:" .. tostring(key)
+            end})
+            api.batch_call("SEMANTIC_ADMIN." .. name, args)
+        end)
+        assert_true(statement ~= nil, name .. " dispatched nothing")
+        assert_contains(statement, "EXECUTE SCRIPT SEMANTIC_ADMIN." .. name .. "(")
+
+        local placeholders = {}
+        for placeholder in string.gmatch(statement, ":([%w_]+)") do
             placeholders[#placeholders + 1] = placeholder
         end
-        inserted[table_name] = {names = names, placeholders = placeholders,
-            params = params or {}}
-        return {}
-    end, function()
-        api.restore_model_state(model, snapshot)
-    end)
-
-    for table_name, snapshot_columns in pairs(selected) do
-        local write = inserted[table_name]
-        assert_true(write ~= nil, table_name .. " was snapshotted but not restored")
-
-        -- Same columns, same order: the parameter map is positional in spirit
-        -- even though it is written by name, and a reordering is how an ordinal
-        -- in row_value silently starts reading its neighbour.
-        assert_equal(#write.names, #snapshot_columns,
-            table_name .. " restores a different number of columns than it captured")
-        for index, column in ipairs(snapshot_columns) do
-            assert_equal(write.names[index], column,
-                table_name .. " column " .. tostring(index) .. " differs")
+        assert_true(#placeholders > 0, name .. " renders no placeholders")
+        for _, placeholder in ipairs(placeholders) do
+            assert_equal(bound[placeholder], "value:" .. placeholder,
+                name .. " binds " .. placeholder .. " from the wrong key")
         end
-
-        -- One placeholder per column, and each bound to the value the snapshot
-        -- read for that column -- which is what makes it a restore rather than
-        -- a partial one.
-        assert_equal(#write.placeholders, #write.names,
-            table_name .. " binds a different number of values than columns")
-        for index, column in ipairs(write.names) do
-            local bound = write.params[write.placeholders[index]]
-            if column ~= "MODEL_ID" and column ~= "VERSION_ID" then
-                assert_equal(bound, string.lower(table_name) .. ":" .. column,
-                    table_name .. "." .. column .. " was not restored")
-            end
+        local placeholder_set = {}
+        for _, placeholder in ipairs(placeholders) do
+            placeholder_set[placeholder] = true
+        end
+        for key, _ in pairs(bound) do
+            assert_true(placeholder_set[key] == true,
+                name .. " binds " .. key .. ", which the statement never names")
         end
     end
 end)
 
-test("DDL rollback carries a NULL through as NULL rather than dropping it", function()
-    -- null_if_missing() guards every optional column in the restore. A row read
-    -- back as SQL NULL has to arrive as NULL, not as the empty string that
-    -- tostring() would produce, or an optional column comes back "set".
-    local model = {model_id = 1, version_id = 1, model_name = "nulls"}
-    local snapshot = {metrics = {{
-        METRIC_ID = 5, MODEL_ID = 1, VERSION_ID = 1, METRIC_NAME = "revenue",
-        EXPRESSION = "SUM(x)", METRIC_TYPE = "SIMPLE", DATA_TYPE = "DECIMAL",
-        STATUS = "ACTIVE", FILTER_EXPR = null, DISPLAY_NAME = null,
-        DESCRIPTION = null, MEASURE_EXPR = null, TYPE_PARAMS_JSON = null,
-    }}}
+test("normalized OSI import refuses a target it cannot dispatch", function()
+    -- An unknown target has to be named rather than silently skipped: the import
+    -- plan is built host-side, so a plan referring to a script this runtime does
+    -- not know is a version mismatch between the two halves.
+    assert_error(function()
+        api.batch_call("SEMANTIC_ADMIN.ADD_SOMETHING_NEW", {})
+    end, "SEMANTIC_OSI_010")
+
+    -- An absent argument set is NULL for every parameter, not a crash: this is
+    -- the SQL-NULL-is-userdata trap's neighbourhood, and `batch_arg` is the
+    -- guard.
     local bound = nil
-    with_query(function(sql, params)
-        if string.find(sql, "INSERT INTO SYS_SEMANTIC.METRICS", 1, true) then
-            bound = params
-        end
-        return {}
-    end, function()
-        api.restore_model_state(model, snapshot)
+    with_query(function(sql, params) bound = params return {} end, function()
+        api.batch_call("SEMANTIC_ADMIN.CREATE_MODEL", nil)
     end)
-    assert_true(bound ~= nil, "the metric row was not restored")
-    assert_equal(bound.metric_name, "revenue")
-    assert_equal(bound.filter_expr, null)
-    assert_equal(bound.display_name, null)
-    assert_equal(bound.measure_expr, null)
+    assert_equal(bound.model_name, null)
+    assert_equal(bound.owner_role, null)
 end)

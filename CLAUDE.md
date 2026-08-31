@@ -105,6 +105,8 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/compiler/materializations.lua` | same | `SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME` |
 | `lua/semantic_layer/shared/grain_graph.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/shared/json.lua` | same, plus `006_…` | shared codec, embedded in every runtime |
+| `lua/semantic_layer/shared/sql_text.lua` | same | shared quoting, rewriting and lexing |
+| `lua/semantic_layer/shared/catalog_rollback.lua` | same | shared snapshot/restore for the two apply paths |
 | `lua/semantic_layer/shared/identity_join.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/shared/source_columns.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/admin/fusion_declaration.lua` | same | `SEMANTIC_ADMIN.FUSION_RUNTIME` |
@@ -147,6 +149,16 @@ Key functions to know when modifying the compiler:
 **Critical invariant:** validator and compiler relationship proofs must delegate
 to `lua/semantic_layer/shared/grain_graph.lua`. Do not reimplement path safety,
 key matching, ambiguity, or identity remapping in one runtime only.
+
+**The same invariant for SQL text.** Quoting, literal rendering, alias
+rewriting, literal stripping and lexing belong to
+`lua/semantic_layer/shared/sql_text.lua`; the F5 mapping join belongs to
+`shared/identity_join.lua`. This is not a style rule — the validator proves an
+expression safe and the compiler emits SQL from the same expression, so two
+copies of `replace_qualified_alias` mean SQL that is wrong *and validates*.
+BUG-G03 was one defect living in five copies of the same join.
+`tests/test_conventions.py` enforces it: no module outside the owner may declare
+a private copy.
 
 Every active entity has exactly one active `PRIMARY` representation. Alternates
 must satisfy validation contracts for keys, bindings, coverage, fusion, and
@@ -424,9 +436,10 @@ it as an empty array while `request_json.lua` refused it; `fusion_declaration.lu
 read it as a present declaration and wrote its address to the catalog. Nothing
 failed, because nothing compared the copies. Put it in
 `lua/semantic_layer/shared/` and add it to every packager block that needs it —
-`identity_join.lua` and `json.lua` are the worked examples. Seven bodies remain
-pinned; `replace_qualified_alias` and `strip_string_literals` are the two worth
-doing next, because a divergence there is wrong SQL that validates.
+`json.lua`, `sql_text.lua`, `catalog_rollback.lua` and `identity_join.lua` are
+the worked examples. The pin is down from seven bodies to four; what remains is
+the row-reading prelude (`row_value`, `null_if_missing`, `scalar`), where a
+divergence yields a nil rather than a wrong answer.
 
 **Derive a surface, do not restate it.** `CATALOG_COLUMNS`,
 `ADMIN_SCRIPT_PARAMETERS` and `CATALOG_RELATIONSHIPS` read `EXA_ALL_*`, so they
