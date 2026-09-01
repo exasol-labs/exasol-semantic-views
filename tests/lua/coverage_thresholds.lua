@@ -76,7 +76,7 @@ return {
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
         ["lua/semantic_layer/compiler/request_json.lua"] = 88.8,
-        ["lua/semantic_layer/admin/validator.lua"] = 94.1,
+        ["lua/semantic_layer/admin/validator.lua"] = 94.2,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.3,

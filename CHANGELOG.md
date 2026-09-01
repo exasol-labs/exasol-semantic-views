@@ -53,6 +53,33 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### VP-002 — a fused dimension resolved to NULL on a validated, published model
+
+- **The canonical fusion case returned `NULL` for every row.** Surfacing an
+  attribute only a supplemental representation carries is what fusion is for,
+  and it was unreachable: `ADD_DIMENSION_WITH_BINDINGS` takes the primary's
+  binding from `EXPRESSION`, so "the primary has no such column" has to be
+  written `CAST(NULL AS VARCHAR(10))` — and the script pinned that placeholder
+  at `PREFER` priority 1 while *refusing* to let the caller say otherwise
+  (`SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind the primary representation`).
+  The compiler picks one representation per entity and prefers the candidate
+  needing the fewest `FALLBACK` bindings, so the placeholder beat the CRM
+  binding that had the data. `VALIDATE_MODEL` reported 0 errors, `PUBLISH_MODEL`
+  succeeded, and the query answered `STATUS = OK` with a single `NULL` row.
+- **`BINDINGS_JSON` now accepts a `primary` entry carrying `binding_role` and
+  `binding_priority`.** The expression still comes from `EXPRESSION` — a primary
+  entry that supplies one is refused, because two places to write it is two
+  places to disagree. The shape the bug report needed is now one call, and
+  `ADD_FACT_WITH_BINDINGS` gets it too, from the same script.
+- **`SEMANTIC_MODEL_063`** refuses the state however it was reached, including
+  on models built before this change: a binding whose expression is a literal
+  `NULL` may not be `PREFER` while another representation binds real data. The
+  message hands back the `REPLACE_ATTRIBUTE_BINDING` call that repairs it. An
+  attribute whose bindings are *all* placeholders is a stub, not a wrong answer,
+  and is left alone. `shared/sql_text.lua` owns what counts as a literal NULL,
+  and matches only `NULL` and `CAST(NULL AS <type>)` — under-matching costs a
+  diagnostic, over-matching would cost someone a valid model.
+
 #### The request log keeps the question it was given
 
 - **`natural_language_text` reaches its own column.**

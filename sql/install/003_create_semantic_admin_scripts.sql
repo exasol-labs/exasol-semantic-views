@@ -6177,6 +6177,8 @@ if primary == nil then
 end
 
 local prepared = {}
+local primary_role = "PREFER"
+local primary_priority = 1
 for _, partition in ipairs(partitions) do
     prepared[#prepared + 1] = {
         representation = partition,
@@ -6193,41 +6195,71 @@ for index, item in ipairs(binding_specs) do
     local representation_name = required_json(
         item, "representation_name", "binding representation_name")
     if upper(representation_name) == upper(primary.name) then
-        error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind the primary representation; "
-            .. "EXPRESSION supplies it: " .. representation_name)
+        -- The primary's *expression* still comes from EXPRESSION -- two places
+        -- to write it is two places to disagree. Its *role* is another matter,
+        -- and refusing to take one is what made the canonical fusion case
+        -- return NULL for every row: surfacing an attribute only a supplemental
+        -- source carries forces EXPRESSION to be a CAST(NULL AS ...) placeholder,
+        -- and this script pinned that placeholder at PREFER priority 1, which is
+        -- what the compiler's candidate sort chooses first. The caller could
+        -- describe the shape and not the resolution, so the only reachable
+        -- outcome was the wrong one.
+        if item.source_expression ~= nil and item.source_expression ~= null then
+            error("SEMANTIC_ADMIN_213: the primary binding takes its expression from "
+                .. "EXPRESSION; supply only binding_role and binding_priority for '"
+                .. representation_name .. "'")
+        end
+        primary_role = upper(required_json(item, "binding_role", "binding_role"))
+        if primary_role ~= "PREFER" and primary_role ~= "FALLBACK" then
+            error("SEMANTIC_ADMIN_213: binding_role must be PREFER or FALLBACK")
+        end
+        local primary_priority_value = item.binding_priority
+        if primary_priority_value ~= nil and primary_priority_value ~= null then
+            primary_priority = tonumber(primary_priority_value)
+            if primary_priority == nil or primary_priority < 1
+                or primary_priority % 1 ~= 0 then
+                error("SEMANTIC_ADMIN_213: binding_priority must be a positive integer")
+            end
+        end
+        if seen[upper(representation_name)] then
+            error("SEMANTIC_ADMIN_213: duplicate binding for representation: "
+                .. representation_name)
+        end
+        seen[upper(representation_name)] = true
+    else
+        if partitions_by_name[upper(representation_name)] ~= nil then
+            error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind an F3 partition; "
+                .. "EXPRESSION supplies it: " .. representation_name)
+        end
+        local representation = alternates[upper(representation_name)]
+        if representation == nil then
+            error("SEMANTIC_ADMIN_213: binding references an inactive or unknown alternate: "
+                .. representation_name)
+        end
+        if seen[upper(representation_name)] then
+            error("SEMANTIC_ADMIN_213: duplicate binding for representation: "
+                .. representation_name)
+        end
+        seen[upper(representation_name)] = true
+        local binding_role = upper(required_json(item, "binding_role", "binding_role"))
+        if binding_role ~= "PREFER" and binding_role ~= "FALLBACK" then
+            error("SEMANTIC_ADMIN_213: binding_role must be PREFER or FALLBACK")
+        end
+        local priority_value = item.binding_priority
+        if type(priority_value) == "table" or priority_value == nil or priority_value == null then
+            error("SEMANTIC_ADMIN_213: binding_priority is required")
+        end
+        local priority = tonumber(priority_value)
+        if priority == nil or priority < 1 or priority % 1 ~= 0 then
+            error("SEMANTIC_ADMIN_213: binding_priority must be a positive integer")
+        end
+        prepared[#prepared + 1] = {
+            representation = representation,
+            source_expression = required_json(item, "source_expression", "source_expression"),
+            binding_role = binding_role,
+            binding_priority = priority,
+        }
     end
-    if partitions_by_name[upper(representation_name)] ~= nil then
-        error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind an F3 partition; "
-            .. "EXPRESSION supplies it: " .. representation_name)
-    end
-    local representation = alternates[upper(representation_name)]
-    if representation == nil then
-        error("SEMANTIC_ADMIN_213: binding references an inactive or unknown alternate: "
-            .. representation_name)
-    end
-    if seen[upper(representation_name)] then
-        error("SEMANTIC_ADMIN_213: duplicate binding for representation: "
-            .. representation_name)
-    end
-    seen[upper(representation_name)] = true
-    local binding_role = upper(required_json(item, "binding_role", "binding_role"))
-    if binding_role ~= "PREFER" and binding_role ~= "FALLBACK" then
-        error("SEMANTIC_ADMIN_213: binding_role must be PREFER or FALLBACK")
-    end
-    local priority_value = item.binding_priority
-    if type(priority_value) == "table" or priority_value == nil or priority_value == null then
-        error("SEMANTIC_ADMIN_213: binding_priority is required")
-    end
-    local priority = tonumber(priority_value)
-    if priority == nil or priority < 1 or priority % 1 ~= 0 then
-        error("SEMANTIC_ADMIN_213: binding_priority must be a positive integer")
-    end
-    prepared[#prepared + 1] = {
-        representation = representation,
-        source_expression = required_json(item, "source_expression", "source_expression"),
-        binding_role = binding_role,
-        binding_priority = priority,
-    }
 end
 for representation_key, representation in pairs(alternates) do
     if not seen[representation_key] then
@@ -6291,11 +6323,13 @@ query([[
       IS_DEFAULT, STATUS
     ) VALUES (
       :model_id, :version_id, :entity_id, :attribute_type, :attribute_id,
-      :representation_id, :source_expression, 'PREFER', 1, TRUE, 'ACTIVE'
+      :representation_id, :source_expression, :binding_role, :binding_priority,
+      TRUE, 'ACTIVE'
     )
 ]], {model_id = model_id, version_id = version_id, entity_id = entity_id,
       attribute_type = attribute_type, attribute_id = attribute_id,
-      representation_id = primary.id, source_expression = expression})
+      representation_id = primary.id, source_expression = expression,
+      binding_role = primary_role, binding_priority = primary_priority})
 for _, item in ipairs(prepared) do
     query([[
         INSERT INTO SYS_SEMANTIC.ATTRIBUTE_BINDINGS (
@@ -9865,6 +9899,38 @@ function M.strip_string_literals(text)
         end
     end
     return table.concat(out)
+end
+
+-- Is this expression a bare SQL NULL constant?
+--
+-- A binding whose expression is a literal NULL means one thing: "this
+-- representation does not carry this attribute." That is a legitimate and
+-- necessary declaration -- it is how a caller says the primary has no such
+-- column -- but it is only ever correct as the *least* preferred binding, and
+-- the catalog cannot tell a placeholder from real data without asking.
+--
+-- Deliberately narrow. It matches NULL and CAST(NULL AS <type>), with optional
+-- wrapping parentheses, and nothing else. An exotic spelling that is also
+-- constant-NULL -- COALESCE(NULL, NULL), a UDF that returns NULL -- is not
+-- matched, and that is the safe direction to be wrong in: the rules built on
+-- this refuse a model, so a false positive costs a user a valid model while a
+-- false negative only costs the diagnostic that was missing anyway.
+function M.is_null_literal(expression)
+    if expression == nil then return false end
+    local text = tostring(expression):match("^%s*(.-)%s*$")
+    -- Peel wrapping parens: ((NULL)) is the same constant as NULL.
+    while true do
+        local inner = text:match("^%(%s*(.-)%s*%)$")
+        if inner == nil or inner == text then break end
+        text = inner
+    end
+    local upper_text = string.upper(text)
+    if upper_text == "NULL" then return true end
+    local cast_target = upper_text:match("^CAST%s*%(%s*NULL%s+AS%s+(.+)%)$")
+    if cast_target == nil then return false end
+    -- The target has to look like a type name, not another expression that
+    -- happens to close a paren early: VARCHAR(10), DECIMAL(18,2), DATE.
+    return cast_target:match("^[A-Z][A-Z0-9_ ]*%s*%(?[%d%s,%)]*$") ~= nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -14499,6 +14565,82 @@ local function fusion_attribute(ctx, policy)
     return nil
 end
 
+-- A NULL placeholder that outranks real data.
+--
+-- Surfacing an attribute only a supplemental source carries is the case fusion
+-- exists for, and the authoring API makes you declare the primary's side of it
+-- as a literal: ADD_DIMENSION_WITH_BINDINGS takes EXPRESSION for the primary
+-- and BINDINGS_JSON for the alternates, so "the primary has no such column"
+-- is written CAST(NULL AS VARCHAR(10)). That declaration is correct and
+-- necessary. What is not correct is leaving it PREFER.
+--
+-- The compiler picks a whole representation per entity and then reads that
+-- representation's binding for each attribute, and the first key in that
+-- choice is how many FALLBACK bindings the candidate needs. So a PREFER
+-- placeholder on the primary beats a PREFER binding on the alternate that
+-- actually has the data, and every row comes back NULL -- on a model that
+-- validates clean, publishes, and answers with STATUS = OK. Nothing else
+-- reports it: each binding is individually well-formed, the expression is
+-- valid SQL, and the grain proof holds. The pair is the defect.
+--
+-- Scoped to the pair deliberately. An attribute whose bindings are *all*
+-- placeholders is a column that is not available anywhere yet -- a stub, not a
+-- wrong answer -- and is left alone.
+local function validate_null_placeholder_bindings(ctx)
+    local representation_by_id = {}
+    for _, representation in ipairs(ctx.representations or {}) do
+        representation_by_id[key(representation.id)] = representation
+    end
+    local attribute_keys = {}
+    for attribute_key, _ in pairs(ctx.bindings_by_attribute or {}) do
+        attribute_keys[#attribute_keys + 1] = attribute_key
+    end
+    table.sort(attribute_keys)
+    for _, attribute_key in ipairs(attribute_keys) do
+        local bindings = ctx.bindings_by_attribute[attribute_key] or {}
+        local placeholders = {}
+        local real_count = 0
+        for _, binding in ipairs(bindings) do
+            if sql_text.is_null_literal(binding.expression) then
+                if upper(binding.role or "PREFER") ~= "FALLBACK" then
+                    placeholders[#placeholders + 1] = binding
+                end
+            else
+                real_count = real_count + 1
+            end
+        end
+        if real_count > 0 then
+            for _, binding in ipairs(placeholders) do
+                local attribute_type = upper(binding.attribute_type)
+                local attribute = attribute_type == "DIMENSION"
+                    and ctx.dimension_by_id[key(binding.attribute_id)]
+                    or ctx.fact_by_id[key(binding.attribute_id)]
+                local representation = representation_by_id[key(binding.representation_id)]
+                local attribute_name = attribute and attribute.name
+                    or tostring(binding.attribute_id)
+                local representation_name = representation and representation.name
+                    or tostring(binding.representation_id)
+                add_issue(ctx, "ERROR", "ATTRIBUTE_BINDING",
+                    attribute_name .. "@" .. representation_name,
+                    "SEMANTIC_MODEL_063",
+                    "Binding for '" .. attribute_name .. "' on representation '"
+                    .. representation_name .. "' is the literal NULL "
+                    .. tostring(binding.expression) .. " but carries role "
+                    .. tostring(binding.role or "PREFER")
+                    .. ", while another representation binds real data. A "
+                    .. "placeholder that says 'this source does not have the "
+                    .. "column' must not be preferred over one that does, or "
+                    .. "every row returns NULL. Give it role FALLBACK: "
+                    .. "EXECUTE SCRIPT SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING('"
+                    .. tostring(ctx.model_name) .. "', '" .. attribute_type
+                    .. "', '" .. attribute_name .. "', '" .. representation_name
+                    .. "', '" .. tostring(binding.expression) .. "', 'FALLBACK', "
+                    .. tostring(binding.priority or 1) .. ").")
+            end
+        end
+    end
+end
+
 local function validate_fusion_policies(ctx)
     local representation_by_id = {}
     local authoritative_by_entity = {}
@@ -15596,6 +15738,7 @@ function M.validate_model(model_name_arg)
         local safe_edges, all_edges = relationship_edges(ctx)
         validate_expressions(ctx, safe_edges)
         validate_fusion_policies(ctx)
+        validate_null_placeholder_bindings(ctx)
         extract_metric_dependencies(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
@@ -15655,6 +15798,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_semantic_identities = validate_semantic_identities,
         validate_semantic_identity_data = validate_semantic_identity_data,
         validate_fusion_policies = validate_fusion_policies,
+        validate_null_placeholder_bindings = validate_null_placeholder_bindings,
         validate_fusion_conflicts = validate_fusion_conflicts,
         validate_relationship_key_mappings = validate_relationship_key_mappings,
         relationship_edges = relationship_edges,
@@ -17215,6 +17359,38 @@ function M.strip_string_literals(text)
         end
     end
     return table.concat(out)
+end
+
+-- Is this expression a bare SQL NULL constant?
+--
+-- A binding whose expression is a literal NULL means one thing: "this
+-- representation does not carry this attribute." That is a legitimate and
+-- necessary declaration -- it is how a caller says the primary has no such
+-- column -- but it is only ever correct as the *least* preferred binding, and
+-- the catalog cannot tell a placeholder from real data without asking.
+--
+-- Deliberately narrow. It matches NULL and CAST(NULL AS <type>), with optional
+-- wrapping parentheses, and nothing else. An exotic spelling that is also
+-- constant-NULL -- COALESCE(NULL, NULL), a UDF that returns NULL -- is not
+-- matched, and that is the safe direction to be wrong in: the rules built on
+-- this refuse a model, so a false positive costs a user a valid model while a
+-- false negative only costs the diagnostic that was missing anyway.
+function M.is_null_literal(expression)
+    if expression == nil then return false end
+    local text = tostring(expression):match("^%s*(.-)%s*$")
+    -- Peel wrapping parens: ((NULL)) is the same constant as NULL.
+    while true do
+        local inner = text:match("^%(%s*(.-)%s*%)$")
+        if inner == nil or inner == text then break end
+        text = inner
+    end
+    local upper_text = string.upper(text)
+    if upper_text == "NULL" then return true end
+    local cast_target = upper_text:match("^CAST%s*%(%s*NULL%s+AS%s+(.+)%)$")
+    if cast_target == nil then return false end
+    -- The target has to look like a type name, not another expression that
+    -- happens to close a paren early: VARCHAR(10), DECIMAL(18,2), DATE.
+    return cast_target:match("^[A-Z][A-Z0-9_ ]*%s*%(?[%d%s,%)]*$") ~= nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -25142,6 +25318,38 @@ function M.strip_string_literals(text)
         end
     end
     return table.concat(out)
+end
+
+-- Is this expression a bare SQL NULL constant?
+--
+-- A binding whose expression is a literal NULL means one thing: "this
+-- representation does not carry this attribute." That is a legitimate and
+-- necessary declaration -- it is how a caller says the primary has no such
+-- column -- but it is only ever correct as the *least* preferred binding, and
+-- the catalog cannot tell a placeholder from real data without asking.
+--
+-- Deliberately narrow. It matches NULL and CAST(NULL AS <type>), with optional
+-- wrapping parentheses, and nothing else. An exotic spelling that is also
+-- constant-NULL -- COALESCE(NULL, NULL), a UDF that returns NULL -- is not
+-- matched, and that is the safe direction to be wrong in: the rules built on
+-- this refuse a model, so a false positive costs a user a valid model while a
+-- false negative only costs the diagnostic that was missing anyway.
+function M.is_null_literal(expression)
+    if expression == nil then return false end
+    local text = tostring(expression):match("^%s*(.-)%s*$")
+    -- Peel wrapping parens: ((NULL)) is the same constant as NULL.
+    while true do
+        local inner = text:match("^%(%s*(.-)%s*%)$")
+        if inner == nil or inner == text then break end
+        text = inner
+    end
+    local upper_text = string.upper(text)
+    if upper_text == "NULL" then return true end
+    local cast_target = upper_text:match("^CAST%s*%(%s*NULL%s+AS%s+(.+)%)$")
+    if cast_target == nil then return false end
+    -- The target has to look like a type name, not another expression that
+    -- happens to close a paren early: VARCHAR(10), DECIMAL(18,2), DATE.
+    return cast_target:match("^[A-Z][A-Z0-9_ ]*%s*%(?[%d%s,%)]*$") ~= nil
 end
 
 -- ---------------------------------------------------------------------------

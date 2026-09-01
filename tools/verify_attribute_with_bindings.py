@@ -177,6 +177,85 @@ def main() -> int:
         if int(residual) != 0:
             raise AssertionError("invalid compound dimension left catalog residue")
 
+        # VP-002: the canonical fusion case -- surfacing an attribute only the
+        # supplemental representation carries. The primary has no such column,
+        # so EXPRESSION has to be a CAST(NULL AS ...) placeholder, and this
+        # script used to pin that placeholder at PREFER priority 1 while
+        # refusing to let the caller say otherwise. The compiler's candidate
+        # sort takes the fewest FALLBACK bindings first, so the placeholder won
+        # and every row came back NULL -- on a model that validated clean,
+        # published, and answered STATUS = OK.
+        crm_only = (
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS("
+            "'bug37_verify', 'CUSTOMERS', 'customer', 'crm_only_band', "
+            "'CAST(NULL AS DECIMAL(18,2))', 'DECIMAL(18,2)', 'CRM Band', "
+            "'Only the CRM source carries it', NULL, TRUE, {bindings})"
+        )
+        inverted = json.dumps(
+            [{"representation_name": "crm", "source_expression": "c.alt_amount",
+              "binding_role": "PREFER", "binding_priority": 20}],
+            separators=(",", ":"))
+        try:
+            execute(con, crm_only.format(bindings=literal(inverted)))
+        except Exception as exc:
+            if "SEMANTIC_MODEL_063" not in str(exc):
+                raise AssertionError(f"unexpected VP-002 rejection: {exc}") from exc
+            if "REPLACE_ATTRIBUTE_BINDING" not in str(exc):
+                raise AssertionError(f"VP-002 refusal names no remedy: {exc}") from exc
+        else:
+            raise AssertionError(
+                "a NULL placeholder preferred over real data was accepted")
+
+        # The same shape, now expressible in one call: the primary's binding
+        # takes its expression from EXPRESSION and its *role* from BINDINGS_JSON.
+        corrected = json.dumps(
+            [{"representation_name": "primary", "binding_role": "FALLBACK",
+              "binding_priority": 100},
+             {"representation_name": "crm", "source_expression": "c.alt_amount",
+              "binding_role": "PREFER", "binding_priority": 20}],
+            separators=(",", ":"))
+        assert_result(
+            execute(con, crm_only.format(bindings=literal(corrected))),
+            "DIMENSION", "crm_only_band")
+        execute(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('bug37_verify')")
+        compiled = execute(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON("
+            "'{\"model\":\"bug37_verify\",\"object\":\"CUSTOMERS\","
+            "\"dimensions\":[\"crm_only_band\"]}')",
+        )[0]
+        if str(compiled[0]) != "OK":
+            raise AssertionError(f"VP-002 corrected shape did not compile: {compiled}")
+        answered = sorted(str(row[0]) for row in execute(con, str(compiled[4])))
+        if answered != ["11", "22"]:
+            raise AssertionError(f"VP-002 fused dimension answered {answered}")
+
+        # The expression still has one home. A primary entry that also supplies
+        # one would put the same value in DIMENSIONS.EXPRESSION and in its
+        # binding, which is two places to disagree.
+        two_homes = json.dumps(
+            [{"representation_name": "primary", "source_expression": "c.city",
+              "binding_role": "FALLBACK", "binding_priority": 100},
+             {"representation_name": "crm", "source_expression": "c.alt_amount",
+              "binding_role": "PREFER", "binding_priority": 20}],
+            separators=(",", ":"))
+        try:
+            execute(
+                con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS("
+                "'bug37_verify', 'CUSTOMERS', 'customer', 'zz_two_homes', "
+                "'CAST(NULL AS VARCHAR(100))', 'VARCHAR(100)', 'x', 'x', "
+                f"NULL, FALSE, {literal(two_homes)})",
+            )
+        except Exception as exc:
+            if "SEMANTIC_ADMIN_213" not in str(exc):
+                raise AssertionError(f"unexpected rejection: {exc}") from exc
+        else:
+            raise AssertionError("a primary binding expression was accepted")
+
+        print("ok VP-002: a NULL placeholder preferred over real data is refused")
+        print("ok VP-002: the primary's binding role is now the caller's to set")
+        print("ok VP-002: the fused dimension answers from the CRM source")
         print("ok BUG-37 wrappers: dimension and fact calls returned success rows")
         print("ok BUG-37 bindings: heterogeneous expressions were committed atomically")
         print("ok BUG-37 rollback: invalid candidate left no catalog residue")

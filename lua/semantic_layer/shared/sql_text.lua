@@ -173,6 +173,38 @@ function M.strip_string_literals(text)
     return table.concat(out)
 end
 
+-- Is this expression a bare SQL NULL constant?
+--
+-- A binding whose expression is a literal NULL means one thing: "this
+-- representation does not carry this attribute." That is a legitimate and
+-- necessary declaration -- it is how a caller says the primary has no such
+-- column -- but it is only ever correct as the *least* preferred binding, and
+-- the catalog cannot tell a placeholder from real data without asking.
+--
+-- Deliberately narrow. It matches NULL and CAST(NULL AS <type>), with optional
+-- wrapping parentheses, and nothing else. An exotic spelling that is also
+-- constant-NULL -- COALESCE(NULL, NULL), a UDF that returns NULL -- is not
+-- matched, and that is the safe direction to be wrong in: the rules built on
+-- this refuse a model, so a false positive costs a user a valid model while a
+-- false negative only costs the diagnostic that was missing anyway.
+function M.is_null_literal(expression)
+    if expression == nil then return false end
+    local text = tostring(expression):match("^%s*(.-)%s*$")
+    -- Peel wrapping parens: ((NULL)) is the same constant as NULL.
+    while true do
+        local inner = text:match("^%(%s*(.-)%s*%)$")
+        if inner == nil or inner == text then break end
+        text = inner
+    end
+    local upper_text = string.upper(text)
+    if upper_text == "NULL" then return true end
+    local cast_target = upper_text:match("^CAST%s*%(%s*NULL%s+AS%s+(.+)%)$")
+    if cast_target == nil then return false end
+    -- The target has to look like a type name, not another expression that
+    -- happens to close a paren early: VARCHAR(10), DECIMAL(18,2), DATE.
+    return cast_target:match("^[A-Z][A-Z0-9_ ]*%s*%(?[%d%s,%)]*$") ~= nil
+end
+
 -- ---------------------------------------------------------------------------
 -- Lexing
 -- ---------------------------------------------------------------------------

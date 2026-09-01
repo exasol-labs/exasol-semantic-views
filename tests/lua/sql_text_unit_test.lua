@@ -190,3 +190,23 @@ test("shared token_upper never mistakes a quoted identifier for a keyword", func
         "PRECOMPUTED")
     assert_equal(sql_text.decode_quoted_identifier('"a""b"'), 'a"b')
 end)
+
+test("null literal recognition is narrow on purpose", function()
+    -- A binding whose expression is a literal NULL is how a caller says "this
+    -- representation has no such column". SEMANTIC_MODEL_063 refuses a model
+    -- when one of those is preferred over real data, so a false positive costs
+    -- someone a valid model. Under-matching only costs the diagnostic.
+    for _, text in ipairs({"NULL", "null", "  NULL  ", "(NULL)", "((NULL))",
+        "CAST(NULL AS VARCHAR(10))", "cast( null as decimal(18,2) )",
+        "CAST(NULL AS DATE)", "CAST(NULL AS TIMESTAMP WITH LOCAL TIME ZONE)"}) do
+        assert_true(ESV_SQL_TEXT.is_null_literal(text), "not matched: " .. text)
+    end
+    for _, text in ipairs({"c.churn_risk", "COALESCE(c.a, NULL)", "'NULL'",
+        "CAST(c.x AS VARCHAR(10))", "NULLIF(c.a, 0)", "NULLABLE",
+        "CAST(NULL AS VARCHAR(10)) || c.x"}) do
+        assert_true(not ESV_SQL_TEXT.is_null_literal(text), "wrongly matched: " .. text)
+    end
+    assert_true(not ESV_SQL_TEXT.is_null_literal(nil))
+    assert_branch("sql_text.null_literal", ESV_SQL_TEXT.is_null_literal("NULL"), true)
+    assert_branch("sql_text.null_literal", ESV_SQL_TEXT.is_null_literal("c.x"), false)
+end)

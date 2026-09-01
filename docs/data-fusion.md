@@ -272,6 +272,34 @@ dimension unresolvable on the alternate. Use
 `ADD_DIMENSION_WITH_BINDINGS`/`ADD_FACT_WITH_BINDINGS` whenever a representation
 either computes the attribute differently *or* does not carry it at all.
 
+**The inverse — the attribute only the supplemental source has — is the case
+fusion exists for, and it needs one more key.** `EXPRESSION` is the *primary's*
+binding, so when the primary has no such column that argument is the null cast,
+and the placeholder has to be declared the fallback. A `primary` entry in
+`BINDINGS_JSON` carries the role and priority; the expression still comes from
+`EXPRESSION`, because two places to write it is two places to disagree:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(
+  'sales', 'SALES', 'customer', 'customer_churn_risk',
+  'CAST(NULL AS VARCHAR(10))', 'VARCHAR(10)',
+  'Churn Risk', 'CRM churn band', NULL, TRUE,
+  '[{"representation_name":"primary",
+     "binding_role":"FALLBACK","binding_priority":100},
+    {"representation_name":"crm","source_expression":"c.churn_risk",
+     "binding_role":"PREFER","binding_priority":20}]');
+```
+
+Leaving the placeholder at `PREFER` is refused with `SEMANTIC_MODEL_063`, and
+the refusal hands back the `REPLACE_ATTRIBUTE_BINDING` call that repairs a model
+already in that state. It is worth knowing *why* it is refused rather than
+merely suboptimal: the compiler chooses one representation per entity and takes
+the candidate needing the fewest `FALLBACK` bindings first, so a `PREFER`
+placeholder beats a `PREFER` binding that has the data, and the dimension
+resolves to `NULL` on every row — on a model that validates clean, publishes,
+and answers `STATUS = OK`. Each binding is well-formed on its own; the pair is
+the defect.
+
 **Registering an F4 alternate on an entity that already has an F5 identity is one
 call.** `ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS` takes whatever has to be
 declared alongside the representation as one closed JSON object:

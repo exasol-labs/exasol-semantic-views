@@ -2363,6 +2363,93 @@ test("validator matrix rejects metrics unreachable from published roots", functi
         "Declare a semantic object rooted at 'shipment', or remove this metric from object 'COMMERCE'.")
 end)
 
+test("a NULL placeholder preferred over real data is refused", function()
+    -- VP-002. The canonical fusion case -- an attribute only the supplemental
+    -- source carries -- forces the primary's binding to be a CAST(NULL AS ...)
+    -- placeholder. The compiler picks a whole representation per entity and
+    -- takes the candidate needing the fewest FALLBACK bindings first, so a
+    -- PREFER placeholder beats a PREFER binding that has the data and every
+    -- row comes back NULL. Each binding is individually well-formed; the pair
+    -- is the defect, which is why nothing else reports it.
+    local ctx = validation_context({
+        model_name = "sales",
+        dimension_by_id = {['10'] = {id = 10, name = "customer_churn_risk", entity_id = 1}},
+        representations = {
+            {id = 100, entity_id = 1, name = "primary", role = "PRIMARY"},
+            {id = 101, entity_id = 1, name = "crm", role = "ALTERNATE"},
+        },
+        bindings_by_attribute = {
+            ["DIMENSION:10"] = {
+                {attribute_type = "DIMENSION", attribute_id = 10, representation_id = 100,
+                    expression = "CAST(NULL AS VARCHAR(10))", role = "PREFER", priority = 1},
+                {attribute_type = "DIMENSION", attribute_id = 10, representation_id = 101,
+                    expression = "c.churn_risk", role = "PREFER", priority = 20},
+            },
+        },
+    })
+    api.validate_null_placeholder_bindings(ctx)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_063"))
+    local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_063")
+    assert_equal(issue.severity, "ERROR")
+    assert_equal(issue.object_name, "customer_churn_risk@primary")
+    -- The message has to carry the repair, not just the verdict: the caller
+    -- cannot see which of two well-formed bindings the compiler will take.
+    assert_contains(issue.message, "REPLACE_ATTRIBUTE_BINDING")
+    assert_contains(issue.message, "'FALLBACK'")
+    assert_branch("validator.null_placeholder", true, true)
+end)
+
+test("a NULL placeholder is fine as a FALLBACK, or when nothing else has data",
+function()
+    -- Declared FALLBACK, the placeholder is exactly right: it is how an
+    -- entity says one of its sources does not carry the column.
+    local declared = validation_context({
+        model_name = "sales",
+        dimension_by_id = {['10'] = {id = 10, name = "churn", entity_id = 1}},
+        representations = {{id = 100, entity_id = 1, name = "primary", role = "PRIMARY"}},
+        bindings_by_attribute = {["DIMENSION:10"] = {
+            {attribute_type = "DIMENSION", attribute_id = 10, representation_id = 100,
+                expression = "CAST(NULL AS VARCHAR(10))", role = "FALLBACK", priority = 100},
+            {attribute_type = "DIMENSION", attribute_id = 10, representation_id = 101,
+                expression = "c.churn_risk", role = "PREFER", priority = 20},
+        }},
+    })
+    api.validate_null_placeholder_bindings(declared)
+    assert_equal(#declared.issues, 0)
+
+    -- Every binding a placeholder is a column nobody sources yet -- a stub,
+    -- not a wrong answer. Refusing it would refuse an honest work in progress.
+    local stub = validation_context({
+        model_name = "sales",
+        dimension_by_id = {['11'] = {id = 11, name = "not_available_yet", entity_id = 1}},
+        representations = {{id = 100, entity_id = 1, name = "primary", role = "PRIMARY"}},
+        bindings_by_attribute = {["DIMENSION:11"] = {
+            {attribute_type = "DIMENSION", attribute_id = 11, representation_id = 100,
+                expression = "CAST(NULL AS VARCHAR(10))", role = "PREFER", priority = 1},
+            {attribute_type = "DIMENSION", attribute_id = 11, representation_id = 101,
+                expression = "NULL", role = "PREFER", priority = 20},
+        }},
+    })
+    api.validate_null_placeholder_bindings(stub)
+    assert_equal(#stub.issues, 0)
+    assert_branch("validator.null_placeholder", false, false)
+
+    -- A fact reaches the same rule through the same table.
+    local fact_ctx = validation_context({
+        model_name = "sales",
+        fact_by_id = {['20'] = {id = 20, name = "crm_score", entity_id = 1}},
+        representations = {{id = 100, entity_id = 1, name = "primary", role = "PRIMARY"}},
+        bindings_by_attribute = {["FACT:20"] = {
+            {attribute_type = "FACT", attribute_id = 20, representation_id = 100,
+                expression = "NULL", role = "PREFER", priority = 1},
+            {attribute_type = "FACT", attribute_id = 20, representation_id = 101,
+                expression = "c.score", role = "PREFER", priority = 20},
+        }},
+    })
+    api.validate_null_placeholder_bindings(fact_ctx)
+    assert_contains(issue_for_rule(fact_ctx, "SEMANTIC_MODEL_063").message, "crm_score")
+end)
+
 test("catalog integrity check derives its tables and names the corrupt one", function()
     -- MODEL_ID is denormalised onto 29 tables and nothing enforces that it
     -- agrees with the model its VERSION_ID belongs to: Exasol's foreign keys

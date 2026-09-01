@@ -433,7 +433,13 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("semantic_definition.decode_json", runtime)
         self.assertIn('string.sub(trim(BINDINGS_JSON), 1, 1) ~= "["', runtime)
         self.assertIn("no binding supplied for active alternate", runtime)
-        self.assertIn("BINDINGS_JSON must not bind the primary representation", runtime)
+        # VP-002: a primary entry may set the binding's *role*, so the caller
+        # can say "the placeholder EXPRESSION forced on me is the fallback".
+        # It may not set the expression -- that still has exactly one home.
+        self.assertIn("the primary binding takes its expression from", runtime)
+        self.assertIn("binding_role = primary_role", runtime)
+        self.assertIn("binding_priority = primary_priority", runtime)
+        self.assertNotIn("'PREFER', 1, TRUE, 'ACTIVE'", runtime)
         self.assertIn("BINDINGS_JSON must not bind an F3 partition", runtime)
         self.assertIn("coverage_predicate", runtime)
         self.assertIn("for _, partition in ipairs(partitions) do", runtime)
