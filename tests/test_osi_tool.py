@@ -863,6 +863,69 @@ def test_apply_metadata_warnings_can_block_before_database_connection() -> None:
     assert ("OSI_IMPORT_120", "ERROR") in {(item["code"], item["severity"]) for item in result["diagnostics"]}
 
 
+def test_script_apply_names_the_field_metadata_it_cannot_carry() -> None:
+    """The lossy lane has to say which keys it drops, per field kind.
+
+    Batch apply patches presentation metadata in after the ADD_* script runs;
+    script apply cannot, and the difference is invisible from the document. So
+    the diagnostic is the only thing that tells a script-mode caller its
+    sensitivity labels did not arrive. Per kind, because the two scripts differ:
+    ADD_DIMENSION carries format_hint and FACTS has no IS_HIDDEN at all, so
+    naming those would send a reader chasing a loss that did not happen.
+    """
+    def plan_with(operation: str, native: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "version": "0.2.0.dev0",
+            "mode": "dry-run",
+            "status": "ok",
+            "source": "<test>",
+            "models": [{"model_name": "presentation_model"}],
+            "diagnostics": [],
+            "operations": [{
+                "operation": operation,
+                "target": "SEMANTIC_ADMIN." + operation.upper(),
+                "source_path": "$.field",
+                "arguments": {"model_name": "presentation_model"},
+                "metadata": {"native": native},
+            }],
+        }
+
+    def messages(plan: dict[str, Any]) -> list[str]:
+        return [item["message"]
+                for item in osi.operation_metadata_diagnostics(plan)
+                if item["code"] == "OSI_IMPORT_120"]
+
+    dimension = messages(plan_with("add_dimension", {
+        "format_hint": "@", "unit_hint": "text",
+        "sensitivity_label": "PII", "display_policy": "MASK", "is_hidden": True}))
+    assert len(dimension) == 1, dimension
+    assert "ADD_DIMENSION" in dimension[0]
+    assert "unit_hint" in dimension[0]
+    assert "sensitivity_label" in dimension[0]
+    assert "is_hidden" in dimension[0]
+    # ADD_DIMENSION has a format_hint parameter, so it is not a loss.
+    assert "format_hint" not in dimension[0]
+
+    fact = messages(plan_with("add_fact", {
+        "format_hint": "#,##0.00", "unit_hint": "USD", "is_hidden": True}))
+    assert len(fact) == 1, fact
+    assert "ADD_FACT" in fact[0]
+    assert "format_hint" in fact[0]
+    assert "unit_hint" in fact[0]
+    # FACTS has no IS_HIDDEN column; a fact hides through IS_PRIVATE, which
+    # ADD_FACT does carry.
+    assert "is_hidden" not in fact[0]
+
+    # Nothing to lose, nothing to say.
+    assert messages(plan_with("add_dimension", {"display_name": "Region"})) == []
+    assert messages(plan_with("add_fact", {})) == []
+
+    metric = messages(plan_with("add_metric", {"unit_hint": "USD", "owner_role": "FINANCE"}))
+    assert len(metric) == 1, metric
+    assert "ADD_METRIC" in metric[0]
+    assert "batch mode" in metric[0]
+
+
 def test_validation_warnings_as_errors_blocks_apply() -> None:
     class FakeStatement:
         def __init__(self, columns: list[str], rows: list[tuple[Any, ...]]) -> None:
@@ -1118,8 +1181,8 @@ def test_lossless_export_refuses_a_model_whose_fusion_layer_it_cannot_carry() ->
         raise AssertionError("a lossy lossless export was not refused")
 
     # The refusal has to name what was found, what it costs, and the way out.
-    assert "1 authority declarations (F4)" in message, message
-    assert "2 semantic identities (F5)" in message, message
+    assert "1 authority declarations" in message, message
+    assert "2 semantic identities" in message, message
     assert "would still pass VALIDATE_MODEL" in message, message
     assert "EXPORT_FUSION_DECLARATION" in message, message
     assert "--allow-lossy" in message, message
@@ -1136,7 +1199,7 @@ def test_interoperability_export_warns_where_lossless_refuses() -> None:
     dropped = [item for item in warnings if item["code"] == "OSI_EXPORT_050"]
     assert len(dropped) == 1, warnings
     assert dropped[0]["severity"] == "WARNING"
-    assert "3 identity mapping relations (F5)" in dropped[0]["message"]
+    assert "3 identity mapping relations" in dropped[0]["message"]
     assert "EXPORT_FUSION_DECLARATION" in dropped[0]["message"]
 
 
@@ -1175,7 +1238,7 @@ def test_a_materialization_warns_but_does_not_block_a_lossless_export() -> None:
         osi.export_model(both, osi.ExportOptions(
             model_name="fused", object_name=None, profile="lossless"))
     except osi.OsiError as error:
-        assert "1 authority declarations (F4)" in str(error)
+        assert "1 authority declarations" in str(error)
         assert "materializations" not in str(error), str(error)
     else:
         raise AssertionError("the fusion half did not block")
@@ -1198,6 +1261,13 @@ def test_every_uncarried_concept_is_classified_and_probed() -> None:
     advisory = {label for label, _, blocking, _ in osi.UNCARRIED_CONCEPTS
                 if not blocking}
     assert advisory == {"materializations"}, advisory
+
+    # These labels are rendered straight into a refusal and a warning, so they
+    # follow the same rule as the Lua runtime's messages: name the level, do not
+    # number it. `F3` in a refusal is a lookup the reader should not have to do.
+    import re as _re
+    numbered = [label for label in labels if _re.search(r"\bF[0-5]\b", label)]
+    assert numbered == [], f"these labels reach a user as a bare level number: {numbered}"
 
 
 def test_a_model_with_no_fusion_layer_exports_without_a_warning() -> None:
@@ -1253,6 +1323,7 @@ def main() -> int:
     test_execute_rows_or_empty_accepts_no_result_script_calls()
     test_apply_refuses_blocked_plan_without_database_connection()
     test_apply_metadata_warnings_can_block_before_database_connection()
+    test_script_apply_names_the_field_metadata_it_cannot_carry()
     test_validation_warnings_as_errors_blocks_apply()
     test_invalid_apply_mode_blocks_before_database_connection()
     test_batch_warning_json_decodes_to_diagnostics()

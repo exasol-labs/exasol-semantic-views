@@ -7,33 +7,22 @@ queries, instructions, and the feedback it records against a compile.
 
 from __future__ import annotations
 
+import importlib.util
 import json
-import os
-import ssl
-import sys
+from pathlib import Path
 from typing import Any
 
+# Connection defaults, SQL escaping and named result reads live in
+# tools/verify_support.py so 59 verifiers do not each carry their own. See the
+# ratchet in tests/test_conventions.py.
+_SUPPORT = importlib.util.spec_from_file_location(
+    "verify_support", Path(__file__).with_name("verify_support.py"))
+support = importlib.util.module_from_spec(_SUPPORT)
+_SUPPORT.loader.exec_module(support)
 
-def connect():
-    try:
-        import pyexasol  # type: ignore
-    except ImportError:
-        print("pyexasol is required for this host-side tool.", file=sys.stderr)
-        raise SystemExit(2)
-
-    host = os.environ.get("EXASOL_HOST", "localhost")
-    port = os.environ.get("EXASOL_PORT", "8563")
-    return pyexasol.connect(
-        dsn=f"{host}:{port}",
-        user=os.environ.get("EXASOL_USER", "sys"),
-        password=os.environ.get("EXASOL_PASSWORD", "exasol"),
-        encryption=True,
-        websocket_sslopt={"cert_reqs": ssl.CERT_NONE},
-    )
-
-
-def sql_string(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+connect = support.connect
+sql_string = support.sql_string
+compile_request = support.compile_request
 
 
 def fetchall(con, sql: str) -> list[tuple[Any, ...]]:
@@ -334,7 +323,7 @@ def main() -> int:
         assert_contains("explain query plan", explain_query[0][9], '"metrics":["total_revenue"]')
 
         metric_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS")
-        suggestion_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_SUGGESTIONS")
+        suggestion_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS")
         feedback_agent = fetchall(
             con,
             "EXECUTE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK("
@@ -366,7 +355,7 @@ def main() -> int:
         )
         assert_equal(
             "suggestion created",
-            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_SUGGESTIONS"),
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS"),
             suggestion_count_before + 1,
         )
         assert_equal("feedback no metadata mutation", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS"), metric_count_before)
@@ -445,6 +434,50 @@ def main() -> int:
                 "WHERE REQUESTED_METRICS IS NOT NULL AND USER_NAME = CURRENT_USER",
             ),
             1,
+        )
+
+        # COMPILE_REQUEST_SCHEMA_FOR_AGENT tells an agent that
+        # `natural_language_text` is "retained as request metadata", and
+        # AGENT_REQUEST_LOG.NATURAL_LANGUAGE_TEXT exists to hold it -- but the
+        # INSERT omitted the column, so the promise was kept only accidentally,
+        # by REQUEST_JSON storing the request whole. Anything reading the
+        # dedicated column got NULL. The contract is asserted here so it cannot
+        # drift back into being true only by accident.
+        question = "Which region earned the most revenue last quarter?"
+        compiled = compile_request(con, {
+            "model": "sales",
+            "object": "SALES",
+            "metrics": ["total_revenue"],
+            "dimensions": ["customer_region"],
+            "client": "verify_agent_context",
+            "natural_language_text": question,
+        })
+        assert_equal("compile carrying a question succeeds", compiled["status"], "OK")
+        assert_equal(
+            "the question reaches its own column",
+            fetchall(
+                con,
+                "SELECT NATURAL_LANGUAGE_TEXT FROM SYS_SEMANTIC.AGENT_REQUEST_LOG "
+                f"WHERE AGENT_REQUEST_ID = {int(compiled['agent_request_id'])}",
+            ),
+            [(question,)],
+        )
+        # A request without one must leave the column NULL rather than inventing
+        # a value -- the key is optional in the contract.
+        silent = compile_request(con, {
+            "model": "sales",
+            "object": "SALES",
+            "metrics": ["total_revenue"],
+            "client": "verify_agent_context",
+        })
+        assert_equal(
+            "no question leaves the column NULL",
+            fetchall(
+                con,
+                "SELECT NATURAL_LANGUAGE_TEXT FROM SYS_SEMANTIC.AGENT_REQUEST_LOG "
+                f"WHERE AGENT_REQUEST_ID = {int(silent['agent_request_id'])}",
+            ),
+            [(None,)],
         )
 
         assert_equal(

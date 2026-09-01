@@ -68,7 +68,7 @@ READ_ONLY_OR_INDIRECT = {
     "DISABLE_SEMANTIC_SQL",             # session-level, no catalog write
     "REGISTER_VERIFIED_QUERY",          # writes VERIFIED_QUERIES; cache is model-version-keyed, no stale risk
     "REGISTER_AGENT_FEEDBACK",          # writes AGENT_FEEDBACK; no stale risk
-    "REGISTER_AGENT_SUGGESTION",        # writes AGENT_SUGGESTIONS; no stale risk
+    "REGISTER_AGENT_SUGGESTION",        # writes MODEL_EVOLUTION_SUGGESTIONS; no stale risk
     "REGISTER_AGENT_INSTRUCTION",       # writes AGENT_INSTRUCTIONS; agent-scope only
     "REMOVE_AGENT_INSTRUCTION",         # writes AGENT_INSTRUCTIONS; agent-scope only
     "PUT_CUSTOM_EXTENSION",             # writes CUSTOM_EXTENSIONS; metadata only, doesn't affect compile

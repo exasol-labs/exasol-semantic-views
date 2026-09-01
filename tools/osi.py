@@ -119,14 +119,14 @@ UNCARRIED_CONCEPTS: tuple[tuple[str, str, bool, str], ...] = (
      " OR ENTITY_ID IN (SELECT ENTITY_ID FROM SEMANTIC_CATALOG.ENTITY_REPRESENTATIONS"
      " WHERE {filter} AND STATUS = 'ACTIVE'"
      " GROUP BY ENTITY_ID HAVING COUNT(*) > 1))"),
-    ("coverage windows (F3)", "ENTITY_REPRESENTATIONS", True,
+    ("temporal coverage windows", "ENTITY_REPRESENTATIONS", True,
      "AND (COVERAGE_PREDICATE IS NOT NULL OR VALID_FROM IS NOT NULL"
      " OR VALID_TO IS NOT NULL)"),
-    ("authority declarations (F4)", "REPRESENTATION_AUTHORITIES", True, ""),
-    ("semantic identities (F5)", "SEMANTIC_IDENTITIES", True, ""),
-    ("identity bindings (F5)", "IDENTITY_BINDINGS", True, ""),
-    ("identity mapping relations (F5)", "IDENTITY_MAPPING_RELATIONS", True, ""),
-    ("attribute fusion policies (F2)", "ATTRIBUTE_FUSION_POLICIES", True, ""),
+    ("authority declarations", "REPRESENTATION_AUTHORITIES", True, ""),
+    ("semantic identities", "SEMANTIC_IDENTITIES", True, ""),
+    ("identity bindings", "IDENTITY_BINDINGS", True, ""),
+    ("identity mapping relations", "IDENTITY_MAPPING_RELATIONS", True, ""),
+    ("attribute fusion policies", "ATTRIBUTE_FUSION_POLICIES", True, ""),
     ("materializations", "MATERIALIZATIONS", False, ""),
 )
 
@@ -2657,6 +2657,42 @@ def operation_metadata_diagnostics(plan: dict[str, Any]) -> list[dict[str, str]]
                     path,
                     "Relationship description and path priority cannot be applied through ADD_RELATIONSHIP.",
                 )
+        # Native metadata the ADD_* scripts have no parameter for.
+        #
+        # These diagnostics are script-mode only, by construction: the caller
+        # above adds them only when apply_mode is "script". A batch apply hands
+        # the whole plan to APPLY_NORMALIZED_OSI_IMPORT, which runs the scripts
+        # and then patches the rest in -- patch_field_metadata and
+        # patch_metric_metadata in semantic_definition.lua. So the same document
+        # is lossless through batch and lossy through script, and only the lossy
+        # lane says so.
+        if operation_name in {"add_dimension", "add_fact"} and native:
+            unsupported_native_keys = [
+                key
+                for key in ["format_hint", "unit_hint", "sensitivity_label",
+                            "display_policy", "is_hidden"]
+                if key in native
+            ]
+            if operation_name == "add_dimension":
+                # ADD_DIMENSION does carry format_hint; ADD_FACT does not.
+                unsupported_native_keys = [
+                    key for key in unsupported_native_keys if key != "format_hint"
+                ]
+            else:
+                unsupported_native_keys = [
+                    key for key in unsupported_native_keys if key != "is_hidden"
+                ]
+            if unsupported_native_keys:
+                add_diagnostic(
+                    diagnostics,
+                    "OSI_IMPORT_120",
+                    "WARNING",
+                    path,
+                    "Field presentation metadata cannot be applied through "
+                    f"{'ADD_DIMENSION' if operation_name == 'add_dimension' else 'ADD_FACT'}; "
+                    "apply in batch mode to keep it: "
+                    + ", ".join(unsupported_native_keys),
+                )
         if operation_name == "add_metric" and native:
             unsupported_native_keys = [
                 key
@@ -2682,7 +2718,8 @@ def operation_metadata_diagnostics(plan: dict[str, Any]) -> list[dict[str, str]]
                     "OSI_IMPORT_120",
                     "WARNING",
                     path,
-                    "Metric native metadata cannot be fully applied through ADD_METRIC: "
+                    "Metric native metadata cannot be fully applied through ADD_METRIC; "
+                    "apply in batch mode to keep it: "
                     + ", ".join(unsupported_native_keys),
                 )
     return diagnostics
@@ -2736,18 +2773,13 @@ def cleanup_imported_model(con: Any, model_name: str) -> None:
         "MATERIALIZATION_ID IN (SELECT MATERIALIZATION_ID FROM SYS_SEMANTIC.MATERIALIZATIONS WHERE "
         f"{model_filter})"
     )
-    calculation_group_filter = (
-        "CALCULATION_GROUP_ID IN (SELECT CALCULATION_GROUP_ID FROM SYS_SEMANTIC.CALCULATION_GROUPS WHERE "
-        f"{model_filter})"
-    )
     queries = [
         f"DELETE FROM SYS_SEMANTIC.AGENT_FEEDBACK WHERE AGENT_REQUEST_ID IN (SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE {model_filter})",
         f"DELETE FROM SYS_SEMANTIC.AGENT_FEEDBACK WHERE QUERY_LOG_ID IN (SELECT QUERY_LOG_ID FROM SYS_SEMANTIC.QUERY_LOG WHERE {model_filter})",
-        f"DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS WHERE {model_filter}",
-        f"DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS WHERE AGENT_REQUEST_ID IN (SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE {model_filter})",
-        f"DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS WHERE QUERY_LOG_ID IN (SELECT QUERY_LOG_ID FROM SYS_SEMANTIC.QUERY_LOG WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS WHERE {model_filter}",
+        f"DELETE FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS WHERE AGENT_REQUEST_ID IN (SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE {model_filter})",
+        f"DELETE FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS WHERE QUERY_LOG_ID IN (SELECT QUERY_LOG_ID FROM SYS_SEMANTIC.QUERY_LOG WHERE {model_filter})",
         f"DELETE FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS WHERE {materialization_filter}",
-        f"DELETE FROM SYS_SEMANTIC.CALCULATION_ITEMS WHERE {calculation_group_filter}",
         f"DELETE FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS WHERE {unique_key_filter}",
         f"DELETE FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS WHERE {relationship_filter}",
         f"DELETE FROM SYS_SEMANTIC.METRIC_INPUTS WHERE {metric_filter}",
@@ -2758,9 +2790,7 @@ def cleanup_imported_model(con: Any, model_name: str) -> None:
         f"DELETE FROM SYS_SEMANTIC.CUSTOM_EXTENSIONS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.VERIFIED_QUERIES WHERE {model_filter}",
-        f"DELETE FROM SYS_SEMANTIC.OBJECT_PRIVILEGES WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.MATERIALIZATIONS WHERE {model_filter}",
-        f"DELETE FROM SYS_SEMANTIC.CALCULATION_GROUPS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.SEMANTIC_DEFINITION_SOURCES WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.VALIDATION_RESULTS WHERE {model_filter}",
         f"DELETE FROM SYS_SEMANTIC.VALIDATION_RUNS WHERE {model_filter}",

@@ -183,7 +183,7 @@ if not missing(published_schema) then
 end
 
 query([[
-    DELETE FROM SYS_SEMANTIC.AGENT_SUGGESTIONS
+    DELETE FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
     WHERE MODEL_ID = :model_id
        OR AGENT_REQUEST_ID IN (
             SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG
@@ -261,13 +261,6 @@ query([[
     )
 ]], {model_id = model_id})
 query([[
-    DELETE FROM SYS_SEMANTIC.CALCULATION_ITEMS
-    WHERE CALCULATION_GROUP_ID IN (
-        SELECT CALCULATION_GROUP_ID FROM SYS_SEMANTIC.CALCULATION_GROUPS
-        WHERE MODEL_ID = :model_id
-    )
-]], {model_id = model_id})
-query([[
     DELETE FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS
     WHERE MATERIALIZATION_ID IN (
         SELECT MATERIALIZATION_ID FROM SYS_SEMANTIC.MATERIALIZATIONS
@@ -285,13 +278,11 @@ local model_tables = {
     "METRIC_DIMENSION_MATRIX",
     "MODEL_ROLE_GRANTS",
     "MODEL_PUBLISH_HISTORY",
-    "OBJECT_PRIVILEGES",
     "MATERIALIZATIONS",
     "AGENT_INSTRUCTIONS",
     "VERIFIED_QUERIES",
     "CUSTOM_EXTENSIONS",
     "SYNONYMS",
-    "CALCULATION_GROUPS",
     "SEMANTIC_DEFINITION_SOURCES",
     "IDENTITY_MAPPING_RELATIONS",
     "IDENTITY_BINDINGS",
@@ -12735,7 +12726,8 @@ local function validate_partition_coverage(ctx, entity)
     if #(ctx.metrics or {}) > 0 and not entity_has_base_metric(ctx, entity) then
         add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_043",
             "Partitioned entity '" .. entity_name
-                .. "' is the base entity of no active metric. F3 UNION fusion applies only "
+                .. "' is the base entity of no active metric. Temporal partition fusion "
+                .. "applies only "
                 .. "to metric-leaf entities; partitioned joined dimensions are unsupported. "
                 .. "Remove the coverage declarations or define a metric based on this entity.")
     end
@@ -12965,9 +12957,10 @@ local function alternate_representation_remedy(ctx, names)
             .. " the representation with REMOVE_ENTITY_REPRESENTATION."
     end
     return " " .. subject .. " is registered but not yet usable, and blocks"
-        .. " unrelated authoring until it is. Complete the declaration (F3"
+        .. " unrelated authoring until it is. Complete the declaration (temporal"
         .. " coverage with SET_REPRESENTATION_COVERAGE_BATCH, attribute bindings"
-        .. " with ADD_ATTRIBUTE_BINDING, or a certified F5 identity), or remove"
+        .. " with ADD_ATTRIBUTE_BINDING, or a certified semantic identity), or"
+        .. " remove"
         .. " it with REMOVE_ENTITY_REPRESENTATION."
 end
 
@@ -12977,7 +12970,61 @@ local function representation_suffix(names)
 end
 
 local function identity_binding_remedy()
-    return " F2 attribute bindings do not remap identity or joins. Use a certified F5 semantic identity for representation-local entity keys; relationship join columns still require canonical source views."
+    return " Attribute bindings do not remap identity or joins. Use a certified semantic identity for representation-local entity keys; relationship join columns still require canonical source views."
+end
+
+-- MODEL_ID is functionally determined by VERSION_ID -- MODEL_VERSIONS maps a
+-- version to exactly one model -- and stored anyway on 29 tables, because
+-- almost every read filters by model and the join would be on every one of
+-- them. That trade is worth making. What it costs is that the invariant "this
+-- row's MODEL_ID is its version's MODEL_ID" is held up entirely by 29 tables'
+-- worth of INSERT statements each remembering to pass both, plus
+-- shared/catalog_rollback.lua restoring both from a snapshot. Exasol's foreign
+-- keys are declared DISABLE by design, so the engine will not catch a
+-- disagreement, and a row filed under the wrong model is invisible: it simply
+-- stops being read, or starts being read by the wrong model.
+--
+-- The table list is derived, not restated. A new catalog table carrying both
+-- columns is checked the day it is added, without anyone remembering to append
+-- it here -- which is the only way a 29-name list stays correct.
+local function validate_catalog_integrity(ctx)
+    local tables = query([[
+        SELECT COLUMN_TABLE
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
+          AND COLUMN_NAME IN ('MODEL_ID', 'VERSION_ID')
+          AND COLUMN_OBJECT_TYPE = 'TABLE'
+        GROUP BY COLUMN_TABLE
+        HAVING COUNT(DISTINCT COLUMN_NAME) = 2
+        ORDER BY COLUMN_TABLE
+    ]])
+    if tables == nil or #tables == 0 then
+        return
+    end
+    local branches = {}
+    for _, row in ipairs(tables) do
+        local table_name = tostring(row_value(row, "COLUMN_TABLE", 1))
+        branches[#branches + 1] = "SELECT '" .. table_name .. "' AS CATALOG_TABLE,"
+            .. " COUNT(*) AS MISMATCH_COUNT FROM SYS_SEMANTIC." .. table_name
+            .. " WHERE (VERSION_ID = :version_id AND MODEL_ID <> :model_id)"
+            .. " OR (MODEL_ID = :model_id AND VERSION_ID NOT IN ("
+            .. "SELECT VERSION_ID FROM SYS_SEMANTIC.MODEL_VERSIONS"
+            .. " WHERE MODEL_ID = :model_id))"
+    end
+    local mismatches = query(
+        "SELECT CATALOG_TABLE, MISMATCH_COUNT FROM ("
+        .. table.concat(branches, " UNION ALL ")
+        .. ") WHERE MISMATCH_COUNT > 0 ORDER BY CATALOG_TABLE",
+        {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(mismatches or {}) do
+        local table_name = tostring(row_value(row, "CATALOG_TABLE", 1))
+        add_issue(ctx, "ERROR", "MODEL", ctx.model_name, "SEMANTIC_MODEL_062",
+            "Catalog corruption in SYS_SEMANTIC." .. table_name .. ": "
+            .. tostring(row_value(row, "MISMATCH_COUNT", 2))
+            .. " row(s) name a MODEL_ID that disagrees with the model their "
+            .. "VERSION_ID belongs to. A row filed under the wrong model is not "
+            .. "read by either. Repair the rows before publishing.")
+    end
 end
 
 local function validate_structural_rules(ctx)
@@ -13020,19 +13067,19 @@ local function validate_structural_rules(ctx)
                 "SEMANTIC_MODEL_036", "Representation references a missing entity.")
         elseif upper(representation.alias) ~= upper(entity.alias) then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "F1 representations must use the entity's stable source alias: "
+                "SEMANTIC_MODEL_036", "Representations must use the entity's stable source alias: "
                     .. tostring(entity.alias) .. ".")
         end
         local source_kind = upper(representation.source_kind)
         if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "Unsupported F1 source kind: "
+                "SEMANTIC_MODEL_036", "Unsupported representation source kind: "
                     .. tostring(representation.source_kind) .. ".")
         end
         local role = upper(representation.role)
         if role ~= "PRIMARY" and role ~= "ALTERNATE" then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "Unsupported F1 representation role: "
+                "SEMANTIC_MODEL_036", "Unsupported representation role: "
                     .. tostring(representation.role) .. ".")
         end
         local priority = tonumber(representation.priority)
@@ -13423,7 +13470,7 @@ local function validate_semantic_identities(ctx)
                     or not missing(representation.valid_from)
                     or not missing(representation.valid_to) then
                     add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
-                        "SEMANTIC_MODEL_047", "F5 semantic identity cannot be combined with F3 representation coverage on the same entity.")
+                        "SEMANTIC_MODEL_047", "A semantic identity cannot be combined with temporal representation coverage on the same entity.")
                     break
                 end
             end
@@ -13705,7 +13752,7 @@ local function validate_representation_data_equivalence(ctx)
             if #unique_keys == 0 then
                 add_issue(ctx, "ERROR", "ENTITY", entity.name,
                     "SEMANTIC_MODEL_037",
-                    "Multiple F1 representations require at least one declared unique key to prove grain and identity equivalence.")
+                    "Multiple representations require at least one declared unique key to prove grain and identity equivalence.")
             end
             local primary = entity.primary_representation
             local partitioned = entity_uses_partition_fusion(ctx, entity)
@@ -13874,7 +13921,7 @@ local function validate_relationship_key_mappings(ctx)
             add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
                 "SEMANTIC_MODEL_050", "Relationship candidate excludes " .. side
                     .. " representation(s): " .. table.concat(unavailable, ", ")
-                    .. "; the endpoint key is absent and no anchored DIRECT F5 identity remap is available.")
+                    .. "; the endpoint key is absent and no anchored DIRECT identity remap is available.")
         end
     end
 
@@ -14968,7 +15015,8 @@ local function validate_metric_plannability(ctx)
                     add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_057",
                         "Metric uses " .. aggregate .. ", which has no mergeable aggregate"
                             .. " state; entity '" .. partitioned_name .. "' is partitioned"
-                            .. " (F3 supports SUM and COUNT), so the metric can never be"
+                            .. " (partition fusion supports SUM and COUNT), so the metric can"
+                            .. " never be"
                             .. " compiled. Express it with mergeable SUM/COUNT states -- a"
                             .. " RATIO of two such metrics is exact.")
                 elseif #(node.leaf_entity_ids or {}) > 1 then
@@ -15327,8 +15375,9 @@ local function validate_visible_metric_dimension_pairs(ctx)
             elseif matrix_row.reason_code == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
                 local hop = matrix_row.partition_hop_name or "an intermediate entity"
                 message = message .. " Entity '" .. tostring(hop)
-                    .. "' carries F3 temporal coverage and sits on the join path"
-                    .. " between them. F3 expands partitions only where the"
+                    .. "' carries temporal coverage and sits on the join path"
+                    .. " between them. Partition fusion expands partitions only"
+                    .. " where the"
                     .. " entity is a metric's own leaf, so joining through it"
                     .. " would read its primary partition alone and silently omit"
                     .. " the others. Expose this dimension alongside metrics"
@@ -15340,7 +15389,7 @@ local function validate_visible_metric_dimension_pairs(ctx)
                     and (ctx.entity_name_by_id[key(dimension.entity_id)]
                         or tostring(dimension.entity_id)) or "the dimension's entity"
                 message = message .. " Entity '" .. dimension_entity_name
-                    .. "' carries F3 temporal coverage, and F3 applies only to an"
+                    .. "' carries temporal coverage, which applies only to an"
                     .. " entity a metric is based on. Expose this dimension only"
                     .. " alongside metrics based at '" .. dimension_entity_name
                     .. "', in this or a separate semantic object, or remove the"
@@ -15401,6 +15450,7 @@ function M.validate_model(model_name_arg)
     local model_loaded = load_model(ctx, model_name_arg)
     if model_loaded then
         load_catalog(ctx)
+        validate_catalog_integrity(ctx)
         validate_structural_rules(ctx)
         validate_custom_extensions(ctx)
         validate_semantic_identities(ctx)
@@ -15455,6 +15505,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         extract_json_array_values = extract_json_array_values,
         source_object_exists = source_object_exists,
         source_column_exists = source_column_exists,
+        validate_catalog_integrity = validate_catalog_integrity,
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
         parse_partition_predicate = parse_partition_predicate,
@@ -20257,7 +20308,7 @@ do
                 return "Metric '" .. metric_name .. "' uses " .. aggregate
                     .. ", which has no mergeable aggregate state; entity '"
                     .. tostring(failure.entity_name)
-                    .. "' is partitioned (F3 supports SUM and COUNT). Remove the metric "
+                    .. "' is partitioned (partition fusion supports SUM and COUNT). Remove the metric "
                     .. "from this request or express it using mergeable SUM/COUNT states."
             end
             return "Metric '" .. metric_name .. "' uses " .. aggregate
@@ -20272,7 +20323,7 @@ do
                 .. "' resolves to partitioned entity '"
                 .. tostring(failure.entity_name or failure.entity_id or "unknown")
                 .. "', which is used here only as a joined dimension. Partitioned joined "
-                .. "dimensions are not supported in F3."
+                .. "dimensions are not supported by partition fusion."
         end
         if reason == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
             local entity_name = tostring(failure.entity_name
@@ -20280,9 +20331,9 @@ do
             local via = failure.path == nil and ""
                 or " (join path: " .. tostring(failure.path) .. ")"
             return "Entity '" .. entity_name
-                .. "' carries F3 temporal coverage and is traversed as an"
+                .. "' carries temporal coverage and is traversed as an"
                 .. " intermediate join on the way to a requested field" .. via
-                .. ". F3 expands partitions only where the entity is a metric's own"
+                .. ". Partition fusion expands partitions only where the entity is a metric's own"
                 .. " leaf, so joining through it would read the primary partition"
                 .. " alone and silently omit the others. Request this field from a"
                 .. " semantic object rooted at '" .. entity_name
@@ -22558,11 +22609,13 @@ local function log_request(result, request_json, request, model)
     local metrics = request and request.metrics or {}
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
-          MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
+          MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, NATURAL_LANGUAGE_TEXT,
+          REQUEST_JSON, GENERATED_SQL,
           PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE,
           CACHE_HIT, FINISHED_AT, RUNTIME_MS
         ) VALUES (
-          :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
+          :model_id, :version_id, :client_name, :purpose, :natural_language_text,
+          :request_json, :generated_sql,
           :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message,
           :cache_hit, CURRENT_TIMESTAMP, :runtime_ms
         )
@@ -22571,6 +22624,11 @@ local function log_request(result, request_json, request, model)
         version_id = null_if_missing(request_version_id),
         client_name = request and null_if_missing(request.client) or null,
         purpose = request and null_if_missing(request.purpose) or null,
+        -- COMPILE_REQUEST_SCHEMA_FOR_AGENT tells an agent that
+        -- `natural_language_text` is "retained as request metadata", and the
+        -- column exists to hold it. The INSERT omitted it, so the promise was
+        -- kept only accidentally, by REQUEST_JSON storing the request whole.
+        natural_language_text = request and null_if_missing(request.natural_language_text) or null,
         request_json = null_if_missing(request_json),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
@@ -23133,7 +23191,7 @@ local function compile_request_table(request, options)
     if typed_plan.plan_kind == "MULTI_BRANCH" then
         if ctx.has_fact_fusion then
             return plan_error("_074",
-                "F4 fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
+                "Fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
         end
         -- Safeguards tighten only: min() with the deployment default, so a
         -- request can ask to fail earlier but never later.
@@ -27344,6 +27402,69 @@ local function non_additive_dimension_id(model, native)
     return dim.id
 end
 
+-- Presentation metadata for a dimension or a fact.
+--
+-- FACTS.FORMAT_HINT, and UNIT_HINT / SENSITIVITY_LABEL / DISPLAY_POLICY on both
+-- FACTS and DIMENSIONS, had no writer anywhere in the product -- seven columns
+-- promising a governance and presentation feature nothing delivered. They were
+-- not, however, dead weight: `tools/osi.py` already *exports* all four for both
+-- field kinds and lists them as importable native keys, so a document carrying
+-- them round-tripped out and was silently dropped on the way back in. Only the
+-- import half was missing, and metrics already had it (see patch_metric_metadata
+-- below), so this is that half, written once for both kinds.
+--
+-- IS_HIDDEN rides along for the same reason: ADD_DIMENSION has no parameter for
+-- it, so an imported hidden dimension came back visible.
+local FIELD_PATCH_TARGETS = {
+    add_dimension = {table_name = "DIMENSIONS", name_column = "DIMENSION_NAME",
+                     name_argument = "dimension_name", hidden_column = "IS_HIDDEN"},
+    add_fact = {table_name = "FACTS", name_column = "FACT_NAME",
+                name_argument = "fact_name"},
+}
+
+local function patch_field_metadata(operation)
+    local target = FIELD_PATCH_TARGETS[operation.operation]
+    if target == nil then
+        return
+    end
+    local metadata = metadata_of(operation)
+    local native = metadata.native
+    if type(native) ~= "table" then
+        return
+    end
+    if missing(native.format_hint) and missing(native.unit_hint)
+        and missing(native.sensitivity_label) and missing(native.display_policy)
+        and (target.hidden_column == nil or native.is_hidden == nil) then
+        return
+    end
+    local args = operation.arguments or {}
+    local model = load_model(args.model_name)
+    local assignments = {
+        "FORMAT_HINT = COALESCE(:format_hint, FORMAT_HINT)",
+        "UNIT_HINT = COALESCE(:unit_hint, UNIT_HINT)",
+        "SENSITIVITY_LABEL = COALESCE(:sensitivity_label, SENSITIVITY_LABEL)",
+        "DISPLAY_POLICY = COALESCE(:display_policy, DISPLAY_POLICY)",
+    }
+    local parameters = {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        field_name = args[target.name_argument],
+        format_hint = null_if_missing(native.format_hint),
+        unit_hint = null_if_missing(native.unit_hint),
+        sensitivity_label = null_if_missing(native.sensitivity_label),
+        display_policy = null_if_missing(native.display_policy),
+    }
+    if target.hidden_column ~= nil and native.is_hidden ~= nil then
+        assignments[#assignments + 1] = target.hidden_column .. " = :is_hidden"
+        parameters.is_hidden = sql_bool(native.is_hidden)
+    end
+    query("UPDATE SYS_SEMANTIC." .. target.table_name
+        .. " SET " .. table.concat(assignments, ", ")
+        .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id"
+        .. " AND UPPER(" .. target.name_column .. ") = UPPER(:field_name)",
+        parameters)
+end
+
 local function patch_metric_metadata(operation)
     local metadata = metadata_of(operation)
     local native = metadata.native
@@ -27460,6 +27581,7 @@ end
 local function apply_metadata_patches(plan)
     for _, operation in ipairs(plan.operations or {}) do
         patch_relationship_metadata(operation)
+        patch_field_metadata(operation)
         patch_metric_metadata(operation)
         patch_operation_object_columns(operation)
     end
@@ -29196,6 +29318,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         drop_metric = drop_metric,
         rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,
+        patch_field_metadata = patch_field_metadata,
         parse_databricks_yaml = parse_databricks_yaml,
         dbx_table_ref = dbx_table_ref,
         dbx_rewrite_expr = dbx_rewrite_expr,

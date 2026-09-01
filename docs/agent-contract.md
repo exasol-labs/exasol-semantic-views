@@ -203,8 +203,13 @@ are rejected with `SEMANTIC_REQUEST_004`; they are never silently ignored.
 This prevents an agent from assuming that an unsupported capability such as
 `output: {"shape": "nested"}` was applied to an otherwise valid request.
 
-Filter field aliases are `field`, `dimension`, `column`, and `name`. Operator
-aliases are `op` and `operator`. Supported operators are `=`, `!=`, `<>`, `>`,
+**`field` is the canonical name for a queryable thing** — a dimension or a
+metric, and never a fact, which is an ingredient rather than something a request
+can select. `dimension`, `column` and `name` are accepted as filter-key aliases
+for tolerance, but a request an agent generates should use `field`. (`attribute`
+is a *different* collective noun, covering dimensions and facts, and appears only
+on the binding surfaces; see the [glossary](glossary.md#the-collective-nouns).)
+Operator aliases are `op` and `operator`. Supported operators are `=`, `!=`, `<>`, `>`,
 `>=`, `<`, `<=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`, and `IS NOT NULL`.
 `BETWEEN` expects a two-element array. Null predicates are unary: omit `value`
 and `value_sql`. `ORDER BY` fields must refer to selected metrics or dimensions.

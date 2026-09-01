@@ -360,7 +360,7 @@ ADD OR REPLACE METRIC avg_freight AS total_freight / NULLIF(order_count, 0)
             assert_contains("partitioned joined dimension refused", message,
                             "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
             assert_contains("refusal names the remedy", message,
-                            "carries F3 temporal coverage")
+                            "carries temporal coverage")
 
         # The same dimension is fine in the object whose metrics are based on
         # that entity, which is exactly what F3 supports.

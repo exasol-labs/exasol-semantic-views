@@ -2111,6 +2111,69 @@ local function non_additive_dimension_id(model, native)
     return dim.id
 end
 
+-- Presentation metadata for a dimension or a fact.
+--
+-- FACTS.FORMAT_HINT, and UNIT_HINT / SENSITIVITY_LABEL / DISPLAY_POLICY on both
+-- FACTS and DIMENSIONS, had no writer anywhere in the product -- seven columns
+-- promising a governance and presentation feature nothing delivered. They were
+-- not, however, dead weight: `tools/osi.py` already *exports* all four for both
+-- field kinds and lists them as importable native keys, so a document carrying
+-- them round-tripped out and was silently dropped on the way back in. Only the
+-- import half was missing, and metrics already had it (see patch_metric_metadata
+-- below), so this is that half, written once for both kinds.
+--
+-- IS_HIDDEN rides along for the same reason: ADD_DIMENSION has no parameter for
+-- it, so an imported hidden dimension came back visible.
+local FIELD_PATCH_TARGETS = {
+    add_dimension = {table_name = "DIMENSIONS", name_column = "DIMENSION_NAME",
+                     name_argument = "dimension_name", hidden_column = "IS_HIDDEN"},
+    add_fact = {table_name = "FACTS", name_column = "FACT_NAME",
+                name_argument = "fact_name"},
+}
+
+local function patch_field_metadata(operation)
+    local target = FIELD_PATCH_TARGETS[operation.operation]
+    if target == nil then
+        return
+    end
+    local metadata = metadata_of(operation)
+    local native = metadata.native
+    if type(native) ~= "table" then
+        return
+    end
+    if missing(native.format_hint) and missing(native.unit_hint)
+        and missing(native.sensitivity_label) and missing(native.display_policy)
+        and (target.hidden_column == nil or native.is_hidden == nil) then
+        return
+    end
+    local args = operation.arguments or {}
+    local model = load_model(args.model_name)
+    local assignments = {
+        "FORMAT_HINT = COALESCE(:format_hint, FORMAT_HINT)",
+        "UNIT_HINT = COALESCE(:unit_hint, UNIT_HINT)",
+        "SENSITIVITY_LABEL = COALESCE(:sensitivity_label, SENSITIVITY_LABEL)",
+        "DISPLAY_POLICY = COALESCE(:display_policy, DISPLAY_POLICY)",
+    }
+    local parameters = {
+        model_id = model.model_id,
+        version_id = model.version_id,
+        field_name = args[target.name_argument],
+        format_hint = null_if_missing(native.format_hint),
+        unit_hint = null_if_missing(native.unit_hint),
+        sensitivity_label = null_if_missing(native.sensitivity_label),
+        display_policy = null_if_missing(native.display_policy),
+    }
+    if target.hidden_column ~= nil and native.is_hidden ~= nil then
+        assignments[#assignments + 1] = target.hidden_column .. " = :is_hidden"
+        parameters.is_hidden = sql_bool(native.is_hidden)
+    end
+    query("UPDATE SYS_SEMANTIC." .. target.table_name
+        .. " SET " .. table.concat(assignments, ", ")
+        .. " WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id"
+        .. " AND UPPER(" .. target.name_column .. ") = UPPER(:field_name)",
+        parameters)
+end
+
 local function patch_metric_metadata(operation)
     local metadata = metadata_of(operation)
     local native = metadata.native
@@ -2227,6 +2290,7 @@ end
 local function apply_metadata_patches(plan)
     for _, operation in ipairs(plan.operations or {}) do
         patch_relationship_metadata(operation)
+        patch_field_metadata(operation)
         patch_metric_metadata(operation)
         patch_operation_object_columns(operation)
     end
@@ -3963,6 +4027,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         drop_metric = drop_metric,
         rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,
+        patch_field_metadata = patch_field_metadata,
         parse_databricks_yaml = parse_databricks_yaml,
         dbx_table_ref = dbx_table_ref,
         dbx_rewrite_expr = dbx_rewrite_expr,

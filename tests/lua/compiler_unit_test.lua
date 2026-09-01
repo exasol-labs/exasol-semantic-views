@@ -1448,7 +1448,7 @@ test("F4 reconciled facts remain blocked in multi-fact plans", function()
         dimensions = {"customer_region"},
     }, {multi_fact = true, f4_fact_reconcile = true})
     assert_equal(result.error_code, "SEMANTIC_REQUEST_074")
-    assert_contains(result.error_message, "fact reconciliation")
+    assert_contains(result.error_message, "Fact reconciliation")
 end)
 
 test("C3 compiler activates a versioned multi branch query", function()

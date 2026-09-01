@@ -1258,3 +1258,62 @@ test("metric metadata surfaces a filter, an owner and a private metric", functio
     assert_contains(ddl, "ADD OR REPLACE METRIC completed_revenue")
     assert_contains(ddl, "FILTER (WHERE order_status = 'COMPLETE')")
 end)
+
+test("OSI import patches the presentation metadata no script parameter carries",
+function()
+    -- FACTS.FORMAT_HINT and UNIT_HINT / SENSITIVITY_LABEL / DISPLAY_POLICY on
+    -- both field tables had no writer anywhere. They were not unused, though:
+    -- osi.py exports all four for both kinds, so a document carrying them
+    -- round-tripped out and was dropped coming back in. Only the import half
+    -- was missing.
+    local function run(operation)
+        local statements = {}
+        with_query(function(sql, params)
+            local text = tostring(sql)
+            if text:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+                return {{MODEL_ID = 1, ACTIVE_VERSION_ID = 2}}
+            end
+            statements[#statements + 1] = {sql = text, parameters = params}
+            return {}
+        end, function() api.patch_field_metadata(operation) end)
+        return statements
+    end
+
+    local dimension = run({
+        operation = "add_dimension",
+        arguments = {model_name = "sales", dimension_name = "customer_email"},
+        metadata = {native = {unit_hint = "text", sensitivity_label = "PII",
+            display_policy = "MASK", is_hidden = true}},
+    })
+    assert_equal(#dimension, 1)
+    assert_contains(dimension[1].sql, "UPDATE SYS_SEMANTIC.DIMENSIONS")
+    assert_contains(dimension[1].sql, "UPPER(DIMENSION_NAME) = UPPER(:field_name)")
+    assert_contains(dimension[1].sql, "IS_HIDDEN = :is_hidden")
+    assert_equal(dimension[1].parameters.sensitivity_label, "PII")
+    assert_equal(dimension[1].parameters.display_policy, "MASK")
+    assert_equal(dimension[1].parameters.is_hidden, true)
+    assert_equal(dimension[1].parameters.field_name, "customer_email")
+
+    -- FACTS has no IS_HIDDEN, so the assignment must not be built for it --
+    -- the column list is per kind, not one list with nullable holes.
+    local fact = run({
+        operation = "add_fact",
+        arguments = {model_name = "sales", fact_name = "net_revenue"},
+        metadata = {native = {format_hint = "#,##0.00", unit_hint = "USD"}},
+    })
+    assert_equal(#fact, 1)
+    assert_contains(fact[1].sql, "UPDATE SYS_SEMANTIC.FACTS")
+    assert_contains(fact[1].sql, "FORMAT_HINT = COALESCE(:format_hint, FORMAT_HINT)")
+    assert_true(not fact[1].sql:find("IS_HIDDEN", 1, true))
+    assert_equal(fact[1].parameters.format_hint, "#,##0.00")
+
+    -- Nothing to patch means no statement at all: every OSI operation passes
+    -- through here, and most carry no presentation metadata.
+    assert_equal(#run({operation = "add_fact", arguments = {model_name = "sales"},
+        metadata = {native = {display_name = "Revenue"}}}), 0)
+    assert_equal(#run({operation = "add_metric", arguments = {model_name = "sales"},
+        metadata = {native = {unit_hint = "USD"}}}), 0)
+    assert_equal(#run({operation = "add_dimension", arguments = {}, metadata = {}}), 0)
+    assert_branch("definition.field_patch", true, true)
+    assert_branch("definition.field_patch", false, false)
+end)

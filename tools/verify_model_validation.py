@@ -106,6 +106,35 @@ def main() -> int:
         )
 
         assert_no_errors("sales validation", validate(con))
+
+        # SEMANTIC_MODEL_062: MODEL_ID is denormalised onto 29 tables and
+        # nothing enforces that it agrees with the model its VERSION_ID belongs
+        # to -- Exasol's foreign keys are declared DISABLE by design. Only a
+        # direct write to SYS_SEMANTIC can produce the corruption the rule
+        # exists to catch, which is why this one reaches past the admin scripts.
+        # A row filed under the wrong model is read by neither, so nothing else
+        # in the suite would notice it.
+        with_restore(
+            con,
+            "a dimension filed under the wrong model",
+            "UPDATE SYS_SEMANTIC.DIMENSIONS SET MODEL_ID = MODEL_ID + 9000 "
+            "WHERE DIMENSION_NAME = 'customer_region' "
+            "AND MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales')",
+            "UPDATE SYS_SEMANTIC.DIMENSIONS SET MODEL_ID = MODEL_ID - 9000 "
+            "WHERE DIMENSION_NAME = 'customer_region' AND MODEL_ID > 9000",
+            "SEMANTIC_MODEL_062",
+        )
+        # The other direction: the right model, a version belonging to another.
+        with_restore(
+            con,
+            "a fact pointing at another model's version",
+            "UPDATE SYS_SEMANTIC.FACTS SET VERSION_ID = VERSION_ID + 9000 "
+            "WHERE FACT_NAME = 'net_revenue' "
+            "AND MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = 'sales')",
+            "UPDATE SYS_SEMANTIC.FACTS SET VERSION_ID = VERSION_ID - 9000 "
+            "WHERE FACT_NAME = 'net_revenue' AND VERSION_ID > 9000",
+            "SEMANTIC_MODEL_062",
+        )
         # 6 metrics x 6 dimensions. Every pair is valid except the one the
         # demo model exists to show: order-grain total_freight cannot be
         # grouped by the line-grain product_category.

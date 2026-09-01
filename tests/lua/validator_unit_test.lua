@@ -865,9 +865,9 @@ test("F2 identity mismatches prescribe canonical views and Phase F5", function()
     local mapping_issue = issue_for_rule(ctx, "SEMANTIC_MODEL_050")
     assert_true(key_issue ~= nil)
     assert_true(mapping_issue ~= nil)
-    assert_contains(key_issue.message, "certified F5 semantic identity")
+    assert_contains(key_issue.message, "certified semantic identity")
     assert_contains(mapping_issue.message, "mongo")
-    assert_contains(mapping_issue.message, "anchored DIRECT F5 identity")
+    assert_contains(mapping_issue.message, "anchored DIRECT identity")
 end)
 
 test("a metric must be based on the entity its facts belong to", function()
@@ -2047,7 +2047,7 @@ test("validator invalidates a partitioned entity used as a joined dimension", fu
     end, function() api.validate_visible_metric_dimension_pairs(ctx) end)
     local issue = issue_for_rule(ctx, "SEMANTIC_MODEL_030")
     assert_contains(issue.message, "FUSION_PARTITION_DIMENSION_UNSUPPORTED")
-    assert_contains(issue.message, "carries F3 temporal coverage")
+    assert_contains(issue.message, "carries temporal coverage")
     assert_contains(issue.message, "metrics based at 'order'")
 end)
 
@@ -2363,6 +2363,61 @@ test("validator matrix rejects metrics unreachable from published roots", functi
         "Declare a semantic object rooted at 'shipment', or remove this metric from object 'COMMERCE'.")
 end)
 
+test("catalog integrity check derives its tables and names the corrupt one", function()
+    -- MODEL_ID is denormalised onto 29 tables and nothing enforces that it
+    -- agrees with the model its VERSION_ID belongs to: Exasol's foreign keys
+    -- are DISABLE by design. A row filed under the wrong model is read by
+    -- neither model, so it fails silently in both directions.
+    local seen = {}
+    local function mock(sql, parameters)
+        seen[#seen + 1] = {sql = sql, parameters = parameters}
+        if contains(sql, "HAVING COUNT(DISTINCT COLUMN_NAME) = 2") then
+            return {{COLUMN_TABLE = "DIMENSIONS"}, {COLUMN_TABLE = "METRIC_INPUTS"}}
+        elseif contains(sql, "SELECT CATALOG_TABLE, MISMATCH_COUNT") then
+            return {{CATALOG_TABLE = "DIMENSIONS", MISMATCH_COUNT = 3}}
+        end
+        error("unexpected catalog integrity SQL: " .. tostring(sql))
+    end
+    local ctx = validation_context({model_id = 7, version_id = 2, model_name = "sales"})
+    with_query(mock, function() api.validate_catalog_integrity(ctx) end)
+
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_062"))
+    assert_equal(issue_for_rule(ctx, "SEMANTIC_MODEL_062").severity, "ERROR")
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_062").message,
+        "SYS_SEMANTIC.DIMENSIONS")
+    assert_contains(issue_for_rule(ctx, "SEMANTIC_MODEL_062").message, "3 row(s)")
+    assert_branch("validator.catalog_integrity", #ctx.issues > 0, true)
+
+    -- Derived, not restated: both table names come from EXA_ALL_COLUMNS, so a
+    -- catalog table added tomorrow is checked without anyone editing a list.
+    -- That is the whole reason the rule can be trusted at 29 tables.
+    assert_equal(#seen, 2)
+    assert_contains(seen[1].sql, "FROM SYS.EXA_ALL_COLUMNS")
+    assert_contains(seen[2].sql, "FROM SYS_SEMANTIC.DIMENSIONS")
+    assert_contains(seen[2].sql, "FROM SYS_SEMANTIC.METRIC_INPUTS")
+    assert_equal(seen[2].parameters.model_id, 7)
+    assert_equal(seen[2].parameters.version_id, 2)
+end)
+
+test("catalog integrity check stays quiet on an agreeing catalog", function()
+    local ctx = validation_context({model_id = 1, version_id = 2, model_name = "sales"})
+    with_query(function(sql)
+        if contains(sql, "HAVING COUNT(DISTINCT COLUMN_NAME) = 2") then
+            return {{COLUMN_TABLE = "ENTITIES"}}
+        end
+        return {}
+    end, function() api.validate_catalog_integrity(ctx) end)
+    assert_equal(#ctx.issues, 0)
+    assert_branch("validator.catalog_integrity", #ctx.issues > 0, false)
+
+    -- An installation with no such tables at all -- the shape a stubbed or
+    -- partially installed catalog presents -- must not build an empty UNION.
+    local empty = validation_context({model_id = 1, version_id = 2, model_name = "sales"})
+    with_query(function() return {} end,
+        function() api.validate_catalog_integrity(empty) end)
+    assert_equal(#empty.issues, 0)
+end)
+
 test("validator public entry point loads and validates a coherent catalog", function()
     local lifecycle = {started = false, finished = false, cache_cleared = false,
         matrix_inserted = false, dependency_inserted = false}
@@ -2425,6 +2480,11 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {{60, "MODEL", 1, "acme", "quality", "JSON", '{"level":"gold"}'}}
         elseif contains(sql, "FROM SYS.EXA_ALL_TABLES") then
             return {{1}}
+        elseif contains(sql, "HAVING COUNT(DISTINCT COLUMN_NAME) = 2") then
+            -- The MODEL_ID/VERSION_ID agreement check derives its table list.
+            return {{COLUMN_TABLE = "DIMENSIONS"}, {COLUMN_TABLE = "FACTS"}}
+        elseif contains(sql, "SELECT CATALOG_TABLE, MISMATCH_COUNT") then
+            return {}
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return {{1}}
         elseif contains(sql, "FROM EXA_PARAMETERS") then

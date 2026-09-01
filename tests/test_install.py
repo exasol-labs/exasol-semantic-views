@@ -253,8 +253,8 @@ class InstallerResetTest(unittest.TestCase):
         for path in INSTALL.INSTALL_FILES:
             statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
         expected_fragments = {
-            "SYS_SEMANTIC.AGENT_SUGGESTION_REVIEWS",
-            "SYS_SEMANTIC.AGENT_SUGGESTION_TARGETS",
+            "SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS",
+            "SYS_SEMANTIC.MODEL_EVOLUTION_TARGETS",
             "SEMANTIC_CATALOG.MODEL_EVOLUTION_SUGGESTIONS",
             "SEMANTIC_CATALOG.MODEL_EVOLUTION_REVIEWS",
             "SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE",
@@ -1107,6 +1107,83 @@ class MainChunkLocalCeilingTest(unittest.TestCase):
         self.assertGreater(counts["COMPILER_RUNTIME"], 100)
         self.assertLessEqual(counts["COMPILER_RUNTIME"],
                              PACKAGER.MAIN_CHUNK_LOCAL_LIMIT)
+
+
+class RenamedTableMigrationTest(unittest.TestCase):
+    """An existing catalog survives a table rename with its rows and its ids.
+
+    `SYS_SEMANTIC` has no schema-version column and every table is created with
+    `CREATE TABLE IF NOT EXISTS`, so a rename with no migration would leave an
+    upgraded deployment holding its rows in the old table and a new empty one
+    beside it -- silently, because both would exist and only one would be read.
+
+    `RENAME TABLE` rather than create-and-copy, because it carries the identity
+    counter too: inserting explicit ids into an IDENTITY column does not advance
+    the generator (verified against Exasol), so a copy migration hands out ids
+    that collide with the ones it just restored.
+    """
+
+    class Catalog:
+        def __init__(self, present):
+            self.present = set(present)
+            self.sql = []
+
+        def execute(self, sql):
+            self.sql.append(sql)
+            if "EXA_ALL_TABLES" in sql:
+                name = sql.split("TABLE_NAME = '", 1)[1].split("'", 1)[0]
+                return Result([(1,)] if name in self.present else [])
+            return Result([])
+
+    def test_a_fresh_install_migrates_nothing(self):
+        catalog = self.Catalog(present=[])
+        self.assertEqual([], INSTALL.migrate_renamed_tables(catalog))
+        self.assertNotIn("RENAME", " ".join(catalog.sql))
+
+    def test_an_existing_catalog_is_renamed_in_place(self):
+        catalog = self.Catalog(present=["AGENT_SUGGESTIONS",
+                                        "AGENT_SUGGESTION_REVIEWS",
+                                        "AGENT_SUGGESTION_TARGETS"])
+        moved = INSTALL.migrate_renamed_tables(catalog)
+        self.assertEqual(
+            ["AGENT_SUGGESTIONS -> MODEL_EVOLUTION_SUGGESTIONS",
+             "AGENT_SUGGESTION_REVIEWS -> MODEL_EVOLUTION_REVIEWS",
+             "AGENT_SUGGESTION_TARGETS -> MODEL_EVOLUTION_TARGETS"], moved)
+        renames = [s for s in catalog.sql if s.startswith("RENAME TABLE")]
+        self.assertEqual(3, len(renames))
+        # Renamed, never recreated-and-copied: the rows and the identity counter
+        # travel with the table.
+        self.assertNotIn("INSERT", " ".join(catalog.sql))
+
+    def test_reinstalling_over_a_migrated_catalog_is_a_no_op(self):
+        catalog = self.Catalog(present=["MODEL_EVOLUTION_SUGGESTIONS",
+                                        "MODEL_EVOLUTION_REVIEWS",
+                                        "MODEL_EVOLUTION_TARGETS"])
+        self.assertEqual([], INSTALL.migrate_renamed_tables(catalog))
+        self.assertNotIn("RENAME", " ".join(catalog.sql))
+        self.assertNotIn("DROP", " ".join(catalog.sql))
+
+    def test_a_run_interrupted_between_rename_and_drop_resolves_forward(self):
+        """Both names present: the new one is authoritative, so retire the old."""
+        catalog = self.Catalog(present=["AGENT_SUGGESTIONS",
+                                        "MODEL_EVOLUTION_SUGGESTIONS"])
+        moved = INSTALL.migrate_renamed_tables(catalog)
+        self.assertEqual(
+            ["AGENT_SUGGESTIONS (dropped; MODEL_EVOLUTION_SUGGESTIONS already present)"],
+            moved)
+        self.assertIn("DROP TABLE IF EXISTS SYS_SEMANTIC.AGENT_SUGGESTIONS CASCADE",
+                      catalog.sql)
+        self.assertNotIn("RENAME", " ".join(catalog.sql))
+
+    def test_the_rename_map_matches_what_the_catalog_declares(self):
+        """A pair left here after the DDL moved on would rename into nothing."""
+        ddl = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(
+            encoding="utf-8")
+        for old, new in INSTALL.RENAMED_TABLES:
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.{new} (", ddl,
+                          f"{new} is a rename target but no longer declared")
+            self.assertNotIn(f"SYS_SEMANTIC.{old} (", ddl,
+                             f"{old} is both a rename source and still declared")
 
 
 if __name__ == "__main__":

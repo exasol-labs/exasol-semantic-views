@@ -44,8 +44,6 @@ EXPECTED_TABLES = {
     "SEMANTIC_DEFINITION_SOURCES",
     "METRIC_INPUTS",
     "METRIC_FILTERS",
-    "CALCULATION_GROUPS",
-    "CALCULATION_ITEMS",
     "OBJECT_COLUMNS",
     "METRIC_DEPENDENCIES",
     "SYNONYMS",
@@ -54,10 +52,9 @@ EXPECTED_TABLES = {
     "VERIFIED_QUERIES",
     "AGENT_REQUEST_LOG",
     "AGENT_FEEDBACK",
-    "AGENT_SUGGESTIONS",
+    "MODEL_EVOLUTION_SUGGESTIONS",
     "MATERIALIZATIONS",
     "MATERIALIZATION_COLUMNS",
-    "OBJECT_PRIVILEGES",
     "QUERY_LOG",
     "VALIDATION_RUNS",
     "VALIDATION_RESULTS",
@@ -259,7 +256,7 @@ def main() -> int:
             "SYS_SEMANTIC.VERIFIED_QUERIES": 0,
             "SYS_SEMANTIC.AGENT_REQUEST_LOG": 0,
             "SYS_SEMANTIC.AGENT_FEEDBACK": 0,
-            "SYS_SEMANTIC.AGENT_SUGGESTIONS": 0,
+            "SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS": 0,
         }
         for table_expr, expected in expected_counts.items():
             assert_equal(table_expr, scalar(con, f"SELECT COUNT(*) FROM {table_expr}"), expected)

@@ -202,8 +202,8 @@ for what each is *for*; use the table above to decode a refusal.
 - **Agent instruction** — governed prose attached to a model, object, entity,
   dimension, fact or metric, surfaced to agents through the glossary.
 - **Model evolution** — an agent's *proposal* to change the model, recorded for
-  human review and never applied automatically. Stored in the
-  `AGENT_SUGGESTION*` tables and read through the `MODEL_EVOLUTION_*` views.
+  human review and never applied automatically. `SYS_SEMANTIC.MODEL_EVOLUTION_*`
+  holds them; the `SEMANTIC_CATALOG.MODEL_EVOLUTION_*` views read them back.
 - **Custom extension** — vendor metadata carried through OSI import and export
   without the layer interpreting it.
 
@@ -230,7 +230,7 @@ column, so joining on the id alone silently mixes rows of different kinds.
 
 | Id column | Discriminator | On |
 |---|---|---|
-| `OBJECT_ID` | `OBJECT_TYPE` | `SYNONYMS`, `MATERIALIZATION_COLUMNS`, `OBJECT_PRIVILEGES`, `AGENT_SUGGESTIONS` |
+| `OBJECT_ID` | `OBJECT_TYPE` | `SYNONYMS`, `MATERIALIZATION_COLUMNS`, `MODEL_EVOLUTION_SUGGESTIONS` |
 | `SCOPE_ID` | `SCOPE_TYPE` | `AGENT_INSTRUCTIONS`, `CUSTOM_EXTENSIONS` |
 | `ATTRIBUTE_ID` | `ATTRIBUTE_TYPE` | `ATTRIBUTE_BINDINGS`, `ATTRIBUTE_FUSION_POLICIES` |
 | `INPUT_OBJECT_ID` | `INPUT_OBJECT_TYPE` | `METRIC_INPUTS` |

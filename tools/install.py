@@ -331,6 +331,51 @@ def discover_published_schemas(con: object) -> list[str]:
     return schemas
 
 
+# Tables that changed name, oldest first. `SYS_SEMANTIC` has no schema-version
+# column and every table is created with `CREATE TABLE IF NOT EXISTS`, so a
+# rename would otherwise leave an upgraded deployment with the old table holding
+# the rows and a new empty one beside it.
+#
+# `RENAME TABLE` is the right instrument rather than create-and-copy: it carries
+# the rows *and the identity counter*. Inserting explicit ids into an IDENTITY
+# column does not advance the generator — verified against Exasol — so a copy
+# migration would hand out ids that collide with the ones it just restored.
+#
+# Guarded on both sides, so this is a no-op on a fresh install (neither table
+# exists) and on a re-install (only the new one does).
+RENAMED_TABLES = [
+    ("AGENT_SUGGESTIONS", "MODEL_EVOLUTION_SUGGESTIONS"),
+    ("AGENT_SUGGESTION_REVIEWS", "MODEL_EVOLUTION_REVIEWS"),
+    ("AGENT_SUGGESTION_TARGETS", "MODEL_EVOLUTION_TARGETS"),
+]
+
+
+def table_exists(con: object, schema: str, table: str) -> bool:
+    rows = con.execute(
+        "SELECT 1 FROM SYS.EXA_ALL_TABLES "
+        f"WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'"
+    ).fetchall()
+    return bool(rows)
+
+
+def migrate_renamed_tables(con: object) -> list[str]:
+    """Carry an existing catalog across a table rename. Returns what it moved."""
+    moved = []
+    for old, new in RENAMED_TABLES:
+        if not table_exists(con, "SYS_SEMANTIC", old):
+            continue
+        if table_exists(con, "SYS_SEMANTIC", new):
+            # Both present: a previous run was interrupted between the rename and
+            # the drop, or someone recreated the old name. The new table is
+            # authoritative, so retire the predecessor rather than guess.
+            con.execute(f"DROP TABLE IF EXISTS SYS_SEMANTIC.{old} CASCADE")
+            moved.append(f"{old} (dropped; {new} already present)")
+            continue
+        con.execute(f"RENAME TABLE SYS_SEMANTIC.{old} TO {new}")
+        moved.append(f"{old} -> {new}")
+    return moved
+
+
 def reset_statements(con: object) -> list[str]:
     dynamic = []
     seen = set(RESET_SCHEMA_NAMES)
@@ -531,6 +576,8 @@ def main() -> int:
     step += 1
     print(f"\n[{step}/{total_steps}] Installing {len(INSTALL_FILES)} SQL files")
     t_install = time.monotonic()
+    for moved in migrate_renamed_tables(con):
+        print(f"      {dim('migrated ' + moved)}")
     run_sql_files(con, INSTALL_FILES, "install")
     install_elapsed = time.monotonic() - t_install
 

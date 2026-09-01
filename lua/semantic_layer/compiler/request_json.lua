@@ -175,7 +175,7 @@ do
                 return "Metric '" .. metric_name .. "' uses " .. aggregate
                     .. ", which has no mergeable aggregate state; entity '"
                     .. tostring(failure.entity_name)
-                    .. "' is partitioned (F3 supports SUM and COUNT). Remove the metric "
+                    .. "' is partitioned (partition fusion supports SUM and COUNT). Remove the metric "
                     .. "from this request or express it using mergeable SUM/COUNT states."
             end
             return "Metric '" .. metric_name .. "' uses " .. aggregate
@@ -190,7 +190,7 @@ do
                 .. "' resolves to partitioned entity '"
                 .. tostring(failure.entity_name or failure.entity_id or "unknown")
                 .. "', which is used here only as a joined dimension. Partitioned joined "
-                .. "dimensions are not supported in F3."
+                .. "dimensions are not supported by partition fusion."
         end
         if reason == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
             local entity_name = tostring(failure.entity_name
@@ -198,9 +198,9 @@ do
             local via = failure.path == nil and ""
                 or " (join path: " .. tostring(failure.path) .. ")"
             return "Entity '" .. entity_name
-                .. "' carries F3 temporal coverage and is traversed as an"
+                .. "' carries temporal coverage and is traversed as an"
                 .. " intermediate join on the way to a requested field" .. via
-                .. ". F3 expands partitions only where the entity is a metric's own"
+                .. ". Partition fusion expands partitions only where the entity is a metric's own"
                 .. " leaf, so joining through it would read the primary partition"
                 .. " alone and silently omit the others. Request this field from a"
                 .. " semantic object rooted at '" .. entity_name
@@ -2476,11 +2476,13 @@ local function log_request(result, request_json, request, model)
     local metrics = request and request.metrics or {}
     query([[
         INSERT INTO SYS_SEMANTIC.AGENT_REQUEST_LOG (
-          MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, REQUEST_JSON, GENERATED_SQL,
+          MODEL_ID, VERSION_ID, CLIENT_NAME, PURPOSE, NATURAL_LANGUAGE_TEXT,
+          REQUEST_JSON, GENERATED_SQL,
           PLAN_JSON, REQUESTED_METRICS, REQUESTED_DIMENSIONS, STATUS, ERROR_CODE, ERROR_MESSAGE,
           CACHE_HIT, FINISHED_AT, RUNTIME_MS
         ) VALUES (
-          :model_id, :version_id, :client_name, :purpose, :request_json, :generated_sql,
+          :model_id, :version_id, :client_name, :purpose, :natural_language_text,
+          :request_json, :generated_sql,
           :plan_json, :requested_metrics, :requested_dimensions, :status, :error_code, :error_message,
           :cache_hit, CURRENT_TIMESTAMP, :runtime_ms
         )
@@ -2489,6 +2491,11 @@ local function log_request(result, request_json, request, model)
         version_id = null_if_missing(request_version_id),
         client_name = request and null_if_missing(request.client) or null,
         purpose = request and null_if_missing(request.purpose) or null,
+        -- COMPILE_REQUEST_SCHEMA_FOR_AGENT tells an agent that
+        -- `natural_language_text` is "retained as request metadata", and the
+        -- column exists to hold it. The INSERT omitted it, so the promise was
+        -- kept only accidentally, by REQUEST_JSON storing the request whole.
+        natural_language_text = request and null_if_missing(request.natural_language_text) or null,
         request_json = null_if_missing(request_json),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
@@ -3051,7 +3058,7 @@ local function compile_request_table(request, options)
     if typed_plan.plan_kind == "MULTI_BRANCH" then
         if ctx.has_fact_fusion then
             return plan_error("_074",
-                "F4 fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
+                "Fact reconciliation is not supported in a multi-fact branch plan; split the request or model a pre-reconciled canonical measure source.")
         end
         -- Safeguards tighten only: min() with the deployment default, so a
         -- request can ask to fail earlier but never later.

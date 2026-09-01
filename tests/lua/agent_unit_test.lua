@@ -351,7 +351,7 @@ test("agent feedback links the correct handle and optional suggestion", function
             return {}
         elseif contains(sql, "SELECT MAX(FEEDBACK_ID)") then
             return {{501}}
-        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTIONS") then
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS") then
             suggestion_params = params
             return {}
         elseif contains(sql, "SELECT MAX(SUGGESTION_ID)") then
@@ -383,15 +383,15 @@ test("F7 evolution proposals are typed versioned and idempotent", function()
                 PUBLISHED_SCHEMA = "SEMANTIC_SALES"}}
         elseif contains(sql, "SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES") then
             return {{20}}
-        elseif contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS")
+        elseif contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS")
             and contains(sql, "REVIEW_STATUS = 'PENDING'") then
             return duplicate and {{SUGGESTION_ID = 701}} or {}
-        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTIONS") then
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS") then
             inserted = params
             return {}
         elseif contains(sql, "SELECT MAX(SUGGESTION_ID)") then
             return {{701}}
-        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_TARGETS") then
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_TARGETS") then
             target_insert = params
             return {}
         end
@@ -457,14 +457,14 @@ test("F7 human review certifies without catalog activation", function()
     local review_insert = nil
     local suggestion_update = nil
     local function mock(sql, params)
-        if contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s") then
+        if contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s") then
             return {{MODEL_ID = 1, VERSION_ID = 2, SUGGESTION_KIND = "DRIFT_REPAIR",
                 OBJECT_TYPE = "ENTITY", OBJECT_ID = 20, REVIEW_STATUS = "PENDING",
                 MODEL_NAME = "sales", ACTIVE_VERSION_ID = 2}}
-        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_REVIEWS") then
+        elseif contains(sql, "INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS") then
             review_insert = params
             return {}
-        elseif contains(sql, "UPDATE SYS_SEMANTIC.AGENT_SUGGESTIONS") then
+        elseif contains(sql, "UPDATE SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS") then
             suggestion_update = params
             return {}
         elseif contains(sql, "SELECT CURRENT_USER") then
@@ -495,7 +495,7 @@ test("F7 review rejects stale certification and repeated decisions", function()
         end, "evolution suggestion not found")
     end)
     with_query(function(sql)
-        if contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s") then
+        if contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s") then
             return {{1, 2, "NEW_CONCEPT", "METRIC", null, "PENDING",
                 "sales", 3}}
         end
@@ -506,7 +506,7 @@ test("F7 review rejects stale certification and repeated decisions", function()
         end, "cannot certify a stale evolution suggestion")
     end)
     with_query(function(sql)
-        if contains(sql, "FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s") then
+        if contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s") then
             return {{1, 2, "NEW_CONCEPT", "METRIC", null, "REJECTED",
                 "sales", 2}}
         end

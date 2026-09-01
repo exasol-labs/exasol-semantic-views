@@ -1298,7 +1298,8 @@ local function validate_partition_coverage(ctx, entity)
     if #(ctx.metrics or {}) > 0 and not entity_has_base_metric(ctx, entity) then
         add_issue(ctx, "ERROR", "ENTITY", entity_name, "SEMANTIC_MODEL_043",
             "Partitioned entity '" .. entity_name
-                .. "' is the base entity of no active metric. F3 UNION fusion applies only "
+                .. "' is the base entity of no active metric. Temporal partition fusion "
+                .. "applies only "
                 .. "to metric-leaf entities; partitioned joined dimensions are unsupported. "
                 .. "Remove the coverage declarations or define a metric based on this entity.")
     end
@@ -1528,9 +1529,10 @@ local function alternate_representation_remedy(ctx, names)
             .. " the representation with REMOVE_ENTITY_REPRESENTATION."
     end
     return " " .. subject .. " is registered but not yet usable, and blocks"
-        .. " unrelated authoring until it is. Complete the declaration (F3"
+        .. " unrelated authoring until it is. Complete the declaration (temporal"
         .. " coverage with SET_REPRESENTATION_COVERAGE_BATCH, attribute bindings"
-        .. " with ADD_ATTRIBUTE_BINDING, or a certified F5 identity), or remove"
+        .. " with ADD_ATTRIBUTE_BINDING, or a certified semantic identity), or"
+        .. " remove"
         .. " it with REMOVE_ENTITY_REPRESENTATION."
 end
 
@@ -1540,7 +1542,61 @@ local function representation_suffix(names)
 end
 
 local function identity_binding_remedy()
-    return " F2 attribute bindings do not remap identity or joins. Use a certified F5 semantic identity for representation-local entity keys; relationship join columns still require canonical source views."
+    return " Attribute bindings do not remap identity or joins. Use a certified semantic identity for representation-local entity keys; relationship join columns still require canonical source views."
+end
+
+-- MODEL_ID is functionally determined by VERSION_ID -- MODEL_VERSIONS maps a
+-- version to exactly one model -- and stored anyway on 29 tables, because
+-- almost every read filters by model and the join would be on every one of
+-- them. That trade is worth making. What it costs is that the invariant "this
+-- row's MODEL_ID is its version's MODEL_ID" is held up entirely by 29 tables'
+-- worth of INSERT statements each remembering to pass both, plus
+-- shared/catalog_rollback.lua restoring both from a snapshot. Exasol's foreign
+-- keys are declared DISABLE by design, so the engine will not catch a
+-- disagreement, and a row filed under the wrong model is invisible: it simply
+-- stops being read, or starts being read by the wrong model.
+--
+-- The table list is derived, not restated. A new catalog table carrying both
+-- columns is checked the day it is added, without anyone remembering to append
+-- it here -- which is the only way a 29-name list stays correct.
+local function validate_catalog_integrity(ctx)
+    local tables = query([[
+        SELECT COLUMN_TABLE
+        FROM SYS.EXA_ALL_COLUMNS
+        WHERE COLUMN_SCHEMA = 'SYS_SEMANTIC'
+          AND COLUMN_NAME IN ('MODEL_ID', 'VERSION_ID')
+          AND COLUMN_OBJECT_TYPE = 'TABLE'
+        GROUP BY COLUMN_TABLE
+        HAVING COUNT(DISTINCT COLUMN_NAME) = 2
+        ORDER BY COLUMN_TABLE
+    ]])
+    if tables == nil or #tables == 0 then
+        return
+    end
+    local branches = {}
+    for _, row in ipairs(tables) do
+        local table_name = tostring(row_value(row, "COLUMN_TABLE", 1))
+        branches[#branches + 1] = "SELECT '" .. table_name .. "' AS CATALOG_TABLE,"
+            .. " COUNT(*) AS MISMATCH_COUNT FROM SYS_SEMANTIC." .. table_name
+            .. " WHERE (VERSION_ID = :version_id AND MODEL_ID <> :model_id)"
+            .. " OR (MODEL_ID = :model_id AND VERSION_ID NOT IN ("
+            .. "SELECT VERSION_ID FROM SYS_SEMANTIC.MODEL_VERSIONS"
+            .. " WHERE MODEL_ID = :model_id))"
+    end
+    local mismatches = query(
+        "SELECT CATALOG_TABLE, MISMATCH_COUNT FROM ("
+        .. table.concat(branches, " UNION ALL ")
+        .. ") WHERE MISMATCH_COUNT > 0 ORDER BY CATALOG_TABLE",
+        {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(mismatches or {}) do
+        local table_name = tostring(row_value(row, "CATALOG_TABLE", 1))
+        add_issue(ctx, "ERROR", "MODEL", ctx.model_name, "SEMANTIC_MODEL_062",
+            "Catalog corruption in SYS_SEMANTIC." .. table_name .. ": "
+            .. tostring(row_value(row, "MISMATCH_COUNT", 2))
+            .. " row(s) name a MODEL_ID that disagrees with the model their "
+            .. "VERSION_ID belongs to. A row filed under the wrong model is not "
+            .. "read by either. Repair the rows before publishing.")
+    end
 end
 
 local function validate_structural_rules(ctx)
@@ -1583,19 +1639,19 @@ local function validate_structural_rules(ctx)
                 "SEMANTIC_MODEL_036", "Representation references a missing entity.")
         elseif upper(representation.alias) ~= upper(entity.alias) then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "F1 representations must use the entity's stable source alias: "
+                "SEMANTIC_MODEL_036", "Representations must use the entity's stable source alias: "
                     .. tostring(entity.alias) .. ".")
         end
         local source_kind = upper(representation.source_kind)
         if source_kind ~= "RELATION" and source_kind ~= "VIRTUAL_SCHEMA" then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "Unsupported F1 source kind: "
+                "SEMANTIC_MODEL_036", "Unsupported representation source kind: "
                     .. tostring(representation.source_kind) .. ".")
         end
         local role = upper(representation.role)
         if role ~= "PRIMARY" and role ~= "ALTERNATE" then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
-                "SEMANTIC_MODEL_036", "Unsupported F1 representation role: "
+                "SEMANTIC_MODEL_036", "Unsupported representation role: "
                     .. tostring(representation.role) .. ".")
         end
         local priority = tonumber(representation.priority)
@@ -1986,7 +2042,7 @@ local function validate_semantic_identities(ctx)
                     or not missing(representation.valid_from)
                     or not missing(representation.valid_to) then
                     add_issue(ctx, "ERROR", "SEMANTIC_IDENTITY", object_name,
-                        "SEMANTIC_MODEL_047", "F5 semantic identity cannot be combined with F3 representation coverage on the same entity.")
+                        "SEMANTIC_MODEL_047", "A semantic identity cannot be combined with temporal representation coverage on the same entity.")
                     break
                 end
             end
@@ -2268,7 +2324,7 @@ local function validate_representation_data_equivalence(ctx)
             if #unique_keys == 0 then
                 add_issue(ctx, "ERROR", "ENTITY", entity.name,
                     "SEMANTIC_MODEL_037",
-                    "Multiple F1 representations require at least one declared unique key to prove grain and identity equivalence.")
+                    "Multiple representations require at least one declared unique key to prove grain and identity equivalence.")
             end
             local primary = entity.primary_representation
             local partitioned = entity_uses_partition_fusion(ctx, entity)
@@ -2437,7 +2493,7 @@ local function validate_relationship_key_mappings(ctx)
             add_issue(ctx, "WARNING", "RELATIONSHIP", relationship.name,
                 "SEMANTIC_MODEL_050", "Relationship candidate excludes " .. side
                     .. " representation(s): " .. table.concat(unavailable, ", ")
-                    .. "; the endpoint key is absent and no anchored DIRECT F5 identity remap is available.")
+                    .. "; the endpoint key is absent and no anchored DIRECT identity remap is available.")
         end
     end
 
@@ -3531,7 +3587,8 @@ local function validate_metric_plannability(ctx)
                     add_issue(ctx, "ERROR", "METRIC", metric.name, "SEMANTIC_MODEL_057",
                         "Metric uses " .. aggregate .. ", which has no mergeable aggregate"
                             .. " state; entity '" .. partitioned_name .. "' is partitioned"
-                            .. " (F3 supports SUM and COUNT), so the metric can never be"
+                            .. " (partition fusion supports SUM and COUNT), so the metric can"
+                            .. " never be"
                             .. " compiled. Express it with mergeable SUM/COUNT states -- a"
                             .. " RATIO of two such metrics is exact.")
                 elseif #(node.leaf_entity_ids or {}) > 1 then
@@ -3890,8 +3947,9 @@ local function validate_visible_metric_dimension_pairs(ctx)
             elseif matrix_row.reason_code == "FUSION_PARTITION_JOIN_UNSUPPORTED" then
                 local hop = matrix_row.partition_hop_name or "an intermediate entity"
                 message = message .. " Entity '" .. tostring(hop)
-                    .. "' carries F3 temporal coverage and sits on the join path"
-                    .. " between them. F3 expands partitions only where the"
+                    .. "' carries temporal coverage and sits on the join path"
+                    .. " between them. Partition fusion expands partitions only"
+                    .. " where the"
                     .. " entity is a metric's own leaf, so joining through it"
                     .. " would read its primary partition alone and silently omit"
                     .. " the others. Expose this dimension alongside metrics"
@@ -3903,7 +3961,7 @@ local function validate_visible_metric_dimension_pairs(ctx)
                     and (ctx.entity_name_by_id[key(dimension.entity_id)]
                         or tostring(dimension.entity_id)) or "the dimension's entity"
                 message = message .. " Entity '" .. dimension_entity_name
-                    .. "' carries F3 temporal coverage, and F3 applies only to an"
+                    .. "' carries temporal coverage, which applies only to an"
                     .. " entity a metric is based on. Expose this dimension only"
                     .. " alongside metrics based at '" .. dimension_entity_name
                     .. "', in this or a separate semantic object, or remove the"
@@ -3964,6 +4022,7 @@ function M.validate_model(model_name_arg)
     local model_loaded = load_model(ctx, model_name_arg)
     if model_loaded then
         load_catalog(ctx)
+        validate_catalog_integrity(ctx)
         validate_structural_rules(ctx)
         validate_custom_extensions(ctx)
         validate_semantic_identities(ctx)
@@ -4018,6 +4077,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         extract_json_array_values = extract_json_array_values,
         source_object_exists = source_object_exists,
         source_column_exists = source_column_exists,
+        validate_catalog_integrity = validate_catalog_integrity,
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
         parse_partition_predicate = parse_partition_predicate,

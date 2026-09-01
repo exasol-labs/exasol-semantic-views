@@ -715,8 +715,6 @@ or external files:
   `MEASURE`, `NUMERATOR`, and `DENOMINATOR`.
 - `METRIC_FILTERS`: semantic filters, resolved SQL filters, and required filter
   dimensions.
-- `CALCULATION_GROUPS` and `CALCULATION_ITEMS`: reserved calculation-item
-  metadata. They are persisted but are not currently consumed by compilation.
 
 Human-oriented views:
 
@@ -724,7 +722,6 @@ Human-oriented views:
 - `SEMANTIC_CATALOG.METRIC_LINEAGE`
 - `SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS`
 - `SEMANTIC_CATALOG.METRIC_FILTER_OVERVIEW`
-- `SEMANTIC_CATALOG.SEMANTIC_DEFINITION_SOURCE`
 - `SEMANTIC_CATALOG.MODEL_EVOLUTION_SUGGESTIONS`
 - `SEMANTIC_CATALOG.MODEL_EVOLUTION_REVIEWS`
 
@@ -992,7 +989,7 @@ resolve to a sibling view in the caller's own schema where one exists, because a
 caller granted only `SEMANTIC_CATALOG` cannot follow an edge into
 `SYS_SEMANTIC`. Column names that are polymorphic anywhere in the catalog are
 excluded from this inference — `OBJECT_ID` means `SEMANTIC_OBJECTS` in
-`OBJECT_COLUMNS` but is discriminated in `OBJECT_PRIVILEGES` — so those edges
+`OBJECT_COLUMNS` but is discriminated in `MATERIALIZATION_COLUMNS` — so those edges
 come from the `DISCRIMINATED` rows instead of a guess that would be wrong half
 the time.
 

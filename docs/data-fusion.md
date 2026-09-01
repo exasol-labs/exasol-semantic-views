@@ -156,6 +156,11 @@ Three properties are non-negotiable:
 
 ## Vocabulary
 
+*Attribute* here means a dimension **or a fact** — never a metric, because a
+metric is computed from other model objects and is never read from a column. It
+is not a synonym for *field*, which covers dimensions and metrics; see
+[the collective nouns](glossary.md#the-collective-nouns).
+
 The fusion nouns — representation, coverage predicate, attribute binding,
 attribute fusion policy, authority, semantic identity, identity binding, mapping
 relation — are defined once in **[the glossary](glossary.md#the-nouns-fusion-adds)**,

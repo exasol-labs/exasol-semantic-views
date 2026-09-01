@@ -140,32 +140,13 @@ JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
  AND so.VERSION_ID = m.VERSION_ID
 LEFT JOIN SYS_SEMANTIC.ENTITIES re
   ON re.ENTITY_ID = so.ROOT_ENTITY_ID
-WHERE so.STATUS = 'ACTIVE'
-  AND (
-    NOT EXISTS (
-      SELECT 1
-      FROM SYS_SEMANTIC.OBJECT_PRIVILEGES op
-      WHERE op.MODEL_ID = so.MODEL_ID
-        AND op.VERSION_ID = so.VERSION_ID
-        AND op.PRIVILEGE = 'USE'
-        AND (
-          (op.OBJECT_TYPE = 'MODEL' AND op.OBJECT_ID = so.MODEL_ID)
-          OR (op.OBJECT_TYPE = 'SEMANTIC_OBJECT' AND op.OBJECT_ID = so.OBJECT_ID)
-        )
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM SYS_SEMANTIC.OBJECT_PRIVILEGES op
-      WHERE op.MODEL_ID = so.MODEL_ID
-        AND op.VERSION_ID = so.VERSION_ID
-        AND op.PRIVILEGE = 'USE'
-        AND op.GRANTEE_NAME IN (CURRENT_USER, 'PUBLIC')
-        AND (
-          (op.OBJECT_TYPE = 'MODEL' AND op.OBJECT_ID = so.MODEL_ID)
-          OR (op.OBJECT_TYPE = 'SEMANTIC_OBJECT' AND op.OBJECT_ID = so.OBJECT_ID)
-        )
-    )
-  );
+-- What an agent may see is decided by what it may read: MODELS_FOR_AGENT is
+-- reached through SEMANTIC_AGENT, and the published schema through Exasol's own
+-- grants. There used to be a second, semantic-layer ACL here over
+-- OBJECT_PRIVILEGES -- allow unless a grant exists, then allow only the
+-- grantees. No script could ever write that table, so the first branch always
+-- won and the whole clause meant TRUE. See 001 for why it is gone.
+WHERE so.STATUS = 'ACTIVE';
 
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.FIELDS_FOR_AGENT AS
 SELECT
@@ -1806,7 +1787,7 @@ function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
     end
     local duplicate = query([[
         SELECT SUGGESTION_ID
-        FROM SYS_SEMANTIC.AGENT_SUGGESTIONS
+        FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND SUGGESTION_KIND = :suggestion_kind
@@ -1825,7 +1806,7 @@ function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
             "PENDING", true}}
     end
     query([[
-        INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTIONS (
+        INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS (
           MODEL_ID, VERSION_ID, SUGGESTION_KIND, OBJECT_TYPE, OBJECT_ID,
           PROPOSED_CHANGE_JSON, RATIONALE, REVIEW_STATUS
         ) VALUES (
@@ -1836,10 +1817,10 @@ function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
         suggestion_kind = suggestion_kind, object_type = object_type,
         object_id = object_id, proposed_change_json = proposed_change_json,
         rationale = tostring(rationale_arg)})
-    local suggestion_id = latest_id("SYS_SEMANTIC.AGENT_SUGGESTIONS",
+    local suggestion_id = latest_id("SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS",
         "SUGGESTION_ID")
     query([[
-        INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_TARGETS (
+        INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_TARGETS (
           SUGGESTION_ID, OBJECT_NAME
         ) VALUES (:suggestion_id, :object_name)
     ]], {suggestion_id = suggestion_id, object_name = object_name})
@@ -1861,7 +1842,7 @@ function M.review_model_evolution(suggestion_id_arg, decision_arg, review_note_a
     local rows = query([[
         SELECT s.MODEL_ID, s.VERSION_ID, s.SUGGESTION_KIND, s.OBJECT_TYPE,
                s.OBJECT_ID, s.REVIEW_STATUS, m.MODEL_NAME, m.ACTIVE_VERSION_ID
-        FROM SYS_SEMANTIC.AGENT_SUGGESTIONS s
+        FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s
         LEFT JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = s.MODEL_ID
         WHERE s.SUGGESTION_ID = :suggestion_id
     ]], {suggestion_id = suggestion_id})
@@ -1883,13 +1864,13 @@ function M.review_model_evolution(suggestion_id_arg, decision_arg, review_note_a
             .. ", active version=" .. tostring(active_version_id))
     end
     query([[
-        INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTION_REVIEWS (
+        INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS (
           SUGGESTION_ID, DECISION, REVIEW_NOTE
         ) VALUES (:suggestion_id, :decision, :review_note)
     ]], {suggestion_id = suggestion_id, decision = decision,
         review_note = tostring(review_note_arg)})
     query([[
-        UPDATE SYS_SEMANTIC.AGENT_SUGGESTIONS
+        UPDATE SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
         SET REVIEW_STATUS = :decision,
             REVIEWED_AT = CURRENT_TIMESTAMP,
             REVIEWED_BY = CURRENT_USER
@@ -2505,7 +2486,7 @@ function M.record_agent_feedback(handle_type_arg, handle_id_arg, verdict_arg, co
     local suggestion_id = null
     if not missing(proposed_change_json_arg) then
         query([[
-            INSERT INTO SYS_SEMANTIC.AGENT_SUGGESTIONS (
+            INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS (
               MODEL_ID, VERSION_ID, AGENT_REQUEST_ID, QUERY_LOG_ID, FEEDBACK_ID,
               SUGGESTION_KIND, OBJECT_TYPE, OBJECT_ID, PROPOSED_CHANGE_JSON,
               RATIONALE, REVIEW_STATUS
@@ -2523,7 +2504,7 @@ function M.record_agent_feedback(handle_type_arg, handle_id_arg, verdict_arg, co
             proposed_change_json = tostring(proposed_change_json_arg),
             rationale = optional_text(comment_text_arg),
         })
-        suggestion_id = latest_id("SYS_SEMANTIC.AGENT_SUGGESTIONS", "SUGGESTION_ID")
+        suggestion_id = latest_id("SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS", "SUGGESTION_ID")
     end
     return {{
         feedback_id,

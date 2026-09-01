@@ -111,7 +111,7 @@ def check_fusion_layer_blocks_a_lossless_export(con: Any) -> None:
         present = osi.uncarried_concepts(con, model)
         labels = {label for label, _, _ in present}
         assert_true("authority declaration is detected",
-                    "authority declarations (F4)" in labels)
+                    "authority declarations" in labels)
         assert_true("alternate representation is detected",
                     "alternate representations" in labels)
 
@@ -124,7 +124,7 @@ def check_fusion_layer_blocks_a_lossless_export(con: Any) -> None:
         else:
             raise AssertionError("lossless export of a fused model was not refused")
         assert_true("refusal names the authority declaration",
-                    "authority declarations (F4)" in message)
+                    "authority declarations" in message)
         assert_true("refusal names the companion export",
                     "EXPORT_FUSION_DECLARATION" in message)
         assert_true("refusal names the override", "--allow-lossy" in message)

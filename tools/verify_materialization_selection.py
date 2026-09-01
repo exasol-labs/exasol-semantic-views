@@ -293,7 +293,7 @@ def main() -> int:
         assert_equal("explain query materialization", explain_query[0][12], "sales_revenue_by_region")
 
         materialization_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MATERIALIZATIONS")
-        suggestion_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_SUGGESTIONS")
+        suggestion_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS")
         feedback = fetchall(
             con,
             "EXECUTE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK("
@@ -304,7 +304,7 @@ def main() -> int:
         assert_equal("materialized feedback pending", feedback[0][5], "PENDING")
         assert_equal(
             "feedback suggestion on materialized query",
-            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_SUGGESTIONS"),
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS"),
             suggestion_count_before + 1,
         )
         assert_equal(

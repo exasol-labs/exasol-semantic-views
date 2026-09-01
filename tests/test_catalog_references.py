@@ -79,7 +79,9 @@ class CatalogTableParsingTest(unittest.TestCase):
 
     def test_ddl_parses_into_tables_with_columns(self) -> None:
         tables = parse_catalog_tables(CATALOG_DDL)
-        self.assertGreaterEqual(len(tables), 45)
+        # 42 after CALCULATION_GROUPS, CALCULATION_ITEMS and OBJECT_PRIVILEGES
+        # were dropped: each was declared for a feature that was never built.
+        self.assertGreaterEqual(len(tables), 42)
         # Spot-check shapes the other tests depend on.
         self.assertIn("MODEL_ID", tables["MODELS"])
         self.assertIn("IDENTITY_ID", tables["SEMANTIC_IDENTITIES"])

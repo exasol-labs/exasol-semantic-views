@@ -132,6 +132,44 @@ def object_columns(con) -> list[tuple[str, str, int, bool]]:
     return [(row[0], row[1], int(row[2]), bool(row[3])) for row in rows]
 
 
+# Presentation metadata the ADD_* scripts have no parameter for.
+#
+# osi.py has always *exported* format_hint, unit_hint, sensitivity_label and
+# display_policy for both field kinds and listed them as importable native
+# keys, but nothing applied them coming back in -- and nothing in the catalog
+# could set them either, so every export carried them absent and the loss was
+# invisible. A document authored elsewhere, by hand or by another
+# implementation of the profile, lost them silently. Batch apply patches them
+# in now; script apply still cannot, and says so with OSI_IMPORT_120. This
+# injects real values into the exported document so the batch lane is checked
+# against something, rather than against four NULLs that would match either way.
+PRESENTATION_PROBE = {
+    "FACT": {"format_hint": "#,##0.00", "unit_hint": "USD",
+             "sensitivity_label": "INTERNAL", "display_policy": "SHOW"},
+    "DIMENSION": {"format_hint": "@", "unit_hint": "text",
+                  "sensitivity_label": "PII", "display_policy": "MASK"},
+}
+
+
+def inject_presentation_metadata(document: dict[str, Any]) -> dict[str, tuple[str, dict]]:
+    """Stamp one dimension and one fact, and say which names were stamped."""
+    stamped: dict[str, tuple[str, dict]] = {}
+    for model in document.get("semantic_model", []):
+        for dataset in model.get("datasets", []):
+            for field in dataset.get("fields", []):
+                for extension in field.get("custom_extensions", []):
+                    if extension.get("vendor_name") != "EXASOL":
+                        continue
+                    data = json.loads(extension["data"])
+                    kind = str(data.get("field_kind", "")).upper()
+                    if kind not in PRESENTATION_PROBE or kind in stamped:
+                        continue
+                    data.update(PRESENTATION_PROBE[kind])
+                    extension["data"] = json.dumps(data)
+                    stamped[kind] = (str(field["name"]), PRESENTATION_PROBE[kind])
+    return stamped
+
+
 def main() -> int:
     con = connect()
     try:
@@ -145,11 +183,31 @@ def main() -> int:
         # warning rather than none. A second code here is a real regression.
         assert_equal("source export warning codes",
                      [item["code"] for item in warnings], ["OSI_EXPORT_050"])
+        stamped = inject_presentation_metadata(document)
+        assert_equal("presentation probe covers both field kinds",
+                     sorted(stamped), ["DIMENSION", "FACT"])
+
         plan = make_plan(document)
         assert_equal("batch plan status", plan["status"], "ok")
 
         result = apply_batch(con, plan)
         assert_equal("batch apply status", result["status"], "ok")
+
+        for kind, (field_name, expected) in sorted(stamped.items()):
+            surface = "DIMENSIONS" if kind == "DIMENSION" else "FACTS"
+            name_column = "DIMENSION_NAME" if kind == "DIMENSION" else "FACT_NAME"
+            assert_equal(
+                f"{kind.lower()} presentation metadata survives a batch import",
+                fetchall(
+                    con,
+                    "SELECT FORMAT_HINT, UNIT_HINT, SENSITIVITY_LABEL, DISPLAY_POLICY "
+                    f"FROM SEMANTIC_CATALOG.{surface} "
+                    f"WHERE MODEL_NAME = {sql_string(TARGET_MODEL)} "
+                    f"AND {name_column} = {sql_string(field_name)}",
+                ),
+                [(expected["format_hint"], expected["unit_hint"],
+                  expected["sensitivity_label"], expected["display_policy"])],
+            )
         assert_equal("batch apply mode", result["apply_mode"], "batch")
         assert_true("batch rows returned", len(result["batch_rows"]) >= len(plan["operations"]))
         operation_row = result["batch_rows"][0]

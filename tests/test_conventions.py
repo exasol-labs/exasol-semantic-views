@@ -387,7 +387,7 @@ class DerivedNotDeclared(unittest.TestCase):
     The view infers view-to-table edges by matching a view's column name against
     the declared foreign-key columns, which only works for names that mean one
     thing. Polymorphic names -- OBJECT_ID is SEMANTIC_OBJECTS in OBJECT_COLUMNS
-    but discriminated in OBJECT_PRIVILEGES -- have to be excluded, and that
+    but discriminated in MATERIALIZATION_COLUMNS -- have to be excluded, and
     exclusion was a literal list of six names sitting a few lines above the
     `discriminated` table that already knew all six. Adding a discriminated
     column would have left its name asserting one bogus parent on every view
@@ -680,7 +680,7 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
 # announcement: the count of verifiers still rolling their own is pinned, may
 # shrink, and may not grow. Convert one when you next touch it —
 # `tools/verify_support.py` is the target and six verifiers already use it.
-PRIVATE_CONNECT = 53
+PRIVATE_CONNECT = 52
 
 # The reason renaming a verifier used to be risky, removed.
 #
@@ -863,33 +863,55 @@ class TermsAreDefinedOnce(unittest.TestCase):
                     broken.append(f"{page.name} -> {target} (no such heading)")
         self.assertEqual([], broken, "these documentation links go nowhere")
 
-    def test_every_refusal_label_the_runtime_emits_can_be_decoded(self):
-        """A refusal saying `F3` is only useful if F3 is written down somewhere.
+    def test_no_refusal_carries_a_bare_fusion_label(self):
+        """`F3` in a refusal is a lookup the reader should not have to do.
 
-        Derived from the Lua sources rather than pinned, so a new fusion level
-        that reaches a user-facing message has to reach the glossary too.
+        Nineteen runtime messages said things like "F5 semantic identity cannot
+        be combined with F3 representation coverage", while the catalog used the
+        numbers zero times and the only decode table lived in one document. The
+        names say what the refusal is about; the numbers require a trip to the
+        docs. They now read "a semantic identity cannot be combined with temporal
+        representation coverage".
         """
-        emitted = set()
+        offenders = []
         for path in (ROOT / "lua").rglob("*.lua"):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                # Per line, and excluding newlines from the literal, or the
-                # quote pairing shifts across statements and silently drops
-                # messages -- which it did on the first attempt at this test.
+            for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                # Per line, and excluding newlines from the literal, or the quote
+                # pairing runs across statements and silently drops messages --
+                # which it did on the first attempt at this test.
                 for message in re.findall(r'"([^"\n]*)"', line):
-                    emitted.update(re.findall(r"\bF([0-5])(?:\.\d+)?\b", message))
-        self.assertGreaterEqual(
-            len(emitted), 4,
-            f"only F{sorted(emitted)} found in runtime messages; the scan broke")
-
-        # Only the decode table counts. The section heading names F3 as an
-        # example, which would otherwise make F3's row unremovable-by-accident
-        # in the one direction this test is meant to catch.
-        rows = set(re.findall(r"^\| `F([0-5])`", self.text, re.M))
-        undecodable = sorted(emitted - rows)
+                    if re.search(r"\bF[0-5](?:\.\d+)?\b", message):
+                        offenders.append(f"{path.name}:{number}  {message[:60]}")
         self.assertEqual(
-            [], undecodable,
-            f"the runtime emits F{undecodable} in a message a user reads, and "
-            "the decode table in docs/glossary.md has no row for it")
+            [], offenders,
+            "these runtime messages carry a bare fusion label; use the name — "
+            "temporal coverage, semantic identity, partition fusion, attribute "
+            "bindings — which is what docs/glossary.md and docs/data-fusion.md "
+            "call them")
+
+    def test_the_labels_the_docs_still_use_can_be_decoded(self):
+        """The reference docs keep the numbers; the glossary has to decode them.
+
+        `semantic-catalog.md` heads its sections `F3`/`F4`/`F5` and the modeller
+        skill uses the labels throughout, so a reader still meets them — just not
+        in a refusal any more. Derived from those files, so a new label cannot
+        appear in the documentation without a row here.
+        """
+        used = set()
+        for path in (list((ROOT / "docs").glob("*.md"))
+                     + list((ROOT / "skills").rglob("*.md"))):
+            if path.name == "glossary.md":
+                continue
+            used.update(re.findall(r"\bF([0-5])(?:\.\d+)?\b",
+                                   path.read_text(encoding="utf-8")))
+        self.assertGreaterEqual(len(used), 5,
+                                f"only F{sorted(used)} found; the scan broke")
+        rows = set(re.findall(r"^\| `F([0-5])`", self.text, re.M))
+        self.assertEqual(
+            [], sorted(used - rows),
+            f"the documentation uses F{sorted(used - rows)} and the decode table "
+            "in docs/glossary.md has no row for it")
 
 
 if __name__ == "__main__":

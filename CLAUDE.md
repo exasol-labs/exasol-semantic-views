@@ -245,7 +245,7 @@ FROM SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS
 WHERE CHILD_SURFACE = 'METRIC_INPUTS' ORDER BY RELATIONSHIP_KIND, CHILD_COLUMN;
 ```
 
-The `SYS_SEMANTIC` tables carry 106 declared `FOREIGN KEY` constraints, all
+The `SYS_SEMANTIC` tables carry 101 declared `FOREIGN KEY` constraints, all
 created `DISABLE` — declared and visible in `EXA_ALL_CONSTRAINTS`, deliberately
 not enforced on write. Adding a table or an ID column means adding its FK to the
 declaration block at the end of

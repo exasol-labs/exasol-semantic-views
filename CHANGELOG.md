@@ -6,6 +6,142 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+#### One word for one concept in the catalog
+
+- **`AGENT_SUGGESTIONS` / `AGENT_SUGGESTION_REVIEWS` / `AGENT_SUGGESTION_TARGETS`
+  are now `MODEL_EVOLUTION_SUGGESTIONS` / `_REVIEWS` / `_TARGETS`.** The thing was
+  called a *suggestion* where it was stored and an *evolution* where it was read
+  (`SEMANTIC_CATALOG.MODEL_EVOLUTION_*`) and written (`PROPOSE_MODEL_EVOLUTION`,
+  `REVIEW_MODEL_EVOLUTION`), so a caller who used the script and then looked for
+  the table found nothing. The rename also restores the convention every other
+  table follows: the catalog view and the core table it exposes share a name.
+- Their seven foreign keys were renamed with them, so a constraint's name no
+  longer disagrees with the table it sits on.
+- **Upgrading carries the data.** `SYS_SEMANTIC` has no schema-version column and
+  every table is created with `CREATE TABLE IF NOT EXISTS`, so a bare rename
+  would have left an existing deployment holding its rows in the old table and a
+  new empty one beside it. `tools/install.py` now renames in place before running
+  the SQL, guarded on both sides so it is a no-op on a fresh install and on a
+  re-install. `RENAME TABLE` rather than create-and-copy, because it carries the
+  identity counter: inserting explicit ids into an IDENTITY column does not
+  advance the generator — verified against Exasol — so a copy migration would
+  hand out ids colliding with the ones it had just restored. 001 also drops the
+  predecessor constraint names, or an upgraded catalog would keep both.
+
+#### Refusals name the fusion level instead of numbering it
+
+- Nineteen runtime messages carried a bare `F0`–`F5` label — *"F5 semantic
+  identity cannot be combined with F3 representation coverage on the same
+  entity"* — while the catalog used the numbers **zero** times and the only
+  decode table lived in one document. They now read *"a semantic identity cannot
+  be combined with temporal representation coverage"*. Same for partition fusion,
+  attribute bindings, representation role and source kind, and fact
+  reconciliation.
+- The reference docs keep the labels — `semantic-catalog.md` heads sections `F3`,
+  `F4`, `F5` — and `docs/glossary.md` decodes them. A reader still meets a number;
+  just not while being refused.
+
+#### `field` is the canonical name for a queryable thing
+
+- `docs/agent-contract.md` now says so where a caller reads it: `field` is a
+  dimension or a metric and never a fact; `dimension`, `column` and `name` are
+  tolerated aliases; and `attribute` is a *different* collective noun covering
+  dimensions and facts, used only on the binding surfaces. `docs/data-fusion.md`
+  says the same where it uses the word.
+
+### Fixed
+
+#### The request log keeps the question it was given
+
+- **`natural_language_text` reaches its own column.**
+  `COMPILE_REQUEST_SCHEMA_FOR_AGENT` tells an agent the key is *"retained as
+  request metadata"*, and `AGENT_REQUEST_LOG.NATURAL_LANGUAGE_TEXT` exists to
+  hold it — but the `INSERT` omitted the column, so the promise was kept only
+  accidentally, by `REQUEST_JSON` storing the request whole. Anything reading the
+  dedicated column got `NULL`.
+
+#### An OSI batch import keeps a field's presentation metadata
+
+- `osi.py` has always **exported** `format_hint`, `unit_hint`,
+  `sensitivity_label` and `display_policy` for dimensions and facts, and listed
+  them as importable native keys — but nothing applied them coming back in.
+  `APPLY_NORMALIZED_OSI_IMPORT` now patches them in after the `ADD_*` script
+  runs, the way it already did for metrics, so a batch import is lossless for
+  them. `is_hidden` rides along: `ADD_DIMENSION` has no parameter for it, so an
+  imported hidden dimension used to come back visible.
+- **Script-mode apply still cannot**, and now says which keys it is dropping,
+  per field kind — `ADD_DIMENSION` does carry `format_hint`, and `FACTS` has no
+  `IS_HIDDEN`, so naming those would send a reader chasing a loss that did not
+  happen. The metric warning gained the same "apply in batch mode to keep it".
+
+### Added
+
+#### One check for an invariant 29 tables depend on
+
+- **`SEMANTIC_MODEL_062`** — a catalog row whose `MODEL_ID` disagrees with the
+  model its `VERSION_ID` belongs to. `MODEL_ID` is denormalised onto 29 tables
+  because almost every read filters by model; the join to `MODEL_VERSIONS` would
+  otherwise be on every one of them. That trade is worth making, but it leaves
+  the invariant held up entirely by every writer passing both columns
+  consistently — Exasol's foreign keys are declared `DISABLE` by design and
+  cannot catch a disagreement, and a row filed under the wrong model is read by
+  neither. The rule derives its table list from `EXA_ALL_COLUMNS`, so a new
+  catalog table carrying both columns is checked from the day it is added.
+
+### Removed
+
+- **`SEMANTIC_CATALOG.SEMANTIC_DEFINITION_SOURCE`** — a second name for
+  `SEMANTIC_DEFINITION_SOURCES`, one letter apart, returning the same fourteen
+  columns and the same rows. Two views for one thing is a trap for whoever finds
+  the wrong one first.
+- **`SYS_SEMANTIC.CALCULATION_GROUPS` and `CALCULATION_ITEMS`** — declared for a
+  calculation-item feature that was never built. Nothing wrote them, nothing read
+  them, and compilation never consulted them; they were documented as "persisted
+  but not currently consumed". Two nouns and three foreign keys standing for
+  behaviour that does not exist. Dropped rather than kept as a promise. They were
+  always empty, so an upgrade loses nothing.
+- **`SYS_SEMANTIC.OBJECT_PRIVILEGES`** — an object-level ACL nothing could
+  populate: eight of its ten columns had no writer anywhere in the product, and
+  no `GRANT` script reached it. `OBJECTS_FOR_AGENT` did read it, which made it
+  look live — but the filter was *deny only if a grant exists*, and since no
+  grant could exist it always evaluated to allow. Two dozen lines of SQL
+  enforcing nothing, plus a governance promise in a catalog an admin browses.
+  Access control that does work is Exasol's own: `PUBLISH_MODEL` grants on the
+  published schema and `MODEL_ROLE_GRANTS` records it.
+- **Three columns no code path could set**, each promising behaviour the product
+  does not have: `MODEL_VERSIONS.CATALOG_HASH` (nothing computed it) and
+  `AGENT_FEEDBACK.REVIEWED_AT` / `REVIEWED_BY` (a review workflow copied from
+  `MODEL_EVOLUTION_SUGGESTIONS`, where `REVIEW_MODEL_EVOLUTION` writes both, and
+  never built for feedback — which has no review queue and no reviewer script).
+  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing catalog, so 001 carries
+  an idempotent `DROP COLUMN IF EXISTS` block; the columns were always `NULL`.
+- Net: the catalog is 45 → 42 core tables, 46 → 44 catalog views, 475 → 462
+  columns and 106 → 101 declared foreign keys.
+
+### Testing
+
+- `RenamedTableMigrationTest` covers all four states the migration can meet: a
+  fresh install (no-op), an existing catalog (renamed in place, never copied), a
+  re-install (no-op), and a run interrupted between the rename and the drop
+  (resolves forward). A fifth check reads `001_create_semantic_catalog.sql` and
+  requires every rename target to still be declared and no rename source to be —
+  so a stale pair cannot rename into nothing.
+- Verified live end to end: a catalog staged in the pre-rename shape with rows in
+  all three tables was upgraded with `install.py` (no `--reset`); the rows
+  survived, the old names were gone, and the next `PROPOSE_MODEL_EVOLUTION` got a
+  fresh id rather than colliding.
+- `tools/osi.py`'s own concept labels — rendered into the `lossless` export
+  refusal — are checked for bare level numbers where they are declared. They were
+  the half of item 5 that a `lua/` grep could not see, and the live smoke run
+  found them.
+- The convention that every `F`-label the runtime emits must be decodable
+  **inverted**: the runtime now emits none, so the check is that no refusal
+  carries a bare label, plus a second check that every label the *documentation*
+  still uses has a row in the glossary's decode table. Both verified by breaking
+  them.
+
 ### Documentation
 
 #### `docs/glossary.md` — every term, defined once
