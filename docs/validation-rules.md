@@ -232,7 +232,7 @@ It is a closed set, matched case-insensitively and stored upper-case:
 **No value authorizes traversal.** The policy records what a modeler intends a
 planner to do if the technique is ever proven; it is not an allocation proof, so
 a many-to-many edge stays unsafe in both proof modes whatever the policy says
-(see [Grain-Aware Result Semantics](architecture-decisions/001-grain-aware-result-semantics.md)).
+(see [Three grains, kept distinct](glossary.md#three-grains-kept-distinct)).
 A relationship whose declared cardinality is not `MANY_TO_MANY` gains nothing
 from a policy either: traversal against the declared direction is refused as
 `ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED` with or without one.
@@ -400,7 +400,7 @@ path.
 `NO_SAFE_JOIN_PATH` means no semantic-object root can reach the metric base
 without traversing from the one-side to the many-side of a relationship. This
 prevents attributing one fact row to multiple dimension rows; see
-[Grain-Aware Result Semantics](architecture-decisions/001-grain-aware-result-semantics.md).
+[Three grains, kept distinct](glossary.md#three-grains-kept-distinct).
 Declare a semantic object rooted at the metric's base entity to establish that
 branch grain, or remove the metric from the incompatible object.
 

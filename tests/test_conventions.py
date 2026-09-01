@@ -29,6 +29,7 @@ pinned, the pinned state may shrink, and it may not grow. Same discipline as
   4. A catalog surface derives what it can look up instead of restating it.
   5. A routine is written once; a copy in a second module is pinned and shrinks.
   6. A verifier uses the shared host-side helpers, and the suite runs all of them.
+  7. A term is defined once, in the glossary, and the glossary stays complete.
 
 Each rule records what it cost when it was broken, because a convention with no
 story attached is the first thing dropped under deadline.
@@ -742,6 +743,153 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
         missing = sorted(named - set(self.verifiers) - {"verify_support.py"})
         self.assertEqual([], missing,
                          "tools/run_smoke.sh names verifiers that do not exist")
+
+
+# ---------------------------------------------------------------------------
+# 7. A term is defined once, and the glossary stays complete
+# ---------------------------------------------------------------------------
+
+# What the missing glossary cost. `grain` -- what one row of a relation
+# represents -- is the property every correctness rule in this layer is
+# ultimately about: fan-out refusals, metric plannability, the object-root check,
+# `STRICT_GRAIN` proof mode, half of docs/validation-rules.md. It appeared 130
+# times across the documentation and was defined nowhere, and a modeller met it
+# in their *second* call, as `ADD_ENTITY`'s GRAIN_DESCRIPTION.
+#
+# Meanwhile the one Vocabulary section that did exist -- in docs/data-fusion.md --
+# defined nine terms, every one of them an advanced fusion concept. The glossary
+# was inverted: the hard parts had one and the first steps did not.
+#
+# docs/glossary.md is now the single definitional home, and these tests keep it
+# honest in the two ways it can rot: a core term quietly disappearing, and a
+# refusal label appearing in the runtime that the glossary cannot decode.
+
+GLOSSARY = ROOT / "docs/glossary.md"
+
+# Terms that must always be defined. Not the whole glossary -- the entries a
+# reader needs before their first model, plus the three collective nouns whose
+# overlap is the thing most likely to be misread.
+REQUIRED_TERMS = {
+    "Grain", "Model", "Entity", "Semantic object", "Dimension", "Fact", "Metric",
+    "Relationship", "Unique key", "Materialization",
+    "Field", "Attribute", "Column",
+    "Representation", "Attribute binding", "Semantic identity", "Authority",
+}
+
+# Where a term was defined before the glossary existed. These sections were
+# lifted, not copied; if one comes back the product has two answers again.
+LIFTED_FROM = {
+    "docs/data-fusion.md": "glossary.md#the-nouns-fusion-adds",
+}
+
+
+class TermsAreDefinedOnce(unittest.TestCase):
+    """docs/glossary.md is the single definitional home for the vocabulary."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = GLOSSARY.read_text(encoding="utf-8")
+        # A definition is a bolded term leading a list item, a table row, or a
+        # paragraph -- `grain` earns a paragraph of its own, which is the point.
+        cls.defined = set(re.findall(r"^(?:[-|]\s*)?\*\*([^*]+)\*\*", cls.text, re.M))
+
+    def test_the_glossary_is_being_read(self):
+        self.assertGreater(len(self.defined), 20, sorted(self.defined))
+
+    def test_every_required_term_is_defined(self):
+        missing = sorted(REQUIRED_TERMS - self.defined)
+        self.assertEqual(
+            [], missing,
+            f"docs/glossary.md no longer defines {missing}. These are the terms a "
+            "reader needs before their first model; a term used across the "
+            "product and defined nowhere is what this rule exists to prevent")
+
+    def test_no_term_is_defined_twice(self):
+        duplicated = sorted({term for term in self.defined
+                             if len(re.findall(r"^(?:[-|]\s*)?\*\*" + re.escape(term)
+                                               + r"\*\*", self.text, re.M)) > 1})
+        self.assertEqual([], duplicated,
+                         "a term with two definitions has none that can be trusted")
+
+    def test_grain_is_actually_defined_and_not_merely_named(self):
+        """The specific failure this rule was written about."""
+        self.assertIn("**Grain** is", self.text)
+        self.assertIn("what one row", self.text.lower().replace("*", ""))
+
+    def test_the_lifted_sections_did_not_come_back(self):
+        for path, target in LIFTED_FROM.items():
+            text = (ROOT / path).read_text(encoding="utf-8")
+            self.assertIn(
+                target, text,
+                f"{path} should point at the glossary for its vocabulary")
+            body = text.split("## Vocabulary", 1)
+            self.assertEqual(2, len(body), f"{path} lost its Vocabulary pointer")
+            section = body[1].split("\n## ", 1)[0]
+            self.assertNotIn(
+                "\n- **", section,
+                f"{path} is defining terms again; it was lifted into the glossary")
+
+    def test_every_documentation_link_resolves(self):
+        """A pointer to a deleted file is worse than no pointer.
+
+        Three links to `architecture-decisions/001-grain-aware-result-semantics.md`
+        outlived the file by nine days, and one of them was `architecture.md`
+        saying "ADR 001 defines the grain-aware result contract" — the only place
+        that promised to define grain at all.
+        """
+        heading = re.compile(r"^#{1,6}\s+(.*)")
+        link = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+
+        def anchors(path: Path) -> set[str]:
+            found = set()
+            for line in path.read_text(encoding="utf-8").splitlines():
+                match = heading.match(line)
+                if match:
+                    slug = re.sub(r"[^\w\s-]", "", match.group(1).lower())
+                    found.add(slug.strip().replace(" ", "-"))
+            return found
+
+        broken = []
+        pages = list((ROOT / "docs").glob("*.md")) + [ROOT / "README.md", ROOT / "CLAUDE.md"]
+        for page in pages:
+            for target in link.findall(page.read_text(encoding="utf-8")):
+                if target.startswith(("http", "mailto", "#!")):
+                    continue
+                file_part, _, anchor = target.partition("#")
+                resolved = (page.parent / file_part).resolve() if file_part else page
+                if not resolved.exists():
+                    broken.append(f"{page.name} -> {target} (no such file)")
+                elif anchor and anchor not in anchors(resolved):
+                    broken.append(f"{page.name} -> {target} (no such heading)")
+        self.assertEqual([], broken, "these documentation links go nowhere")
+
+    def test_every_refusal_label_the_runtime_emits_can_be_decoded(self):
+        """A refusal saying `F3` is only useful if F3 is written down somewhere.
+
+        Derived from the Lua sources rather than pinned, so a new fusion level
+        that reaches a user-facing message has to reach the glossary too.
+        """
+        emitted = set()
+        for path in (ROOT / "lua").rglob("*.lua"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                # Per line, and excluding newlines from the literal, or the
+                # quote pairing shifts across statements and silently drops
+                # messages -- which it did on the first attempt at this test.
+                for message in re.findall(r'"([^"\n]*)"', line):
+                    emitted.update(re.findall(r"\bF([0-5])(?:\.\d+)?\b", message))
+        self.assertGreaterEqual(
+            len(emitted), 4,
+            f"only F{sorted(emitted)} found in runtime messages; the scan broke")
+
+        # Only the decode table counts. The section heading names F3 as an
+        # example, which would otherwise make F3's row unremovable-by-accident
+        # in the one direction this test is meant to catch.
+        rows = set(re.findall(r"^\| `F([0-5])`", self.text, re.M))
+        undecodable = sorted(emitted - rows)
+        self.assertEqual(
+            [], undecodable,
+            f"the runtime emits F{undecodable} in a message a user reads, and "
+            "the decode table in docs/glossary.md has no row for it")
 
 
 if __name__ == "__main__":

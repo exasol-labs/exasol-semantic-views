@@ -749,5 +749,5 @@ independently, planned deterministically, and explained after compilation.
 - [Semantic catalog](semantic-catalog.md) documents catalog objects and supported
   administration surfaces.
 - [Runtime testing](runtime-testing.md) explains database-backed verification.
-- [ADR 001](architecture-decisions/001-grain-aware-result-semantics.md) defines
-  the grain-aware result contract.
+- [Glossary](glossary.md#three-grains-kept-distinct) defines the grain-aware
+  result contract: entity grain, requested dimensionality and merge identity.

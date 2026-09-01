@@ -482,6 +482,9 @@ Known issues and their current status are tracked in the checked-in `docs/known-
 
 ## Documentation
 
+- `docs/glossary.md` — **every term, defined once.** Start here; nothing else
+  should redefine a term. Includes what `grain` means, why `field`, `attribute`
+  and `column` cover different sets, and what an `F3` in a refusal refers to
 - `docs/creating-metrics.md` — how to define metrics; mental model for entity → fact → metric
 - `docs/agent-contract.md` — the agent discovery and compilation contract
 - `docs/validation-rules.md` — all SEMANTIC_MODEL_* rule codes

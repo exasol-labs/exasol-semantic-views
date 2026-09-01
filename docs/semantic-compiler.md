@@ -1,5 +1,35 @@
 # Semantic Compiler
 
+## Which query lane
+
+There are six ways to get an answer out of a published model. They are not
+alternatives to choose between on taste — each exists for a different caller, and
+picking wrong mostly costs you convenience rather than correctness, because all
+of them lower to the same planner.
+
+| You are | Use | Because |
+|---|---|---|
+| an **agent** composing a request from field names it discovered | `COMPILE_REQUEST_JSON` | the request is a closed JSON contract you can validate before sending, and refusals come back as structured `CLARIFICATION_JSON` rather than prose |
+| a **SQL user or BI tool** with a session you control | `ENABLE_SEMANTIC_SQL()` once, then plain `SELECT` from `SEMANTIC_<MODEL>.<OBJECT>` | the preprocessor rewrites your statement in place, so the model looks like a table and every existing SQL client works unchanged |
+| a **tool that cannot set a session preprocessor** | `COMPILE_SQL` | same Semantic SQL text, but you get the generated SQL back as a string to execute yourself |
+| **debugging a compile** | `COMPILE_SQL_DEBUG` | identical to `COMPILE_SQL` except it writes the compile to `SYS_SEMANTIC.QUERY_LOG` and returns the `QUERY_LOG_ID` instead of `AGENT_REQUEST_ID` |
+| **migrating from Databricks** | `MEASURE(...)` and `GROUP BY ALL` inside Semantic SQL | the UCMV query shapes compile unchanged; see [databricks-metric-views.md](databricks-metric-views.md) |
+| **reading the model, not querying it** | `SEMANTIC_AGENT.*` views | field lists, valid metric/dimension combinations, glossary and verified queries, without compiling anything |
+
+Three things are worth knowing before choosing:
+
+- **`SELECT` from a published view without the preprocessor is refused, not
+  wrong.** `SEMANTIC_SURFACE_001` names the command to run. The views exist so BI
+  tools can read column metadata; they are not queryable on their own.
+- **`COMPILE_SQL` and `COMPILE_REQUEST_JSON` return the identical nine columns**,
+  so a caller can switch lanes without changing its result handling. Read them by
+  name — `COMPILE_SQL_DEBUG`'s ninth column differs.
+- **Every lane refuses the same things.** Grain safety, fan-out and metric
+  plannability are properties of the model, proven once in the planner. No lane
+  is a way around a refusal, and none is "the fast path".
+
+## Entrypoints
+
 The compiler has four installed SQL-facing entrypoints:
 
 1. `SEMANTIC_ADMIN.COMPILE_REQUEST_JSON`, for structured agent requests.

@@ -156,29 +156,20 @@ Three properties are non-negotiable:
 
 ## Vocabulary
 
-- **Entity** — logical grain-bearing node (customer, order).
-- **Representation** — one physical relation (table or virtual schema) that
-  can serve an entity. An entity has exactly one active `PRIMARY`
-  representation and any number of `ALTERNATE`s.
-- **Coverage predicate + validity interval** — half-open `[from, to)` a
-  representation is authoritative for. Predicate must exactly encode the
-  interval; a mismatch is `SEMANTIC_MODEL_042`.
-- **Attribute binding** — per-representation source expression for a
-  dimension or fact. Role hierarchy `PREFER > FALLBACK`.
-- **Attribute fusion policy** — how per-attribute values combine when
-  multiple representations contribute: `PREFER` (single source),
-  `COALESCE` (null-fill, agreement required), `RECONCILE` (authority wins,
-  warn on conflict).
-- **Authority** — `AUTHORITATIVE` / `PREFER` / `SUPPLEMENTAL` per
-  representation. `RECONCILE` requires exactly one `AUTHORITATIVE`.
-- **Semantic identity** — model-global identity name for an entity; used
-  when representations don't share a physical key.
-- **Identity binding** — per-representation `DIRECT` (local column equals
-  the semantic key) or `MAPPED` (through a certified two-column relation).
-- **Mapping relation** — the `CERTIFIED` cross-reference table that maps a
-  source-local key to the semantic key.
+The fusion nouns — representation, coverage predicate, attribute binding,
+attribute fusion policy, authority, semantic identity, identity binding, mapping
+relation — are defined once in **[the glossary](glossary.md#the-nouns-fusion-adds)**,
+along with the base nouns they build on and the `F0`–`F5` labels that appear in
+refusal messages.
+
+The rest of this document assumes them and explains what they are *for*.
 
 ## The Fusion Levels
+
+These are the levels by *name*, which is how this document refers to them. The
+`F0`–`F5` labels that appear in refusal messages group the same ground slightly
+differently — the [glossary](glossary.md#the-fusion-levels-and-what-f3-means-in-a-refusal)
+maps one to the other.
 
 | Level | Problem It Solves | Runtime Shape |
 | --- | --- | --- |

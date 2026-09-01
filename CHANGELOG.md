@@ -6,6 +6,72 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Documentation
+
+#### `docs/glossary.md` — every term, defined once
+
+- **`grain` was used 130 times across the documentation and defined nowhere.** It
+  is the property every correctness rule in this layer is ultimately about —
+  fan-out refusals, metric plannability, the object-root check, `STRICT_GRAIN`
+  proof mode, half of `validation-rules.md` — and a modeller met it in their
+  *second* call, as `ADD_ENTITY`'s `GRAIN_DESCRIPTION`. It now has a definition,
+  an example with a number attached, and the distinction between the prose
+  `GRAIN_DESCRIPTION` and the machine-readable `UNIQUE_KEYS` that grain proofs
+  actually use.
+- The only Vocabulary section that existed — in `docs/data-fusion.md` — defined
+  nine terms, every one an advanced fusion concept. The glossary was inverted:
+  the hard parts had one and the first steps did not. That section is now
+  **lifted** into the glossary rather than copied, so a term has one definition.
+- 31 terms, in the order a reader meets them: grain first, then the nine a first
+  model needs, then the collective nouns, then fusion, then governance.
+- **`field`, `attribute` and `column` are explained.** They group dimensions,
+  facts and metrics into three different overlapping sets, neither `field` nor
+  `attribute` was defined anywhere, and the split is not arbitrary — a *field* is
+  what a caller can name in a query (so no facts), an *attribute* is what must be
+  bound to an expression per source (so no metrics).
+- **`F0`–`F5` can be decoded.** Those labels appear in 19 runtime refusal
+  messages and nowhere in the catalog, and `docs/data-fusion.md` names the levels
+  differently than `docs/semantic-catalog.md` numbers them. The glossary carries
+  one table mapping each label to what it means, and says the two enumerations
+  differ.
+- Reading the catalog: that `STATUS` means lifecycle on most tables and something
+  else on the rest, and that six `*_ID` columns are discriminated rather than
+  foreign keys.
+
+#### Recovered content and repaired links
+
+- `docs/architecture-decisions/001-grain-aware-result-semantics.md` was deleted
+  as a stale doc on 2026-08-22 and three links to it were left behind — including
+  `architecture.md` saying *"ADR 001 defines the grain-aware result contract"*,
+  the only place that promised to define grain at all.
+- The distinction it carried — **entity grain**, **requested dimensionality** and
+  **merge identity**, and why a multi-fact request aggregates each branch before
+  merging rather than joining facts first — survived nowhere else. It is now in
+  the glossary, and the three links point there.
+
+#### Which query lane
+
+- `docs/semantic-compiler.md` opens with a table of the six ways to get an answer
+  out of a published model and who each is for. The authoring surfaces have had a
+  documented boundary since `CLAUDE.md`'s "Two Authoring Surfaces"; the query
+  surfaces had none.
+
+### Testing
+
+- A seventh convention in `tests/test_conventions.py`: **a term is defined once,
+  in the glossary, and the glossary stays complete.** Five checks, all verified by
+  breaking them:
+  - a pinned set of terms a reader needs before their first model must stay
+    defined, and no term may be defined twice;
+  - `grain` must be *defined*, not merely named;
+  - `data-fusion.md` must keep pointing at the glossary rather than defining
+    terms again — the section was lifted, not copied;
+  - every `F0`–`F5` label the **runtime** emits in a user-facing message must have
+    a row in the glossary's decode table, derived from the Lua sources so a new
+    fusion level cannot reach a refusal without reaching the glossary;
+  - every documentation link resolves, file and heading anchor — which is how the
+    nine-day-old dangling ADR links were found.
+
 ### Changed
 
 #### Reading a driver row has one implementation: `shared/rows.lua`

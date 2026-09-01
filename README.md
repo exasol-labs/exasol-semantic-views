@@ -9,7 +9,7 @@
 [![Agent-first](https://img.shields.io/badge/agent--first-COMPILE__REQUEST__JSON-blueviolet)](#agent-first-by-design)
 [![Semantic SQL](https://img.shields.io/badge/Semantic%20SQL-preprocessor-success)](#a-concrete-example)
 
-**[Quickstart](#quickstart-with-exasol-personal) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example) · [Grain Safety](#grain-safety-you-can-see)**
+**[Quickstart](#quickstart-with-exasol-personal) · [Glossary](docs/glossary.md) · [Docs](#project-docs) · [Agent Skills](#agent-first-by-design) · [Example](#a-concrete-example) · [Grain Safety](#grain-safety-you-can-see)**
 
 </div>
 
@@ -57,7 +57,11 @@ business shape of the model and uses that shape when compiling queries:
 
 - **Entities and grain** describe business objects such as `order_line`,
   `order`, `customer`, and `product`, including their physical tables and key
-  expressions.
+  expressions. *Grain* is what one row represents — `MART.ORDER_LINES` has one
+  row per order line, `MART.ORDERS` one per order — and it is the property every
+  correctness rule in this layer is ultimately about, because joining from a
+  coarse grain to a finer one repeats rows and inflates any sum over them. Every
+  term used here is defined in the [glossary](docs/glossary.md).
 - **Relationships** describe how entities join and whether those joins preserve
   metric correctness.
 - **Dimensions** are the fields users group, filter, and explain by, such as
@@ -303,10 +307,12 @@ authoring forms fail loudly during preprocessing.
 ## Grain Safety You Can See
 
 The demo model is deliberately multi-grain, because that is what makes the
-project's central property observable. `net_revenue`, `net_cost`, and
-`quantity` are order-line measures in the `SALES` object. `freight_amount` is
-charged once per order and lives in a second object, `ORDER_HEADER`, rooted at
-`order`.
+project's central property observable. (*Grain* is what one row represents; see
+the [glossary](docs/glossary.md#grain--read-this-one-first).)
+
+`net_revenue`, `net_cost` and `quantity` are order-line measures in the `SALES`
+object. `freight_amount` is charged once per order and lives in a second object,
+`ORDER_HEADER`, rooted at `order`.
 
 Order-grain freight groups fine along dimensions reachable without fan-out --
 `ship_mode` on the order itself, `customer_segment` through the `MANY_TO_ONE`
@@ -571,6 +577,8 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
 
 ## Project Docs
 
+- Start here
+  - [Glossary](docs/glossary.md) — every term, in the order you meet them
 - Usage
   - [Creating metrics](docs/creating-metrics.md)
   - [Exasol MCP Server integration](docs/mcp-server-integration.md)
