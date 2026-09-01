@@ -78,6 +78,32 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### `RENAME_ENTITY_REPRESENTATION` — the remedy an advisory already named
+
+- `ADD_ENTITY` mints the name `primary` for an entity's first representation and
+  `REPRESENTATION_ROLE` is a separate column, so **the first promotion anyone
+  performs leaves a row named `primary` holding role `ALTERNATE`.**
+  `SET_PRIMARY_REPRESENTATION` reported this as `SEMANTIC_ADMIN_221` and told the
+  caller to "rename either representation" — and no rename existed anywhere in
+  the product. A warning whose remedy is not implemented is worse than no
+  warning: it says the state is fixable and then strands the reader in it, since
+  the name could not be changed by any script. Reported open by three
+  consecutive fusion evaluations.
+- The new script is a **pure relabel**, and the catalog is what makes that safe:
+  `REPRESENTATION_NAME` occurs in exactly one column of one table, and
+  `ATTRIBUTE_BINDINGS`, `IDENTITY_BINDINGS` and `REPRESENTATION_AUTHORITIES` all
+  reference a representation by `REPRESENTATION_ID`. Nothing points at the name,
+  so bindings, authorities, coverage, priority and role are untouched and there is
+  nothing to roll back. It clears the compile cache (cached `PLAN_JSON` carries
+  the old label in its provenance) and deliberately does *not* mark validation
+  runs stale — a relabel cannot change a verdict, and marking stale would drop a
+  published model to `NEEDS_VALIDATION` over a cosmetic fix.
+- `SEMANTIC_ADMIN_221` now hands back a ready-to-run call with the model, entity
+  and current name already filled in. Promotion still never renames on your
+  behalf: the name is what authoring scripts and fusion documents address a
+  representation by, so moving it silently under a caller would be worse than the
+  divergence it fixes.
+
 #### One check for an invariant 29 tables depend on
 
 - **`SEMANTIC_MODEL_062`** — a catalog row whose `MODEL_ID` disagrees with the

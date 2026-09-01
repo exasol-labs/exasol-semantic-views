@@ -100,6 +100,7 @@ SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
 SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH
 SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
+SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION
 SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
 ```
 
@@ -150,7 +151,25 @@ model afterwards:
 | Code | Reported when |
 |---|---|
 | `SEMANTIC_ADMIN_220` | The promoted representation has a `VALID_TO`, so it is not the open-ended partition and rows past that bound are answered by an `ALTERNATE`. Deliberate during an F3 rebuild, a mistake otherwise; only the caller knows which. A representation with only a `VALID_FROM` is still open-ended and does not warn. |
-| `SEMANTIC_ADMIN_221` | The representation that lost the role is *named* `primary` — the conventional name for the F0 compatibility row — so its name and its role now disagree in `ENTITY_REPRESENTATIONS`. |
+| `SEMANTIC_ADMIN_221` | The representation that lost the role is *named* `primary` — the conventional name for the F0 compatibility row — so its name and its role now disagree in `ENTITY_REPRESENTATIONS`. The message hands back a ready-to-run `RENAME_ENTITY_REPRESENTATION` call. |
+
+`RENAME_ENTITY_REPRESENTATION` is how that second warning is answered, and it is
+a **pure relabel**: `REPRESENTATION_NAME` occurs in one column of one table, and
+`ATTRIBUTE_BINDINGS`, `IDENTITY_BINDINGS` and `REPRESENTATION_AUTHORITIES` all
+reference a representation by `REPRESENTATION_ID`. So bindings, authorities,
+coverage, priority and role are untouched, and there is nothing to roll back —
+which is why this script carries none of the candidate-and-restore machinery its
+neighbours do. It clears the compile cache, because cached `PLAN_JSON` records
+the old label in its provenance, and deliberately does **not** mark validation
+runs stale: a relabel cannot change a verdict, and marking stale would drop a
+published model to `NEEDS_VALIDATION` over a cosmetic fix. Renaming to the name
+a representation already carries is a no-op (`CHANGED = FALSE`), and a name the
+entity already uses is refused with `SEMANTIC_ADMIN_046`.
+
+Promotion never renames on your behalf. The name is a durable identifier that
+authoring scripts and fusion documents address representations by, so moving it
+silently under a caller would be the worse failure; the warning tells you, and
+this script is how you act on it.
 
 Neither is raised. They arrive as text in the `WARNINGS` column of the result
 row, and that column is the only thing marking them advisory — the codes

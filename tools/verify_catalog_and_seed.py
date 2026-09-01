@@ -80,6 +80,7 @@ EXPECTED_SCRIPTS = {
     "REMOVE_IDENTITY_MAPPING_RELATION",
     "REMOVE_IDENTITY_BINDING",
     "REMOVE_SEMANTIC_IDENTITY",
+    "RENAME_ENTITY_REPRESENTATION",
     "SET_PRIMARY_REPRESENTATION",
     "REMOVE_ENTITY_REPRESENTATION",
     "ADD_ATTRIBUTE_BINDING",
@@ -147,6 +148,12 @@ def assert_equal(name: str, actual: int, expected: int) -> None:
     if actual != expected:
         raise AssertionError(f"{name}: expected {expected}, got {actual}")
     print(f"ok {name}: {actual}")
+
+
+def assert_contains(name: str, text: str, expected: str) -> None:
+    if expected not in text:
+        raise AssertionError(f"{name}: expected {expected!r} in {text!r}")
+    print(f"ok {name}")
 
 
 def assert_at_least(name: str, actual: int, expected: int) -> None:
@@ -302,10 +309,101 @@ def main() -> int:
                 ),
                 0,
             )
-            con.execute(
+            promotion = con.execute(
                 "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
                 "'sales', 'order', 'archive')"
+            ).fetchall()[0]
+
+            # F17, open across three fusion evaluations. ADD_ENTITY mints the
+            # name 'primary' for an entity's first representation and the role
+            # lives in its own column, so the first promotion anyone performs
+            # leaves a row *named* primary holding role ALTERNATE. The advisory
+            # for it told the reader to rename, and no rename existed -- the one
+            # state SEMANTIC_ADMIN_221 reports was the one state nobody could
+            # leave. These assertions pin the whole loop: the divergence, the
+            # advisory that names the remedy, and the remedy working.
+            assert_equal(
+                "F17 promotion leaves a representation named primary as ALTERNATE",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er "
+                    "JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = er.ENTITY_ID "
+                    "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = e.MODEL_ID "
+                    "WHERE m.MODEL_NAME = 'sales' AND e.ENTITY_NAME = 'order' "
+                    "AND er.REPRESENTATION_NAME = 'primary' "
+                    "AND er.REPRESENTATION_ROLE = 'ALTERNATE' AND er.STATUS = 'ACTIVE'",
+                ),
+                1,
+            )
+            warnings = str(promotion[8] or "")
+            assert_contains("F17 advisory raised", warnings, "SEMANTIC_ADMIN_221")
+            assert_contains(
+                "F17 advisory names a remedy that exists",
+                warnings,
+                "SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION",
+            )
+
+            # The rename is a pure relabel *because* every reference to a
+            # representation is by REPRESENTATION_ID -- REPRESENTATION_NAME
+            # occurs in one column of one table. Count what points at this row
+            # before and after: same id, same dependants, new label.
+            def representation_dependants() -> tuple:
+                return tuple(
+                    scalar(
+                        con,
+                        f"SELECT COUNT(*) FROM SYS_SEMANTIC.{table} d "
+                        "JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er "
+                        "  ON er.REPRESENTATION_ID = d.REPRESENTATION_ID "
+                        "JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = er.ENTITY_ID "
+                        "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = e.MODEL_ID "
+                        "WHERE m.MODEL_NAME = 'sales' AND e.ENTITY_NAME = 'order' "
+                        "AND d.STATUS = 'ACTIVE'",
+                    )
+                    for table in ("ATTRIBUTE_BINDINGS", "IDENTITY_BINDINGS",
+                                  "REPRESENTATION_AUTHORITIES")
+                )
+
+            before_dependants = representation_dependants()
+            renamed = con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'primary', 'orders_base')"
+            ).fetchall()[0]
+            assert_equal("F17 rename reports the previous name", renamed[3], "primary")
+            assert_equal("F17 rename reports the new name", renamed[4], "orders_base")
+            assert_equal("F17 rename does not touch the role", renamed[5], "ALTERNATE")
+            assert_equal("F17 rename changed the row", bool(renamed[6]), True)
+            assert_equal(
+                "F17 the name is gone and the row is not",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er "
+                    "JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = er.ENTITY_ID "
+                    "JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = e.MODEL_ID "
+                    "WHERE m.MODEL_NAME = 'sales' AND e.ENTITY_NAME = 'order' "
+                    "AND er.REPRESENTATION_NAME = 'orders_base' AND er.STATUS = 'ACTIVE'",
+                ),
+                1,
+            )
+            assert_equal("F17 dependants follow the id", representation_dependants(),
+                         before_dependants)
+            # Re-running it is a no-op rather than a collision with itself.
+            repeated = con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'orders_base', 'orders_base')"
+            ).fetchall()[0]
+            assert_equal("F17 rename is idempotent", bool(repeated[6]), False)
+            assert_script_fails(
+                con,
+                "F17 rename onto a name the entity already uses",
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'orders_base', 'archive')",
+                "SEMANTIC_ADMIN_046",
+            )
+            con.execute(
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION("
+                "'sales', 'order', 'orders_base', 'primary')"
             ).fetchall()
+
             assert_equal(
                 "F1 promoted source compatibility mirror",
                 scalar(
