@@ -6,6 +6,8 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.2] - 2026-09-02
+
 ### Changed
 
 #### One word for one concept in the catalog
@@ -1461,7 +1463,7 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## Notes on versioning
 
-Version 0.1 is the first tagged release. Items above are tracked against the
+Version 0.2 is the second tagged release. Items above are tracked against the
 development baseline established by the user-study simulations run on
 2026-05-13. Phase 1 and Phase 2 are complete. The next planned milestone is
 Phase 3 (subqueries/CTE rewriting and CAST in SELECT — deferred pending demand).
