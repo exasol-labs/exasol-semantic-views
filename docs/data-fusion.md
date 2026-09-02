@@ -290,6 +290,12 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS(
      "binding_role":"PREFER","binding_priority":20}]');
 ```
 
+`BINDINGS_JSON` is a **closed contract**: an unrecognised key is refused with a
+suggestion rather than silently ignored, every fault in one binding object comes
+back in a single refusal, and that refusal carries the accepted shape together
+with the entity's actual alternate names. Writing `representation` instead of
+`representation_name` therefore costs one attempt, not three.
+
 Leaving the placeholder at `PREFER` is refused with `SEMANTIC_MODEL_063`, and
 the refusal hands back the `REPLACE_ATTRIBUTE_BINDING` call that repairs a model
 already in that state. It is worth knowing *why* it is refused rather than

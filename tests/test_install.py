@@ -433,14 +433,26 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("semantic_definition.decode_json", runtime)
         self.assertIn('string.sub(trim(BINDINGS_JSON), 1, 1) ~= "["', runtime)
         self.assertIn("no binding supplied for active alternate", runtime)
+        # VP-020: BINDINGS_JSON is a closed contract like DECLARATIONS_JSON --
+        # a misspelled key is refused with a suggestion, not silently dropped,
+        # and one refusal carries every fault plus the accepted shape.
+        self.assertIn("local BINDING_KEYS = {", runtime)
+        self.assertIn("BINDING_KEY_HINTS", runtime)
+        self.assertIn('representation = "representation_name"', runtime)
+        self.assertIn("binding_shape_help", runtime)
+        self.assertIn("Alternates to bind: ", runtime)
+        self.assertIn('did you mean "', runtime)
+        self.assertIn('table.concat(faults, "; ")', runtime)
+
         # VP-002: a primary entry may set the binding's *role*, so the caller
         # can say "the placeholder EXPRESSION forced on me is the fallback".
         # It may not set the expression -- that still has exactly one home.
-        self.assertIn("the primary binding takes its expression from", runtime)
+        self.assertIn("source_expression is not accepted for the", runtime)
         self.assertIn("binding_role = primary_role", runtime)
         self.assertIn("binding_priority = primary_priority", runtime)
         self.assertNotIn("'PREFER', 1, TRUE, 'ACTIVE'", runtime)
-        self.assertIn("BINDINGS_JSON must not bind an F3 partition", runtime)
+        self.assertIn("names the F3", runtime)
+        self.assertIn("every partition's binding.", runtime)
         self.assertIn("coverage_predicate", runtime)
         self.assertIn("for _, partition in ipairs(partitions) do", runtime)
         self.assertIn("source_expression", runtime)

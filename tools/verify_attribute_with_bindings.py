@@ -253,6 +253,44 @@ def main() -> int:
         else:
             raise AssertionError("a primary binding expression was accepted")
 
+        # VP-020: the refusals were precise about the fault and silent about the
+        # vocabulary, and they arrived one per round trip -- `representation`
+        # was silently ignored, so the first message complained that
+        # `representation_name` was missing, and each retry bought exactly one
+        # more fact. One object's worth of faults now comes back at once, with
+        # the shape and this entity's actual alternate names attached.
+        first_guess = json.dumps(
+            [{"representation": "crm", "source_expression": "c.alt_amount"}],
+            separators=(",", ":"))
+        try:
+            execute(
+                con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS("
+                "'bug37_verify', 'CUSTOMERS', 'customer', 'zz_vocabulary', "
+                "'CAST(NULL AS DECIMAL(18,2))', 'DECIMAL(18,2)', 'x', 'x', "
+                f"NULL, FALSE, {literal(first_guess)})",
+            )
+        except Exception as exc:
+            message = str(exc)
+            # The typo is named rather than dropped, and it is named as a typo.
+            for expected in ['unknown key "representation"',
+                             'did you mean "representation_name"',
+                             # every remaining fault, not just the first
+                             "binding_role is required",
+                             "binding_priority is required",
+                             # the vocabulary the caller was guessing at
+                             '"binding_role": "PREFER" or "FALLBACK"',
+                             # this entity's alternates, by name
+                             "Alternates to bind: crm",
+                             # and the rule that costs a round trip of its own
+                             "takes binding_role and binding_priority only"]:
+                if expected not in message:
+                    raise AssertionError(
+                        f"VP-020 refusal omits {expected!r}: {message}") from exc
+        else:
+            raise AssertionError("an unknown binding key was silently ignored")
+
+        print("ok VP-020: one refusal carries every fault and the vocabulary")
         print("ok VP-002: a NULL placeholder preferred over real data is refused")
         print("ok VP-002: the primary's binding role is now the caller's to set")
         print("ok VP-002: the fused dimension answers from the CRM source")

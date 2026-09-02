@@ -6034,13 +6034,6 @@ local function scalar(sql_text, params)
     if rows == nil or #rows == 0 then return nil end
     return rows[1][1]
 end
-local function required_json(item, field, label)
-    local value = item[field]
-    if type(value) == "table" or missing(value) then
-        error("SEMANTIC_ADMIN_213: " .. label .. " is required")
-    end
-    return trim(value)
-end
 local function validation_error_summary(rows)
     for _, row in ipairs(rows or {}) do
         if tostring(row_value(row, "SEVERITY", 1)) == "ERROR"
@@ -6176,6 +6169,99 @@ if primary == nil then
     error("SEMANTIC_ADMIN_213: entity has no active primary representation")
 end
 
+-- What a binding object may say, and what to do about a near miss.
+--
+-- Every refusal below used to be precise about the fault and silent about the
+-- vocabulary, and they arrive one per round trip: "representation_name is
+-- required" (because `representation` was silently ignored), then "binding_role
+-- is required", then the primary rule, then "binding_role must be PREFER or
+-- FALLBACK". Five attempts to write one dimension, each one buying a single
+-- fact. So the contract is closed like DECLARATIONS_JSON's -- a misspelled key
+-- is a refusal, not a silent drop -- every fault in an object is reported
+-- together, and the refusal carries the shape and this entity's actual
+-- alternate names, so one attempt is enough.
+local BINDING_KEYS = {representation_name = true, source_expression = true,
+    binding_role = true, binding_priority = true}
+local BINDING_KEY_HINTS = {
+    representation = "representation_name", name = "representation_name",
+    rep = "representation_name", representationname = "representation_name",
+    expression = "source_expression", source = "source_expression",
+    sourceexpression = "source_expression", expr = "source_expression",
+    role = "binding_role", bindingrole = "binding_role",
+    priority = "binding_priority", bindingpriority = "binding_priority",
+}
+local function binding_shape_help()
+    local alternate_names = {}
+    for _, alternate in pairs(alternates) do
+        alternate_names[#alternate_names + 1] = tostring(alternate.name)
+    end
+    table.sort(alternate_names)
+    local help = ' Each binding is {"representation_name": ..., "source_expression":'
+        .. ' ..., "binding_role": "PREFER" or "FALLBACK", "binding_priority":'
+        .. ' <positive integer>}.'
+    if #alternate_names > 0 then
+        help = help .. " Alternates to bind: " .. table.concat(alternate_names, ", ") .. "."
+    else
+        help = help .. " This entity has no active alternate to bind."
+    end
+    return help .. ' The primary "' .. tostring(primary.name) .. '" takes'
+        .. " binding_role and binding_priority only, because EXPRESSION supplies"
+        .. " its expression."
+end
+local function positive_integer_fault(value, label, required_here)
+    if value == nil or value == null then
+        if required_here then return label .. " is required" end
+        return nil
+    end
+    if type(value) == "table" then return label .. " must be a positive integer" end
+    local number = tonumber(value)
+    if number == nil or number < 1 or number % 1 ~= 0 then
+        return label .. " must be a positive integer"
+    end
+    return nil
+end
+-- Every fault in one object, in one refusal.
+local function binding_faults(item)
+    local faults = {}
+    local unknown = {}
+    for supplied_key, _ in pairs(item) do
+        local key_text = tostring(supplied_key)
+        if not BINDING_KEYS[key_text] then unknown[#unknown + 1] = key_text end
+    end
+    table.sort(unknown)
+    for _, key_text in ipairs(unknown) do
+        local hint = BINDING_KEY_HINTS[string.lower(string.gsub(key_text, "[_%s]", ""))]
+        faults[#faults + 1] = 'unknown key "' .. key_text .. '"'
+            .. (hint ~= nil and (' (did you mean "' .. hint .. '"?)') or "")
+    end
+    local representation_name = item.representation_name
+    local binds_primary = false
+    if type(representation_name) == "table" or missing(representation_name) then
+        faults[#faults + 1] = "representation_name is required"
+    else
+        binds_primary = upper(representation_name) == upper(primary.name)
+    end
+    if binds_primary then
+        if item.source_expression ~= nil and item.source_expression ~= null then
+            faults[#faults + 1] = "source_expression is not accepted for the"
+                .. " primary; EXPRESSION supplies it"
+        end
+    elseif type(item.source_expression) == "table"
+            or missing(item.source_expression) then
+        faults[#faults + 1] = "source_expression is required"
+    end
+    if type(item.binding_role) == "table" or missing(item.binding_role) then
+        faults[#faults + 1] = "binding_role is required"
+    elseif upper(item.binding_role) ~= "PREFER" and upper(item.binding_role) ~= "FALLBACK" then
+        faults[#faults + 1] = 'binding_role must be "PREFER" or "FALLBACK", not "'
+            .. tostring(item.binding_role) .. '"'
+    end
+    local priority_fault = positive_integer_fault(
+        item.binding_priority, "binding_priority", not binds_primary)
+    if priority_fault ~= nil then faults[#faults + 1] = priority_fault end
+    return faults
+end
+
 local prepared = {}
 local primary_role = "PREFER"
 local primary_priority = 1
@@ -6192,8 +6278,12 @@ for index, item in ipairs(binding_specs) do
     if type(item) ~= "table" then
         error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " must be an object")
     end
-    local representation_name = required_json(
-        item, "representation_name", "binding representation_name")
+    local faults = binding_faults(item)
+    if #faults > 0 then
+        error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " is not usable: "
+            .. table.concat(faults, "; ") .. "." .. binding_shape_help())
+    end
+    local representation_name = trim(item.representation_name)
     if upper(representation_name) == upper(primary.name) then
         -- The primary's *expression* still comes from EXPRESSION -- two places
         -- to write it is two places to disagree. Its *role* is another matter,
@@ -6204,22 +6294,9 @@ for index, item in ipairs(binding_specs) do
         -- what the compiler's candidate sort chooses first. The caller could
         -- describe the shape and not the resolution, so the only reachable
         -- outcome was the wrong one.
-        if item.source_expression ~= nil and item.source_expression ~= null then
-            error("SEMANTIC_ADMIN_213: the primary binding takes its expression from "
-                .. "EXPRESSION; supply only binding_role and binding_priority for '"
-                .. representation_name .. "'")
-        end
-        primary_role = upper(required_json(item, "binding_role", "binding_role"))
-        if primary_role ~= "PREFER" and primary_role ~= "FALLBACK" then
-            error("SEMANTIC_ADMIN_213: binding_role must be PREFER or FALLBACK")
-        end
-        local primary_priority_value = item.binding_priority
-        if primary_priority_value ~= nil and primary_priority_value ~= null then
-            primary_priority = tonumber(primary_priority_value)
-            if primary_priority == nil or primary_priority < 1
-                or primary_priority % 1 ~= 0 then
-                error("SEMANTIC_ADMIN_213: binding_priority must be a positive integer")
-            end
+        primary_role = upper(item.binding_role)
+        if item.binding_priority ~= nil and item.binding_priority ~= null then
+            primary_priority = tonumber(item.binding_priority)
         end
         if seen[upper(representation_name)] then
             error("SEMANTIC_ADMIN_213: duplicate binding for representation: "
@@ -6228,43 +6305,35 @@ for index, item in ipairs(binding_specs) do
         seen[upper(representation_name)] = true
     else
         if partitions_by_name[upper(representation_name)] ~= nil then
-            error("SEMANTIC_ADMIN_213: BINDINGS_JSON must not bind an F3 partition; "
-                .. "EXPRESSION supplies it: " .. representation_name)
+            error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " names the F3"
+                .. " partition '" .. representation_name .. "'; EXPRESSION supplies"
+                .. " every partition's binding." .. binding_shape_help())
         end
         local representation = alternates[upper(representation_name)]
         if representation == nil then
-            error("SEMANTIC_ADMIN_213: binding references an inactive or unknown alternate: "
-                .. representation_name)
+            error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " names '"
+                .. representation_name .. "', which is not an active alternate of"
+                .. " entity '" .. entity_name .. "'." .. binding_shape_help())
         end
         if seen[upper(representation_name)] then
             error("SEMANTIC_ADMIN_213: duplicate binding for representation: "
                 .. representation_name)
         end
         seen[upper(representation_name)] = true
-        local binding_role = upper(required_json(item, "binding_role", "binding_role"))
-        if binding_role ~= "PREFER" and binding_role ~= "FALLBACK" then
-            error("SEMANTIC_ADMIN_213: binding_role must be PREFER or FALLBACK")
-        end
-        local priority_value = item.binding_priority
-        if type(priority_value) == "table" or priority_value == nil or priority_value == null then
-            error("SEMANTIC_ADMIN_213: binding_priority is required")
-        end
-        local priority = tonumber(priority_value)
-        if priority == nil or priority < 1 or priority % 1 ~= 0 then
-            error("SEMANTIC_ADMIN_213: binding_priority must be a positive integer")
-        end
         prepared[#prepared + 1] = {
             representation = representation,
-            source_expression = required_json(item, "source_expression", "source_expression"),
-            binding_role = binding_role,
-            binding_priority = priority,
+            source_expression = trim(item.source_expression),
+            binding_role = upper(item.binding_role),
+            binding_priority = tonumber(item.binding_priority),
         }
     end
 end
 for representation_key, representation in pairs(alternates) do
     if not seen[representation_key] then
-        error("SEMANTIC_ADMIN_213: no binding supplied for active alternate: "
-            .. tostring(representation.name))
+        error("SEMANTIC_ADMIN_213: no binding supplied for active alternate '"
+            .. tostring(representation.name) .. "'; every active alternate needs"
+            .. " one, so the attribute resolves whichever source a query picks."
+            .. binding_shape_help())
     end
 end
 

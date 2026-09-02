@@ -53,6 +53,24 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+#### VP-020 — `BINDINGS_JSON` made you guess its vocabulary, one round trip at a time
+
+- Each refusal was precise about the fault and silent about the accepted
+  vocabulary, and they arrived one per attempt: `representation` was *silently
+  ignored*, so the first message said `representation_name is required`; then
+  `binding_role is required`; then the primary rule; then `binding_role must be
+  PREFER or FALLBACK`. Five attempts to write one dimension, each buying a
+  single fact.
+- `BINDINGS_JSON` is now a closed contract like `DECLARATIONS_JSON`: an
+  unrecognised key is **refused with a suggestion** (`unknown key
+  "representation" (did you mean "representation_name"?)`) rather than dropped,
+  every fault in one binding object is reported **together**, and the refusal
+  carries the accepted shape plus this entity's actual alternate names and the
+  primary's role-only rule. The first attempt now returns everything the five
+  attempts used to.
+- The unknown-representation and unbound-alternate refusals name the alternates
+  that exist, instead of only the name that does not.
+
 #### VP-002 — a fused dimension resolved to NULL on a validated, published model
 
 - **The canonical fusion case returned `NULL` for every row.** Surfacing an
