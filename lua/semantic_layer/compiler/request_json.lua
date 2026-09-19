@@ -351,6 +351,22 @@ do
         return value
     end
 
+    -- Identity of the runtime that produced a cached statement. `PLAN_VERSION`
+    -- alone is not enough: it is a hand-maintained constant, so a parser or
+    -- renderer change that leaves it alone used to keep serving SQL compiled by
+    -- the previous runtime. `package_lua_scripts.py` stamps ESV_RUNTIME_BUILD
+    -- from the hash of the sources that decide compiler output, so every build
+    -- gets its own keyspace and a stale entry is unreachable rather than wrong.
+    -- Absent when the sources are loaded directly, as the database-free tests
+    -- do; "dev" keeps those runs sharing one keyspace.
+    function compile_cache.runtime_build()
+        local stamped = rawget(_G, "ESV_RUNTIME_BUILD")
+        if stamped == nil or stamped == "" then
+            return "dev"
+        end
+        return tostring(stamped)
+    end
+
     function compile_cache.canonical_request_text(request)
         if type(request) ~= "table" then
             return nil
@@ -365,7 +381,8 @@ do
         if not ok then
             return nil
         end
-        return "plan=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|" .. encoded
+        return "plan=" .. tostring(metric_plan_runtime.PLAN_VERSION)
+            .. "|build=" .. compile_cache.runtime_build() .. "|" .. encoded
     end
 
     -- The Semantic SQL lane cannot reach the request-keyed cache above until it
@@ -390,7 +407,8 @@ do
         for i = 1, #tokens do
             parts[i] = tostring(tokens[i].kind or "") .. "\30" .. tostring(tokens[i].text or "")
         end
-        return "sql=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|"
+        return "sql=" .. tostring(metric_plan_runtime.PLAN_VERSION)
+            .. "|build=" .. compile_cache.runtime_build() .. "|"
             .. table.concat(parts, "\31")
     end
 
@@ -4159,6 +4177,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,
         canonical_sql_text = compile_cache.canonical_sql_text,
+        runtime_build = compile_cache.runtime_build,
         compile_cache_key = compile_cache.compile_cache_key,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,

@@ -1054,6 +1054,62 @@ class PackagerOutputFormattingTest(unittest.TestCase):
         self.assertEqual("something", INSTALL.format_packager_line("something"))
 
 
+class RuntimeBuildStampTest(unittest.TestCase):
+    """A cached statement must not outlive the runtime that produced it.
+
+    `SYS_SEMANTIC.COMPILE_CACHE` is keyed on the model version and the canonical
+    request. `VALIDATE_MODEL` clears it when the model changes, and the canonical
+    text carries `PLAN_VERSION` so a planner bump invalidates -- but that is a
+    hand-maintained constant, so a parser or renderer change that left it alone
+    kept serving SQL compiled by the previous runtime. It was caught only because
+    two queries passed that should have failed.
+
+    The packager therefore stamps a content hash of the sources that decide
+    compiler output, and the canonical text folds it in.
+    """
+
+    def test_build_id_is_stable_and_content_addressed(self) -> None:
+        self.assertEqual(PACKAGER.runtime_build_id(), PACKAGER.runtime_build_id())
+        self.assertRegex(PACKAGER.runtime_build_id(), r"^[0-9a-f]{16}$")
+
+    def test_build_id_follows_the_sources_that_change_compiler_output(self) -> None:
+        original = PACKAGER.COMPILER_SOURCE.read_bytes()
+        before = PACKAGER.runtime_build_id()
+        try:
+            PACKAGER.COMPILER_SOURCE.write_bytes(original + b"\n-- touched\n")
+            self.assertNotEqual(PACKAGER.runtime_build_id(), before)
+        finally:
+            PACKAGER.COMPILER_SOURCE.write_bytes(original)
+        self.assertEqual(PACKAGER.runtime_build_id(), before)
+
+    def test_both_compiling_runtimes_carry_the_stamp(self) -> None:
+        block = PACKAGER.compiler_block()
+        stamp = f'ESV_RUNTIME_BUILD = "{PACKAGER.runtime_build_id()}"'
+        self.assertEqual(block.count(stamp), 2,
+                         "COMPILER_RUNTIME and MATERIALIZATION_RUNTIME must both be stamped")
+
+    def test_the_stamp_is_a_global_so_it_costs_no_local(self) -> None:
+        # The 200-local ceiling applies to the sum of a chunk's top-level locals,
+        # and COMPILER_RUNTIME sits near it. The stamp must be a bare global
+        # assignment at column 0 -- reading it back inside a function is a
+        # function-scoped local and does not count.
+        stamp = f'ESV_RUNTIME_BUILD = "{PACKAGER.runtime_build_id()}"'
+        assignments = [line for line in PACKAGER.compiler_block().splitlines()
+                       if line.rstrip() == stamp]
+        self.assertEqual(len(assignments), 2)
+        before = PACKAGER.main_chunk_local_count(
+            PACKAGER.COMPILER_SOURCE.read_text(encoding="utf-8"))
+        self.assertEqual(
+            PACKAGER.main_chunk_local_count(
+                stamp + "\n" + PACKAGER.COMPILER_SOURCE.read_text(encoding="utf-8")),
+            before, "the stamp must not spend one of the 200 chunk locals")
+
+    def test_shipped_install_sql_matches_the_current_sources(self) -> None:
+        text = PACKAGER.INSTALL_SQL.read_text(encoding="utf-8")
+        self.assertIn(f'ESV_RUNTIME_BUILD = "{PACKAGER.runtime_build_id()}"', text,
+                      "run tools/package_lua_scripts.py after editing Lua sources")
+
+
 class MainChunkLocalCeilingTest(unittest.TestCase):
     """Exasol allows 200 locals per function; a runtime script is one chunk.
 

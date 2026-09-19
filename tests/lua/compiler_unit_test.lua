@@ -1740,6 +1740,41 @@ test("compiler retries collisions and tolerates best-effort cache failures", fun
     assert_equal(touch_state.cache_touches, 1)
 end)
 
+test("the cache key carries the runtime build, so a new runtime cannot serve stale SQL", function()
+    -- COMPILE_CACHE maps a request to the SQL some compiler produced for it.
+    -- VALIDATE_MODEL clears it when the model changes and PLAN_VERSION covers a
+    -- planner bump, but a parser or renderer change that leaves PLAN_VERSION
+    -- alone used to keep serving the previous runtime's SQL. That happened.
+    local request = {model = "sales", object = "SALES", metrics = {"revenue"}}
+    local tokens = api.sql_tokens("SELECT region, revenue FROM SEMANTIC_SALES.SALES")
+
+    local before_request = api.canonical_request_text(request)
+    local before_sql = api.canonical_sql_text(tokens)
+    assert_contains(before_request, "build=")
+    assert_contains(before_sql, "build=")
+    assert_equal(api.runtime_build(), "dev")   -- sources loaded directly, not packaged
+
+    -- Stand in for a repackaged runtime.
+    _G.ESV_RUNTIME_BUILD = "0123456789abcdef"
+    local after_request = api.canonical_request_text(request)
+    local after_sql = api.canonical_sql_text(tokens)
+    assert_equal(api.runtime_build(), "0123456789abcdef")
+    assert_true(after_request ~= before_request)
+    assert_true(after_sql ~= before_sql)
+    assert_true(api.compile_cache_key(after_request) ~= api.compile_cache_key(before_request))
+    assert_true(api.compile_cache_key(after_sql) ~= api.compile_cache_key(before_sql))
+
+    -- Content-addressed: the same build finds its own entries again, so a
+    -- rebuild that changes nothing keeps its warm cache.
+    _G.ESV_RUNTIME_BUILD = nil
+    assert_equal(api.canonical_request_text(request), before_request)
+    assert_equal(api.canonical_sql_text(tokens), before_sql)
+    assert_branch("compiler.cache.runtime_build", api.runtime_build() == "dev", true)
+    _G.ESV_RUNTIME_BUILD = "x"
+    assert_branch("compiler.cache.runtime_build", api.runtime_build() == "dev", false)
+    _G.ESV_RUNTIME_BUILD = nil
+end)
+
 test("canonical SQL text keys on tokens, not on formatting", function()
     -- The Semantic SQL lane keys the compile cache on the token stream so it can
     -- answer before loading the catalog. That key must ignore everything the

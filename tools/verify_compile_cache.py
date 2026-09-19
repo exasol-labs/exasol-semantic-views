@@ -11,16 +11,25 @@ Asserts:
 5. SET_MATERIALIZATION_STATUS invalidates the cache (materialization choice
    changes mean cached compile output is no longer correct).
 6. Distinct requests do not collide on the cache key.
+7. The deployed runtime carries a build stamp, both compiling runtimes agree on
+   it, and it matches what the current Lua sources hash to -- so a cached
+   statement cannot outlive the compiler that produced it. Before this, a parser
+   change that left PLAN_VERSION alone kept serving the previous runtime's SQL.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import re
 import ssl
 import sys
 import time
+from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def connect():
@@ -92,6 +101,24 @@ def cache_count(con, model_name: str = "sales") -> int:
         WHERE UPPER(m.MODEL_NAME) = UPPER('{model_name}')
     """)
     return int(val or 0)
+
+
+def deployed_build_stamp(con, script_name: str) -> str | None:
+    text = scalar(con, "SELECT SCRIPT_TEXT FROM EXA_ALL_SCRIPTS "
+                       "WHERE SCRIPT_SCHEMA = 'SEMANTIC_ADMIN' "
+                       f"AND SCRIPT_NAME = {sql_string(script_name)}")
+    if text is None:
+        return None
+    found = re.search(r'ESV_RUNTIME_BUILD = "([0-9a-f]+)"', str(text))
+    return found.group(1) if found else None
+
+
+def packaged_build_id() -> str:
+    spec = importlib.util.spec_from_file_location(
+        "package_lua_scripts", ROOT / "tools/package_lua_scripts.py")
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module.runtime_build_id()
 
 
 def main() -> None:
@@ -186,8 +213,17 @@ def main() -> None:
     distinct_cache = cache_count(con)
     assert_equal("distinct requests fill distinct cache slots", distinct_cache, len(distinct_requests))
 
+    # Test 7: the cache key is bound to the runtime that filled it.
+    compiler_stamp = deployed_build_stamp(con, "COMPILER_RUNTIME")
+    materialization_stamp = deployed_build_stamp(con, "MATERIALIZATION_RUNTIME")
+    assert_true("COMPILER_RUNTIME carries a build stamp", compiler_stamp is not None)
+    assert_equal("both compiling runtimes share one build", materialization_stamp, compiler_stamp)
+    assert_equal("deployed runtime matches the packaged sources",
+                 compiler_stamp, packaged_build_id())
+
     con.close()
-    print(f"ok compile cache: miss avg {miss_avg:.0f} ms / hit avg {hit_avg:.0f} ms ({miss_avg / max(hit_avg, 1):.1f}x speedup)")
+    print(f"ok compile cache: miss avg {miss_avg:.0f} ms / hit avg {hit_avg:.0f} ms "
+          f"({miss_avg / max(hit_avg, 1):.1f}x speedup), runtime build {compiler_stamp}")
 
 
 if __name__ == "__main__":

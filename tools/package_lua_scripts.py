@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -278,6 +279,44 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
 {VALIDATOR_END}"""
 
 
+# Sources whose content can change what the compiler emits for a given request.
+# The materialization runtime is included because the compiler imports it and its
+# choices land in the generated SQL.
+COMPILE_RELEVANT_SOURCES = (
+    "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE", "GRAIN_GRAPH_SOURCE",
+    "SOURCE_COLUMNS_SOURCE", "IDENTITY_JOIN_SOURCE", "QUERY_SPEC_SOURCE",
+    "CATALOG_SNAPSHOT_SOURCE", "METRIC_PLAN_SOURCE", "PHYSICAL_PLAN_SOURCE",
+    "GRAIN_SQL_SOURCE", "COMPILER_SOURCE", "MATERIALIZATIONS_SOURCE",
+)
+
+
+def runtime_build_id() -> str:
+    """Identity of the compiled runtime, for the compile-cache key.
+
+    `SYS_SEMANTIC.COMPILE_CACHE` maps a request to the SQL a compiler produced
+    for it. `VALIDATE_MODEL` clears entries when the *model* changes, and the
+    canonical text carries `PLAN_VERSION` so a planner bump invalidates -- but a
+    parser or renderer change that leaves that constant alone did not, so a
+    cached statement from an older runtime kept being served after the runtime
+    was replaced. That is not hypothetical: it happened during the BI
+    investigation and silently changed observable results.
+
+    Hashing the sources that determine compiler output gives every build its own
+    keyspace, so a stale entry is unreachable rather than wrong. It is also
+    content-addressed: rebuilding identical sources yields the same id, so a
+    rebuild that changes nothing keeps its warm cache, and a downgrade back to a
+    previous runtime finds its own entries again.
+    """
+    digest = hashlib.sha256()
+    for name in COMPILE_RELEVANT_SOURCES:
+        path = globals()[name]
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
 def compiler_block() -> str:
     json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
     rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
@@ -292,8 +331,14 @@ def compiler_block() -> str:
     grain_sql_source = GRAIN_SQL_SOURCE.read_text(encoding="utf-8").rstrip()
     source = COMPILER_SOURCE.read_text(encoding="utf-8").rstrip()
     materializations_source = MATERIALIZATIONS_SOURCE.read_text(encoding="utf-8").rstrip()
+    build_id = runtime_build_id()
+    # A global, not a local: the 200-local ceiling applies to the sum of the
+    # concatenated sources in one chunk, and this must not spend one of them.
+    stamp = f'ESV_RUNTIME_BUILD = "{build_id}"'
     return f"""{BEGIN}
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
+{stamp}
+
 {json_source}
 
 {rows_source}
@@ -302,6 +347,8 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
+{stamp}
+
 {json_source}
 
 {rows_source}
