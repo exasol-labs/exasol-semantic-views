@@ -84,6 +84,13 @@
 -- into the generated SQL, which stayed hidden only because those queries were
 -- refused earlier for wrapping a metric in SUM().
 -- See plans/bi-and-generic-interface-support.md.
+-- validator.lua 94.2 -> 94.4 on 2026-09-19, when representations and
+-- materializations stopped being governed by two sets of rules and got one
+-- derived trust class. That split is how a materialization over the raw mart
+-- could void a representation's row-level security: each was checked on its own
+-- terms, neither was compared with the other. The tests drive the derivation
+-- directly rather than through a full validate_model mock, so the classification
+-- and both governance modes are exercised without a 200-line SQL fixture.
 return {
     lines = {
         ["lua/semantic_layer/shared/json.lua"] = 100,
@@ -99,7 +106,7 @@ return {
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
         ["lua/semantic_layer/compiler/request_json.lua"] = 90.0,
-        ["lua/semantic_layer/admin/validator.lua"] = 94.2,
+        ["lua/semantic_layer/admin/validator.lua"] = 94.4,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.3,

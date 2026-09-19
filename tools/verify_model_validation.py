@@ -72,7 +72,32 @@ def assert_code(name: str, issues: list[tuple[str, str, str | None, str, str]], 
 
 
 def with_restore(con, name: str, mutate_sql: str, restore_sql: str, expected_code: str) -> None:
-    execute(con, mutate_sql)
+    """Assert that a mutation makes the model report `expected_code`.
+
+    There are two ways a model can tell you that, and which one you get depends
+    on whether it is published -- so this verifier used to pass only when it ran
+    before PUBLISH_MODEL, and fail with an unhandled exception after it:
+
+      * on a DRAFT model the mutation applies and VALIDATE_MODEL reports it;
+      * on a PUBLISHED model the admin script validates the candidate itself,
+        refuses it, restores the catalog and raises SEMANTIC_ADMIN_09x with the
+        rule code quoted in the message.
+
+    Both say the same thing about the same rule, so accept either. That makes the
+    check order-independent, and it now covers the published guard path too --
+    which the DRAFT-only version never exercised.
+    """
+    try:
+        execute(con, mutate_sql)
+    except Exception as exc:  # noqa: BLE001 - the refusal text is the assertion
+        message = str(exc)
+        if expected_code not in message:
+            raise
+        # The script already restored the catalog; re-running the restore would
+        # fail on an object that is no longer there.
+        print(f"ok {name}: {expected_code} (refused by the published-model guard)")
+        assert_no_errors(f"{name} restored", validate(con))
+        return
     try:
         assert_code(name, validate(con), expected_code)
     finally:

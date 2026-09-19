@@ -32,6 +32,7 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_structured_request_compiler.py
 "$PYTHON_BIN" tools/verify_sql_compiler_and_surfaces.py
 "$PYTHON_BIN" tools/verify_agent_context_and_feedback.py
+"$PYTHON_BIN" tools/verify_source_trust.py
 "$PYTHON_BIN" tools/verify_sql_result_contract.py
 "$PYTHON_BIN" tools/verify_semantic_sql_phase1.py
 "$PYTHON_BIN" tools/verify_group_by_inference.py

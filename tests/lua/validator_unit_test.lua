@@ -2618,7 +2618,17 @@ test("validator public entry point loads and validates a coherent catalog", func
             lifecycle.finished = true
             return {}
         elseif contains(sql, "DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES")
-            or contains(sql, "DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX") then
+            or contains(sql, "DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX")
+            or contains(sql, "DELETE FROM SYS_SEMANTIC.SOURCE_TRUST")
+            or contains(sql, "INSERT INTO SYS_SEMANTIC.SOURCE_TRUST") then
+            return {}
+        elseif contains(sql, "FROM SYS.EXA_ALL_VIEWS")
+            or contains(sql, "FROM SYS.EXA_ALL_DEPENDENCIES")
+            or contains(sql, "FROM SYS_SEMANTIC.MATERIALIZATIONS") then
+            -- Source-trust derivation: no views, no dependency edges and no
+            -- materializations, so every representation resolves to a base
+            -- table and classifies RAW. A model in OPEN mode with no governed
+            -- representation raises nothing, which is what this case asserts.
             return {}
         end
         error("unexpected validate_model SQL: " .. tostring(sql))
@@ -2902,4 +2912,150 @@ test("validation issues lead with the cause, not its consequences", function()
         "SEMANTIC_MODEL_060")
 
     assert_equal(#api.order_root_cause_first({}), 0)
+end)
+
+
+test("source trust walks views to their base tables and stops honestly", function()
+    -- The walk is what decides whether a relation carries policy. A view chain
+    -- resolves to the tables underneath it; a base table is its own base; a view
+    -- Exasol records no dependencies for is UNKNOWN, because answering "no
+    -- bases" would read as "reads nothing" rather than "we could not tell".
+    local api = ESV_VALIDATOR_TEST_API
+    assert_equal(api.relation_key("mart", "orders"), "MART.ORDERS")
+    assert_equal(api.relation_key(nil, nil), ".")
+
+    local graph = {
+        views = {["GOV.ORDERS"] = true, ["GOV.WRAPPED"] = true, ["GOV.ORPHAN"] = true},
+        edges = {
+            ["GOV.ORDERS"] = {"MART.ORDERS"},
+            ["GOV.WRAPPED"] = {"GOV.ORDERS", "MART.CUSTOMERS"},
+        },
+    }
+
+    local bases, complete = api.resolve_base_relations(graph, "GOV.ORDERS")
+    assert_equal(complete, true)
+    assert_equal(table.concat(bases, ","), "MART.ORDERS")
+
+    -- two hops, and the result is sorted so two relations reading the same
+    -- tables in a different order still compare equal
+    bases, complete = api.resolve_base_relations(graph, "GOV.WRAPPED")
+    assert_equal(complete, true)
+    assert_equal(table.concat(bases, ","), "MART.CUSTOMERS,MART.ORDERS")
+
+    -- a base table is its own base
+    bases, complete = api.resolve_base_relations(graph, "MART.ORDERS")
+    assert_equal(complete, true)
+    assert_equal(table.concat(bases, ","), "MART.ORDERS")
+
+    -- a view with no recorded dependencies cannot be classified
+    bases, complete = api.resolve_base_relations(graph, "GOV.ORPHAN")
+    assert_equal(complete, false)
+
+    -- a cycle terminates rather than hanging the validator
+    local cyclic = {views = {["A.V"] = true, ["B.V"] = true},
+                    edges = {["A.V"] = {"B.V"}, ["B.V"] = {"A.V"}}}
+    bases, complete = api.resolve_base_relations(cyclic, "A.V")
+    assert_equal(complete, true)
+    assert_equal(#bases, 0)
+
+    assert_branch("validator.trust.walk", complete, true)
+    assert_branch("validator.trust.walk",
+        select(2, api.resolve_base_relations(graph, "GOV.ORPHAN")), false)
+end)
+
+
+test("source trust classifies every relation the planner may emit", function()
+    -- Representations and materializations are the same question asked of
+    -- different objects, so they get one derivation. A materialization that
+    -- reads something the representations do not is DIVERGENT: substituting it
+    -- drops whatever policy they carry, which is how a rollup over the raw mart
+    -- returned every region to a principal entitled to one.
+    local api = ESV_VALIDATOR_TEST_API
+
+    local function run(mode, representations, materializations, views, edges)
+        local written = {}
+        local ctx = {
+            model_id = 1, version_id = 1, governance_mode = mode,
+            representations = representations, issues = {}, issue_seen = {},
+            error_count = 0, warning_count = 0, precondition_count = 0,
+        }
+        local mock = function(sql, params)
+            if contains(sql, "DELETE FROM SYS_SEMANTIC.SOURCE_TRUST") then return {} end
+            if contains(sql, "INSERT INTO SYS_SEMANTIC.SOURCE_TRUST") then
+                written[#written + 1] = params
+                return {}
+            end
+            if contains(sql, "FROM SYS.EXA_ALL_VIEWS") then
+                local rows = {}
+                for _, v in ipairs(views or {}) do rows[#rows + 1] = {v[1], v[2]} end
+                return rows
+            end
+            if contains(sql, "FROM SYS.EXA_ALL_DEPENDENCIES") then
+                local rows = {}
+                for _, e in ipairs(edges or {}) do rows[#rows + 1] = {e[1], e[2], e[3], e[4]} end
+                return rows
+            end
+            if contains(sql, "FROM SYS_SEMANTIC.MATERIALIZATIONS") then
+                return materializations or {}
+            end
+            error("unexpected source-trust SQL: " .. tostring(sql))
+        end
+        with_query(mock, function() return api.derive_source_trust(ctx) end)
+        local classes = {}
+        for _, row in ipairs(written) do classes[row.name] = row.class end
+        local codes = {}
+        for _, issue in ipairs(ctx.issues) do
+            codes[issue.rule_code] = issue.severity
+        end
+        return classes, codes
+    end
+
+    local GOVERNED_REP = {{id = 1, name = "primary", source_schema = "GOV", source_object = "ORDERS"}}
+    local RAW_REP = {{id = 1, name = "primary", source_schema = "MART", source_object = "ORDERS"}}
+    local VIEWS = {{"GOV", "ORDERS"}}
+    local EDGES = {{"GOV", "ORDERS", "MART", "ORDERS"}}
+    -- MATERIALIZATION_ID, NAME, PHYSICAL_SCHEMA, PHYSICAL_OBJECT
+    local SAFE_MAT = {{9, "safe", "GOV", "ORDERS"}}
+    local DIVERGENT_MAT = {{9, "rollup", "MART", "ROLLUP"}}
+
+    -- a view over a table is GOVERNED and raises nothing
+    local classes, codes = run("OPEN", GOVERNED_REP, {}, VIEWS, EDGES)
+    assert_equal(classes["primary"], "GOVERNED")
+    assert_equal(next(codes), nil)
+
+    -- a base table is RAW; only GOVERNED mode objects to it
+    classes, codes = run("OPEN", RAW_REP, {}, {}, {})
+    assert_equal(classes["primary"], "RAW")
+    assert_equal(codes["SEMANTIC_MODEL_064"], nil)
+    classes, codes = run("GOVERNED", RAW_REP, {}, {}, {})
+    assert_equal(codes["SEMANTIC_MODEL_064"], "ERROR")
+
+    -- a materialization over the same relations carries the same policy
+    classes, codes = run("OPEN", GOVERNED_REP, SAFE_MAT, VIEWS, EDGES)
+    assert_equal(classes["safe"], "GOVERNED")
+    assert_equal(codes["SEMANTIC_MODEL_065"], nil)
+
+    -- one over anything else does not: warn in OPEN, refuse in GOVERNED
+    classes, codes = run("OPEN", GOVERNED_REP, DIVERGENT_MAT, VIEWS, EDGES)
+    assert_equal(classes["rollup"], "DIVERGENT")
+    assert_equal(codes["SEMANTIC_MODEL_065"], "WARNING")
+    classes, codes = run("GOVERNED", GOVERNED_REP, DIVERGENT_MAT, VIEWS, EDGES)
+    assert_equal(codes["SEMANTIC_MODEL_065"], "ERROR")
+
+    -- with nothing to lose there is nothing to warn about: raw representations
+    -- carry no policy, so a divergent rollup costs them nothing and saying so
+    -- would train people to ignore the case that matters
+    classes, codes = run("OPEN", RAW_REP, DIVERGENT_MAT, {}, {})
+    assert_equal(classes["rollup"], "DIVERGENT")
+    assert_equal(codes["SEMANTIC_MODEL_065"], nil)
+
+    -- a relation whose dependencies Exasol does not record is UNKNOWN
+    classes, codes = run("OPEN", GOVERNED_REP, {}, VIEWS, {})
+    assert_equal(classes["primary"], "UNKNOWN")
+    assert_equal(codes["SEMANTIC_MODEL_066"], "WARNING")
+    classes, codes = run("GOVERNED", GOVERNED_REP, {}, VIEWS, {})
+    assert_equal(codes["SEMANTIC_MODEL_066"], "ERROR")
+
+    assert_branch("validator.trust.mode", run("GOVERNED", RAW_REP, {}, {}, {}) ~= nil, true)
+    assert_branch("validator.trust.mode", false, false)
 end)

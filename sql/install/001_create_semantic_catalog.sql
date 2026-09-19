@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MODELS (
   PREPROCESSOR_SCHEMA  VARCHAR(256),
   PREPROCESSOR_SCRIPT  VARCHAR(256),
   SURFACE_TYPE         VARCHAR(32) DEFAULT 'VIEW_PREPROCESSOR',
+  GOVERNANCE_MODE      VARCHAR(16) DEFAULT 'OPEN' NOT NULL,
   CREATED_AT           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CREATED_BY           VARCHAR(256) DEFAULT CURRENT_USER,
   UPDATED_AT           TIMESTAMP,
@@ -596,6 +597,40 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MATERIALIZATIONS (
   STATUS                VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL
 );
 
+-- One trust class for every physical relation the planner may emit into SQL.
+--
+-- Representations and materializations used to be governed by different rules,
+-- which is how a materialization built over the raw mart could silently void a
+-- representation's row-level security: each was checked, neither was compared to
+-- the other. They are the same question -- is this relation inside the set the
+-- layer vouches for? -- so they get one derivation and one table.
+--
+-- Derived by VALIDATE_MODEL, never declared: TRUST_CLASS and BASE_RELATIONS are
+-- resolved from SYS.EXA_ALL_DEPENDENCIES. RELATION_ID is a discriminated
+-- reference -- a REPRESENTATION_ID or a MATERIALIZATION_ID according to
+-- RELATION_KIND -- so it carries no foreign key; always join on the
+-- discriminator too.
+CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.SOURCE_TRUST (
+  TRUST_ID          DECIMAL(18,0) IDENTITY PRIMARY KEY,
+  MODEL_ID          DECIMAL(18,0) NOT NULL,
+  VERSION_ID        DECIMAL(18,0) NOT NULL,
+  RELATION_KIND     VARCHAR(32) NOT NULL,
+  RELATION_ID       DECIMAL(18,0) NOT NULL,
+  RELATION_NAME     VARCHAR(256),
+  PHYSICAL_SCHEMA   VARCHAR(256) NOT NULL,
+  PHYSICAL_OBJECT   VARCHAR(256) NOT NULL,
+  TRUST_CLASS       VARCHAR(32) NOT NULL,
+  BASE_RELATIONS    VARCHAR(2000000),
+  DERIVED_AT        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON TABLE SYS_SEMANTIC.SOURCE_TRUST (
+  RELATION_KIND IS 'Which kind of physical relation this row classifies: REPRESENTATION or MATERIALIZATION.',
+  RELATION_ID IS 'Discriminated reference -- a REPRESENTATION_ID or a MATERIALIZATION_ID according to RELATION_KIND. Join on the discriminator too, or rows of different kinds sharing an id will mix.',
+  TRUST_CLASS IS 'GOVERNED (a view stands between the caller and the base tables), RAW (the relation is a base table), DIVERGENT (a materialization whose base relations differ from the representations it can replace, so it does not carry their policy), or UNKNOWN (dependencies could not be resolved).',
+  BASE_RELATIONS IS 'The resolved transitive base tables, sorted and comma-separated. What DIVERGENT is decided by.'
+);
+
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MATERIALIZATION_COLUMNS (
   MATERIALIZATION_ID DECIMAL(18,0) NOT NULL,
   OBJECT_TYPE        VARCHAR(64) NOT NULL,
@@ -762,6 +797,12 @@ ALTER TABLE SYS_SEMANTIC.AGENT_FEEDBACK DROP COLUMN IF EXISTS REVIEWED_BY;
 -- than failing or silently skipping tables it did not just create.
 
 -- Model and version scope -- every model-scoped table hangs off these two.
+ALTER TABLE SYS_SEMANTIC.SOURCE_TRUST DROP CONSTRAINT IF EXISTS FK_SOURCE_TRUST_MODEL;
+ALTER TABLE SYS_SEMANTIC.SOURCE_TRUST ADD CONSTRAINT FK_SOURCE_TRUST_MODEL
+  FOREIGN KEY (MODEL_ID) REFERENCES SYS_SEMANTIC.MODELS (MODEL_ID) DISABLE;
+ALTER TABLE SYS_SEMANTIC.SOURCE_TRUST DROP CONSTRAINT IF EXISTS FK_SOURCE_TRUST_VERSION;
+ALTER TABLE SYS_SEMANTIC.SOURCE_TRUST ADD CONSTRAINT FK_SOURCE_TRUST_VERSION
+  FOREIGN KEY (VERSION_ID) REFERENCES SYS_SEMANTIC.MODEL_VERSIONS (VERSION_ID) DISABLE;
 ALTER TABLE SYS_SEMANTIC.AGENT_INSTRUCTIONS DROP CONSTRAINT IF EXISTS FK_AGENT_INSTRUCTIONS_MODEL;
 ALTER TABLE SYS_SEMANTIC.AGENT_INSTRUCTIONS ADD CONSTRAINT FK_AGENT_INSTRUCTIONS_MODEL
   FOREIGN KEY (MODEL_ID) REFERENCES SYS_SEMANTIC.MODELS (MODEL_ID) DISABLE;

@@ -1053,6 +1053,27 @@ JOIN SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s
   ON s.SUGGESTION_ID = r.SUGGESTION_ID
 LEFT JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = s.MODEL_ID;
 
+-- Trust class of every physical relation the planner may emit for a model: its
+-- representations and its active materializations, classified by one derivation
+-- rather than by two sets of rules that could disagree. GOVERNANCE_MODE says
+-- whether a problem refuses (GOVERNED) or reports (OPEN). Derived by
+-- VALIDATE_MODEL, so a model that has not been validated since its sources
+-- changed has no rows here -- absence is "not yet established", not "fine".
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL AS
+SELECT
+  m.MODEL_NAME,
+  m.GOVERNANCE_MODE,
+  t.RELATION_KIND,
+  t.RELATION_NAME,
+  t.PHYSICAL_SCHEMA,
+  t.PHYSICAL_OBJECT,
+  t.TRUST_CLASS,
+  t.BASE_RELATIONS,
+  t.DERIVED_AT
+FROM SYS_SEMANTIC.SOURCE_TRUST t
+JOIN SYS_SEMANTIC.MODELS m
+  ON m.MODEL_ID = t.MODEL_ID AND m.ACTIVE_VERSION_ID = t.VERSION_ID;
+
 -- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS AS
 SELECT
@@ -1378,6 +1399,8 @@ FROM (VALUES
   ('ADD_MATERIALIZATION_COLUMN', 6, 4, 'OBJECT_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN(<model_name>, <materialization_name>, <object_type>, <object_name>, <physical_column>, <rollup_policy>)'),
   ('ADD_MATERIALIZATION_COLUMN', 6, 5, 'PHYSICAL_COLUMN', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN(<model_name>, <materialization_name>, <object_type>, <object_name>, <physical_column>, <rollup_policy>)'),
   ('ADD_MATERIALIZATION_COLUMN', 6, 6, 'ROLLUP_POLICY', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN(<model_name>, <materialization_name>, <object_type>, <object_name>, <physical_column>, <rollup_policy>)'),
+  ('SET_MODEL_GOVERNANCE_MODE', 2, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE(<model_name>, <governance_mode>)'),
+  ('SET_MODEL_GOVERNANCE_MODE', 2, 2, 'GOVERNANCE_MODE', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE(<model_name>, <governance_mode>)'),
   ('SET_MATERIALIZATION_STATUS', 3, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(<model_name>, <materialization_name>, <status>)'),
   ('SET_MATERIALIZATION_STATUS', 3, 2, 'MATERIALIZATION_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(<model_name>, <materialization_name>, <status>)'),
   ('SET_MATERIALIZATION_STATUS', 3, 3, 'STATUS', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(<model_name>, <materialization_name>, <status>)'),

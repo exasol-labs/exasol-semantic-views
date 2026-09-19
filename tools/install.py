@@ -358,6 +358,41 @@ def table_exists(con: object, schema: str, table: str) -> bool:
     return bool(rows)
 
 
+# Columns added to a table that `CREATE TABLE IF NOT EXISTS` will not add to an
+# existing catalog. Each is (table, column, DDL type/default).
+ADDED_COLUMNS = [
+    ("MODELS", "GOVERNANCE_MODE", "VARCHAR(16) DEFAULT 'OPEN' NOT NULL"),
+]
+
+
+def column_exists(con: object, schema: str, table: str, column: str) -> bool:
+    rows = con.execute(
+        "SELECT 1 FROM SYS.EXA_ALL_COLUMNS "
+        f"WHERE COLUMN_SCHEMA = '{schema}' AND COLUMN_TABLE = '{table}' "
+        f"AND COLUMN_NAME = '{column}'"
+    ).fetchall()
+    return bool(rows)
+
+
+def migrate_added_columns(con: object) -> list[str]:
+    """Add columns an existing catalog predates. Returns what it added.
+
+    `001` creates tables with `CREATE TABLE IF NOT EXISTS`, so a table that is
+    already there keeps its old shape however the file changes. Without this a
+    reinstall over an existing catalog leaves the column missing and every read
+    of it fails at runtime rather than at install.
+    """
+    added = []
+    for table, column, ddl in ADDED_COLUMNS:
+        if not table_exists(con, "SYS_SEMANTIC", table):
+            continue
+        if column_exists(con, "SYS_SEMANTIC", table, column):
+            continue
+        con.execute(f"ALTER TABLE SYS_SEMANTIC.{table} ADD COLUMN {column} {ddl}")
+        added.append(f"{table}.{column}")
+    return added
+
+
 def migrate_renamed_tables(con: object) -> list[str]:
     """Carry an existing catalog across a table rename. Returns what it moved."""
     moved = []
@@ -579,6 +614,10 @@ def main() -> int:
     for moved in migrate_renamed_tables(con):
         print(f"      {dim('migrated ' + moved)}")
     run_sql_files(con, INSTALL_FILES, "install")
+    # After the files, because the table has to exist before a column can be
+    # added to it, and a fresh install creates it with the column already there.
+    for added in migrate_added_columns(con):
+        print(f"      {dim('added column ' + added)}")
     install_elapsed = time.monotonic() - t_install
 
     # record which build this deployment is now running, before the example

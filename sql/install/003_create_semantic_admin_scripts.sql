@@ -9099,6 +9099,87 @@ query([[
 ]], {version_id = model.version_id})
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE(
+  MODEL_NAME,
+  GOVERNANCE_MODE
+) AS
+-- The one declared input to the trust boundary. Everything else about it --
+-- which relations are governed, which materializations carry their policy -- is
+-- derived by VALIDATE_MODEL from what the database says, never declared twice.
+--
+-- OPEN reports; GOVERNED refuses. A model is not moved to GOVERNED silently: the
+-- caller sets it, then validates, and the validation tells them what it costs.
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function normalize_choice(value, label, allowed)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local choice = string.upper(trim(value))
+    for _, allowed_value in ipairs(allowed) do
+        if choice == allowed_value then
+            return choice
+        end
+    end
+    error("SEMANTIC_ADMIN_003: invalid " .. label .. ": " .. tostring(value))
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local mode = normalize_choice(GOVERNANCE_MODE, "GOVERNANCE_MODE", {"OPEN", "GOVERNED"})
+
+local rows = query([[
+    SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+
+query([[
+    UPDATE SYS_SEMANTIC.MODELS
+    SET GOVERNANCE_MODE = :mode, UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {mode = mode, model_name = model_name})
+
+-- The stored trust classes were derived under the previous mode's rules, so they
+-- no longer describe this model. Clearing them keeps a stale answer from being
+-- read as a current one; the next VALIDATE_MODEL rebuilds them.
+query([[
+    DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
+    WHERE MODEL_ID IN (
+      SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+    )
+]], {model_name = model_name})
+
+-- And the compile cache with them. Moving to GOVERNED can make the model fail
+-- validation, and the compiler binds to the latest run that *succeeded* -- so a
+-- cached statement would go on being served by a model that no longer validates.
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID IN (
+      SELECT ACTIVE_VERSION_ID FROM SYS_SEMANTIC.MODELS
+      WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+    )
+]], {model_name = model_name})
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(
   MODEL_NAME,
   MATERIALIZATION_NAME,
@@ -12315,7 +12396,8 @@ local function load_model(ctx, model_name_arg)
         SELECT
           m.MODEL_ID,
           m.ACTIVE_VERSION_ID AS VERSION_ID,
-          mv.VERSION_NUMBER
+          mv.VERSION_NUMBER,
+          m.GOVERNANCE_MODE
         FROM SYS_SEMANTIC.MODELS m
         LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -12329,6 +12411,7 @@ local function load_model(ctx, model_name_arg)
 
     ctx.model_id = row_value(rows[1], "MODEL_ID", 1)
     ctx.version_id = row_value(rows[1], "VERSION_ID", 2)
+    ctx.governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 4)
     start_validation_run(ctx)
 
     if missing(ctx.version_id) then
@@ -14935,6 +15018,202 @@ local function validate_fusion_conflicts(ctx)
     end
 end
 
+-- One trust class for every physical relation the planner may emit into SQL.
+--
+-- Representations and materializations ask the same question -- is this relation
+-- inside the set the layer vouches for? -- and used to be governed by different
+-- rules. That is how a materialization built over the raw mart could silently
+-- void a representation's row-level security: each was checked on its own terms,
+-- neither was compared with the other. One derivation, one table, one answer.
+--
+-- What this can and cannot prove is worth stating, because the difference is the
+-- whole honesty of the feature. It can prove that a view stands between the
+-- caller and the base tables, and that a materialization reads the same base
+-- tables as the representations it would replace. It cannot prove that the
+-- view's predicate is the right policy. Proving the former and claiming the
+-- latter is exactly the error the SENSITIVITY_LABEL columns already make.
+local function relation_key(schema, object)
+    return upper(tostring(schema or "")) .. "." .. upper(tostring(object or ""))
+end
+
+local function load_relation_graph()
+    local graph = {edges = {}, views = {}}
+    -- Only views have dependencies worth walking, and only views can stand
+    -- between a caller and a base table. Two bulk reads beat one round trip per
+    -- hop: a single dependency lookup measured 127 ms.
+    local view_rows = query([[
+        SELECT UPPER(VIEW_SCHEMA) AS VIEW_SCHEMA, UPPER(VIEW_NAME) AS VIEW_NAME
+        FROM SYS.EXA_ALL_VIEWS
+    ]])
+    for _, row in ipairs(view_rows or {}) do
+        graph.views[relation_key(row_value(row, "VIEW_SCHEMA", 1),
+                                row_value(row, "VIEW_NAME", 2))] = true
+    end
+    local edge_rows = query([[
+        SELECT UPPER(OBJECT_SCHEMA) AS OBJECT_SCHEMA, UPPER(OBJECT_NAME) AS OBJECT_NAME,
+               UPPER(REFERENCED_OBJECT_SCHEMA) AS REFERENCED_OBJECT_SCHEMA,
+               UPPER(REFERENCED_OBJECT_NAME) AS REFERENCED_OBJECT_NAME
+        FROM SYS.EXA_ALL_DEPENDENCIES
+        WHERE OBJECT_TYPE = 'VIEW'
+    ]])
+    for _, row in ipairs(edge_rows or {}) do
+        local from = relation_key(row_value(row, "OBJECT_SCHEMA", 1),
+                                  row_value(row, "OBJECT_NAME", 2))
+        local to = relation_key(row_value(row, "REFERENCED_OBJECT_SCHEMA", 3),
+                                row_value(row, "REFERENCED_OBJECT_NAME", 4))
+        graph.edges[from] = graph.edges[from] or {}
+        table.insert(graph.edges[from], to)
+    end
+    return graph
+end
+
+-- Walk to the base tables. Returns the sorted set, and whether the walk was
+-- complete: a view with no recorded dependencies is not the same as a table, and
+-- answering UNKNOWN is the only honest reply.
+local function resolve_base_relations(graph, start_key)
+    local bases, seen, pending, resolved = {}, {}, {start_key}, true
+    local guard = 0
+    while #pending > 0 do
+        guard = guard + 1
+        if guard > 200 then
+            return nil, false
+        end
+        local current = table.remove(pending)
+        if not seen[current] then
+            seen[current] = true
+            if graph.views[current] then
+                local edges = graph.edges[current]
+                if edges == nil or #edges == 0 then
+                    resolved = false
+                else
+                    for _, next_key in ipairs(edges) do
+                        table.insert(pending, next_key)
+                    end
+                end
+            else
+                bases[#bases + 1] = current
+            end
+        end
+    end
+    table.sort(bases)
+    return bases, resolved
+end
+
+local function derive_source_trust(ctx)
+    query([[
+        DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+
+    local governed_mode = upper(tostring(ctx.governance_mode or "OPEN")) == "GOVERNED"
+    local graph = load_relation_graph()
+    local classified = {}
+
+    local function classify(kind, id, name, schema, object)
+        local start_key = relation_key(schema, object)
+        local bases, complete = resolve_base_relations(graph, start_key)
+        local trust_class
+        if bases == nil or not complete then
+            trust_class = "UNKNOWN"
+        elseif graph.views[start_key] then
+            trust_class = "GOVERNED"
+        else
+            trust_class = "RAW"
+        end
+        local entry = {kind = kind, id = id, name = name, schema = schema,
+                       object = object, bases = bases or {}, class = trust_class}
+        classified[#classified + 1] = entry
+        return entry
+    end
+
+    local representation_bases = {}
+    local any_governed_representation = false
+    for _, representation in ipairs(ctx.representations or {}) do
+        local entry = classify("REPRESENTATION", representation.id, representation.name,
+                               representation.source_schema, representation.source_object)
+        if entry.class == "GOVERNED" then
+            any_governed_representation = true
+        end
+        for _, base in ipairs(entry.bases) do
+            representation_bases[base] = true
+        end
+    end
+
+    local materialization_rows = query([[
+        SELECT MATERIALIZATION_ID, MATERIALIZATION_NAME, PHYSICAL_SCHEMA, PHYSICAL_OBJECT
+        FROM SYS_SEMANTIC.MATERIALIZATIONS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(materialization_rows or {}) do
+        local entry = classify("MATERIALIZATION",
+            row_value(row, "MATERIALIZATION_ID", 1), row_value(row, "MATERIALIZATION_NAME", 2),
+            row_value(row, "PHYSICAL_SCHEMA", 3), row_value(row, "PHYSICAL_OBJECT", 4))
+        -- A materialization substitutes for a proven branch. If it reads
+        -- anything the representations do not, it is not carrying their policy,
+        -- whatever else it is: that is how a rollup over the raw mart returned
+        -- every region to a principal entitled to one.
+        if entry.class ~= "UNKNOWN" then
+            for _, base in ipairs(entry.bases) do
+                if not representation_bases[base] then
+                    entry.class = "DIVERGENT"
+                    entry.divergent_base = base
+                    break
+                end
+            end
+        end
+    end
+
+    for _, entry in ipairs(classified) do
+        query([[
+            INSERT INTO SYS_SEMANTIC.SOURCE_TRUST (
+              MODEL_ID, VERSION_ID, RELATION_KIND, RELATION_ID, RELATION_NAME,
+              PHYSICAL_SCHEMA, PHYSICAL_OBJECT, TRUST_CLASS, BASE_RELATIONS
+            ) VALUES (
+              :model_id, :version_id, :kind, :id, :name,
+              :schema, :object, :class, :bases
+            )
+        ]], {model_id = ctx.model_id, version_id = ctx.version_id,
+             kind = entry.kind, id = entry.id, name = entry.name or "",
+             schema = entry.schema, object = entry.object, class = entry.class,
+             bases = table.concat(entry.bases, ",")})
+
+        local where = entry.kind == "REPRESENTATION" and "representation" or "materialization"
+        local label = tostring(entry.name or entry.object)
+        -- Divergence is always recorded, but it only costs something when there
+        -- is policy to lose. A model whose representations read base tables
+        -- directly has none, so warning about a pre-aggregate there would be
+        -- noise -- and a warning that means nothing in the common case is how
+        -- the one that means something gets ignored.
+        if entry.class == "DIVERGENT" and (governed_mode or any_governed_representation) then
+            add_issue(ctx, governed_mode and "ERROR" or "WARNING", "MATERIALIZATION", label,
+                "SEMANTIC_MODEL_065",
+                "Materialization '" .. label .. "' reads "
+                .. tostring(entry.divergent_base) .. ", which none of this model's"
+                .. " representations read. Substituting it drops whatever row or"
+                .. " column policy those representations carry, silently and for"
+                .. " every caller. Build it over the same relations the"
+                .. " representations use, or retire it with"
+                .. " SET_MATERIALIZATION_STATUS.")
+        elseif entry.class == "UNKNOWN" then
+            add_issue(ctx, governed_mode and "ERROR" or "WARNING", "SOURCE", label,
+                "SEMANTIC_MODEL_066",
+                "Cannot resolve what " .. where .. " '" .. label .. "' ("
+                .. relation_key(entry.schema, entry.object) .. ") reads, so its trust"
+                .. " class is unknown. A virtual-schema relation or a view whose"
+                .. " dependencies Exasol does not record will do this.")
+        elseif entry.class == "RAW" and governed_mode and entry.kind == "REPRESENTATION" then
+            add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", label,
+                "SEMANTIC_MODEL_064",
+                "Representation '" .. label .. "' reads the base table "
+                .. relation_key(entry.schema, entry.object) .. " directly, and this"
+                .. " model runs in GOVERNED mode, where every representation must"
+                .. " resolve through a view that can carry row and column policy."
+                .. " Point it at a governed view, or set the model back to OPEN"
+                .. " with SET_MODEL_GOVERNANCE_MODE.")
+        end
+    end
+end
+
 local function extract_metric_dependencies(ctx)
     query([[
         DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
@@ -15838,6 +16117,7 @@ function M.validate_model(model_name_arg)
         validate_fusion_policies(ctx)
         validate_null_placeholder_bindings(ctx)
         extract_metric_dependencies(ctx)
+        derive_source_trust(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
         validate_metric_plannability(ctx)
@@ -15873,6 +16153,9 @@ validate_model = M.validate_model
 -- gated instead of becoming part of the installed runtime contract.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
+        relation_key = relation_key,
+        resolve_base_relations = resolve_base_relations,
+        derive_source_trust = derive_source_trust,
         valid_json_text = valid_json_text,
         strip_string_literals = sql_text.strip_string_literals,
         aliases_in_expression = aliases_in_expression,
