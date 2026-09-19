@@ -868,6 +868,60 @@ class InstallerResetTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             INSTALL.reset_statements(Blind(catalog_broken=True))
 
+    def test_an_existing_catalog_gains_a_column_001_will_not_add(self):
+        """`CREATE TABLE IF NOT EXISTS` leaves an existing table its old shape.
+
+        So a column added to 001 arrives on a fresh install and never on a
+        reinstall, and the first read of it fails at runtime instead of at
+        install. GOVERNANCE_MODE was the first of these.
+        """
+        class Catalog:
+            def __init__(self, columns):
+                self.columns = set(columns)
+                self.sql = []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)])
+                if "EXA_ALL_COLUMNS" in sql:
+                    name = sql.split("COLUMN_NAME = '")[1].split("'")[0]
+                    return Result([(1,)] if name in self.columns else [])
+                if sql.startswith("ALTER TABLE"):
+                    return Result([])
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        missing = Catalog(columns=[])
+        self.assertEqual(["MODELS.GOVERNANCE_MODE"], INSTALL.migrate_added_columns(missing))
+        altered = [sql for sql in missing.sql if sql.startswith("ALTER TABLE")]
+        self.assertEqual(1, len(altered))
+        self.assertIn("SYS_SEMANTIC.MODELS ADD COLUMN GOVERNANCE_MODE", altered[0])
+
+        # Idempotent: a catalog that already has it is left alone, which is what
+        # makes this safe to run on every install rather than once.
+        present = Catalog(columns=["GOVERNANCE_MODE"])
+        self.assertEqual([], INSTALL.migrate_added_columns(present))
+        self.assertEqual([], [sql for sql in present.sql if sql.startswith("ALTER TABLE")])
+
+        # And a catalog that does not have the table yet skips it: 001 is about
+        # to create it with the column already in place.
+        class NoTable(Catalog):
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([])
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        absent = NoTable(columns=[])
+        self.assertEqual([], INSTALL.migrate_added_columns(absent))
+
+    def test_every_added_column_names_a_table_001_creates(self):
+        """A typo in ADDED_COLUMNS is a migration that silently never runs."""
+        catalog = (INSTALL.ROOT / "sql/install/001_create_semantic_catalog.sql").read_text()
+        for table, column, _ddl in INSTALL.ADDED_COLUMNS:
+            self.assertIn(f"SYS_SEMANTIC.{table}", catalog, table)
+            self.assertIn(column, catalog, column)
+
     def test_identifier_quoting(self):
         self.assertEqual('"A""B"', INSTALL.quote_ident('A"B'))
 

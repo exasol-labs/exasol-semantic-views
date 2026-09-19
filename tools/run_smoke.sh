@@ -34,6 +34,7 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_agent_context_and_feedback.py
 "$PYTHON_BIN" tools/verify_source_trust.py
 "$PYTHON_BIN" tools/verify_sql_result_contract.py
+"$PYTHON_BIN" tools/verify_cache_integrity.py
 "$PYTHON_BIN" tools/verify_semantic_sql_phase1.py
 "$PYTHON_BIN" tools/verify_group_by_inference.py
 "$PYTHON_BIN" tools/run_sql_files.py tests/sql/validation_smoke.sql tests/sql/compile_request_smoke.sql

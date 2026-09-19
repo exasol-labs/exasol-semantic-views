@@ -84,6 +84,14 @@
 -- into the generated SQL, which stayed hidden only because those queries were
 -- refused earlier for wrapping a metric in SUM().
 -- See plans/bi-and-generic-interface-support.md.
+-- request_json.lua 90.0 -> 90.1 on 2026-09-19, when a cache entry stopped being
+-- trusted merely because the compiler is what usually writes it. COMPILE_CACHE
+-- is a table: whoever can UPDATE it picks the text a published guarded view then
+-- runs with the view owner's rights, with no compile in between. The read now
+-- checks the statement against the relations the model declares, and the tests
+-- cover both halves of that -- an entry reading an undeclared relation, and
+-- `SELECT 'PWNED'`, which reads none and which a containment-only check would
+-- wave through. See plans/combined-bi-and-governance-plan.md, C3.
 -- validator.lua 94.2 -> 94.4 on 2026-09-19, when representations and
 -- materializations stopped being governed by two sets of rules and got one
 -- derived trust class. That split is how a materialization over the raw mart
@@ -105,7 +113,7 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 90.0,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 90.1,
         ["lua/semantic_layer/admin/validator.lua"] = 94.4,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,

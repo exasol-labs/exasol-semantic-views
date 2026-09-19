@@ -644,6 +644,19 @@ local function with_query(mock, fn)
     return result, second, third
 end
 
+-- Every physical relation this fixture's compiler can render. The live
+-- trust-boundary check reads the same four declaration tables the planner does,
+-- so the mock answers that query from one list rather than from nine scattered
+-- representation fixtures: a new fixture source is added here, once, instead of
+-- being silently rejected on the next cache read.
+local FIXTURE_BOUNDARY = {
+    {"MART", "ORDERS"}, {"MART", "ORDERS_HOT"}, {"MART", "TICKETS"},
+    {"MART", "CUSTOMERS"}, {"MART", "SALES_AGG"},
+    {"CRM", "CUSTOMERS"}, {"ARCHIVE", "ORDERS"}, {"MONGO", "CUSTOMERS"},
+    {"VS_ARCHIVE", "ORDERS"}, {"VS_LAKE", "ORDERS"},
+    {"IDENTITY_MAP", "ORDER_XREF"},
+}
+
 local function compiler_query_fixture(options)
     options = options or {}
     local state = {
@@ -655,13 +668,32 @@ local function compiler_query_fixture(options)
         request_logs = {},
         query_logs = {},
         representation_reads = 0,
+        boundary_reads = 0,
+        cache_discards = 0,
     }
 
     local function mock(sql, params)
         local normalized = tostring(sql):gsub("%s+", " ")
         params = params or {}
 
-        if normalized:find("SELECT GENERATED_SQL, PLAN_JSON, VALIDATION_RUN_ID", 1, true) then
+        if normalized:find("SELECT SOURCE_SCHEMA, SOURCE_OBJECT FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
+            -- Matched ahead of the representation branch below, which the same
+            -- table name would otherwise capture and answer with the wrong
+            -- column layout.
+            state.boundary_reads = state.boundary_reads + 1
+            if options.trust_boundary ~= nil then
+                return options.trust_boundary
+            end
+            local relations = {}
+            for index, pair in ipairs(FIXTURE_BOUNDARY) do
+                relations[index] = {pair[1], pair[2]}
+            end
+            return relations
+        elseif normalized:find("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", 1, true) then
+            state.cache_discards = state.cache_discards + 1
+            state.cache[params.cache_key] = nil
+            return {}
+        elseif normalized:find("SELECT GENERATED_SQL, PLAN_JSON, VALIDATION_RUN_ID", 1, true) then
             local cached = state.cache[params.cache_key]
             return cached and {{cached.generated_sql, cached.plan_json,
                 cached.validation_run_id}} or {}
@@ -1740,6 +1772,116 @@ test("compiler retries collisions and tolerates best-effort cache failures", fun
     assert_equal(second.status, "OK")
     assert_equal(second.cache_hit, true)
     assert_equal(touch_state.cache_touches, 1)
+end)
+
+test("a cached statement is checked against the model's declared relations", function()
+    -- COMPILE_CACHE is a table, and whoever can UPDATE it picks the text a
+    -- published guarded view then runs with the view owner's rights. The entry
+    -- is therefore checked on the way out: it may read the relations this model
+    -- declares, and it must read at least one of them.
+    local request = {model = "sales", object = "SALES", metrics = {"revenue"}}
+    local payload = api.json_encode(request)
+
+    local mock, state = compiler_query_fixture()
+    local first = with_query(mock, function() return compile_request_json(payload) end)
+    assert_equal(first.status, "OK")
+    assert_equal(state.cache_inserts, 1)
+
+    local cache_key = next(state.cache)
+    -- `SELECT 'PWNED'` is the shortest poisoned entry there is: it reads
+    -- nothing, so a containment-only check would wave it through.
+    state.cache[cache_key].generated_sql = "SELECT 'PWNED' AS \"total_revenue\""
+
+    local poisoned = with_query(mock, function() return compile_request_json(payload) end)
+    assert_equal(poisoned.status, "OK")
+    assert_equal(poisoned.cache_hit, nil)
+    assert_equal(poisoned.generated_sql, first.generated_sql)
+    assert_equal(state.cache_discards, 1)
+    -- The boundary is read only when there is a row to check, so a miss -- the
+    -- expensive path already -- pays nothing for this.
+    assert_equal(state.boundary_reads, 1)
+
+    -- ... and an entry that reads a relation the model never declared.
+    local exfiltrating, exfil_state = compiler_query_fixture()
+    local clean = with_query(exfiltrating, function() return compile_request_json(payload) end)
+    assert_equal(clean.status, "OK")
+    local key = next(exfil_state.cache)
+    exfil_state.cache[key].generated_sql =
+        'SELECT o."REVENUE" FROM "MART"."ORDERS" o, "SYS_SEMANTIC"."CONNECTIONS" x'
+    local rejected = with_query(exfiltrating, function() return compile_request_json(payload) end)
+    assert_equal(rejected.status, "OK")
+    assert_equal(rejected.cache_hit, nil)
+    assert_equal(exfil_state.cache_discards, 1)
+
+    -- A legitimate entry still hits, and the check costs exactly one statement.
+    local honest, honest_state = compiler_query_fixture()
+    with_query(honest, function() return compile_request_json(payload) end)
+    local hit = with_query(honest, function() return compile_request_json(payload) end)
+    assert_equal(hit.cache_hit, true)
+    assert_equal(honest_state.cache_discards, 0)
+    assert_equal(honest_state.boundary_reads, 1)
+
+    -- An installation whose declarations cannot be read loses cache hits, not
+    -- its cache: fail closed on the answer, but do not delete rows on the
+    -- strength of a boundary that is empty because the read came back empty.
+    local blind, blind_state = compiler_query_fixture({trust_boundary = {}})
+    with_query(blind, function() return compile_request_json(payload) end)
+    local miss = with_query(blind, function() return compile_request_json(payload) end)
+    assert_equal(miss.status, "OK")
+    assert_equal(miss.cache_hit, nil)
+    assert_equal(blind_state.cache_discards, 0)
+    assert_branch("compiler.cache.boundary", blind_state.cache_discards == 0, true)
+    assert_branch("compiler.cache.boundary", state.cache_discards == 0, false)
+end)
+
+test("the boundary reads relations, not columns, CTEs or the inside of a literal", function()
+    -- The check finds relations by the one shape only a relation has: a quoted
+    -- schema, a dot, a quoted object. Parsing from-clauses instead would have to
+    -- know that EXTRACT(YEAR FROM x) does not introduce one, and being wrong
+    -- about that rejects SQL the compiler had just emitted.
+    local relations = api.qualified_relations([[
+        WITH "__esv_b_1" AS (
+          SELECT o."ORDER_DATE", EXTRACT(YEAR FROM o."ORDER_DATE") AS "y"
+          FROM "MART"."ORDERS" o
+          JOIN "mart"."customers" c ON c."ID" = o."CUSTOMER_ID"
+          WHERE o."NOTE" <> 'see "SECRET"."LEDGER" for detail'
+        )
+        SELECT b."y" FROM "__esv_b_1" b
+    ]])
+    -- Two relations, both case-folded; the CTE reference, the alias-qualified
+    -- columns and the pair spelled inside the string literal are not relations.
+    --
+    -- The renderer aliases every CTE reference, so `"__esv_b_1"."y"` -- a pair
+    -- whose head is a CTE rather than a schema -- never appears. It is not
+    -- exempted here, because exempting a name prefix is a way into the boundary
+    -- for anyone who can create a schema with that prefix. What holds the
+    -- coupling is a live assertion that a repeat request is still served from
+    -- cache: if the renderer ever starts qualifying CTE columns, that fails
+    -- loudly instead of the cache going quiet.
+    assert_equal(#relations, 2)
+    assert_equal(relations[1], "MART.ORDERS")
+    assert_equal(relations[2], "MART.CUSTOMERS")
+
+    local boundary = {names = {["MART.ORDERS"] = true}, count = 1}
+    local ok, offending = api.within_trust_boundary('SELECT 1 FROM "MART"."ORDERS" o', boundary)
+    assert_equal(ok, true)
+    assert_equal(offending, nil)
+
+    ok, offending = api.within_trust_boundary('SELECT 1 FROM "MART"."SECRETS" s', boundary)
+    assert_equal(ok, false)
+    assert_equal(offending, "MART.SECRETS")
+
+    ok, offending = api.within_trust_boundary("SELECT 'PWNED'", boundary)
+    assert_equal(ok, false)
+    assert_equal(offending, "no relation inside the boundary")
+
+    ok, offending = api.within_trust_boundary('SELECT 1 FROM "MART"."ORDERS" o',
+        {names = {}, count = 0})
+    assert_equal(ok, false)
+    assert_equal(offending, "no declared relations")
+
+    assert_equal(#api.qualified_relations(""), 0)
+    assert_equal(#api.qualified_relations(nil), 0)
 end)
 
 test("the cache key carries the runtime build, so a new runtime cannot serve stale SQL", function()

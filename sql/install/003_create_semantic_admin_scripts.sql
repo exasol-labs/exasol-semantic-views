@@ -8927,6 +8927,16 @@ query([[
     DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
     WHERE MODEL_VERSION_ID = :version_id
 ]], {version_id = model.version_id})
+-- SOURCE_TRUST classifies the relations this model reads, and this call changed
+-- that set, so the stored classes no longer describe it. They are derived by
+-- VALIDATE_MODEL and cannot be recomputed here; clearing them makes the gap
+-- visible as an empty SOURCE_TRUST_FOR_MODEL rather than as a picture that
+-- quietly omits the relation just registered. The next VALIDATE_MODEL rebuilds
+-- them, which is the next step in the authoring order anyway.
+query([[
+    DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+]], {model_id = model.model_id, version_id = model.version_id})
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN(
@@ -9281,6 +9291,16 @@ query([[
     DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
     WHERE MODEL_VERSION_ID = :version_id
 ]], {version_id = model.version_id})
+-- SOURCE_TRUST classifies the relations this model reads, and activating or
+-- retiring a materialization changes that set, so the stored classes no longer
+-- describe it. They are derived by VALIDATE_MODEL and cannot be recomputed
+-- here; clearing them makes the gap visible as an empty SOURCE_TRUST_FOR_MODEL
+-- rather than as a picture that still classifies a relation the planner can no
+-- longer choose. The next VALIDATE_MODEL rebuilds them.
+query([[
+    DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
+    WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+]], {model_id = model.model_id, version_id = model.version_id})
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.GRANT_MODEL_ROLE(
@@ -16229,7 +16249,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "95cb86d805b8b543"
+ESV_RUNTIME_BUILD = "ac8843eb477ab2fb"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17111,7 +17131,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "95cb86d805b8b543"
+ESV_RUNTIME_BUILD = "ac8843eb477ab2fb"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -21288,6 +21308,143 @@ do
         return string.format("%08x%08x", h1, h2)
     end
 
+    -- Cache integrity: what a cached statement is allowed to read.
+    --
+    -- COMPILE_CACHE is an ordinary table in SYS_SEMANTIC, and the compiler is
+    -- not the only thing that can write to it. Whoever can `UPDATE
+    -- SYS_SEMANTIC.COMPILE_CACHE SET GENERATED_SQL = ...` chooses the text that
+    -- a published guarded view then executes with the view owner's rights, for
+    -- every caller, with no compile in between. So a cache row is not trusted
+    -- input merely because the compiler is what usually writes it. It is
+    -- checked on the way out.
+    --
+    -- The boundary is read from the model's *declarations* -- representations,
+    -- materializations, and F5 identity mapping relations -- and not from
+    -- SYS_SEMANTIC.SOURCE_TRUST, which VALIDATE_MODEL derives. The planner
+    -- reads the declarations, so a check that reads the same rows cannot
+    -- disagree with the compile that produced the entry it is checking.
+    -- SOURCE_TRUST can lag: a materialization added after the last
+    -- VALIDATE_MODEL is absent from it while the planner is already choosing
+    -- it, and a boundary that lags is a boundary that rejects SQL the compiler
+    -- emitted seconds ago. SOURCE_TRUST keeps the job it was built for, which
+    -- is classifying these relations (RAW / GOVERNED / DIVERGENT) -- not
+    -- deciding membership.
+    function compile_cache.trust_boundary(model_version_id)
+        local boundary = {names = {}, count = 0}
+        if model_version_id == nil then
+            return boundary
+        end
+        -- Three sources, and SYS_SEMANTIC.ENTITIES is deliberately not one of
+        -- them. It carries SOURCE_SCHEMA/SOURCE_OBJECT columns, but load_catalog
+        -- selects `er.SOURCE_SCHEMA` through an inner join on the entity's
+        -- active PRIMARY representation and never reads the entity's own pair,
+        -- so admitting it would widen the boundary with relations the renderer
+        -- cannot emit -- and cost a fourth scan, about five milliseconds here,
+        -- on every cache hit -- to do it.
+        --
+        -- UNION ALL, not UNION: the duplicates are folded into a set below, so
+        -- paying the database to sort them first buys nothing.
+        local rows = query([[
+            SELECT SOURCE_SCHEMA, SOURCE_OBJECT
+              FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+             WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+            UNION ALL
+            SELECT PHYSICAL_SCHEMA, PHYSICAL_OBJECT
+              FROM SYS_SEMANTIC.MATERIALIZATIONS
+             WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+            UNION ALL
+            SELECT SOURCE_SCHEMA, SOURCE_OBJECT
+              FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS
+             WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+        ]], {version_id = model_version_id})
+        for _, row in ipairs(rows or {}) do
+            local schema_name = row_value(row, "SOURCE_SCHEMA", 1)
+            local object_name = row_value(row, "SOURCE_OBJECT", 2)
+            if not missing(schema_name) and not missing(object_name) then
+                local name = upper(schema_name) .. "." .. upper(object_name)
+                if not boundary.names[name] then
+                    boundary.names[name] = true
+                    boundary.count = boundary.count + 1
+                end
+            end
+        end
+        return boundary
+    end
+
+    -- The relations a statement reads, found by the one shape that cannot be
+    -- mistaken for anything else: a quoted schema identifier, a dot, and a
+    -- quoted object identifier. Every physical relation the renderer emits has
+    -- that shape, and nothing else in its output does -- a column reference is
+    -- `alias."NAME"`, whose head is an unquoted alias, and a CTE reference is a
+    -- lone `"__esv_..."` with no dot at all.
+    --
+    -- Reading pairs rather than parsing from-clauses is deliberate. A
+    -- from-clause parser has to know that the `FROM` in `EXTRACT(YEAR FROM
+    -- o."ORDER_DATE")` and `TRIM(BOTH ' ' FROM x)` does not introduce a
+    -- relation, and being wrong about that rejects a statement the compiler
+    -- just produced. The pair scan has no such cases. It runs on the token
+    -- stream, not the raw text, so a `"MART"."ORDERS"` written inside a string
+    -- literal is a literal and not a relation.
+    --
+    -- What it does not see is an *unqualified* reference -- `FROM SECRETS`,
+    -- resolved against the executing schema. The renderer quotes and qualifies
+    -- everything, so it never emits one, but a rewritten entry could. Finding it
+    -- needs the from-clause parser this avoids, and it is not worth that while
+    -- the same principal can widen the boundary by declaring a relation; G3 is
+    -- what closes both.
+    function compile_cache.qualified_relations(sql)
+        local found = {}
+        if type(sql) ~= "string" or sql == "" then
+            return found
+        end
+        local tokens = sql_text.tokenize(sql)
+        local i = 1
+        while i + 2 <= #tokens do
+            local head, dot, tail = tokens[i], tokens[i + 1], tokens[i + 2]
+            if head.kind == "identifier" and dot.kind == "symbol" and dot.text == "."
+                and tail.kind == "identifier" then
+                found[#found + 1] = upper(sql_text.decode_quoted_identifier(head.text))
+                    .. "." .. upper(sql_text.decode_quoted_identifier(tail.text))
+                i = i + 3
+            else
+                i = i + 1
+            end
+        end
+        return found
+    end
+
+    -- Two conditions, and the second is the one that does the work.
+    --
+    -- Containment alone accepts `SELECT 'PWNED'`, which reads no relation at
+    -- all -- the shortest poisoned entry there is, and the first one a
+    -- demonstration reaches for. Requiring that the statement actually read
+    -- something the model declares is what turns "may not read anything else"
+    -- into "may only be this model's query".
+    function compile_cache.within_trust_boundary(sql, boundary)
+        if boundary == nil or boundary.count == 0 then
+            return false, "no declared relations"
+        end
+        local inside = 0
+        for _, name in ipairs(compile_cache.qualified_relations(sql)) do
+            if not boundary.names[name] then
+                return false, name
+            end
+            inside = inside + 1
+        end
+        if inside == 0 then
+            return false, "no relation inside the boundary"
+        end
+        return true, nil
+    end
+
+    function compile_cache.discard_entry(model_version_id, cache_key)
+        pcall(query, [[
+            DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+            WHERE MODEL_VERSION_ID = :model_version_id
+              AND CACHE_KEY = :cache_key
+        ]], {model_version_id = model_version_id, cache_key = cache_key})
+    end
+
     function compile_cache.cache_lookup(model_version_id, cache_key)
         if cache_key == nil or model_version_id == nil then
             return nil
@@ -21302,8 +21459,22 @@ do
             return nil
         end
         local row = rows[1]
+        local generated_sql = row_value(row, "GENERATED_SQL", 1)
+        local boundary = compile_cache.trust_boundary(model_version_id)
+        local within, offending = compile_cache.within_trust_boundary(generated_sql, boundary)
+        if not within then
+            -- A rejected entry is a miss: the caller compiles, gets the right
+            -- answer, and pays what any cold query pays. The row is dropped
+            -- only when there was a boundary to violate, so an installation
+            -- whose declarations could not be read loses cache hits rather
+            -- than its cache.
+            if boundary.count > 0 then
+                compile_cache.discard_entry(model_version_id, cache_key)
+            end
+            return nil, offending
+        end
         return {
-            generated_sql = row_value(row, "GENERATED_SQL", 1),
+            generated_sql = generated_sql,
             plan_json = row_value(row, "PLAN_JSON", 2),
             validation_run_id = row_value(row, "VALIDATION_RUN_ID", 3),
         }
@@ -25172,6 +25343,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         canonical_sql_text = compile_cache.canonical_sql_text,
         runtime_build = compile_cache.runtime_build,
         compile_cache_key = compile_cache.compile_cache_key,
+        qualified_relations = compile_cache.qualified_relations,
+        within_trust_boundary = compile_cache.within_trust_boundary,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,
         sql_literal = sql_text.sql_literal,
