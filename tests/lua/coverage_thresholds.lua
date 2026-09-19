@@ -74,6 +74,16 @@
 -- (binding by position put the wrong data in each column, silently), `AS "c11"`
 -- was discarded, and an unaliased column came back lower-case where the
 -- published view advertises it upper-case. See plans/bi-and-generic-interface-support.md.
+-- request_json.lua 88.9 -> 89.9 on 2026-09-19, when BI-generated SQL started
+-- being accepted on its own terms: an aggregate wrapper is honoured only when
+-- the metric declares it (SUM of a ratio refuses rather than returning the
+-- ratio), COUNT(*) is refused because its answer depends on a grain the caller
+-- never named, and the `WHERE 1 = 0` / `LIMIT 0` driver probes return a shape
+-- instead of an error. Ratcheted again the same day to 90.0 for the latent bug
+-- that work exposed: a parenthesised WHERE predicate leaked its closing paren
+-- into the generated SQL, which stayed hidden only because those queries were
+-- refused earlier for wrapping a metric in SUM().
+-- See plans/bi-and-generic-interface-support.md.
 return {
     lines = {
         ["lua/semantic_layer/shared/json.lua"] = 100,
@@ -88,7 +98,7 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 88.9,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 90.0,
         ["lua/semantic_layer/admin/validator.lua"] = 94.2,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,

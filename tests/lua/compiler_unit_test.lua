@@ -1572,7 +1572,9 @@ test("structured compiler maps request and validation failures", function()
             dimensions = {"status"}}, {missing_matrix = true}, "SEMANTIC_REQUEST_040"},
         {{model = "sales", object = "SALES", metrics = {"revenue"},
             dimensions = {"status"}}, {invalid_matrix = true}, "SEMANTIC_REQUEST_041"},
-        {{model = "sales", object = "SALES", metrics = {"revenue"}, limit = 0},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}, limit = -1},
+            nil, "SEMANTIC_REQUEST_050"},
+        {{model = "sales", object = "SALES", metrics = {"revenue"}, limit = 1.5},
             nil, "SEMANTIC_REQUEST_050"},
         {{model = "sales", object = "SALES", metrics = {"revenue"}, limit = 10001},
             nil, "SEMANTIC_REQUEST_051"},
@@ -1773,6 +1775,158 @@ test("the cache key carries the runtime build, so a new runtime cannot serve sta
     _G.ESV_RUNTIME_BUILD = "x"
     assert_branch("compiler.cache.runtime_build", api.runtime_build() == "dev", false)
     _G.ESV_RUNTIME_BUILD = nil
+end)
+
+test("an aggregate wrapper is honoured only when the metric declares it", function()
+    -- BI tools write SUM(metric) over what they believe is a table column. For an
+    -- additive metric that reading is exactly right. For a ratio it is not: the
+    -- sum of a ratio is not the ratio, and answering anyway would put a number
+    -- under a label that lies about how it was computed.
+    local mock = compiler_query_fixture()
+    local function sql(text) return with_query(mock, function() return compile_sql(text) end) end
+
+    local declared = sql("SELECT order_status, SUM(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1")
+    assert_equal(declared.status, "OK")
+    local explicit = sql("SELECT order_status, MEASURE(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1")
+    assert_equal(explicit.status, "OK")
+    assert_equal(sql("SELECT order_status, agg(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1").status, "OK")
+
+    local mismatched = sql("SELECT order_status, AVG(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1")
+    assert_equal(mismatched.status, "ERROR")
+    assert_equal(mismatched.error_code, "SEMANTIC_QUERY_007")
+    assert_contains(mismatched.error_message, "declares SUM")
+    assert_contains(mismatched.error_message, "MEASURE(total_revenue)")
+
+    -- A wrapper around a dimension is still the older, different refusal.
+    assert_equal(sql("SELECT SUM(order_status) FROM SEMANTIC_SALES.SALES").error_code,
+        "SEMANTIC_QUERY_006")
+
+    -- A metric that declares no aggregation accepts no named wrapper at all.
+    local ratio_mock = compiler_query_fixture({multi_fact = true})
+    local ratio = with_query(ratio_mock, function()
+        return compile_sql("SELECT SUM(activity_ratio) FROM SEMANTIC_SALES.SALES")
+    end)
+    assert_equal(ratio.error_code, "SEMANTIC_QUERY_007")
+
+    assert_branch("compiler.select.wrapper", declared.status == "OK", true)
+    assert_branch("compiler.select.wrapper", mismatched.status == "OK", false)
+end)
+
+test("COUNT(*) over a semantic object is refused, not guessed", function()
+    -- The row count depends on the grain the layer selects, not on anything the
+    -- caller named, so any number would be an answer to a question they did not
+    -- ask. Drivers emit it for row estimates; refusing is the honest reply.
+    local mock = compiler_query_fixture()
+    local counted = with_query(mock, function()
+        return compile_sql("SELECT COUNT(*) FROM SEMANTIC_SALES.SALES")
+    end)
+    assert_equal(counted.status, "ERROR")
+    assert_equal(counted.error_code, "SEMANTIC_QUERY_010")
+    assert_contains(counted.error_message, "grain")
+    assert_branch("compiler.select.count_star", counted.error_code == "SEMANTIC_QUERY_010", true)
+    local normal = with_query(mock, function()
+        return compile_sql("SELECT order_status FROM SEMANTIC_SALES.SALES")
+    end)
+    assert_branch("compiler.select.count_star", normal.error_code == "SEMANTIC_QUERY_010", false)
+end)
+
+test("a parenthesised predicate does not leak its closing paren into the SQL", function()
+    -- BI tools wrap WHERE predicates in parentheses. The trailing `)` used to be
+    -- carried into the predicate's value and rendered straight into the
+    -- generated statement, which Exasol will not parse. It stayed hidden because
+    -- those queries were refused earlier for using SUM() around a metric, so the
+    -- renderer never saw them; accepting that wrapper exposed it.
+    local mock = compiler_query_fixture()
+    local function sql(text) return with_query(mock, function() return compile_sql(text) end) end
+    local V = "SEMANTIC_SALES.SALES"
+
+    for _, text in ipairs({
+        "SELECT order_status FROM " .. V .. " WHERE (order_status = 'COMPLETE')",
+        "SELECT order_status FROM " .. V .. " WHERE (order_status = 'COMPLETE') AND (order_status <> 'X')",
+        "SELECT order_status FROM " .. V .. " WHERE (order_status = 'COMPLETE' AND order_status <> 'X')",
+        "SELECT order_status FROM " .. V .. " WHERE ((order_status = 'COMPLETE'))",
+    }) do
+        local result = sql(text)
+        assert_equal(result.status, "OK", text)
+        assert_true(not string.find(result.generated_sql, "'COMPLETE' )", 1, true),
+            "stray paren in: " .. tostring(result.generated_sql))
+    end
+
+    -- An IN list's own parentheses are not an enclosing wrapper and must stay.
+    local in_list = sql("SELECT order_status FROM " .. V
+        .. " WHERE order_status IN ('COMPLETE', 'OPEN')")
+    assert_equal(in_list.status, "OK")
+    assert_contains(in_list.generated_sql, "'COMPLETE'")
+    assert_contains(in_list.generated_sql, "'OPEN'")
+
+    -- and an unparenthesised predicate is unchanged.
+    local plain = sql("SELECT order_status FROM " .. V .. " WHERE order_status = 'COMPLETE'")
+    assert_equal(plain.status, "OK")
+    assert_branch("compiler.filter.parens", plain.status == "OK", true)
+    assert_branch("compiler.filter.parens",
+        sql("SELECT order_status FROM " .. V .. " WHERE (nope").status == "OK", false)
+end)
+
+test("a constant predicate is a driver probe, not a filter without a subject", function()
+    -- `WHERE 1 = 0` is how JDBC/ODBC ask for a result's shape without its rows,
+    -- and `WHERE 1 = 1` is how some tools spell "no filter". Neither names a
+    -- field, and refusing them for that can fail a tool during schema discovery
+    -- before the user has run anything.
+    local mock = compiler_query_fixture()
+    local function sql(text) return with_query(mock, function() return compile_sql(text) end) end
+
+    local empty = sql("SELECT order_status, total_revenue FROM SEMANTIC_SALES.SALES WHERE 1 = 0")
+    assert_equal(empty.status, "OK")
+    assert_contains(empty.generated_sql, "LIMIT 0")
+
+    local always = sql("SELECT order_status, total_revenue FROM SEMANTIC_SALES.SALES WHERE 1 = 1")
+    assert_equal(always.status, "OK")
+    assert_true(not string.find(always.generated_sql, "LIMIT 0", 1, true))
+
+    -- every comparison operator, both ways
+    for _, case in ipairs({{"1 <> 1", true}, {"1 != 1", true}, {"2 > 1", false},
+                           {"1 > 2", true}, {"2 >= 2", false}, {"1 >= 2", true},
+                           {"1 < 2", false}, {"2 < 1", true}, {"1 <= 1", false},
+                           {"2 <= 1", true}}) do
+        local result = sql("SELECT order_status FROM SEMANTIC_SALES.SALES WHERE " .. case[1])
+        assert_equal(result.status, "OK")
+        local emptied = string.find(result.generated_sql, "LIMIT 0", 1, true) ~= nil
+        assert_true(emptied == case[2], case[1] .. " expected empty=" .. tostring(case[2]))
+    end
+
+    -- mixed with a real predicate: the constant empties, the real one still parses
+    local mixed = sql("SELECT order_status FROM SEMANTIC_SALES.SALES"
+        .. " WHERE 1 = 0 AND order_status = 'COMPLETE'")
+    assert_equal(mixed.status, "OK")
+    assert_contains(mixed.generated_sql, "LIMIT 0")
+    assert_contains(mixed.generated_sql, "COMPLETE")
+
+    -- only a literal-vs-literal comparison takes the constant path; a named
+    -- subject still resolves as a field predicate, and fails as one.
+    local named = sql("SELECT order_status FROM SEMANTIC_SALES.SALES WHERE nope = 1")
+    assert_equal(named.status, "ERROR")
+    assert_branch("compiler.filter.constant",
+        string.find(empty.generated_sql, "LIMIT 0", 1, true) ~= nil, true)
+    assert_branch("compiler.filter.constant",
+        string.find(always.generated_sql, "LIMIT 0", 1, true) ~= nil, false)
+end)
+
+test("LIMIT 0 is a shape probe, not an error", function()
+    -- JDBC and ODBC drivers issue `LIMIT 0` during schema discovery to learn a
+    -- result's shape without fetching it. This used to be SEMANTIC_REQUEST_050,
+    -- which can fail a BI tool before the user has run anything. Zero is a
+    -- well-defined limit -- at most zero rows -- so both lanes accept it, and a
+    -- negative or fractional limit is still refused.
+    local zero = compile_with_fixture(
+        {model = "sales", object = "SALES", metrics = {"revenue"}, limit = 0})
+    assert_equal(zero.status, "OK")
+    assert_contains(zero.generated_sql, "LIMIT 0")
+    assert_branch("compiler.limit.zero", zero.status == "OK", true)
+
+    local negative = compile_with_fixture(
+        {model = "sales", object = "SALES", metrics = {"revenue"}, limit = -1})
+    assert_equal(negative.error_code, "SEMANTIC_REQUEST_050")
+    assert_branch("compiler.limit.zero", negative.status == "OK", false)
 end)
 
 test("canonical SQL text keys on tokens, not on formatting", function()

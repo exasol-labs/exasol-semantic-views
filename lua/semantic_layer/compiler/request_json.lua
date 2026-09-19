@@ -2809,8 +2809,11 @@ local function compile_request_table(request, options)
     local limit = nil
     if not missing(request.limit) then
         limit = tonumber(request.limit)
-        if limit == nil or limit < 1 or limit % 1 ~= 0 then
-            return error_result("SEMANTIC_REQUEST_050", "LIMIT must be a positive integer.")
+        -- Zero is allowed: JDBC/ODBC drivers issue `LIMIT 0` during schema
+        -- discovery to learn a result's shape without fetching it, and refusing
+        -- that can fail a tool before the user has run anything.
+        if limit == nil or limit < 0 or limit % 1 ~= 0 then
+            return error_result("SEMANTIC_REQUEST_050", "LIMIT must be a non-negative integer.")
         end
         if limit > MAX_LIMIT then
             return error_result("SEMANTIC_REQUEST_051", "LIMIT exceeds maximum " .. tostring(MAX_LIMIT) .. ".")
@@ -3296,13 +3299,22 @@ end
 -- in SELECT / HAVING / ORDER BY. Unwrap that call to the bare semantic field name
 -- so the rest of the parser treats it like any other metric reference. Returns the
 -- (possibly rewritten) token list and whether a wrapper was actually removed.
+-- Wrappers a select item may put around a metric. MEASURE/AGG say "give me this
+-- metric" and carry no aggregation of their own. A named aggregate is accepted
+-- only when it is the one the metric declares -- see the select-list loop -- so
+-- that SUM(a_ratio) refuses instead of quietly returning the ratio.
+local METRIC_WRAPPERS = {
+    MEASURE = true, AGG = true,
+    SUM = true, COUNT = true, MIN = true, MAX = true, AVG = true,
+}
+
 local function unwrap_measure_part(part)
     if part == nil or #part < 4 then
-        return part, false
+        return part, false, nil
     end
     local head = sql_text.token_upper(part[1])
-    if (head ~= "MEASURE" and head ~= "AGG") or part[2].text ~= "(" then
-        return part, false
+    if not METRIC_WRAPPERS[head] or part[2].text ~= "(" then
+        return part, false, nil
     end
     local depth = 0
     local close_index = nil
@@ -3320,7 +3332,7 @@ local function unwrap_measure_part(part)
     end
     -- Require a non-empty argument and a matching close paren.
     if close_index == nil or close_index <= 3 then
-        return part, false
+        return part, false, nil
     end
     local rewritten = {}
     for i = 3, close_index - 1 do
@@ -3329,7 +3341,7 @@ local function unwrap_measure_part(part)
     for i = close_index + 1, #part do
         rewritten[#rewritten + 1] = part[i]
     end
-    return rewritten, true
+    return rewritten, true, head
 end
 
 local function identifier_from_part(part)
@@ -3465,6 +3477,55 @@ local function predicate_operator_at(tokens, index)
     return nil
 end
 
+-- Strip parentheses that wrap a whole predicate. BI tools emit
+-- `WHERE ("t"."STATUS" = 'X')`, and without this the trailing `)` was carried
+-- into the predicate's value and rendered straight into the generated SQL,
+-- producing a statement Exasol will not parse. It went unnoticed because those
+-- queries were refused earlier, for using SUM() around a metric, before the
+-- renderer ever saw them.
+local function strip_outer_parens(tokens, first, last)
+    while first < last and tokens[first].text == "(" do
+        local depth = 0
+        local match = nil
+        for i = first, last do
+            local text = tokens[i].text
+            if text == "(" then
+                depth = depth + 1
+            elseif text == ")" then
+                depth = depth - 1
+                if depth == 0 then
+                    match = i
+                    break
+                end
+            end
+        end
+        if match ~= last then
+            return first, last
+        end
+        first, last = first + 1, last - 1
+    end
+    return first, last
+end
+
+-- Evaluate `<number> <op> <number>`, the only predicate shape that names no
+-- field. Returns true/false for a constant comparison and nil for anything else,
+-- so a real predicate falls through untouched.
+local function constant_comparison(tokens, first, last, op_index, op)
+    local left = token_slice(tokens, first, op_index - 1)
+    local right = token_slice(tokens, op_index + 1, last)
+    if #left ~= 1 or #right ~= 1 then return nil end
+    if left[1].kind ~= "number" or right[1].kind ~= "number" then return nil end
+    local a, b = tonumber(left[1].text), tonumber(right[1].text)
+    if a == nil or b == nil then return nil end
+    if op == "=" then return a == b end
+    if op == "!=" or op == "<>" then return a ~= b end
+    if op == ">" then return a > b end
+    if op == ">=" then return a >= b end
+    if op == "<" then return a < b end
+    if op == "<=" then return a <= b end
+    return nil
+end
+
 -- One predicate parser for both WHERE and HAVING.
 --
 -- These were two ~110-line functions whose diff was 72 lines of 123, and almost
@@ -3478,9 +3539,13 @@ end
 -- resolved name where WHERE stores what the author typed.
 local function parse_predicates(ctx, tokens, start_index, end_index, clause)
     local filters = {}
+    local empty_result = false
     local chunks = {}
     -- Split on top-level AND conjunctions, but skip the AND that belongs to a
     -- BETWEEN...AND range (e.g. "field BETWEEN v1 AND v2").
+    -- `WHERE (a = 1 AND b = 2)` wraps the whole clause; unwrap before splitting
+    -- so the conjunction is still seen at the top level.
+    start_index, end_index = strip_outer_parens(tokens, start_index, end_index)
     local current_start = start_index
     local depth = 0
     local after_between = false
@@ -3509,8 +3574,8 @@ local function parse_predicates(ctx, tokens, start_index, end_index, clause)
     chunks[#chunks + 1] = {current_start, end_index}
 
     for _, chunk in ipairs(chunks) do
-        local first = chunk[1]
-        local last = chunk[2]
+        -- and `(a = 1) AND (b = 2)` wraps each conjunct separately.
+        local first, last = strip_outer_parens(tokens, chunk[1], chunk[2])
         local op_index = nil
         local op = nil
         for idx = first, last do
@@ -3523,6 +3588,18 @@ local function parse_predicates(ctx, tokens, start_index, end_index, clause)
         end
         if op_index == nil then
             return nil, error_result("SEMANTIC_QUERY_030", clause.unsupported)
+        end
+        -- `WHERE 1 = 0` is how JDBC/ODBC drivers ask for a result's shape
+        -- without its rows, and `WHERE 1 = 1` is how some tools spell "no
+        -- filter". Neither names a field, so evaluate the comparison rather than
+        -- refusing it for having no subject. A false one makes the whole
+        -- conjunction empty, which LIMIT 0 expresses exactly.
+        local constant = constant_comparison(tokens, first, last, op_index, op)
+        if constant ~= nil then
+            if constant == false then
+                empty_result = true
+            end
+            goto continue_chunk
         end
         local field = identifier_from_part(token_slice(tokens, first, op_index - 1))
         if field == nil then
@@ -3595,8 +3672,9 @@ local function parse_predicates(ctx, tokens, start_index, end_index, clause)
                 filters[#filters + 1] = {field = field, op = op, value = value}
             end
         end
+        ::continue_chunk::
     end
-    return filters, nil
+    return filters, nil, empty_result
 end
 
 -- The whole difference between the two clauses, in one place. It used to be
@@ -3798,7 +3876,16 @@ local function parse_semantic_sql(statement_text, options)
         end
     end
     for _, part in ipairs(wildcard_select and {} or select_parts) do
-        local _, measure_wrapped = unwrap_measure_part(part)
+        local inner, measure_wrapped, wrapper = unwrap_measure_part(part)
+        -- COUNT(*) counts rows of a result whose grain the layer chose, not
+        -- anything the caller named. Refuse rather than answer a question the
+        -- number would not actually be an answer to.
+        if wrapper == "COUNT" and #inner == 1 and inner[1].text == "*" then
+            return nil, error_result("SEMANTIC_QUERY_010",
+                "COUNT(*) over a semantic object is not supported: the row count"
+                    .. " depends on the grain the layer selects. Count a metric,"
+                    .. " or select the dimensions the count should be over.")
+        end
         local field_name = identifier_from_part(part)
         if field_name == nil then
             return nil, error_result("SEMANTIC_QUERY_005", "SELECT supports semantic field names, MEASURE(metric), or *.")
@@ -3809,6 +3896,20 @@ local function parse_semantic_sql(statement_text, options)
         end
         if measure_wrapped and field.kind ~= "METRIC" then
             return nil, error_result("SEMANTIC_QUERY_006", "MEASURE()/agg() may only wrap a metric, not '" .. tostring(field.name) .. "'.")
+        end
+        -- A named aggregate is honoured only when it is the aggregation the
+        -- metric declares. BI tools write SUM(metric) over what they believe is
+        -- a column, and for an additive metric that reading is exactly right --
+        -- but SUM of a ratio is not the ratio, and answering it anyway would
+        -- return a number under a label that lies about how it was computed.
+        if measure_wrapped and wrapper ~= "MEASURE" and wrapper ~= "AGG" then
+            local declared = upper(tostring(field.aggregation_function or ""))
+            if declared ~= wrapper then
+                return nil, error_result("SEMANTIC_QUERY_007",
+                    wrapper .. "(" .. tostring(field.name) .. ") is not how that metric"
+                        .. " aggregates" .. (declared == "" and "" or "; it declares " .. declared)
+                        .. ". Use MEASURE(" .. tostring(field.name) .. ") to select it as defined.")
+            end
         end
         selected_output[#selected_output + 1] = field.name
         local output_alias = alias_from_select_part(part)
@@ -3832,9 +3933,15 @@ local function parse_semantic_sql(statement_text, options)
     end
 
     if clauses.WHERE ~= nil then
-        local raw_filters, filter_err = parse_where_filters(tokens, clauses.WHERE + 1, clause_end(tokens, clauses, "WHERE"))
+        local raw_filters, filter_err, where_empty = parse_where_filters(tokens, clauses.WHERE + 1, clause_end(tokens, clauses, "WHERE"))
         if filter_err ~= nil then
             return nil, filter_err
+        end
+        -- A constant-false conjunct empties the result. Say so as LIMIT 0, which
+        -- is the same shape-without-rows the driver asked for and needs no new
+        -- concept in the planner.
+        if where_empty then
+            request.limit = 0
         end
         for _, filter in ipairs(raw_filters) do
             local field, _ = resolve_field(ctx, filter.field, nil)
@@ -3896,7 +4003,10 @@ local function parse_semantic_sql(statement_text, options)
     end
 
     if clauses.HAVING ~= nil then
-        local having_filters, having_err = parse_having_filters(ctx, tokens, clauses.HAVING + 1, clause_end(tokens, clauses, "HAVING"))
+        local having_filters, having_err, having_empty = parse_having_filters(ctx, tokens, clauses.HAVING + 1, clause_end(tokens, clauses, "HAVING"))
+        if having_empty then
+            request.limit = 0
+        end
         if having_err ~= nil then
             return nil, having_err
         end
@@ -3917,7 +4027,7 @@ local function parse_semantic_sql(statement_text, options)
         local limit_start = clauses.LIMIT + 1
         local limit_end = clause_end(tokens, clauses, "LIMIT")
         if limit_start ~= limit_end or tokens[limit_start].kind ~= "number" then
-            return nil, error_result("SEMANTIC_QUERY_050", "LIMIT must be a positive integer literal.")
+            return nil, error_result("SEMANTIC_QUERY_050", "LIMIT must be a non-negative integer literal.")
         end
         request.limit = tonumber(tokens[limit_start].text)
     end
