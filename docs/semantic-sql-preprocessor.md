@@ -112,6 +112,62 @@ ordinals. Databricks-style `ORDER BY MEASURE(metric)` is accepted for selected
 metrics. `SELECT *` expands to the visible semantic dimensions and metrics for
 the published object.
 
+## Statements that wrap a semantic object
+
+The subset above is what the *whole-statement* path compiles: a `SELECT` whose
+`FROM` is one published object. A BI tool almost never emits that. It emits the
+object wrapped in something — a TopN wrapper, a CTE, a subquery, a union, a
+window, arithmetic in the select list, `COUNT(*)`.
+
+Those are accepted too, by a second path: **reference expansion** replaces the
+reference rather than compiling the statement around it.
+
+```sql
+-- you write
+SELECT t0.CUSTOMER_REGION, RANK() OVER (ORDER BY t0.TOTAL_REVENUE DESC) r
+FROM SEMANTIC_SALES.SALES t0
+
+-- the preprocessor emits
+SELECT t0.CUSTOMER_REGION, RANK() OVER (ORDER BY t0.TOTAL_REVENUE DESC) r
+FROM (<compiled semantic SQL for CUSTOMER_REGION, TOTAL_REVENUE>) t0
+```
+
+Everything outside the parentheses stays ordinary SQL that Exasol handles
+natively. A `CREATE VIEW` over a semantic object therefore stores *compiled*
+SQL, so the view answers with no preprocessor at all.
+
+**Which columns get compiled is inferred from the statement**: every
+`alias.column` reference, unqualified names matching a published column, and
+`*` — where a bare `*` counts only when it is selected from the same query block
+as the reference, so the star in `SELECT * FROM (SELECT t0.A FROM obj t0) x`
+means the subquery's columns and not the object's. When no column of the object
+is referenced at all, the statement is refused with `SEMANTIC_QUERY_011` rather
+than defaulting to every column: a wrong grain returns plausible totals, which is
+the hardest kind of wrong to notice.
+
+### Composition is refused by default
+
+A derived table can be joined, and a join can repeat the semantic result's rows:
+
+```sql
+SELECT t0.CUSTOMER_REGION, SUM(t0.TOTAL_REVENUE)
+FROM SEMANTIC_SALES.SALES t0 JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION
+GROUP BY 1
+-- North 7270, where the model says 3635
+```
+
+The semantic layer stops supervising at the edge of the derived table, so this
+is refused with `SEMANTIC_QUERY_012`. Unlike the same hazard under a Virtual
+Schema, the boundary is visible in the author's own SQL — they wrote the join —
+which makes it explainable, not safe.
+
+A deployment that would rather have ordinary-SQL semantics than a refusal opts
+in per model:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION('sales', 'TRUE');
+```
+
 Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.
 

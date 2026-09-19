@@ -243,6 +243,44 @@ local function valid_json_text(text)
     return json.is_valid(text)
 end
 
+-- One statement per batch of rows, not one per row.
+--
+-- VALIDATE_MODEL writes about 260 rows for a four-entity model -- validation
+-- results, metric dependencies, the compatibility matrix, source trust -- and
+-- each was its own INSERT. That made validation cost ~2.1 s regardless of model
+-- size, which mattered far more than it looks: every ADD_*/REMOVE_*/PUBLISH_
+-- script validates, so the smoke suite performs 222 validations and spent 44% of
+-- its wall clock here. The work was never the rows; it was the round trips.
+--
+-- Chunked rather than one giant statement: parameter count and statement length
+-- both have limits, and a model large enough to matter is exactly the one that
+-- would find them.
+local INSERT_BATCH_ROWS = 100
+
+local function insert_rows(table_name, columns, rows)
+    if rows == nil or #rows == 0 then
+        return
+    end
+    local column_sql = table.concat(columns, ", ")
+    local first = 1
+    while first <= #rows do
+        local last = math.min(first + INSERT_BATCH_ROWS - 1, #rows)
+        local tuples, params = {}, {}
+        for position = first, last do
+            local placeholders = {}
+            for column_index = 1, #columns do
+                local name = "b" .. position .. "_" .. column_index
+                placeholders[column_index] = ":" .. name
+                params[name] = rows[position][column_index]
+            end
+            tuples[#tuples + 1] = "(" .. table.concat(placeholders, ", ") .. ")"
+        end
+        query("INSERT INTO " .. table_name .. " (" .. column_sql .. ") VALUES "
+            .. table.concat(tuples, ", "), params)
+        first = last + 1
+    end
+end
+
 local function start_validation_run(ctx)
     query([[
         INSERT INTO SYS_SEMANTIC.VALIDATION_RUNS (
@@ -293,26 +331,39 @@ local function add_issue(ctx, severity, object_type, object_name, rule_code, mes
         ctx.warning_count = ctx.warning_count + 1
     end
 
+    -- Buffered, not written here. An issue raised before the model row is read
+    -- has no run id yet, and writing each one as it is found cost 161 round
+    -- trips on a four-entity model. flush_issues writes them together once the
+    -- run is known, which is also what makes the stored order match the order
+    -- the caller is handed.
     if not missing(ctx.validation_run_id) then
-        query([[
-            INSERT INTO SYS_SEMANTIC.VALIDATION_RESULTS (
-              VALIDATION_RUN_ID, MODEL_ID, VERSION_ID, SEVERITY, OBJECT_TYPE,
-              OBJECT_NAME, RULE_CODE, MESSAGE
-            ) VALUES (
-              :validation_run_id, :model_id, :version_id, :severity, :object_type,
-              :object_name, :rule_code, :message
-            )
-        ]], {
-            validation_run_id = ctx.validation_run_id,
-            model_id = null_if_missing(ctx.model_id),
-            version_id = null_if_missing(ctx.version_id),
-            severity = severity,
-            object_type = object_type,
-            object_name = null_if_missing(object_name),
-            rule_code = rule_code,
-            message = message,
-        })
+        issue.recordable = true
     end
+end
+
+local function flush_issues(ctx)
+    if missing(ctx.validation_run_id) then
+        return
+    end
+    local rows = {}
+    for _, issue in ipairs(ctx.issues or {}) do
+        if issue.recordable then
+            rows[#rows + 1] = {
+                ctx.validation_run_id,
+                null_if_missing(ctx.model_id),
+                null_if_missing(ctx.version_id),
+                issue.severity,
+                issue.object_type,
+                null_if_missing(issue.object_name),
+                issue.rule_code,
+                issue.message,
+            }
+        end
+    end
+    insert_rows("SYS_SEMANTIC.VALIDATION_RESULTS", {
+        "VALIDATION_RUN_ID", "MODEL_ID", "VERSION_ID", "SEVERITY", "OBJECT_TYPE",
+        "OBJECT_NAME", "RULE_CODE", "MESSAGE",
+    }, rows)
 end
 
 local function finish_validation_run(ctx)
@@ -361,31 +412,77 @@ local function source_object_exists(schema_name, object_name)
     ]], {schema_name = schema_name, object_name = object_name}) > 0
 end
 
-local function source_column_exists(schema_name, object_name, column_name)
-    return count_query([[
-        SELECT COUNT(*)
+-- One read per relation, not one per column.
+--
+-- These two asked SYS.EXA_ALL_COLUMNS once per declared column, and that ran 48
+-- times for a four-entity model: 0.85 s of a 1.96 s validation, 43% of it. The
+-- system view is scanned rather than indexed, so each probe costs about the same
+-- whether it returns one row or none, and the validator was paying that per
+-- column name instead of per relation.
+--
+-- A relation's columns are a small set that cannot change while one validation
+-- runs, and the runtime chunk is re-created per EXECUTE SCRIPT, so this cache
+-- lives exactly one validation and has no way to go stale. It is the same
+-- load-once shape load_relation_graph already uses.
+local source_column_cache = {}
+
+local function source_relation_columns(schema_name, object_name)
+    local cache_key = upper(tostring(schema_name)) .. "\0" .. upper(tostring(object_name))
+    local cached = source_column_cache[cache_key]
+    if cached ~= nil then
+        return cached
+    end
+    local columns = {}
+    local ok, rows = pcall(query, [[
+        SELECT COLUMN_NAME, COLUMN_TYPE
         FROM SYS.EXA_ALL_COLUMNS
         WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
           AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
-          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
-    ]], {schema_name = schema_name, object_name = object_name, column_name = column_name}) > 0
+    ]], {schema_name = schema_name, object_name = object_name})
+    if ok and rows ~= nil then
+        for _, row in ipairs(rows) do
+            local name = row_value(row, "COLUMN_NAME", 1)
+            if name ~= nil then
+                local entry = {data_type = row_value(row, "COLUMN_TYPE", 2)}
+                -- Indexed under both spellings, exact first, which is what the
+                -- `= :name OR = UPPER(:name)` predicates and the ORDER BY that
+                -- preferred an exact match used to express.
+                columns[tostring(name)] = entry
+                local folded = upper(tostring(name))
+                if columns[folded] == nil then
+                    columns[folded] = entry
+                end
+            end
+        end
+    end
+    source_column_cache[cache_key] = columns
+    return columns
+end
+
+-- The cache is per validation, not per chunk. In the installed runtime those
+-- are the same thing -- a runtime script is created fresh for each EXECUTE
+-- SCRIPT -- but relying on that would make the cache silently wrong anywhere the
+-- module is loaded once and used twice, which is exactly what the database-free
+-- test suite does.
+local function reset_source_column_cache()
+    source_column_cache = {}
+end
+
+local function source_column_entry(schema_name, object_name, column_name)
+    local columns = source_relation_columns(schema_name, object_name)
+    return columns[tostring(column_name)] or columns[upper(tostring(column_name))]
+end
+
+local function source_column_exists(schema_name, object_name, column_name)
+    return source_column_entry(schema_name, object_name, column_name) ~= nil
 end
 
 local function source_column_type(schema_name, object_name, column_name)
-    local ok, rows = pcall(query, [[
-        SELECT COLUMN_TYPE
-        FROM SYS.EXA_ALL_COLUMNS
-        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
-          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
-          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
-        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
-        LIMIT 1
-    ]], {schema_name = schema_name, object_name = object_name,
-          column_name = column_name})
-    if not ok or rows == nil or #rows == 0 then return nil end
-    local data_type = row_value(rows[1], "COLUMN_TYPE", 1)
-    if type(data_type) ~= "string" then return nil end
-    return data_type
+    local entry = source_column_entry(schema_name, object_name, column_name)
+    if entry == nil or type(entry.data_type) ~= "string" then
+        return nil
+    end
+    return entry.data_type
 end
 
 local function relationship_type_family(data_type)
@@ -3298,6 +3395,7 @@ local function derive_source_trust(ctx)
     local governed_mode = upper(tostring(ctx.governance_mode or "OPEN")) == "GOVERNED"
     local graph = load_relation_graph()
     local classified = {}
+    local trust_rows = {}
 
     local function classify(kind, id, name, schema, object)
         local start_key = relation_key(schema, object)
@@ -3354,18 +3452,10 @@ local function derive_source_trust(ctx)
     end
 
     for _, entry in ipairs(classified) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.SOURCE_TRUST (
-              MODEL_ID, VERSION_ID, RELATION_KIND, RELATION_ID, RELATION_NAME,
-              PHYSICAL_SCHEMA, PHYSICAL_OBJECT, TRUST_CLASS, BASE_RELATIONS
-            ) VALUES (
-              :model_id, :version_id, :kind, :id, :name,
-              :schema, :object, :class, :bases
-            )
-        ]], {model_id = ctx.model_id, version_id = ctx.version_id,
-             kind = entry.kind, id = entry.id, name = entry.name or "",
-             schema = entry.schema, object = entry.object, class = entry.class,
-             bases = table.concat(entry.bases, ",")})
+        trust_rows[#trust_rows + 1] = {
+            ctx.model_id, ctx.version_id, entry.kind, entry.id, entry.name or "",
+            entry.schema, entry.object, entry.class, table.concat(entry.bases, ","),
+        }
 
         local where = entry.kind == "REPRESENTATION" and "representation" or "materialization"
         local label = tostring(entry.name or entry.object)
@@ -3402,6 +3492,10 @@ local function derive_source_trust(ctx)
                 .. " with SET_MODEL_GOVERNANCE_MODE.")
         end
     end
+    insert_rows("SYS_SEMANTIC.SOURCE_TRUST", {
+        "MODEL_ID", "VERSION_ID", "RELATION_KIND", "RELATION_ID", "RELATION_NAME",
+        "PHYSICAL_SCHEMA", "PHYSICAL_OBJECT", "TRUST_CLASS", "BASE_RELATIONS",
+    }, trust_rows)
 end
 
 local function extract_metric_dependencies(ctx)
@@ -3417,19 +3511,15 @@ local function extract_metric_dependencies(ctx)
 
     ctx.metric_edges = {}
     local dependency_seen = {}
+    local dependency_rows = {}
     local function add_dependency(metric, object_type, object_id)
         local dep_key = key(metric.id) .. "|" .. object_type .. "|" .. key(object_id)
         if dependency_seen[dep_key] then
             return
         end
         dependency_seen[dep_key] = true
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRIC_DEPENDENCIES (
-              METRIC_ID, DEPENDS_ON_OBJECT_TYPE, DEPENDS_ON_OBJECT_ID, DEPENDENCY_KIND
-            ) VALUES (
-              :metric_id, :object_type, :object_id, 'EXPRESSION'
-            )
-        ]], {metric_id = metric.id, object_type = object_type, object_id = object_id})
+        dependency_rows[#dependency_rows + 1] =
+            {metric.id, object_type, object_id, "EXPRESSION"}
         if object_type == "METRIC" then
             local metric_key = key(metric.id)
             ctx.metric_edges[metric_key] = ctx.metric_edges[metric_key] or {}
@@ -3451,6 +3541,9 @@ local function extract_metric_dependencies(ctx)
             end
         end
     end
+    insert_rows("SYS_SEMANTIC.METRIC_DEPENDENCIES",
+        {"METRIC_ID", "DEPENDS_ON_OBJECT_TYPE", "DEPENDS_ON_OBJECT_ID", "DEPENDENCY_KIND"},
+        dependency_rows)
 end
 
 local function detect_metric_cycles(ctx)
@@ -3918,6 +4011,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     ]], {model_id = ctx.model_id, version_id = ctx.version_id})
 
     local matrix = {}
+    local matrix_rows = {}
     for _, metric in ipairs(ctx.metrics) do
         matrix[key(metric.id)] = {}
         -- Pre-check: the compiler starts joins from the semantic object root. If the
@@ -3984,26 +4078,19 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 alternate_paths = alternates ~= nil
                     and #alternates.alternates > 0 and alternates.alternates or nil,
             }
-            query([[
-                INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX (
-                  MODEL_ID, VERSION_ID, METRIC_ID, DIMENSION_ID, IS_VALID,
-                  REASON_CODE, RELATIONSHIP_PATH, VALIDATION_RUN_ID, UPDATED_AT
-                ) VALUES (
-                  :model_id, :version_id, :metric_id, :dimension_id, :is_valid,
-                  :reason_code, :relationship_path, :validation_run_id, CURRENT_TIMESTAMP
-                )
-            ]], {
-                model_id = ctx.model_id,
-                version_id = ctx.version_id,
-                metric_id = metric.id,
-                dimension_id = dimension.id,
-                is_valid = is_valid,
-                reason_code = reason_code,
-                relationship_path = null_if_missing(path),
-                validation_run_id = ctx.validation_run_id,
-            })
+            -- UPDATED_AT is left to the column default, which is
+            -- CURRENT_TIMESTAMP: naming it would mean carrying a SQL expression
+            -- through a parameter list that otherwise holds only values.
+            matrix_rows[#matrix_rows + 1] = {
+                ctx.model_id, ctx.version_id, metric.id, dimension.id,
+                is_valid, reason_code, null_if_missing(path), ctx.validation_run_id,
+            }
         end
     end
+    insert_rows("SYS_SEMANTIC.METRIC_DIMENSION_MATRIX", {
+        "MODEL_ID", "VERSION_ID", "METRIC_ID", "DIMENSION_ID", "IS_VALID",
+        "REASON_CODE", "RELATIONSHIP_PATH", "VALIDATION_RUN_ID",
+    }, matrix_rows)
     ctx.matrix = matrix
 end
 
@@ -4285,6 +4372,7 @@ local function order_root_cause_first(issues)
 end
 
 function M.validate_model(model_name_arg)
+    reset_source_column_cache()
     local ctx = {
         issues = {},
         issue_seen = {},
@@ -4333,6 +4421,7 @@ function M.validate_model(model_name_arg)
     end
 
     ctx.issues = order_root_cause_first(ctx.issues)
+    flush_issues(ctx)
     finish_validation_run(ctx)
     return ctx.issues
 end
@@ -4344,6 +4433,7 @@ validate_model = M.validate_model
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
         relation_key = relation_key,
+        reset_source_column_cache = reset_source_column_cache,
         resolve_base_relations = resolve_base_relations,
         derive_source_trust = derive_source_trust,
         valid_json_text = valid_json_text,

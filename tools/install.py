@@ -365,6 +365,7 @@ def table_exists(con: object, schema: str, table: str) -> bool:
 # existing catalog. Each is (table, column, DDL type/default).
 ADDED_COLUMNS = [
     ("MODELS", "GOVERNANCE_MODE", "VARCHAR(16) DEFAULT 'OPEN' NOT NULL"),
+    ("MODELS", "ALLOW_DERIVED_COMPOSITION", "BOOLEAN DEFAULT FALSE NOT NULL"),
 ]
 
 

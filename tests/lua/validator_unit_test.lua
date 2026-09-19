@@ -406,11 +406,80 @@ end)
 
 local function with_query(mock, fn)
     local original = query
+    -- The validator caches a relation's columns for the life of one validation.
+    -- These tests drive its internals directly rather than through
+    -- validate_model, so each mock swap starts the cache over -- otherwise the
+    -- first test's columns would answer for every test after it.
+    if api.reset_source_column_cache then api.reset_source_column_cache() end
     query = mock
     local ok, result = xpcall(fn, debug.traceback)
     query = original
     if not ok then error(result, 0) end
     return result
+end
+
+-- The validator reads a relation's whole column list once now, instead of
+-- probing SYS.EXA_ALL_COLUMNS per declared column -- 48 probes for a
+-- four-entity model, 43% of a validation. So a mock says which columns a
+-- relation *has* rather than answering "yes" to every name it is asked about.
+--
+-- `any_columns` is the direct replacement for the old `{{1}}`, which meant
+-- exactly that: whatever this test's fixture declares, treat it as present. The
+-- list is every column name the fixtures in this file reference, minus the ones
+-- named to be absent (`missing_*`, `fake`, `orphan`) -- a test that asserts a
+-- column is *not* there must not be handed it. Tests that care precisely which
+-- columns exist pass their own list to columns_response instead.
+-- Identity mapping key columns are named as bare strings in the fixtures rather
+-- than inside an `alias.column` expression, so they are listed explicitly.
+local ANY_COLUMN_NAMES = {
+    "ARCHIVE_ORDER_ID", "ACCOUNT_ID", "CUSTOMER_XREF_ID",
+    "CAMPAIGN_ID", "COLUMN_KIND", "CUSTOMER_ID", "ENTITY_ID", "ENTITY_NAME",
+    "FREIGHT_AMOUNT", "PREDICT", "PRODUCT_ID", "REPRESENTATION_ID", "SYNONYM",
+    "UNIQUE_KEY_ID", "V", "VERIFIED_QUERY_ID", "WRAPPED", "account_id",
+    "amount", "churn_risk", "city", "cost_usd", "created_at",
+    "crm", "customer_id", "customer_name", "day", "display_name",
+    "flag", "freight_amount", "id", "line_id", "loyalty_tier",
+    "mode", "order_date", "order_id", "order_ts", "other_day",
+    "rate", "region", "score", "ship_date", "signup_date",
+    "status", "tier_code", "town_name", "ts", "valid",
+    "value", "walk", "x",
+}
+
+-- Each entry is a name, or a {name, type} pair when the test cares about the
+-- declared type as well as the column's existence.
+local function columns_response(names)
+    local rows = {}
+    for _, entry in ipairs(names) do
+        if type(entry) == "table" then
+            rows[#rows + 1] = {entry[1], entry[2]}
+        else
+            rows[#rows + 1] = {entry, "VARCHAR(200)"}
+        end
+    end
+    return rows
+end
+
+local function any_columns()
+    return columns_response(ANY_COLUMN_NAMES)
+end
+
+-- The validator writes its catalog rows in batches now -- one statement per
+-- table instead of one per row -- so a mock reads the rows back out of the
+-- generated parameter names (`:bN_C` is row N, column C) rather than counting
+-- calls. Asserting on rows is what these tests meant all along; counting
+-- statements only happened to be the same number.
+local function batched_rows(params, column_count)
+    local rows = {}
+    local row_index = 1
+    while params["b" .. row_index .. "_1"] ~= nil do
+        local row = {}
+        for column_index = 1, column_count do
+            row[column_index] = params["b" .. row_index .. "_" .. column_index]
+        end
+        rows[#rows + 1] = row
+        row_index = row_index + 1
+    end
+    return rows
 end
 
 local function contains(text, fragment)
@@ -426,16 +495,20 @@ test("source catalog probes preserve non-uppercase identifiers", function()
             assert_equal(params.object_name, "ORDERS_line_items_arr")
             return {{1}}
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            -- The column list is read per relation, so the probe carries the
+            -- schema and object but no column name. What has to survive either
+            -- way is the spelling: a lower-case source object is not folded.
             assert_true(contains(sql, "COLUMN_TABLE = :object_name"))
-            assert_true(contains(sql, "COLUMN_NAME = :column_name"))
+            assert_true(not contains(sql, ":column_name"))
             assert_equal(params.object_name, "campaigns")
-            assert_equal(params.column_name, "_id")
-            return {{1}}
+            return columns_response({"_id", "NAME"})
         end
         error("unexpected source catalog SQL: " .. tostring(sql))
     end, function()
         assert_true(api.source_object_exists("SRC_MONGO_ORDERS", "ORDERS_line_items_arr"))
+        -- Matched on the exact spelling the source uses, not an upper-cased one.
         assert_true(api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "_id"))
+        assert_true(not api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "absent"))
     end)
 end)
 
@@ -460,14 +533,13 @@ test("validator rejects type-incompatible relationship endpoints", function()
         }},
     })
     with_query(function(sql, params)
-        if contains(sql, "SELECT COUNT(*)")
-            and contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
-            return {{1}}
-        elseif contains(sql, "SELECT COLUMN_TYPE") then
-            if params.column_name == "PRODUCT_ID" then
-                return {{COLUMN_TYPE = "DECIMAL(10,0)"}}
-            end
-            return {{COLUMN_TYPE = "VARCHAR(2000000) UTF8"}}
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            -- The relation's columns and their types arrive together, so the
+            -- mismatch this test is about is expressed in one response.
+            return columns_response({
+                {"PRODUCT_ID", "DECIMAL(10,0)"},
+                {"CAMPAIGN_ID", "VARCHAR(2000000) UTF8"},
+            })
         end
         error("unexpected relationship type SQL: " .. tostring(sql))
     end, function()
@@ -577,7 +649,7 @@ test("validator rejects malformed and column-incompatible F1 representations", f
         if contains(sql, "COUNT(er.REPRESENTATION_ID)") then return {} end
         if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
         if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
-            return {{params.schema_name == "MART" and 1 or 0}}
+            return params.schema_name == "MART" and any_columns() or {}
         end
         return {}
     end, function()
@@ -619,7 +691,7 @@ test("validator warns when the legacy key expression misses declared key columns
     local partial = context_for("CAST(ol.order_id AS VARCHAR(36))")
     with_query(function(sql)
         if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_structural_rules(partial) end)
     assert_true(has_rule(partial, "SEMANTIC_MODEL_054"))
@@ -633,7 +705,7 @@ test("validator warns when the legacy key expression misses declared key columns
         "CAST(ol.order_id AS VARCHAR(36)) || '-' || CAST(ol.line_id AS VARCHAR(36))")
     with_query(function(sql)
         if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_structural_rules(complete) end)
     assert_true(not has_rule(complete, "SEMANTIC_MODEL_054"))
@@ -689,7 +761,7 @@ test("validator accepts valid F2 bindings and rejects dangling ownership", funct
         },
     })
     with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_expressions(ctx, {}) end)
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_039"))
@@ -716,7 +788,7 @@ test("validator accepts canonical string functions in F2 bindings", function()
         },
     })
     with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_expressions(ctx, {}) end)
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_040"))
@@ -741,7 +813,7 @@ test("SEMANTIC_MODEL_040 names the permitted function set", function()
         },
     })
     with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_expressions(ctx, {}) end)
     local message = issue_for_rule(ctx, "SEMANTIC_MODEL_040").message
@@ -796,12 +868,15 @@ test("F2 bindings monotonically repair renamed representation columns", function
     local function validate(ctx)
         with_query(function(sql, params)
             if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
-                local column_name = string.lower(tostring(params.column_name))
-                local available = params.object_name == "CUSTOMERS"
-                    and (column_name == "loyalty_tier" or column_name == "city")
-                    or params.object_name == "CUSTOMERS_RENAMED"
-                    and (column_name == "tier_code" or column_name == "town_name")
-                return {{available and 1 or 0}}
+                -- The rename this test is about is now stated as two column
+                -- lists rather than as a per-name answer: the original relation
+                -- has the old names, the renamed one has the new.
+                if params.object_name == "CUSTOMERS" then
+                    return columns_response({"loyalty_tier", "city"})
+                elseif params.object_name == "CUSTOMERS_RENAMED" then
+                    return columns_response({"tier_code", "town_name"})
+                end
+                return {}
             end
             return {}
         end, function() api.validate_expressions(ctx, {}) end)
@@ -854,7 +929,7 @@ test("F2 identity mismatches prescribe canonical views and Phase F5", function()
         if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             -- The quoted MongoDB key is physically lowercase and therefore
             -- does not satisfy the model's canonical CUSTOMER_ID contract.
-            return {{params.schema_name == "SRC_MONGO" and 0 or 1}}
+            return params.schema_name == "SRC_MONGO" and {} or any_columns()
         end
         return {}
     end, function()
@@ -950,7 +1025,7 @@ test("validator proves F1 representation grain and key-set equivalence", functio
     with_query(function(sql)
         local normalized = tostring(sql):gsub("%s+", " ")
         if contains(normalized, "FROM SYS.EXA_ALL_COLUMNS") then
-            return {{"CUSTOMER_ID"}}
+            return columns_response({"CUSTOMER_ID"})
         end
         if contains(normalized, " MINUS ") then return {{1}} end
         local grouped = contains(normalized, "FROM (SELECT")
@@ -999,7 +1074,7 @@ test("validator accepts contiguous F3 coverage and rejects boundary gaps", funct
     end
     local valid = context()
     with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         error("unexpected coverage SQL: " .. tostring(sql))
     end, function() api.validate_partition_coverage(valid, entity) end)
     assert_equal(valid.error_count, 0)
@@ -1061,7 +1136,7 @@ test("validator rejects F3 predicates that disagree with declared intervals", fu
             representations_by_entity = {["1"] = {cold, hot}},
         })
         with_query(function(sql)
-            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
             error("unexpected coverage SQL: " .. tostring(sql))
         end, function() api.validate_partition_coverage(ctx, entity) end)
         return ctx
@@ -1116,7 +1191,7 @@ test("validator rejects partitioning an entity used only as a joined dimension",
             representations_by_entity = {["1"] = {primary, local_copy}},
         })
         with_query(function(sql)
-            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{1}} end
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
             error("unexpected coverage SQL: " .. tostring(sql))
         end, function() api.validate_partition_coverage(ctx, customer) end)
         return ctx
@@ -1187,7 +1262,7 @@ test("validator proves partition grain without requiring equal key sets", functi
     })
     local minus_count = 0
     with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return {{"ORDER_ID"}} end
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return columns_response({"ORDER_ID"}) end
         if contains(sql, " MINUS ") then minus_count = minus_count + 1 end
         return {{4}}
     end, function() api.validate_representation_data_equivalence(ctx) end)
@@ -1377,6 +1452,7 @@ end
 test("F5 validator accepts complete certified representation identity metadata", function()
     local ctx = f5_identity_context()
     with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         if contains(sql, "SELECT COUNT(*)") then return {{1}} end
         error("unexpected F5 structural SQL: " .. tostring(sql))
     end, function()
@@ -1571,9 +1647,13 @@ test("F5.1 validator accepts anchored DIRECT relationship remaps", function()
     local function run(ctx)
         with_query(function(sql, params)
             if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
-                if params.schema_name == "MONGO"
-                    and params.column_name == "CUSTOMER_ID" then return {{0}} end
-                return {{1}}
+                -- The point of this fixture is that the MONGO representation
+                -- lacks CUSTOMER_ID. Stated as a column list, that is simply a
+                -- relation whose columns do not include it.
+                if params.schema_name == "MONGO" then
+                    return columns_response({"CUSTOMER_DOC_ID"})
+                end
+                return any_columns()
             end
             return {}
         end, function()
@@ -1733,13 +1813,16 @@ test("validator extracts and deduplicates fact and metric dependencies", functio
     })
     with_query(function(sql, params)
         if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_DEPENDENCIES") then
-            inserted[#inserted + 1] = params
+            -- METRIC_ID, DEPENDS_ON_OBJECT_TYPE, DEPENDS_ON_OBJECT_ID, DEPENDENCY_KIND
+            for _, row in ipairs(batched_rows(params, 4)) do
+                inserted[#inserted + 1] = row
+            end
         end
         return {}
     end, function() api.extract_metric_dependencies(ctx) end)
     assert_equal(#inserted, 2)
-    assert_equal(inserted[1].object_type, "FACT")
-    assert_equal(inserted[2].object_type, "METRIC")
+    assert_equal(inserted[1][2], "FACT")
+    assert_equal(inserted[2][2], "METRIC")
     assert_equal(ctx.metric_edges['21'][1], "20")
     assert_true(has_rule(ctx, "SEMANTIC_MODEL_011"))
 end)
@@ -2211,7 +2294,11 @@ test("validator computes safe fanout and missing-entity matrix outcomes", functi
     }
     with_query(function(sql, params)
         if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX") then
-            inserted[#inserted + 1] = params
+            -- MODEL_ID, VERSION_ID, METRIC_ID, DIMENSION_ID, IS_VALID,
+            -- REASON_CODE, RELATIONSHIP_PATH, VALIDATION_RUN_ID
+            for _, row in ipairs(batched_rows(params, 8)) do
+                inserted[#inserted + 1] = row
+            end
         end
         return {}
     end, function() api.compute_metric_dimension_matrix(ctx, safe, all) end)
@@ -2341,7 +2428,7 @@ test("validator matrix rejects metrics unreachable from published roots", functi
     }
     with_query(function(sql, params)
         if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX") then
-            inserted = params
+            inserted = batched_rows(params, 8)[1]
         end
         return {}
     end, function()
@@ -2350,7 +2437,7 @@ test("validator matrix rejects metrics unreachable from published roots", functi
     assert_equal(ctx.matrix['10']['20'].reason_code, "NO_SAFE_JOIN_PATH")
     assert_equal(ctx.matrix['10']['20'].path,
         "line_to_order > shipment_to_order (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED)")
-    assert_equal(inserted.relationship_path, ctx.matrix['10']['20'].path)
+    assert_equal(inserted[7], ctx.matrix['10']['20'].path)   -- RELATIONSHIP_PATH
 
     with_query(function(sql)
         if contains(sql, "FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so") then
@@ -2573,7 +2660,7 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "SELECT CATALOG_TABLE, MISMATCH_COUNT") then
             return {}
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
-            return {{1}}
+            return any_columns()
         elseif contains(sql, "FROM EXA_PARAMETERS") then
             return {{60}}
         elseif contains(sql, "AS PROBE_COUNT") then
@@ -2620,7 +2707,8 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "DELETE FROM SYS_SEMANTIC.METRIC_DEPENDENCIES")
             or contains(sql, "DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX")
             or contains(sql, "DELETE FROM SYS_SEMANTIC.SOURCE_TRUST")
-            or contains(sql, "INSERT INTO SYS_SEMANTIC.SOURCE_TRUST") then
+            or contains(sql, "INSERT INTO SYS_SEMANTIC.SOURCE_TRUST")
+            or contains(sql, "INSERT INTO SYS_SEMANTIC.VALIDATION_RESULTS") then
             return {}
         elseif contains(sql, "FROM SYS.EXA_ALL_VIEWS")
             or contains(sql, "FROM SYS.EXA_ALL_DEPENDENCIES")
@@ -2982,7 +3070,13 @@ test("source trust classifies every relation the planner may emit", function()
         local mock = function(sql, params)
             if contains(sql, "DELETE FROM SYS_SEMANTIC.SOURCE_TRUST") then return {} end
             if contains(sql, "INSERT INTO SYS_SEMANTIC.SOURCE_TRUST") then
-                written[#written + 1] = params
+                -- MODEL_ID, VERSION_ID, RELATION_KIND, RELATION_ID, RELATION_NAME,
+                -- PHYSICAL_SCHEMA, PHYSICAL_OBJECT, TRUST_CLASS, BASE_RELATIONS
+                for _, row in ipairs(batched_rows(params, 9)) do
+                    written[#written + 1] = {kind = row[3], name = row[5],
+                        schema = row[6], object = row[7], class = row[8],
+                        bases = row[9]}
+                end
                 return {}
             end
             if contains(sql, "FROM SYS.EXA_ALL_VIEWS") then

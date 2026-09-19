@@ -1780,6 +1780,125 @@ test("compiler retries collisions and tolerates best-effort cache failures", fun
     assert_equal(touch_state.cache_touches, 1)
 end)
 
+test("reference expansion finds what to compile, and refuses to guess", function()
+    -- Projection inference is the correctness surface of expansion. An earlier
+    -- prototype defaulted to "all columns" when it could not tell and returned
+    -- seven rows where three were correct -- with correct totals, which is the
+    -- shape of wrong a reviewer is least likely to catch.
+    local columns = {
+        {name = "customer_region", kind = "DIMENSION"},
+        {name = "order_status", kind = "DIMENSION"},
+        {name = "total_revenue", kind = "METRIC"},
+    }
+    local by_name = {}
+    for _, column in ipairs(columns) do by_name[column.name:upper()] = column end
+
+    local function parse(text)
+        return api.sql_tokens(text)
+    end
+
+    local function only_reference(text)
+        local tokens = parse(text)
+        local found = api.bi_find_references(tokens)
+        return tokens, found[1], found
+    end
+
+    -- An aliased reference, and the columns qualified with that alias.
+    local tokens, reference = only_reference(
+        "SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE FROM SEMANTIC_SALES.SALES t0")
+    assert_equal(reference.published_schema, "SEMANTIC_SALES")
+    assert_equal(reference.object_name, "SALES")
+    assert_equal(reference.alias, "t0")
+    local wanted = api.bi_infer_columns(tokens, reference, columns, by_name)
+    assert_equal(#wanted, 2)
+    assert_equal(wanted[1], "customer_region")   -- published order, not written order
+    assert_equal(wanted[2], "total_revenue")
+
+    -- `AS alias` is the same reference.
+    local _, as_reference = only_reference(
+        "SELECT x.ORDER_STATUS FROM SEMANTIC_SALES.SALES AS x")
+    assert_equal(as_reference.alias, "x")
+
+    -- A star belongs to the block it is selected in. Reading the outer star as
+    -- "every column of the object" compiled nine columns where the subquery
+    -- named two, which changed the grain and returned 0 for a region worth 3635.
+    local nested_tokens, nested_reference = only_reference(
+        "SELECT * FROM (SELECT t0.CUSTOMER_REGION FROM SEMANTIC_SALES.SALES t0) x")
+    local nested = api.bi_infer_columns(nested_tokens, nested_reference, columns, by_name)
+    assert_equal(#nested, 1)
+    assert_equal(nested[1], "customer_region")
+
+    -- ... while a star in the reference's own block does mean all of them.
+    local flat_tokens, flat_reference = only_reference(
+        "SELECT * FROM SEMANTIC_SALES.SALES t0")
+    assert_equal(#api.bi_infer_columns(flat_tokens, flat_reference, columns, by_name), 3)
+
+    -- COUNT(*) names no column, so a statement that names nothing else is
+    -- refused rather than answered at a grain nobody asked for.
+    local empty_tokens, empty_reference = only_reference(
+        "SELECT COUNT(*) FROM SEMANTIC_SALES.SALES t0")
+    local none, why = api.bi_infer_columns(empty_tokens, empty_reference, columns, by_name)
+    assert_equal(none, nil)
+    assert_contains(why, "no column")
+
+    -- A column the object does not have is named, not silently dropped.
+    local bad_tokens, bad_reference = only_reference(
+        "SELECT t0.NOT_A_COLUMN FROM SEMANTIC_SALES.SALES t0")
+    local rejected, reason = api.bi_infer_columns(bad_tokens, bad_reference, columns, by_name)
+    assert_equal(rejected, nil)
+    assert_contains(reason, "unknown column")
+
+    -- Unqualified names matching a published column count too: a BI tool that
+    -- omits the alias still gets the columns it asked for.
+    local plain_tokens, plain_reference = only_reference(
+        "SELECT ORDER_STATUS FROM SEMANTIC_SALES.SALES")
+    assert_equal(plain_reference.alias, nil)
+    local plain = api.bi_infer_columns(plain_tokens, plain_reference, columns, by_name)
+    assert_equal(#plain, 1)
+    assert_equal(plain[1], "order_status")
+
+    assert_branch("compiler.expansion.projection", none == nil, true)
+    assert_branch("compiler.expansion.projection", #wanted == 0, false)
+end)
+
+test("reference expansion sees composition, which is what the guard refuses", function()
+    -- The fan-out: a semantic result joined to another relation can repeat its
+    -- rows, and re-aggregating the repeats double-counts. The layer stops
+    -- supervising at the edge of the derived table.
+    local function composed(text)
+        local tokens = api.sql_tokens(text)
+        local found = api.bi_find_references(tokens)
+        return api.bi_composed_in_from(tokens, found[1])
+    end
+
+    assert_equal(composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0"), false)
+    assert_equal(composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0 WHERE t0.A = 1"), false)
+    assert_equal(composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0 ORDER BY 1"), false)
+    assert_equal(composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0 GROUP BY 1"), false)
+
+    assert_equal(composed(
+        "SELECT t0.A FROM SEMANTIC_SALES.SALES t0 JOIN MART.C c ON c.R = t0.A"), true)
+    assert_equal(composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0, MART.C c"), true)
+    assert_equal(composed(
+        "SELECT t0.A FROM SEMANTIC_SALES.SALES t0 LEFT JOIN MART.C c ON c.R = t0.A"), true)
+
+    -- A join *outside* the reference's own block is not this reference's
+    -- composition: the derived table is already closed by then.
+    assert_equal(composed(
+        "SELECT * FROM (SELECT t0.A FROM SEMANTIC_SALES.SALES t0) x JOIN MART.C c ON c.R = x.A"),
+        false)
+
+    -- A union is two separate statements, not a composition of one.
+    assert_equal(composed(
+        "SELECT a.A FROM SEMANTIC_SALES.SALES a UNION SELECT b.A FROM SEMANTIC_SALES.SALES b"),
+        false)
+
+    assert_branch("compiler.expansion.composition",
+        composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0, MART.C c"), true)
+    assert_branch("compiler.expansion.composition",
+        composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0"), false)
+end)
+
 test("a cached statement is checked against the model's declared relations", function()
     -- COMPILE_CACHE is a table, and whoever can UPDATE it picks the text a
     -- published guarded view then runs with the view owner's rights. The entry

@@ -891,15 +891,16 @@ class InstallerResetTest(unittest.TestCase):
                     return Result([])
                 raise AssertionError(f"unexpected SQL: {sql}")
 
+        expected = [f"{table}.{column}" for table, column, _ddl in INSTALL.ADDED_COLUMNS]
         missing = Catalog(columns=[])
-        self.assertEqual(["MODELS.GOVERNANCE_MODE"], INSTALL.migrate_added_columns(missing))
+        self.assertEqual(expected, INSTALL.migrate_added_columns(missing))
         altered = [sql for sql in missing.sql if sql.startswith("ALTER TABLE")]
-        self.assertEqual(1, len(altered))
+        self.assertEqual(len(INSTALL.ADDED_COLUMNS), len(altered))
         self.assertIn("SYS_SEMANTIC.MODELS ADD COLUMN GOVERNANCE_MODE", altered[0])
 
-        # Idempotent: a catalog that already has it is left alone, which is what
-        # makes this safe to run on every install rather than once.
-        present = Catalog(columns=["GOVERNANCE_MODE"])
+        # Idempotent: a catalog that already has them is left alone, which is
+        # what makes this safe to run on every install rather than once.
+        present = Catalog(columns=[column for _t, column, _d in INSTALL.ADDED_COLUMNS])
         self.assertEqual([], INSTALL.migrate_added_columns(present))
         self.assertEqual([], [sql for sql in present.sql if sql.startswith("ALTER TABLE")])
 

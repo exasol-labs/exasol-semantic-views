@@ -9190,6 +9190,79 @@ query([[
 ]], {model_name = model_name})
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION(
+  MODEL_NAME,
+  ALLOWED
+) AS
+-- Whether this model's published objects may be composed with other relations
+-- in ordinary SQL.
+--
+-- Reference expansion turns a semantic object into a derived table, and a
+-- derived table can be joined. That join can repeat the semantic result's rows,
+-- and anything re-aggregating above it then double-counts -- the same fan-out a
+-- Virtual Schema would produce, arriving by a different route. One thing is
+-- better here: the author wrote the join themselves, so the boundary is visible
+-- in their own SQL rather than chosen by an optimizer. That makes it
+-- explainable, not safe, which is why the default is FALSE and refusing.
+--
+-- TRUE is for deployments that would rather have ordinary-SQL semantics over a
+-- derived table than a refusal. It is a real choice with a real cost, so it is
+-- made per model, by an administrator, in a statement that says so.
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+if missing(MODEL_NAME) then
+    error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
+end
+local model_name = trim(MODEL_NAME)
+
+if missing(ALLOWED) then
+    error("SEMANTIC_ADMIN_001: ALLOWED is required (TRUE or FALSE)")
+end
+local raw = string.upper(trim(ALLOWED))
+local allowed
+if raw == "TRUE" or raw == "YES" or raw == "1" then
+    allowed = true
+elseif raw == "FALSE" or raw == "NO" or raw == "0" then
+    allowed = false
+else
+    error("SEMANTIC_ADMIN_002: ALLOWED must be TRUE or FALSE, got: " .. raw)
+end
+
+local rows = query([[
+    SELECT MODEL_ID, ACTIVE_VERSION_ID FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+
+query([[
+    UPDATE SYS_SEMANTIC.MODELS
+    SET ALLOW_DERIVED_COMPOSITION = :allowed,
+        UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {allowed = allowed, model_name = model_name})
+
+-- Compiled SQL does not depend on this flag -- it decides whether a statement is
+-- refused, not what it compiles to -- but a statement refused under FALSE was
+-- never cached, and one accepted under TRUE must not survive the flag going
+-- back. Clearing is cheap and removes the need to reason about which of those
+-- applies.
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID IN (
+      SELECT ACTIVE_VERSION_ID FROM SYS_SEMANTIC.MODELS
+      WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+    )
+]], {model_name = model_name})
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(
   MODEL_NAME,
   MATERIALIZATION_NAME,
@@ -12095,6 +12168,44 @@ local function valid_json_text(text)
     return json.is_valid(text)
 end
 
+-- One statement per batch of rows, not one per row.
+--
+-- VALIDATE_MODEL writes about 260 rows for a four-entity model -- validation
+-- results, metric dependencies, the compatibility matrix, source trust -- and
+-- each was its own INSERT. That made validation cost ~2.1 s regardless of model
+-- size, which mattered far more than it looks: every ADD_*/REMOVE_*/PUBLISH_
+-- script validates, so the smoke suite performs 222 validations and spent 44% of
+-- its wall clock here. The work was never the rows; it was the round trips.
+--
+-- Chunked rather than one giant statement: parameter count and statement length
+-- both have limits, and a model large enough to matter is exactly the one that
+-- would find them.
+local INSERT_BATCH_ROWS = 100
+
+local function insert_rows(table_name, columns, rows)
+    if rows == nil or #rows == 0 then
+        return
+    end
+    local column_sql = table.concat(columns, ", ")
+    local first = 1
+    while first <= #rows do
+        local last = math.min(first + INSERT_BATCH_ROWS - 1, #rows)
+        local tuples, params = {}, {}
+        for position = first, last do
+            local placeholders = {}
+            for column_index = 1, #columns do
+                local name = "b" .. position .. "_" .. column_index
+                placeholders[column_index] = ":" .. name
+                params[name] = rows[position][column_index]
+            end
+            tuples[#tuples + 1] = "(" .. table.concat(placeholders, ", ") .. ")"
+        end
+        query("INSERT INTO " .. table_name .. " (" .. column_sql .. ") VALUES "
+            .. table.concat(tuples, ", "), params)
+        first = last + 1
+    end
+end
+
 local function start_validation_run(ctx)
     query([[
         INSERT INTO SYS_SEMANTIC.VALIDATION_RUNS (
@@ -12145,26 +12256,39 @@ local function add_issue(ctx, severity, object_type, object_name, rule_code, mes
         ctx.warning_count = ctx.warning_count + 1
     end
 
+    -- Buffered, not written here. An issue raised before the model row is read
+    -- has no run id yet, and writing each one as it is found cost 161 round
+    -- trips on a four-entity model. flush_issues writes them together once the
+    -- run is known, which is also what makes the stored order match the order
+    -- the caller is handed.
     if not missing(ctx.validation_run_id) then
-        query([[
-            INSERT INTO SYS_SEMANTIC.VALIDATION_RESULTS (
-              VALIDATION_RUN_ID, MODEL_ID, VERSION_ID, SEVERITY, OBJECT_TYPE,
-              OBJECT_NAME, RULE_CODE, MESSAGE
-            ) VALUES (
-              :validation_run_id, :model_id, :version_id, :severity, :object_type,
-              :object_name, :rule_code, :message
-            )
-        ]], {
-            validation_run_id = ctx.validation_run_id,
-            model_id = null_if_missing(ctx.model_id),
-            version_id = null_if_missing(ctx.version_id),
-            severity = severity,
-            object_type = object_type,
-            object_name = null_if_missing(object_name),
-            rule_code = rule_code,
-            message = message,
-        })
+        issue.recordable = true
     end
+end
+
+local function flush_issues(ctx)
+    if missing(ctx.validation_run_id) then
+        return
+    end
+    local rows = {}
+    for _, issue in ipairs(ctx.issues or {}) do
+        if issue.recordable then
+            rows[#rows + 1] = {
+                ctx.validation_run_id,
+                null_if_missing(ctx.model_id),
+                null_if_missing(ctx.version_id),
+                issue.severity,
+                issue.object_type,
+                null_if_missing(issue.object_name),
+                issue.rule_code,
+                issue.message,
+            }
+        end
+    end
+    insert_rows("SYS_SEMANTIC.VALIDATION_RESULTS", {
+        "VALIDATION_RUN_ID", "MODEL_ID", "VERSION_ID", "SEVERITY", "OBJECT_TYPE",
+        "OBJECT_NAME", "RULE_CODE", "MESSAGE",
+    }, rows)
 end
 
 local function finish_validation_run(ctx)
@@ -12213,31 +12337,77 @@ local function source_object_exists(schema_name, object_name)
     ]], {schema_name = schema_name, object_name = object_name}) > 0
 end
 
-local function source_column_exists(schema_name, object_name, column_name)
-    return count_query([[
-        SELECT COUNT(*)
+-- One read per relation, not one per column.
+--
+-- These two asked SYS.EXA_ALL_COLUMNS once per declared column, and that ran 48
+-- times for a four-entity model: 0.85 s of a 1.96 s validation, 43% of it. The
+-- system view is scanned rather than indexed, so each probe costs about the same
+-- whether it returns one row or none, and the validator was paying that per
+-- column name instead of per relation.
+--
+-- A relation's columns are a small set that cannot change while one validation
+-- runs, and the runtime chunk is re-created per EXECUTE SCRIPT, so this cache
+-- lives exactly one validation and has no way to go stale. It is the same
+-- load-once shape load_relation_graph already uses.
+local source_column_cache = {}
+
+local function source_relation_columns(schema_name, object_name)
+    local cache_key = upper(tostring(schema_name)) .. "\0" .. upper(tostring(object_name))
+    local cached = source_column_cache[cache_key]
+    if cached ~= nil then
+        return cached
+    end
+    local columns = {}
+    local ok, rows = pcall(query, [[
+        SELECT COLUMN_NAME, COLUMN_TYPE
         FROM SYS.EXA_ALL_COLUMNS
         WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
           AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
-          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
-    ]], {schema_name = schema_name, object_name = object_name, column_name = column_name}) > 0
+    ]], {schema_name = schema_name, object_name = object_name})
+    if ok and rows ~= nil then
+        for _, row in ipairs(rows) do
+            local name = row_value(row, "COLUMN_NAME", 1)
+            if name ~= nil then
+                local entry = {data_type = row_value(row, "COLUMN_TYPE", 2)}
+                -- Indexed under both spellings, exact first, which is what the
+                -- `= :name OR = UPPER(:name)` predicates and the ORDER BY that
+                -- preferred an exact match used to express.
+                columns[tostring(name)] = entry
+                local folded = upper(tostring(name))
+                if columns[folded] == nil then
+                    columns[folded] = entry
+                end
+            end
+        end
+    end
+    source_column_cache[cache_key] = columns
+    return columns
+end
+
+-- The cache is per validation, not per chunk. In the installed runtime those
+-- are the same thing -- a runtime script is created fresh for each EXECUTE
+-- SCRIPT -- but relying on that would make the cache silently wrong anywhere the
+-- module is loaded once and used twice, which is exactly what the database-free
+-- test suite does.
+local function reset_source_column_cache()
+    source_column_cache = {}
+end
+
+local function source_column_entry(schema_name, object_name, column_name)
+    local columns = source_relation_columns(schema_name, object_name)
+    return columns[tostring(column_name)] or columns[upper(tostring(column_name))]
+end
+
+local function source_column_exists(schema_name, object_name, column_name)
+    return source_column_entry(schema_name, object_name, column_name) ~= nil
 end
 
 local function source_column_type(schema_name, object_name, column_name)
-    local ok, rows = pcall(query, [[
-        SELECT COLUMN_TYPE
-        FROM SYS.EXA_ALL_COLUMNS
-        WHERE (COLUMN_SCHEMA = :schema_name OR COLUMN_SCHEMA = UPPER(:schema_name))
-          AND (COLUMN_TABLE = :object_name OR COLUMN_TABLE = UPPER(:object_name))
-          AND (COLUMN_NAME = :column_name OR COLUMN_NAME = UPPER(:column_name))
-        ORDER BY CASE WHEN COLUMN_NAME = :column_name THEN 0 ELSE 1 END
-        LIMIT 1
-    ]], {schema_name = schema_name, object_name = object_name,
-          column_name = column_name})
-    if not ok or rows == nil or #rows == 0 then return nil end
-    local data_type = row_value(rows[1], "COLUMN_TYPE", 1)
-    if type(data_type) ~= "string" then return nil end
-    return data_type
+    local entry = source_column_entry(schema_name, object_name, column_name)
+    if entry == nil or type(entry.data_type) ~= "string" then
+        return nil
+    end
+    return entry.data_type
 end
 
 local function relationship_type_family(data_type)
@@ -15150,6 +15320,7 @@ local function derive_source_trust(ctx)
     local governed_mode = upper(tostring(ctx.governance_mode or "OPEN")) == "GOVERNED"
     local graph = load_relation_graph()
     local classified = {}
+    local trust_rows = {}
 
     local function classify(kind, id, name, schema, object)
         local start_key = relation_key(schema, object)
@@ -15206,18 +15377,10 @@ local function derive_source_trust(ctx)
     end
 
     for _, entry in ipairs(classified) do
-        query([[
-            INSERT INTO SYS_SEMANTIC.SOURCE_TRUST (
-              MODEL_ID, VERSION_ID, RELATION_KIND, RELATION_ID, RELATION_NAME,
-              PHYSICAL_SCHEMA, PHYSICAL_OBJECT, TRUST_CLASS, BASE_RELATIONS
-            ) VALUES (
-              :model_id, :version_id, :kind, :id, :name,
-              :schema, :object, :class, :bases
-            )
-        ]], {model_id = ctx.model_id, version_id = ctx.version_id,
-             kind = entry.kind, id = entry.id, name = entry.name or "",
-             schema = entry.schema, object = entry.object, class = entry.class,
-             bases = table.concat(entry.bases, ",")})
+        trust_rows[#trust_rows + 1] = {
+            ctx.model_id, ctx.version_id, entry.kind, entry.id, entry.name or "",
+            entry.schema, entry.object, entry.class, table.concat(entry.bases, ","),
+        }
 
         local where = entry.kind == "REPRESENTATION" and "representation" or "materialization"
         local label = tostring(entry.name or entry.object)
@@ -15254,6 +15417,10 @@ local function derive_source_trust(ctx)
                 .. " with SET_MODEL_GOVERNANCE_MODE.")
         end
     end
+    insert_rows("SYS_SEMANTIC.SOURCE_TRUST", {
+        "MODEL_ID", "VERSION_ID", "RELATION_KIND", "RELATION_ID", "RELATION_NAME",
+        "PHYSICAL_SCHEMA", "PHYSICAL_OBJECT", "TRUST_CLASS", "BASE_RELATIONS",
+    }, trust_rows)
 end
 
 local function extract_metric_dependencies(ctx)
@@ -15269,19 +15436,15 @@ local function extract_metric_dependencies(ctx)
 
     ctx.metric_edges = {}
     local dependency_seen = {}
+    local dependency_rows = {}
     local function add_dependency(metric, object_type, object_id)
         local dep_key = key(metric.id) .. "|" .. object_type .. "|" .. key(object_id)
         if dependency_seen[dep_key] then
             return
         end
         dependency_seen[dep_key] = true
-        query([[
-            INSERT INTO SYS_SEMANTIC.METRIC_DEPENDENCIES (
-              METRIC_ID, DEPENDS_ON_OBJECT_TYPE, DEPENDS_ON_OBJECT_ID, DEPENDENCY_KIND
-            ) VALUES (
-              :metric_id, :object_type, :object_id, 'EXPRESSION'
-            )
-        ]], {metric_id = metric.id, object_type = object_type, object_id = object_id})
+        dependency_rows[#dependency_rows + 1] =
+            {metric.id, object_type, object_id, "EXPRESSION"}
         if object_type == "METRIC" then
             local metric_key = key(metric.id)
             ctx.metric_edges[metric_key] = ctx.metric_edges[metric_key] or {}
@@ -15303,6 +15466,9 @@ local function extract_metric_dependencies(ctx)
             end
         end
     end
+    insert_rows("SYS_SEMANTIC.METRIC_DEPENDENCIES",
+        {"METRIC_ID", "DEPENDS_ON_OBJECT_TYPE", "DEPENDS_ON_OBJECT_ID", "DEPENDENCY_KIND"},
+        dependency_rows)
 end
 
 local function detect_metric_cycles(ctx)
@@ -15770,6 +15936,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
     ]], {model_id = ctx.model_id, version_id = ctx.version_id})
 
     local matrix = {}
+    local matrix_rows = {}
     for _, metric in ipairs(ctx.metrics) do
         matrix[key(metric.id)] = {}
         -- Pre-check: the compiler starts joins from the semantic object root. If the
@@ -15836,26 +16003,19 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
                 alternate_paths = alternates ~= nil
                     and #alternates.alternates > 0 and alternates.alternates or nil,
             }
-            query([[
-                INSERT INTO SYS_SEMANTIC.METRIC_DIMENSION_MATRIX (
-                  MODEL_ID, VERSION_ID, METRIC_ID, DIMENSION_ID, IS_VALID,
-                  REASON_CODE, RELATIONSHIP_PATH, VALIDATION_RUN_ID, UPDATED_AT
-                ) VALUES (
-                  :model_id, :version_id, :metric_id, :dimension_id, :is_valid,
-                  :reason_code, :relationship_path, :validation_run_id, CURRENT_TIMESTAMP
-                )
-            ]], {
-                model_id = ctx.model_id,
-                version_id = ctx.version_id,
-                metric_id = metric.id,
-                dimension_id = dimension.id,
-                is_valid = is_valid,
-                reason_code = reason_code,
-                relationship_path = null_if_missing(path),
-                validation_run_id = ctx.validation_run_id,
-            })
+            -- UPDATED_AT is left to the column default, which is
+            -- CURRENT_TIMESTAMP: naming it would mean carrying a SQL expression
+            -- through a parameter list that otherwise holds only values.
+            matrix_rows[#matrix_rows + 1] = {
+                ctx.model_id, ctx.version_id, metric.id, dimension.id,
+                is_valid, reason_code, null_if_missing(path), ctx.validation_run_id,
+            }
         end
     end
+    insert_rows("SYS_SEMANTIC.METRIC_DIMENSION_MATRIX", {
+        "MODEL_ID", "VERSION_ID", "METRIC_ID", "DIMENSION_ID", "IS_VALID",
+        "REASON_CODE", "RELATIONSHIP_PATH", "VALIDATION_RUN_ID",
+    }, matrix_rows)
     ctx.matrix = matrix
 end
 
@@ -16137,6 +16297,7 @@ local function order_root_cause_first(issues)
 end
 
 function M.validate_model(model_name_arg)
+    reset_source_column_cache()
     local ctx = {
         issues = {},
         issue_seen = {},
@@ -16185,6 +16346,7 @@ function M.validate_model(model_name_arg)
     end
 
     ctx.issues = order_root_cause_first(ctx.issues)
+    flush_issues(ctx)
     finish_validation_run(ctx)
     return ctx.issues
 end
@@ -16196,6 +16358,7 @@ validate_model = M.validate_model
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
         relation_key = relation_key,
+        reset_source_column_cache = reset_source_column_cache,
         resolve_base_relations = resolve_base_relations,
         derive_source_trust = derive_source_trust,
         valid_json_text = valid_json_text,
@@ -16271,7 +16434,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "3ef457a9c7a2f26a"
+ESV_RUNTIME_BUILD = "63d65c5ca9295f5b"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17153,7 +17316,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "3ef457a9c7a2f26a"
+ESV_RUNTIME_BUILD = "63d65c5ca9295f5b"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -25183,6 +25346,372 @@ function M.compile_sql_debug(sql_text, client_name)
     return result, request, model
 end
 
+-- ── BI reference expansion ───────────────────────────────────────────────────
+--
+-- A statement the whole-statement lane cannot compile may still *reference* a
+-- semantic object it can. Expansion replaces the reference with a derived table
+-- rather than compiling the statement around it, which leaves joins, CTEs,
+-- unions, windows, TopN wrappers and arbitrary select-list expressions to
+-- Exasol, where they already work. A BI tool's generated SQL is almost never a
+-- bare `SELECT fields FROM object`, and before this it was almost never
+-- accepted: 3 of 24 corpus statements.
+--
+-- Everything here lives behind one namespace table inside a `do` block. That is
+-- load-bearing, not tidiness: COMPILER_RUNTIME is nine concatenated sources
+-- sharing one 200-local chunk and had 14 locals of headroom when this was
+-- written. See CLAUDE.md.
+-- Refusals that mean "this is not a bare semantic query", which is exactly what
+-- expansion exists to handle. Anything else the whole-statement lane says is a
+-- real answer and is kept.
+local EXPANDABLE_REFUSALS = {
+    SEMANTIC_QUERY_002 = true,   -- no FROM clause the lane could read
+    SEMANTIC_QUERY_003 = true,   -- FROM is not exactly one schema.object
+    SEMANTIC_QUERY_005 = true,   -- select list is not bare field names
+    SEMANTIC_QUERY_006 = true,   -- a wrapper the lane does not model
+    SEMANTIC_QUERY_008 = true,   -- GROUP BY the lane cannot match to the select
+    SEMANTIC_QUERY_009 = true,   -- statement does not start with SELECT
+}
+
+-- SEMANTIC_QUERY_005 is two conditions sharing one code -- the select-list shape
+-- above, and an orphaned publication found while resolving the FROM. Letting
+-- both fall through is safe rather than sloppy: an orphaned schema resolves to
+-- no published columns, so expansion declines and the original refusal is what
+-- the caller gets. Splitting the code is worth doing when that file is next
+-- touched for its own sake.
+
+local bi_expansion = {}
+do
+    -- Each reference is a separate compile, so a statement naming many of them
+    -- is a statement that should be looked at rather than silently multiplied.
+    bi_expansion.MAX_REFERENCES = 8
+
+    -- A relation reference can only follow one of these.
+    local RELATION_INTRO = {FROM = true, JOIN = true}
+
+    -- Words that end a from-clause item, so cannot be an alias.
+    local NOT_AN_ALIAS = {
+        ON = true, WHERE = true, GROUP = true, ORDER = true, HAVING = true,
+        LIMIT = true, UNION = true, JOIN = true, INNER = true, LEFT = true,
+        RIGHT = true, FULL = true, CROSS = true, NATURAL = true, AS = true,
+        SELECT = true, FROM = true, WITH = true, QUALIFY = true, CONNECT = true,
+        PREFERRING = true, INTO = true, VALUES = true, USING = true,
+    }
+
+    -- Words that close the from-clause when scanning for a second relation.
+    local ENDS_FROM = {
+        WHERE = true, GROUP = true, HAVING = true, ORDER = true, LIMIT = true,
+        UNION = true, INTERSECT = true, EXCEPT = true, QUALIFY = true,
+        CONNECT = true, WINDOW = true, PREFERRING = true,
+    }
+
+    local JOIN_WORDS = {
+        JOIN = true, INNER = true, LEFT = true, RIGHT = true, FULL = true,
+        CROSS = true, NATURAL = true,
+    }
+
+    -- The published column list, read from the cheap source.
+    --
+    -- SEMANTIC_AGENT.FIELDS_FOR_AGENT answers the same question and cost 166 ms
+    -- doing it, which was the whole of the expansion prototype's overhead;
+    -- OBJECT_COLUMNS answers it in about ten. Principal-scoped, so an object in
+    -- a model the caller is not granted resolves to no columns and expansion
+    -- declines rather than leaking that the object exists.
+    function bi_expansion.published_columns(published_schema, object_name)
+        local rows = query([[
+            SELECT oc.COLUMN_NAME, oc.COLUMN_KIND
+              FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
+              JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
+                ON so.OBJECT_ID = oc.OBJECT_ID
+              JOIN SEMANTIC_SOURCE.MODELS m
+                ON m.MODEL_ID = so.MODEL_ID
+               AND m.ACTIVE_VERSION_ID = so.VERSION_ID
+             WHERE UPPER(m.PUBLISHED_SCHEMA) = UPPER(:published_schema)
+               AND UPPER(so.OBJECT_NAME) = UPPER(:object_name)
+               AND so.STATUS = 'ACTIVE'
+               AND oc.IS_VISIBLE = TRUE
+             ORDER BY oc.ORDINAL_POSITION
+        ]], {published_schema = published_schema, object_name = object_name})
+        if rows == nil or #rows == 0 then
+            return nil
+        end
+        local columns, by_name = {}, {}
+        for index, row in ipairs(rows) do
+            local name = tostring(row_value(row, "COLUMN_NAME", 1))
+            columns[index] = {name = name, kind = tostring(row_value(row, "COLUMN_KIND", 2))}
+            by_name[upper(name)] = columns[index]
+        end
+        return columns, by_name
+    end
+
+    -- Every `<schema>.<object>` that sits where a relation may sit.
+    function bi_expansion.find_references(tokens)
+        local found = {}
+        for index = 1, #tokens - 3 do
+            local intro = tokens[index]
+            if intro.kind == "word" and RELATION_INTRO[sql_text.token_upper(intro)] then
+                local head, dot, tail = tokens[index + 1], tokens[index + 2], tokens[index + 3]
+                local head_name = token_identifier_value(head)
+                local tail_name = token_identifier_value(tail)
+                if head_name ~= nil and tail_name ~= nil
+                    and dot.kind == "symbol" and dot.text == "." then
+                    local reference = {
+                        first = index + 1, last = index + 3,
+                        published_schema = head_name, object_name = tail_name,
+                        depth = intro.depth,
+                    }
+                    -- `X.Y alias` and `X.Y AS alias`; anything else has none.
+                    local after = tokens[index + 4]
+                    -- The alias is carried as the author spelled it, not
+                    -- re-quoted. `t0` unquoted is folded to T0 by Exasol and
+                    -- matches `t0.CUSTOMER_REGION` elsewhere in the statement;
+                    -- re-emitting it as "t0" makes a lower-case alias that the
+                    -- same reference no longer resolves against.
+                    if after ~= nil and sql_text.token_upper(after) == "AS" then
+                        after = tokens[index + 5]
+                        if after ~= nil and token_identifier_value(after) ~= nil then
+                            reference.alias = token_identifier_value(after)
+                            reference.alias_text = after.text
+                            reference.last = index + 5
+                        end
+                    elseif after ~= nil and (after.kind == "word" or after.kind == "identifier")
+                        and not NOT_AN_ALIAS[sql_text.token_upper(after)] then
+                        reference.alias = token_identifier_value(after)
+                        reference.alias_text = after.text
+                        reference.last = index + 4
+                    end
+                    found[#found + 1] = reference
+                end
+            end
+        end
+        return found
+    end
+
+    -- Which published columns the statement actually uses.
+    --
+    -- This is the correctness surface of the whole feature, so it refuses
+    -- rather than guesses. An earlier prototype fell back to "all columns" when
+    -- it could not tell, and returned seven rows where three were correct --
+    -- with correct totals, which is the most dangerous shape of wrong, because
+    -- the number a human checks first agrees.
+    function bi_expansion.infer_columns(tokens, reference, columns, by_name)
+        local wanted, seen = {}, {}
+        local alias_upper = reference.alias and upper(reference.alias) or nil
+
+        local function take_all()
+            for _, column in ipairs(columns) do
+                if not seen[upper(column.name)] then
+                    seen[upper(column.name)] = true
+                    wanted[#wanted + 1] = column.name
+                end
+            end
+        end
+
+        for index = 1, #tokens do
+            local token = tokens[index]
+            local previous = tokens[index - 1]
+            local following = tokens[index + 1]
+            local qualified_by_us = alias_upper ~= nil
+                and (token.kind == "word" or token.kind == "identifier")
+                and upper(token_identifier_value(token) or "") == alias_upper
+                and following ~= nil and following.kind == "symbol" and following.text == "."
+
+            if token.kind == "symbol" and token.text == "*" then
+                -- A bare `*` means every column of this reference only when it
+                -- is selected from the same query block. In
+                -- `SELECT * FROM (SELECT t0.A FROM obj t0) x` the star belongs
+                -- to `x`, and reading it as "every column of obj" silently
+                -- changed the grain: the inner query named two columns and the
+                -- expansion compiled nine, so the result grouped by four
+                -- dimensions instead of one and North came back 0 instead of
+                -- 3635. Comparing depth is what tells the two apart.
+                --
+                -- `COUNT(*)` names no column at all; if the statement names no
+                -- other, the refusal below is the right answer rather than a
+                -- guess at which columns were meant.
+                local is_call_argument = previous ~= nil
+                    and previous.kind == "symbol" and previous.text == "("
+                if not is_call_argument and token.depth == reference.depth then
+                    take_all()
+                end
+            elseif qualified_by_us then
+                local named = tokens[index + 2]
+                if named ~= nil and named.kind == "symbol" and named.text == "*" then
+                    take_all()
+                else
+                    local column_name = token_identifier_value(named)
+                    if column_name ~= nil then
+                        local column = by_name[upper(column_name)]
+                        if column == nil then
+                            return nil, "unknown column " .. tostring(reference.alias)
+                                .. "." .. tostring(column_name)
+                        end
+                        if not seen[upper(column.name)] then
+                            seen[upper(column.name)] = true
+                            wanted[#wanted + 1] = column.name
+                        end
+                    end
+                end
+            elseif (token.kind == "word" or token.kind == "identifier")
+                and (previous == nil or previous.kind ~= "symbol" or previous.text ~= ".")
+                and (following == nil or following.kind ~= "symbol" or following.text ~= ".") then
+                local column = by_name[upper(token_identifier_value(token) or "")]
+                if column ~= nil and not seen[upper(column.name)] then
+                    seen[upper(column.name)] = true
+                    wanted[#wanted + 1] = column.name
+                end
+            end
+        end
+
+        if #wanted == 0 then
+            return nil, "no column of " .. tostring(reference.published_schema) .. "."
+                .. tostring(reference.object_name) .. " is referenced"
+        end
+
+        -- Published order, not order of appearance: the derived table is read by
+        -- name, and a stable order keeps one statement's cache entry usable by
+        -- another that names the same columns differently.
+        local ordered = {}
+        for _, column in ipairs(columns) do
+            if seen[upper(column.name)] then
+                ordered[#ordered + 1] = column.name
+            end
+        end
+        return ordered
+    end
+
+    -- Is the reference joined to, or listed beside, another relation?
+    --
+    -- This is the fan-out: a semantic result composed with another table in
+    -- ordinary SQL can repeat its rows, and re-aggregating the result then
+    -- double-counts. The layer stops supervising at the edge of the derived
+    -- table, and the number is wrong with nothing to show for it.
+    function bi_expansion.composed_in_from(tokens, reference)
+        for index = reference.last + 1, #tokens do
+            local token = tokens[index]
+            if token.depth < reference.depth then
+                return false
+            end
+            if token.depth == reference.depth then
+                local word = sql_text.token_upper(token)
+                if token.kind == "word" and ENDS_FROM[word] then
+                    return false
+                end
+                if token.kind == "symbol" and token.text == ")" then
+                    return false
+                end
+                if token.kind == "symbol" and token.text == "," then
+                    return true
+                end
+                if token.kind == "word" and JOIN_WORDS[word] then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- Does this model accept ordinary-SQL semantics over its derived table?
+    function bi_expansion.allows_composition(published_schema)
+        local allowed = scalar([[
+            SELECT ALLOW_DERIVED_COMPOSITION FROM SEMANTIC_SOURCE.MODELS
+             WHERE UPPER(PUBLISHED_SCHEMA) = UPPER(:published_schema)
+        ]], {published_schema = published_schema})
+        return allowed == true or upper(tostring(allowed)) == "TRUE"
+    end
+
+    -- Replace each semantic reference with the compiled SQL for exactly the
+    -- columns the statement uses.
+    function bi_expansion.rewrite(statement_text)
+        local tokens = sql_text.tokenize(statement_text, SEMANTIC_SQL_LEXER)
+        if #tokens == 0 then
+            return {status = "UNCHANGED", generated_sql = statement_text}
+        end
+        local references = bi_expansion.find_references(tokens)
+        if #references == 0 then
+            return {status = "UNCHANGED", generated_sql = statement_text}
+        end
+
+        local applicable = {}
+        for _, reference in ipairs(references) do
+            local columns, by_name =
+                bi_expansion.published_columns(reference.published_schema, reference.object_name)
+            if columns ~= nil then
+                reference.columns, reference.by_name = columns, by_name
+                applicable[#applicable + 1] = reference
+            end
+        end
+        if #applicable == 0 then
+            return {status = "UNCHANGED", generated_sql = statement_text}
+        end
+        if #applicable > bi_expansion.MAX_REFERENCES then
+            return error_result("SEMANTIC_QUERY_013",
+                "This statement references " .. #applicable .. " semantic objects;"
+                .. " at most " .. bi_expansion.MAX_REFERENCES .. " are expanded."
+                .. " Each one is a separate compile.")
+        end
+
+        -- Reverse order, so an earlier reference's character offsets are still
+        -- valid after a later one has been spliced.
+        local rewritten = statement_text
+        local expanded = 0
+        for index = #applicable, 1, -1 do
+            local reference = applicable[index]
+
+            if bi_expansion.composed_in_from(tokens, reference)
+                and not bi_expansion.allows_composition(reference.published_schema) then
+                return error_result("SEMANTIC_QUERY_012",
+                    "This statement joins " .. tostring(reference.published_schema) .. "."
+                    .. tostring(reference.object_name) .. " to another relation. The"
+                    .. " semantic layer stops supervising at the edge of the derived"
+                    .. " table, so the join can repeat its rows and any re-aggregation"
+                    .. " above it will double-count. Query the object on its own, or"
+                    .. " accept ordinary-SQL semantics for this model with"
+                    .. " SET_MODEL_DERIVED_COMPOSITION.")
+            end
+
+            local wanted, why =
+                bi_expansion.infer_columns(tokens, reference, reference.columns, reference.by_name)
+            if wanted == nil then
+                return error_result("SEMANTIC_QUERY_011",
+                    "Cannot tell which columns of " .. tostring(reference.published_schema)
+                    .. "." .. tostring(reference.object_name) .. " this statement needs: "
+                    .. tostring(why) .. ". Name them, or alias the reference and qualify"
+                    .. " them with it.")
+            end
+
+            local parts = {}
+            for position, column_name in ipairs(wanted) do
+                parts[position] = sql_text.quote_ident(column_name)
+            end
+            local inner = "SELECT " .. table.concat(parts, ", ") .. " FROM "
+                .. sql_text.quote_qualified(reference.published_schema, reference.object_name)
+            local compiled = compile_sql_internal(inner, {
+                validate = false,
+                unchanged_nonsemantic = false,
+                unchanged_unknown_schema = false,
+                sql_cache = true,
+            })
+            if compiled == nil or compiled.status ~= "OK" then
+                return compiled or error_result("SEMANTIC_QUERY_999",
+                    "Expansion could not compile " .. inner)
+            end
+
+            -- A derived table needs a name for the outer statement to qualify
+            -- it. When the author gave none they cannot be referring to it by
+            -- alias, so any name works and a generated one cannot collide with
+            -- theirs.
+            local alias = reference.alias_text or ("__esv_ref_" .. index)
+            local replacement = "(\n" .. compiled.generated_sql .. "\n) " .. alias
+            rewritten = string.sub(rewritten, 1, tokens[reference.first].start_pos - 1)
+                .. replacement
+                .. string.sub(rewritten, tokens[reference.last].end_pos + 1)
+            expanded = expanded + 1
+        end
+
+        return {status = "OK", generated_sql = rewritten, expanded_references = expanded}
+    end
+end
+
 function M.compile_sql_for_preprocessor(sql_text)
     local upper_sql = upper(sql_text or "")
     if string.find(upper_sql, "SELECT", 1, true) == nil or string.find(upper_sql, "FROM", 1, true) == nil then
@@ -25207,6 +25736,32 @@ function M.compile_sql_for_preprocessor(sql_text)
         local msg = tostring(result)
         local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
         return error_result(code, msg)
+    end
+
+    -- The whole-statement lane is tried first and kept: it is faster, and it
+    -- already does `SELECT *` expansion and GROUP BY inference for the pure
+    -- case. Expansion is what happens when the statement is *not* pure -- a
+    -- join, a CTE, a union, a TopN wrapper, `CREATE VIEW` -- which the lane
+    -- declines by shape rather than by anything being wrong with it.
+    --
+    -- Only those shape refusals fall through. A statement that named an unknown
+    -- field keeps that answer: re-reading it as a reference to expand would
+    -- replace a precise refusal with a vaguer one.
+    if result == nil
+        or result.status == "UNCHANGED"
+        or (result.status == "ERROR" and EXPANDABLE_REFUSALS[result.error_code or ""]) then
+        local expanded_ok, expanded = pcall(bi_expansion.rewrite, sql_text)
+        if not expanded_ok then
+            -- Surfaced rather than swallowed. Expansion only runs on a statement
+            -- the lane already declined, so the alternative to an error here is
+            -- Exasol reporting `object SEMANTIC_X.Y not found` -- which names the
+            -- symptom and hides the cause.
+            return error_result("SEMANTIC_QUERY_014",
+                "Reference expansion failed on this statement: " .. tostring(expanded))
+        end
+        if expanded ~= nil and expanded.status ~= "UNCHANGED" then
+            return expanded
+        end
     end
     return result
 end
@@ -25372,6 +25927,9 @@ if rawget(_G, "ESV_TEST_MODE") then
         runtime_build = compile_cache.runtime_build,
         compile_cache_key = compile_cache.compile_cache_key,
         qualified_relations = compile_cache.qualified_relations,
+        bi_find_references = bi_expansion.find_references,
+        bi_infer_columns = bi_expansion.infer_columns,
+        bi_composed_in_from = bi_expansion.composed_in_from,
         within_trust_boundary = compile_cache.within_trust_boundary,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,

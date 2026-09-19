@@ -99,6 +99,15 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- request_json.lua 90.1 -> 90.3 on 2026-09-19, when a statement that *wraps* a
+-- semantic object started compiling instead of being refused. The tests cover
+-- the two things that decide whether the answer is right rather than merely
+-- produced: which columns get compiled, and whether the reference is composed
+-- with another relation. The star case is there because it was a live defect --
+-- an outer `SELECT *` over a subquery was read as "every column of the object",
+-- which changed the grain and returned 0 for a region worth 3635, with no error.
+-- See plans/combined-bi-and-governance-plan.md, step 7.
+--
 -- No threshold moved for the principal-scoped catalog (2026-09-19). The change
 -- is a schema qualifier on 27 catalog reads plus one view in place of a
 -- three-branch union, so it moves no branch: what it changes is which
@@ -119,7 +128,7 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 90.1,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 90.3,
         ["lua/semantic_layer/admin/validator.lua"] = 94.4,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
