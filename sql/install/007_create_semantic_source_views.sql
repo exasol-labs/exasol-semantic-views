@@ -1,0 +1,550 @@
+-- SEMANTIC_SOURCE — the catalog, as the calling principal may see it.
+--
+-- Why this schema exists. The compiler runs as the caller: an Exasol scripting
+-- script has the caller's rights, not the script owner's. So for a non-SYS
+-- principal to compile anything at all, it needed SELECT on SYS_SEMANTIC — and
+-- that is the whole catalog. Verified as a restricted analyst holding a grant on
+-- exactly one model: every other model's metric definitions, every other user's
+-- logged requests, and a map of the physical estate. A read surface that wide
+-- cannot be narrowed by the compiler, because the caller can simply query the
+-- tables without it.
+--
+-- So the surface itself is narrowed. SEMANTIC_SOURCE is one thin view per
+-- SYS_SEMANTIC table the compiler reads, filtered to the models the caller is
+-- authorized for. Callers are granted SELECT here and nowhere in SYS_SEMANTIC,
+-- and a view is owner-rights, so the filter is enforced by the database rather
+-- than by the compiler agreeing to apply it.
+--
+-- Thin is a contract, not a preference. SEMANTIC_CATALOG already has a view per
+-- table, but those are denormalized for people — three to five joins each — and
+-- load_catalog runs seventeen statements on a cold compile. These carry the
+-- authorization filter and nothing else.
+--
+-- The generated block below is derived from the compiler's own Lua: every
+-- `SEMANTIC_SOURCE.<TABLE>` it reads gets a view, so a new catalog read either
+-- has one or fails the build. Regenerate with tools/package_lua_scripts.py.
+
+-- Who the caller is, resolved once and read by everything that needs it.
+--
+-- ESV used to match principals as `IN (CURRENT_USER, 'PUBLIC')`, which misses
+-- every inherited role: a user granted REGIONAL_ANALYST, which itself holds
+-- SEMANTIC_READER, was not a SEMANTIC_READER as far as ESV was concerned.
+-- Exasol answers this properly in EXA_SESSION_ROLES, which reports the
+-- transitive closure; ESV simply did not ask.
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.EFFECTIVE_PRINCIPAL AS
+SELECT UPPER(CURRENT_USER) AS PRINCIPAL_NAME, 'USER' AS PRINCIPAL_KIND FROM DUAL
+UNION ALL
+SELECT UPPER(ROLE_NAME), 'ROLE' FROM EXA_SESSION_ROLES
+UNION ALL
+SELECT 'PUBLIC', 'PUBLIC' FROM DUAL;
+
+-- Which models that principal may read.
+--
+-- Authorization is opt-in per model, and that is a deliberate default rather
+-- than an oversight: a model nobody has granted stays visible to everyone, which
+-- is exactly the behaviour every existing installation has today, so upgrading
+-- changes nothing until someone calls GRANT_MODEL_ROLE. Granting the first role
+-- is what turns the model private. The cost of that choice is worth stating
+-- plainly: a newly created model is not private by default.
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.AUTHORIZED_MODELS AS
+SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID
+FROM SYS_SEMANTIC.MODELS m
+WHERE NOT EXISTS (
+        SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+        WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+   OR EXISTS (
+        SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+        JOIN SEMANTIC_SOURCE.EFFECTIVE_PRINCIPAL p
+          ON p.PRINCIPAL_NAME = UPPER(g.ROLE_NAME)
+        WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+   OR EXISTS (
+        SELECT 1 FROM SEMANTIC_SOURCE.EFFECTIVE_PRINCIPAL p
+        WHERE p.PRINCIPAL_NAME = UPPER(m.OWNER_ROLE))
+   OR EXISTS (
+        SELECT 1 FROM SEMANTIC_SOURCE.EFFECTIVE_PRINCIPAL p
+        WHERE p.PRINCIPAL_NAME = 'DBA');
+
+-- The baseline a caller needs, named once so a deployment does not have to
+-- discover it by trial and error.
+--
+-- Note what is and is not in here. SELECT on SEMANTIC_SOURCE and EXECUTE on
+-- SEMANTIC_ADMIN are the read and call surface. The three SYS_SEMANTIC tables
+-- are the ones the compiler *writes* as the caller -- the compile cache and the
+-- two logs -- and granting write on them is a real exposure, not a tidy-up: it
+-- is what makes cache poisoning possible at all, which is why a cached
+-- statement is checked against the model's declared relations before it is
+-- served. Taking that write surface away from callers is its own piece of work;
+-- until then this role states the exposure instead of hiding it.
+--
+-- Not included, deliberately: SELECT on the physical source schemas. Those are
+-- the deployment's own data and the deployment's own grant to make -- and it is
+-- where row-level security actually lives, so ESV handing it out would be ESV
+-- deciding who sees which rows.
+-- The role itself is created by tools/install.py: Exasol has no
+-- `CREATE ROLE IF NOT EXISTS`, and this file re-runs on every install.
+GRANT SELECT ON SCHEMA SEMANTIC_SOURCE TO SEMANTIC_USER;
+GRANT SELECT ON SCHEMA SEMANTIC_CATALOG TO SEMANTIC_USER;
+GRANT SELECT ON SCHEMA SEMANTIC_AGENT TO SEMANTIC_USER;
+GRANT EXECUTE ON SCHEMA SEMANTIC_ADMIN TO SEMANTIC_USER;
+GRANT SELECT, INSERT, UPDATE, DELETE ON SYS_SEMANTIC.COMPILE_CACHE TO SEMANTIC_USER;
+-- INSERT but not SELECT on the two logs. The compiler reads back only the row
+-- it just wrote, and both reads already said WHERE USER_NAME = CURRENT_USER, so
+-- the grant was simply wider than the need: SELECT here would have handed every
+-- caller every other caller's logged questions.
+GRANT INSERT ON SYS_SEMANTIC.AGENT_REQUEST_LOG TO SEMANTIC_USER;
+GRANT INSERT ON SYS_SEMANTIC.QUERY_LOG TO SEMANTIC_USER;
+
+-- A caller's own log rows, and only its own. These are scoped by user rather
+-- than by model: a logged request belongs to whoever asked it.
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MY_AGENT_REQUESTS AS
+SELECT * FROM SYS_SEMANTIC.AGENT_REQUEST_LOG WHERE USER_NAME = CURRENT_USER;
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MY_QUERY_LOG AS
+SELECT * FROM SYS_SEMANTIC.QUERY_LOG WHERE USER_NAME = CURRENT_USER;
+
+-- BEGIN GENERATED SEMANTIC_SOURCE_VIEWS
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.ATTRIBUTE_BINDINGS AS
+SELECT * FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES AS
+SELECT * FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.DIMENSIONS AS
+SELECT * FROM SYS_SEMANTIC.DIMENSIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.ENTITIES AS
+SELECT * FROM SYS_SEMANTIC.ENTITIES
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS AS
+SELECT * FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.FACTS AS
+SELECT * FROM SYS_SEMANTIC.FACTS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.IDENTITY_BINDINGS AS
+SELECT * FROM SYS_SEMANTIC.IDENTITY_BINDINGS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS AS
+SELECT * FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MATERIALIZATIONS AS
+SELECT * FROM SYS_SEMANTIC.MATERIALIZATIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MATERIALIZATION_COLUMNS AS
+SELECT * FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS
+ WHERE MATERIALIZATION_ID IN (SELECT MATERIALIZATION_ID FROM SYS_SEMANTIC.MATERIALIZATIONS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.METRICS AS
+SELECT * FROM SYS_SEMANTIC.METRICS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.METRIC_DEPENDENCIES AS
+SELECT * FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
+ WHERE METRIC_ID IN (SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.METRIC_DIMENSION_MATRIX AS
+SELECT * FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.METRIC_FILTERS AS
+SELECT * FROM SYS_SEMANTIC.METRIC_FILTERS
+ WHERE METRIC_ID IN (SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.METRIC_INPUTS AS
+SELECT * FROM SYS_SEMANTIC.METRIC_INPUTS
+ WHERE METRIC_ID IN (SELECT METRIC_ID FROM SYS_SEMANTIC.METRICS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODELS AS
+SELECT * FROM SYS_SEMANTIC.MODELS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_VERSIONS AS
+SELECT * FROM SYS_SEMANTIC.MODEL_VERSIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.OBJECT_COLUMNS AS
+SELECT * FROM SYS_SEMANTIC.OBJECT_COLUMNS
+ WHERE OBJECT_ID IN (SELECT OBJECT_ID FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.RELATIONSHIPS AS
+SELECT * FROM SYS_SEMANTIC.RELATIONSHIPS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.RELATIONSHIP_KEY_MAPPINGS AS
+SELECT * FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+ WHERE RELATIONSHIP_ID IN (SELECT RELATIONSHIP_ID FROM SYS_SEMANTIC.RELATIONSHIPS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.REPRESENTATION_AUTHORITIES AS
+SELECT * FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.SEMANTIC_IDENTITIES AS
+SELECT * FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.SEMANTIC_OBJECTS AS
+SELECT * FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.SYNONYMS AS
+SELECT * FROM SYS_SEMANTIC.SYNONYMS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.UNIQUE_KEYS AS
+SELECT * FROM SYS_SEMANTIC.UNIQUE_KEYS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.UNIQUE_KEY_COLUMNS AS
+SELECT * FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS
+ WHERE UNIQUE_KEY_ID IN (SELECT UNIQUE_KEY_ID FROM SYS_SEMANTIC.UNIQUE_KEYS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.VALIDATION_RUNS AS
+SELECT * FROM SYS_SEMANTIC.VALIDATION_RUNS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+-- Every physical relation this model's compiled SQL may read, in one view.
+--
+-- The compile cache checks a cached statement against this set before serving
+-- it (see compile_cache.trust_boundary). That check runs on every cache hit, so
+-- it reads one view carrying the authorization filter once rather than three
+-- tables carrying it three times.
+--
+-- The three sources are the declarations a planner can turn into a FROM clause:
+-- an entity's representation, a materialization substituted for one, and an F5
+-- identity mapping relation joined into one. It is created after the views it
+-- reads, which is why it lives at the end of the generated block.
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_RELATIONS AS
+SELECT VERSION_ID, 'REPRESENTATION' AS RELATION_KIND,
+       SOURCE_SCHEMA AS RELATION_SCHEMA, SOURCE_OBJECT AS RELATION_OBJECT
+  FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS WHERE STATUS = 'ACTIVE'
+UNION ALL
+SELECT VERSION_ID, 'MATERIALIZATION', PHYSICAL_SCHEMA, PHYSICAL_OBJECT
+  FROM SEMANTIC_SOURCE.MATERIALIZATIONS WHERE STATUS = 'ACTIVE'
+UNION ALL
+SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
+  FROM SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS WHERE STATUS = 'ACTIVE';
+-- END GENERATED SEMANTIC_SOURCE_VIEWS
+
+
+
+
+
+
+
+
+
+
+

@@ -454,28 +454,23 @@ do
         if model_version_id == nil then
             return boundary
         end
-        -- Three sources, and SYS_SEMANTIC.ENTITIES is deliberately not one of
-        -- them. It carries SOURCE_SCHEMA/SOURCE_OBJECT columns, but load_catalog
-        -- selects `er.SOURCE_SCHEMA` through an inner join on the entity's
-        -- active PRIMARY representation and never reads the entity's own pair,
-        -- so admitting it would widen the boundary with relations the renderer
-        -- cannot emit -- and cost a fourth scan, about five milliseconds here,
-        -- on every cache hit -- to do it.
+        -- One view, not three reads. SEMANTIC_SOURCE.MODEL_RELATIONS unions the
+        -- three declaration tables that can put a physical relation into
+        -- rendered SQL, and it carries the authorization filter once rather
+        -- than once per branch. That is what keeps the warm path free: this
+        -- runs on every cache hit, and three filter evaluations per hit was the
+        -- whole measured cost of scoping there.
         --
-        -- UNION ALL, not UNION: the duplicates are folded into a set below, so
-        -- paying the database to sort them first buys nothing.
+        -- SYS_SEMANTIC.ENTITIES is deliberately not among the three. It carries
+        -- SOURCE_SCHEMA/SOURCE_OBJECT columns, but load_catalog selects
+        -- `er.SOURCE_SCHEMA` through an inner join on the entity's active
+        -- PRIMARY representation and never reads the entity's own pair, so
+        -- admitting it would widen the boundary with relations the renderer
+        -- cannot emit.
         local rows = query([[
-            SELECT SOURCE_SCHEMA, SOURCE_OBJECT
-              FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
-             WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
-            UNION ALL
-            SELECT PHYSICAL_SCHEMA, PHYSICAL_OBJECT
-              FROM SYS_SEMANTIC.MATERIALIZATIONS
-             WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
-            UNION ALL
-            SELECT SOURCE_SCHEMA, SOURCE_OBJECT
-              FROM SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS
-             WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+            SELECT RELATION_SCHEMA AS SOURCE_SCHEMA, RELATION_OBJECT AS SOURCE_OBJECT
+              FROM SEMANTIC_SOURCE.MODEL_RELATIONS
+             WHERE VERSION_ID = :version_id
         ]], {version_id = model_version_id})
         for _, row in ipairs(rows or {}) do
             local schema_name = row_value(row, "SOURCE_SCHEMA", 1)
@@ -668,8 +663,8 @@ end
 local function load_model(model_name)
     local rows = query([[
         SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER
-        FROM SYS_SEMANTIC.MODELS m
-        LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
+        FROM SEMANTIC_SOURCE.MODELS m
+        LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
         WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
     ]], {model_name = model_name})
@@ -702,7 +697,7 @@ local function validate_model(model)
     end
     local validation_run_id = scalar([[
         SELECT MAX(VALIDATION_RUN_ID)
-        FROM SYS_SEMANTIC.VALIDATION_RUNS
+        FROM SEMANTIC_SOURCE.VALIDATION_RUNS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
     ]], {model_id = model.model_id, version_id = model.version_id})
@@ -727,7 +722,7 @@ local function collect_referenced_validation_objects(ctx, metrics, dimensions)
         referenced.METRIC[upper(metric.name)] = true
         local dep_rows = query([[
             SELECT DEPENDS_ON_OBJECT_TYPE, DEPENDS_ON_OBJECT_ID
-            FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
+            FROM SEMANTIC_SOURCE.METRIC_DEPENDENCIES
             WHERE METRIC_ID = :metric_id
         ]], {metric_id = metric.id})
         for _, row in ipairs(dep_rows or {}) do
@@ -767,7 +762,7 @@ end
 local function load_catalog(model, object_name)
     local object_rows = query([[
         SELECT OBJECT_ID, OBJECT_NAME, ROOT_ENTITY_ID
-        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND UPPER(OBJECT_NAME) = UPPER(:object_name)
@@ -825,8 +820,8 @@ local function load_catalog(model, object_name)
                e.PRIMARY_KEY_EXPR, e.GRAIN_DESCRIPTION,
                er.REPRESENTATION_ID, er.REPRESENTATION_NAME,
                er.SOURCE_KIND, er.REPRESENTATION_ROLE, er.PRIORITY
-        FROM SYS_SEMANTIC.ENTITIES e
-        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+        FROM SEMANTIC_SOURCE.ENTITIES e
+        JOIN SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
           ON er.ENTITY_ID = e.ENTITY_ID
          AND er.MODEL_ID = e.MODEL_ID
          AND er.VERSION_ID = e.VERSION_ID
@@ -869,8 +864,8 @@ local function load_catalog(model, object_name)
                er.SOURCE_ALIAS, er.REPRESENTATION_ROLE, er.PRIORITY,
                er.FRESHNESS_POLICY, er.COVERAGE_PREDICATE, er.VALID_FROM,
                er.VALID_TO, COALESCE(ra.AUTHORITY_ROLE, 'PREFER') AS AUTHORITY_ROLE
-        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
-        LEFT JOIN SYS_SEMANTIC.REPRESENTATION_AUTHORITIES ra
+        FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
+        LEFT JOIN SEMANTIC_SOURCE.REPRESENTATION_AUTHORITIES ra
           ON ra.MODEL_ID = er.MODEL_ID AND ra.VERSION_ID = er.VERSION_ID
          AND ra.REPRESENTATION_ID = er.REPRESENTATION_ID AND ra.STATUS = 'ACTIVE'
         WHERE er.MODEL_ID = :model_id
@@ -912,8 +907,8 @@ local function load_catalog(model, object_name)
     local dimension_rows = query([[
         SELECT d.DIMENSION_ID, d.DIMENSION_NAME, d.ENTITY_ID, d.EXPRESSION,
                d.DATA_TYPE, d.DISPLAY_NAME
-        FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
-        JOIN SYS_SEMANTIC.DIMENSIONS d
+        FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
+        JOIN SEMANTIC_SOURCE.DIMENSIONS d
           ON d.DIMENSION_ID = oc.OBJECT_REF_ID
         WHERE oc.OBJECT_ID = :object_id
           AND oc.COLUMN_KIND = 'DIMENSION'
@@ -945,8 +940,8 @@ local function load_catalog(model, object_name)
                mt.SEMANTIC_FILTER_EXPR, mt.SQL_FILTER_EXPR,
                mt.DISTINCT_KEY_EXPR, mt.NON_ADDITIVE_DIMENSION_ID,
                mt.WINDOW_SPEC_JSON, mt.TYPE_PARAMS_JSON
-        FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
-        JOIN SYS_SEMANTIC.METRICS mt
+        FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
+        JOIN SEMANTIC_SOURCE.METRICS mt
           ON mt.METRIC_ID = oc.OBJECT_REF_ID
         WHERE oc.OBJECT_ID = :object_id
           AND oc.COLUMN_KIND = 'METRIC'
@@ -996,7 +991,7 @@ local function load_catalog(model, object_name)
                SEMANTIC_FILTER_EXPR, SQL_FILTER_EXPR,
                DISTINCT_KEY_EXPR, NON_ADDITIVE_DIMENSION_ID,
                WINDOW_SPEC_JSON, TYPE_PARAMS_JSON
-        FROM SYS_SEMANTIC.METRICS
+        FROM SEMANTIC_SOURCE.METRICS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
@@ -1038,8 +1033,8 @@ local function load_catalog(model, object_name)
         SELECT mi.METRIC_ID, mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE,
                mi.INPUT_OBJECT_ID, mi.EXPRESSION_ALIAS, mi.OFFSET_WINDOW,
                mi.FILTER_EXPR, mi.ORDINAL_POSITION
-        FROM SYS_SEMANTIC.METRIC_INPUTS mi
-        JOIN SYS_SEMANTIC.METRICS mt
+        FROM SEMANTIC_SOURCE.METRIC_INPUTS mi
+        JOIN SEMANTIC_SOURCE.METRICS mt
           ON mt.METRIC_ID = mi.METRIC_ID
         WHERE mt.MODEL_ID = :model_id
           AND mt.VERSION_ID = :version_id
@@ -1065,8 +1060,8 @@ local function load_catalog(model, object_name)
         SELECT mf.METRIC_ID, mf.FILTER_KIND, mf.FILTER_EXPR,
                mf.RESOLVED_SQL_EXPR, mf.REQUIRED_DIMENSION_ID,
                mf.REQUIRED_ENTITY_ID, mf.ORDINAL_POSITION
-        FROM SYS_SEMANTIC.METRIC_FILTERS mf
-        JOIN SYS_SEMANTIC.METRICS mt
+        FROM SEMANTIC_SOURCE.METRIC_FILTERS mf
+        JOIN SEMANTIC_SOURCE.METRICS mt
           ON mt.METRIC_ID = mf.METRIC_ID
         WHERE mt.MODEL_ID = :model_id
           AND mt.VERSION_ID = :version_id
@@ -1089,8 +1084,8 @@ local function load_catalog(model, object_name)
 
     local metric_dependency_rows = query([[
         SELECT md.METRIC_ID, md.DEPENDS_ON_OBJECT_TYPE, md.DEPENDS_ON_OBJECT_ID
-        FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md
-        JOIN SYS_SEMANTIC.METRICS mt ON mt.METRIC_ID = md.METRIC_ID
+        FROM SEMANTIC_SOURCE.METRIC_DEPENDENCIES md
+        JOIN SEMANTIC_SOURCE.METRICS mt ON mt.METRIC_ID = md.METRIC_ID
         WHERE mt.MODEL_ID = :model_id
           AND mt.VERSION_ID = :version_id
           AND mt.STATUS = 'ACTIVE'
@@ -1110,7 +1105,7 @@ local function load_catalog(model, object_name)
     local fact_rows = query([[
         SELECT FACT_ID, FACT_NAME, ENTITY_ID, EXPRESSION, DATA_TYPE,
                ADDITIVE_POLICY
-        FROM SYS_SEMANTIC.FACTS
+        FROM SEMANTIC_SOURCE.FACTS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
@@ -1134,7 +1129,7 @@ local function load_catalog(model, object_name)
         SELECT ATTRIBUTE_BINDING_ID, ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID,
                REPRESENTATION_ID, SOURCE_EXPRESSION, BINDING_ROLE,
                BINDING_PRIORITY, IS_DEFAULT
-        FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+        FROM SEMANTIC_SOURCE.ATTRIBUTE_BINDINGS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
@@ -1165,7 +1160,7 @@ local function load_catalog(model, object_name)
 
     local fusion_policy_rows = query([[
         SELECT ENTITY_ID, ATTRIBUTE_TYPE, ATTRIBUTE_ID, FUSION_STRATEGY
-        FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+        FROM SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES
         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
         ORDER BY ATTRIBUTE_TYPE, ATTRIBUTE_ID
@@ -1184,7 +1179,7 @@ local function load_catalog(model, object_name)
 
     local identity_rows = query([[
         SELECT IDENTITY_ID, ENTITY_ID, IDENTITY_NAME, IDENTITY_KIND, DATA_TYPE
-        FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES
+        FROM SEMANTIC_SOURCE.SEMANTIC_IDENTITIES
         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
         ORDER BY ENTITY_ID, IDENTITY_ID
@@ -1211,8 +1206,8 @@ local function load_catalog(model, object_name)
                im.IDENTITY_MAPPING_ID, im.SOURCE_SCHEMA, im.SOURCE_OBJECT,
                im.SOURCE_LOCAL_COLUMN, im.SEMANTIC_KEY_COLUMN,
                im.CERTIFICATION_STATUS
-        FROM SYS_SEMANTIC.IDENTITY_BINDINGS ib
-        LEFT JOIN SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS im
+        FROM SEMANTIC_SOURCE.IDENTITY_BINDINGS ib
+        LEFT JOIN SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS im
           ON im.IDENTITY_BINDING_ID = ib.IDENTITY_BINDING_ID
          AND im.STATUS = 'ACTIVE'
         WHERE ib.MODEL_ID = :model_id AND ib.VERSION_ID = :version_id
@@ -1250,7 +1245,7 @@ local function load_catalog(model, object_name)
         SELECT RELATIONSHIP_ID, RELATIONSHIP_NAME, FROM_ENTITY_ID, TO_ENTITY_ID,
                JOIN_CONDITION, RELATIONSHIP_CARDINALITY, JOIN_TYPE, FANOUT_POLICY,
                PATH_PRIORITY
-        FROM SYS_SEMANTIC.RELATIONSHIPS
+        FROM SEMANTIC_SOURCE.RELATIONSHIPS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
@@ -1277,8 +1272,8 @@ local function load_catalog(model, object_name)
         SELECT rkm.RELATIONSHIP_ID, rkm.ORDINAL_POSITION,
                rkm.FROM_COLUMN_NAME, rkm.FROM_EXPRESSION,
                rkm.TO_COLUMN_NAME, rkm.TO_EXPRESSION
-        FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS rkm
-        JOIN SYS_SEMANTIC.RELATIONSHIPS r
+        FROM SEMANTIC_SOURCE.RELATIONSHIP_KEY_MAPPINGS rkm
+        JOIN SEMANTIC_SOURCE.RELATIONSHIPS r
           ON r.RELATIONSHIP_ID = rkm.RELATIONSHIP_ID
         WHERE r.MODEL_ID = :model_id
           AND r.VERSION_ID = :version_id
@@ -1300,7 +1295,7 @@ local function load_catalog(model, object_name)
 
     local unique_key_rows = query([[
         SELECT UNIQUE_KEY_ID, ENTITY_ID, KEY_NAME, KEY_KIND, SOURCE_FORMAT
-        FROM SYS_SEMANTIC.UNIQUE_KEYS
+        FROM SEMANTIC_SOURCE.UNIQUE_KEYS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
@@ -1325,8 +1320,8 @@ local function load_catalog(model, object_name)
     local unique_key_column_rows = query([[
         SELECT ukc.UNIQUE_KEY_ID, ukc.ORDINAL_POSITION,
                ukc.COLUMN_NAME, ukc.EXPRESSION
-        FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS ukc
-        JOIN SYS_SEMANTIC.UNIQUE_KEYS uk
+        FROM SEMANTIC_SOURCE.UNIQUE_KEY_COLUMNS ukc
+        JOIN SEMANTIC_SOURCE.UNIQUE_KEYS uk
           ON uk.UNIQUE_KEY_ID = ukc.UNIQUE_KEY_ID
         WHERE uk.MODEL_ID = :model_id
           AND uk.VERSION_ID = :version_id
@@ -1351,7 +1346,7 @@ local function load_catalog(model, object_name)
 
     local synonym_rows = query([[
         SELECT OBJECT_TYPE, OBJECT_ID, SYNONYM
-        FROM SYS_SEMANTIC.SYNONYMS
+        FROM SEMANTIC_SOURCE.SYNONYMS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND OBJECT_TYPE IN ('DIMENSION', 'METRIC')
@@ -1445,8 +1440,8 @@ local function resolve_field(ctx, field_name, expected_kind)
     if ctx.model ~= nil and ctx.object ~= nil then
         for _, row in ipairs(query([[
             SELECT so.OBJECT_NAME, oc.COLUMN_KIND
-            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
-            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
+            FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
+            JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
               ON so.OBJECT_ID = oc.OBJECT_ID
             WHERE so.MODEL_ID = :model_id
               AND so.VERSION_ID = :version_id
@@ -1588,7 +1583,7 @@ local function collect_metric_entities(ctx, metric, needed_entities, seen_metric
     end
     local dep_rows = query([[
         SELECT DEPENDS_ON_OBJECT_TYPE, DEPENDS_ON_OBJECT_ID
-        FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
+        FROM SEMANTIC_SOURCE.METRIC_DEPENDENCIES
         WHERE METRIC_ID = :metric_id
         ORDER BY DEPENDS_ON_OBJECT_TYPE, DEPENDS_ON_OBJECT_ID
     ]], {metric_id = metric.id})
@@ -2238,7 +2233,7 @@ local function collect_intrinsic_filter_dimensions(ctx, metrics, needed_entities
     for _, metric in ipairs(metrics or {}) do
         local rows = query([[
             SELECT REQUIRED_DIMENSION_ID
-            FROM SYS_SEMANTIC.METRIC_FILTERS
+            FROM SEMANTIC_SOURCE.METRIC_FILTERS
             WHERE METRIC_ID = :metric_id
               AND REQUIRED_DIMENSION_ID IS NOT NULL
             ORDER BY ORDINAL_POSITION
@@ -2259,7 +2254,7 @@ local function validate_metric_dimensions(ctx, metrics, dimensions)
         for _, dimension in ipairs(dimensions) do
             local rows = query([[
                 SELECT IS_VALID, REASON_CODE, RELATIONSHIP_PATH
-                FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX
+                FROM SEMANTIC_SOURCE.METRIC_DIMENSION_MATRIX
                 WHERE MODEL_ID = :model_id
                   AND VERSION_ID = :version_id
                   AND METRIC_ID = :metric_id
@@ -2704,8 +2699,7 @@ local function log_request(result, request_json, request, model)
     })
     result.agent_request_id = scalar([[
         SELECT MAX(AGENT_REQUEST_ID)
-        FROM SYS_SEMANTIC.AGENT_REQUEST_LOG
-        WHERE USER_NAME = CURRENT_USER
+        FROM SEMANTIC_SOURCE.MY_AGENT_REQUESTS
     ]])
 end
 
@@ -2743,15 +2737,14 @@ local function log_query_result(result, original_sql, request, model, client_nam
     })
     result.query_log_id = scalar([[
         SELECT MAX(QUERY_LOG_ID)
-        FROM SYS_SEMANTIC.QUERY_LOG
-        WHERE USER_NAME = CURRENT_USER
+        FROM SEMANTIC_SOURCE.MY_QUERY_LOG
     ]])
 end
 
 local function latest_successful_validation(model)
     local rows = query([[
         SELECT VALIDATION_RUN_ID, STATUS, ERROR_COUNT
-        FROM SYS_SEMANTIC.VALIDATION_RUNS
+        FROM SEMANTIC_SOURCE.VALIDATION_RUNS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS IN ('OK', 'WARNING')
@@ -2762,7 +2755,7 @@ local function latest_successful_validation(model)
     if rows == nil or #rows == 0 then
         local latest_rows = query([[
             SELECT STATUS, ERROR_COUNT
-            FROM SYS_SEMANTIC.VALIDATION_RUNS
+            FROM SEMANTIC_SOURCE.VALIDATION_RUNS
             WHERE MODEL_ID = :model_id
               AND VERSION_ID = :version_id
             ORDER BY VALIDATION_RUN_ID DESC
@@ -2798,8 +2791,8 @@ end
 local function load_model_by_published_schema(schema_name)
     local rows = query([[
         SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER
-        FROM SYS_SEMANTIC.MODELS m
-        LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
+        FROM SEMANTIC_SOURCE.MODELS m
+        LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
         WHERE UPPER(m.PUBLISHED_SCHEMA) = UPPER(:schema_name)
     ]], {schema_name = schema_name})
@@ -2841,7 +2834,20 @@ local function compile_request_table(request, options)
 
     local model = options.model or load_model(model_name)
     if model == nil then
-        return error_result(error_prefix .. "_011", "Model not found: " .. model_name .. ".")
+        -- The model is absent *from what this caller may see*, which is the
+        -- same answer for a model that does not exist and one that exists but
+        -- was granted to somebody else. Saying so is the point: before the
+        -- catalog reads were principal-scoped, an unauthorized model failed
+        -- much later and much worse -- the source-column probe found nothing,
+        -- the planner concluded no representation could traverse a
+        -- relationship, and an authorization outcome was reported as
+        -- SEMANTIC_REQUEST_080, a modelling defect. That sent modellers looking
+        -- for a bug that did not exist. One code, and a message that names the
+        -- other possibility, costs nothing and points at GRANT_MODEL_ROLE.
+        return error_result(error_prefix .. "_011",
+            "Model not found: " .. model_name
+            .. ". It does not exist, or it is not granted to you"
+            .. " -- see SEMANTIC_SOURCE.AUTHORIZED_MODELS for the models you can read.")
     end
 
     -- Compile-cache fast path: hit returns the stored GENERATED_SQL + PLAN_JSON
@@ -3165,7 +3171,7 @@ local function compile_request_table(request, options)
             }
             for _, row in ipairs(query([[
                 SELECT INPUT_ROLE, INPUT_OBJECT_TYPE, EXPRESSION_ALIAS
-                FROM SYS_SEMANTIC.METRIC_INPUTS
+                FROM SEMANTIC_SOURCE.METRIC_INPUTS
                 WHERE METRIC_ID = :metric_id
                 ORDER BY ORDINAL_POSITION
             ]], {metric_id = metric.id}) or {}) do
@@ -4341,8 +4347,8 @@ function M.suggest_grain_metadata(model_name)
     local suggestions = {}
     local entities = query([[
         SELECT e.ENTITY_ID, e.ENTITY_NAME, er.SOURCE_ALIAS, e.PRIMARY_KEY_EXPR
-        FROM SYS_SEMANTIC.ENTITIES e
-        JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+        FROM SEMANTIC_SOURCE.ENTITIES e
+        JOIN SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
           ON er.ENTITY_ID = e.ENTITY_ID
          AND er.MODEL_ID = e.MODEL_ID
          AND er.VERSION_ID = e.VERSION_ID
@@ -4366,7 +4372,7 @@ function M.suggest_grain_metadata(model_name)
         if expression_alias ~= nil and upper(expression_alias) == upper(alias) then
             local existing = scalar([[
                 SELECT COUNT(*)
-                FROM SYS_SEMANTIC.UNIQUE_KEYS
+                FROM SEMANTIC_SOURCE.UNIQUE_KEYS
                 WHERE MODEL_ID = :model_id
                   AND VERSION_ID = :version_id
                   AND ENTITY_ID = :entity_id
@@ -4394,7 +4400,7 @@ function M.suggest_grain_metadata(model_name)
     local relationships = query([[
         SELECT RELATIONSHIP_ID, RELATIONSHIP_NAME, FROM_ENTITY_ID, TO_ENTITY_ID,
                JOIN_CONDITION
-        FROM SYS_SEMANTIC.RELATIONSHIPS
+        FROM SEMANTIC_SOURCE.RELATIONSHIPS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
           AND STATUS = 'ACTIVE'
@@ -4421,7 +4427,7 @@ function M.suggest_grain_metadata(model_name)
             end
             local existing = scalar([[
                 SELECT COUNT(*)
-                FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+                FROM SEMANTIC_SOURCE.RELATIONSHIP_KEY_MAPPINGS
                 WHERE RELATIONSHIP_ID = :relationship_id
             ]], {relationship_id = relationship_id})
             if from_column ~= nil and tonumber(existing or 0) == 0 then

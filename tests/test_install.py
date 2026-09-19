@@ -915,6 +915,42 @@ class InstallerResetTest(unittest.TestCase):
         absent = NoTable(columns=[])
         self.assertEqual([], INSTALL.migrate_added_columns(absent))
 
+    def test_the_caller_baseline_role_is_created_once(self):
+        """007 grants the caller baseline to SEMANTIC_USER, so it must exist first.
+
+        Exasol has no `CREATE ROLE IF NOT EXISTS` and the install files re-run
+        over an existing deployment, so this is idempotent here rather than in
+        SQL -- a second install must not fail on a role it created itself.
+        """
+        class Roles:
+            def __init__(self, existing):
+                self.existing = set(existing)
+                self.sql = []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_ROLES" in sql:
+                    name = sql.split("ROLE_NAME = '")[1].split("'")[0]
+                    return Result([(1,)] if name in self.existing else [])
+                if sql.startswith("CREATE ROLE"):
+                    return Result([])
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        fresh = Roles(existing=[])
+        self.assertEqual(["SEMANTIC_USER"], INSTALL.ensure_baseline_roles(fresh))
+        self.assertIn("CREATE ROLE SEMANTIC_USER",
+                      [sql for sql in fresh.sql if sql.startswith("CREATE ROLE")])
+
+        again = Roles(existing=["SEMANTIC_USER"])
+        self.assertEqual([], INSTALL.ensure_baseline_roles(again))
+        self.assertEqual([], [sql for sql in again.sql if sql.startswith("CREATE ROLE")])
+
+    def test_every_baseline_role_is_granted_something_by_007(self):
+        """A role nothing grants to is a role that does nothing."""
+        source = (INSTALL.ROOT / "sql/install/007_create_semantic_source_views.sql").read_text()
+        for role in INSTALL.BASELINE_ROLES:
+            self.assertIn(f"TO {role};", source, role)
+
     def test_every_added_column_names_a_table_001_creates(self):
         """A typo in ADDED_COLUMNS is a migration that silently never runs."""
         catalog = (INSTALL.ROOT / "sql/install/001_create_semantic_catalog.sql").read_text()

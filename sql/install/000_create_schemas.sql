@@ -2,11 +2,13 @@ CREATE SCHEMA IF NOT EXISTS SYS_SEMANTIC;
 CREATE SCHEMA IF NOT EXISTS SEMANTIC_CATALOG;
 CREATE SCHEMA IF NOT EXISTS SEMANTIC_ADMIN;
 CREATE SCHEMA IF NOT EXISTS SEMANTIC_AGENT;
+CREATE SCHEMA IF NOT EXISTS SEMANTIC_SOURCE;
 
 COMMENT ON SCHEMA SYS_SEMANTIC IS 'Internal catalog tables for Exasol Semantic Views.';
 COMMENT ON SCHEMA SEMANTIC_CATALOG IS 'Readable semantic catalog views for models, entities, facts, metrics, validation, and materializations.';
 COMMENT ON SCHEMA SEMANTIC_ADMIN IS 'Lua admin, compiler, validation, publish, preprocessor, and agent scripts for Exasol Semantic Views.';
 COMMENT ON SCHEMA SEMANTIC_AGENT IS 'Agent-scoped semantic discovery views for models, objects, fields, valid combinations, glossary, and request history.';
+COMMENT ON SCHEMA SEMANTIC_SOURCE IS 'Principal-scoped catalog reads. One thin view per SYS_SEMANTIC table the compiler reads, filtered to the models the calling principal is authorized for. This is the surface callers are granted; SYS_SEMANTIC itself is not.';
 
 CREATE TABLE IF NOT EXISTS SEMANTIC_CATALOG.SEMANTIC_CATALOG_DISCOVERY (
   ENTRY_NAME  VARCHAR(256),

@@ -42,6 +42,132 @@ FUSION_END = "-- END GENERATED FUSION_RUNTIME"
 SCRIPT_PARAMETERS_BEGIN = "-- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS"
 SCRIPT_PARAMETERS_END = "-- END GENERATED ADMIN_SCRIPT_PARAMETERS"
 CATALOG_VIEWS_SQL = ROOT / "sql/install/002_create_semantic_catalog_views.sql"
+SOURCE_VIEWS_SQL = ROOT / "sql/install/007_create_semantic_source_views.sql"
+SOURCE_VIEWS_BEGIN = "-- BEGIN GENERATED SEMANTIC_SOURCE_VIEWS"
+SOURCE_VIEWS_END = "-- END GENERATED SEMANTIC_SOURCE_VIEWS"
+
+# The two views 007 writes by hand. Everything else in SEMANTIC_SOURCE is
+# generated, so a reference to anything not in this set must resolve to a
+# catalog table or the build fails.
+SOURCE_VIEWS_HANDWRITTEN = {"EFFECTIVE_PRINCIPAL", "AUTHORIZED_MODELS", "MODEL_RELATIONS",
+                            "MY_AGENT_REQUESTS", "MY_QUERY_LOG"}
+
+# The compiler modules whose catalog reads define the scoped surface. The admin
+# modules are deliberately absent: VALIDATE_MODEL and the authoring scripts are
+# run by modellers against SYS_SEMANTIC, and scoping them would hide a model
+# from the person maintaining it.
+SOURCE_VIEW_READERS = [
+    ROOT / "lua/semantic_layer/compiler/request_json.lua",
+    ROOT / "lua/semantic_layer/compiler/materializations.lua",
+    ROOT / "lua/semantic_layer/compiler/query_spec.lua",
+    ROOT / "lua/semantic_layer/compiler/catalog_snapshot.lua",
+    ROOT / "lua/semantic_layer/compiler/metric_plan.lua",
+    ROOT / "lua/semantic_layer/compiler/physical_plan.lua",
+    ROOT / "lua/semantic_layer/compiler/grain_sql.lua",
+]
+
+# A child table carries no MODEL_ID, so it is scoped through the parent that
+# does. This is the one part that cannot be derived: it is the foreign key, and
+# the FK constraints are declared DISABLE with no column metadata a generator
+# could read back. Maps table -> (parent table, shared key column).
+SOURCE_VIEW_PARENT_SCOPE = {
+    "MATERIALIZATION_COLUMNS":   ("MATERIALIZATIONS", "MATERIALIZATION_ID"),
+    "METRIC_DEPENDENCIES":       ("METRICS", "METRIC_ID"),
+    "METRIC_FILTERS":            ("METRICS", "METRIC_ID"),
+    "METRIC_INPUTS":             ("METRICS", "METRIC_ID"),
+    "OBJECT_COLUMNS":            ("SEMANTIC_OBJECTS", "OBJECT_ID"),
+    "RELATIONSHIP_KEY_MAPPINGS": ("RELATIONSHIPS", "RELATIONSHIP_ID"),
+    "UNIQUE_KEY_COLUMNS":        ("UNIQUE_KEYS", "UNIQUE_KEY_ID"),
+}
+
+SOURCE_VIEW_REFERENCE = re.compile(r"\bSEMANTIC_SOURCE\.([A-Z_0-9]+)")
+
+# The authorization rule, written once and expanded into every generated view.
+# Kept as a subquery over MODEL_ID so a view body stays `SELECT * FROM <table>
+# WHERE MODEL_ID IN (...)` -- readable, and identical in every view.
+AUTHORIZED_MODEL_IDS = """SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')"""
+
+
+def source_view_tables() -> list[str]:
+    """Every SYS_SEMANTIC table the compiler reads through SEMANTIC_SOURCE."""
+    found: set[str] = set()
+    for path in SOURCE_VIEW_READERS:
+        for name in SOURCE_VIEW_REFERENCE.findall(path.read_text(encoding="utf-8")):
+            if name not in SOURCE_VIEWS_HANDWRITTEN:
+                found.add(name)
+    return sorted(found)
+
+
+def source_views_block() -> str:
+    """One thin, principal-scoped view per table, derived from the reads above.
+
+    `SELECT *` rather than a column list on purpose: the view is re-created by
+    every install, so it tracks the table instead of restating it, and a column
+    added to 001 needs no second edit here.
+
+    The authorization predicate is expanded into each view rather than left as a
+    reference to SEMANTIC_SOURCE.AUTHORIZED_MODELS. That is a measured choice,
+    not a stylistic one: every view layer costs about five milliseconds of fixed
+    planning overhead in Exasol, and load_catalog runs seventeen statements on a
+    cold compile, so the indirection cost more than the whole rest of the
+    filter. It is still written once -- here -- and AUTHORIZED_MODELS remains the
+    readable statement of the same rule, with a test asserting the two agree.
+    """
+    catalog = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(encoding="utf-8")
+    lines = []
+    for table in source_view_tables():
+        if f"SYS_SEMANTIC.{table} (" not in catalog:
+            raise SystemExit(
+                f"SEMANTIC_SOURCE.{table} is read by the compiler but "
+                f"SYS_SEMANTIC.{table} is not created by 001")
+        lines.append(f"CREATE OR REPLACE VIEW SEMANTIC_SOURCE.{table} AS")
+        lines.append(f"SELECT * FROM SYS_SEMANTIC.{table}")
+        if table in SOURCE_VIEW_PARENT_SCOPE:
+            parent, key = SOURCE_VIEW_PARENT_SCOPE[table]
+            lines.append(f" WHERE {key} IN (SELECT {key} FROM SYS_SEMANTIC.{parent}")
+            lines.append(f"                  WHERE MODEL_ID IN ({AUTHORIZED_MODEL_IDS}));")
+        else:
+            lines.append(f" WHERE MODEL_ID IN ({AUTHORIZED_MODEL_IDS});")
+        lines.append("")
+    body = "\n".join(lines).rstrip()
+    # The markers are part of the block: replace_between_markers consumes them.
+    return f"""{SOURCE_VIEWS_BEGIN}
+{body}
+
+-- Every physical relation this model's compiled SQL may read, in one view.
+--
+-- The compile cache checks a cached statement against this set before serving
+-- it (see compile_cache.trust_boundary). That check runs on every cache hit, so
+-- it reads one view carrying the authorization filter once rather than three
+-- tables carrying it three times.
+--
+-- The three sources are the declarations a planner can turn into a FROM clause:
+-- an entity's representation, a materialization substituted for one, and an F5
+-- identity mapping relation joined into one. It is created after the views it
+-- reads, which is why it lives at the end of the generated block.
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_RELATIONS AS
+SELECT VERSION_ID, 'REPRESENTATION' AS RELATION_KIND,
+       SOURCE_SCHEMA AS RELATION_SCHEMA, SOURCE_OBJECT AS RELATION_OBJECT
+  FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS WHERE STATUS = 'ACTIVE'
+UNION ALL
+SELECT VERSION_ID, 'MATERIALIZATION', PHYSICAL_SCHEMA, PHYSICAL_OBJECT
+  FROM SEMANTIC_SOURCE.MATERIALIZATIONS WHERE STATUS = 'ACTIVE'
+UNION ALL
+SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
+  FROM SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS WHERE STATUS = 'ACTIVE';
+{SOURCE_VIEWS_END}
+"""
 # A callable admin script, with or without a RETURNS clause.
 #
 # Requiring `RETURNS` used to be the whole bug: the mutators that "complete
@@ -1038,6 +1164,15 @@ def main() -> int:
         print(f"updated {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
     else:
         print(f"unchanged {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
+
+    original_source = SOURCE_VIEWS_SQL.read_text(encoding="utf-8")
+    updated_source = replace_between_markers(
+        original_source, source_views_block(), SOURCE_VIEWS_BEGIN, SOURCE_VIEWS_END)
+    if updated_source != original_source:
+        SOURCE_VIEWS_SQL.write_text(updated_source, encoding="utf-8")
+        print(f"updated {SOURCE_VIEWS_SQL.relative_to(ROOT)}")
+    else:
+        print(f"unchanged {SOURCE_VIEWS_SQL.relative_to(ROOT)}")
 
     original_agent = AGENT_INSTALL_SQL.read_text(encoding="utf-8")
     updated_agent = replace_between_markers(original_agent, agent_block(), AGENT_BEGIN, AGENT_END)

@@ -358,6 +358,23 @@ query([[
     publish_number = publish_number,
 })
 
+-- Roles granted this model before it had a published schema still need SELECT on
+-- it. GRANT_MODEL_ROLE cannot grant a schema that does not exist yet, so the
+-- other half of that ordering lives here: publishing catches up every active
+-- grant. Best effort per role -- one role dropped out from under the catalog
+-- must not fail a publish that otherwise succeeded.
+local granted_roles = query([[
+    SELECT DISTINCT ROLE_NAME FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS
+    WHERE MODEL_ID = :model_id AND STATUS = 'ACTIVE'
+]], {model_id = model.id})
+for _, grant_row in ipairs(granted_roles or {}) do
+    local granted_role = grant_row[1] or grant_row.ROLE_NAME
+    if granted_role ~= nil and tostring(granted_role) ~= "" then
+        pcall(query, "GRANT SELECT ON SCHEMA " .. quote_ident(model.published_schema)
+            .. " TO " .. quote_ident(granted_role))
+    end
+end
+
 exit(output_rows, [[
   MODEL_NAME VARCHAR(256),
   PUBLISHED_SCHEMA VARCHAR(256),

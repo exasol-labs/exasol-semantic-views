@@ -99,6 +99,12 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- No threshold moved for the principal-scoped catalog (2026-09-19). The change
+-- is a schema qualifier on 27 catalog reads plus one view in place of a
+-- three-branch union, so it moves no branch: what it changes is which
+-- privileges the caller needs, and that is provable only against a live
+-- database with a real role hierarchy. tools/verify_effective_principal.py is
+-- where it is proven; this gate cannot see it.
 return {
     lines = {
         ["lua/semantic_layer/shared/json.lua"] = 100,

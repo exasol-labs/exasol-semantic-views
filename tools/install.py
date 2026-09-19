@@ -40,6 +40,7 @@ INSTALL_FILES = [
     ROOT / "sql/install/004_create_semantic_preprocessor.sql",
     ROOT / "sql/install/005_create_semantic_surface_helpers.sql",
     ROOT / "sql/install/006_create_semantic_agent_views.sql",
+    ROOT / "sql/install/007_create_semantic_source_views.sql",
 ]
 
 EXAMPLE_FILES = [
@@ -51,6 +52,7 @@ EXAMPLE_FILES = [
 RESET_STATEMENTS = [
     "DROP SCHEMA IF EXISTS SEMANTIC_SALES CASCADE",
     "DROP SCHEMA IF EXISTS SEMANTIC_AGENT CASCADE",
+    "DROP SCHEMA IF EXISTS SEMANTIC_SOURCE CASCADE",
     "DROP SCHEMA IF EXISTS SEMANTIC_CATALOG CASCADE",
     "DROP SCHEMA IF EXISTS SEMANTIC_ADMIN CASCADE",
     "DROP SCHEMA IF EXISTS SYS_SEMANTIC CASCADE",
@@ -60,6 +62,7 @@ RESET_STATEMENTS = [
 RESET_SCHEMA_NAMES = {
     "SEMANTIC_SALES",
     "SEMANTIC_AGENT",
+    "SEMANTIC_SOURCE",
     "SEMANTIC_CATALOG",
     "SEMANTIC_ADMIN",
     "SYS_SEMANTIC",
@@ -374,6 +377,26 @@ def column_exists(con: object, schema: str, table: str, column: str) -> bool:
     return bool(rows)
 
 
+# Roles the install needs before 007 can grant to them. Exasol has no
+# `CREATE ROLE IF NOT EXISTS`, and the install files re-run over an existing
+# deployment, so creation is idempotent here rather than in SQL.
+BASELINE_ROLES = ["SEMANTIC_USER"]
+
+
+def ensure_baseline_roles(con: object) -> list[str]:
+    """Create the roles 007 grants the caller baseline to. Returns what it made."""
+    created = []
+    for role in BASELINE_ROLES:
+        rows = con.execute(
+            f"SELECT 1 FROM SYS.EXA_ALL_ROLES WHERE ROLE_NAME = '{role}'"
+        ).fetchall()
+        if rows:
+            continue
+        con.execute(f"CREATE ROLE {role}")
+        created.append(role)
+    return created
+
+
 def migrate_added_columns(con: object) -> list[str]:
     """Add columns an existing catalog predates. Returns what it added.
 
@@ -613,6 +636,9 @@ def main() -> int:
     t_install = time.monotonic()
     for moved in migrate_renamed_tables(con):
         print(f"      {dim('migrated ' + moved)}")
+    # Before the files, because 007 grants the caller baseline to this role.
+    for role in ensure_baseline_roles(con):
+        print(f"      {dim('created role ' + role)}")
     run_sql_files(con, INSTALL_FILES, "install")
     # After the files, because the table has to exist before a column can be
     # added to it, and a fresh install creates it with the column already there.

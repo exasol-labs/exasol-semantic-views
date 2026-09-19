@@ -674,12 +674,18 @@ local function compiler_query_fixture(options)
 
     local function mock(sql, params)
         local normalized = tostring(sql):gsub("%s+", " ")
+        -- SEMANTIC_SOURCE is a privilege boundary, not a different shape: each
+        -- view is `SELECT * FROM SYS_SEMANTIC.<same table>` plus an
+        -- authorization filter the fixture has no principals to exercise. So
+        -- the mock answers for the table either way, and the branches below stay
+        -- written against one name.
+        normalized = normalized:gsub("SEMANTIC_SOURCE%.", "SYS_SEMANTIC.")
         params = params or {}
 
-        if normalized:find("SELECT SOURCE_SCHEMA, SOURCE_OBJECT FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
-            -- Matched ahead of the representation branch below, which the same
-            -- table name would otherwise capture and answer with the wrong
-            -- column layout.
+        if normalized:find("SYS_SEMANTIC.MODEL_RELATIONS", 1, true) then
+            -- The trust boundary reads one view that unions the three
+            -- declaration tables, so it carries the authorization filter once
+            -- instead of three times -- which is what keeps a cache hit free.
             state.boundary_reads = state.boundary_reads + 1
             if options.trust_boundary ~= nil then
                 return options.trust_boundary
@@ -2155,6 +2161,7 @@ test("grain metadata migration assistant is dry run and conservative", function(
     local mock = function(sql, params)
         calls = calls + 1
         local normalized = tostring(sql):gsub("%s+", " ")
+        normalized = normalized:gsub("SEMANTIC_SOURCE%.", "SYS_SEMANTIC.")
         if normalized:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
             return {{1, 2, 3}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
@@ -2210,7 +2217,7 @@ test("an unknown field answers with candidates instead of a dead end", function(
 
     -- A field that belongs to another semantic view names that view.
     local elsewhere, elsewhere_error = with_query(function(sql)
-        if tostring(sql):find("FROM SYS_SEMANTIC.OBJECT_COLUMNS oc", 1, true) then
+        if tostring(sql):find("FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc", 1, true) then
             return {{"ORDER_HEADER", "METRIC"}}
         end
         return {}
