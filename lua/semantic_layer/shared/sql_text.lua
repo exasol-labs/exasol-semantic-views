@@ -368,4 +368,33 @@ function M.tokenize(text, options)
     return tokens
 end
 
+--- Re-project compiled SQL so its result columns are the ones the caller asked
+--- for, in the order they asked for them.
+--
+-- The planner emits columns in its own order (dimensions, then metrics) named
+-- after the semantic field. A SQL client gets neither: `SELECT total_revenue,
+-- customer_region` came back reversed, `AS "c11"` came back as
+-- `customer_region`, and an unaliased column came back lower-case where the
+-- published view advertises it upper-case. A client that binds by position gets
+-- the wrong data silently; one that binds by name gets nothing.
+--
+-- `columns` is an ordered list of {source = <name in the compiled SQL>,
+-- output = <name to present>}. Returns the SQL unchanged when the projection
+-- would be the identity, so the structured lane and `SELECT *` pay nothing.
+function M.output_projection(sql, columns)
+    if type(sql) ~= "string" or type(columns) ~= "table" or #columns == 0 then
+        return sql
+    end
+    local parts = {}
+    for index, column in ipairs(columns) do
+        local source = tostring(column.source or "")
+        local output = tostring(column.output or source)
+        if source == "" then
+            return sql
+        end
+        parts[index] = M.quote_ident(source) .. " AS " .. M.quote_ident(output)
+    end
+    return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)"
+end
+
 ESV_SQL_TEXT = M

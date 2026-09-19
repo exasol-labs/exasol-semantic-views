@@ -210,3 +210,42 @@ test("null literal recognition is narrow on purpose", function()
     assert_branch("sql_text.null_literal", ESV_SQL_TEXT.is_null_literal("NULL"), true)
     assert_branch("sql_text.null_literal", ESV_SQL_TEXT.is_null_literal("c.x"), false)
 end)
+
+test("output projection returns the caller's select list, named and ordered", function()
+    -- The planner emits its own order (dimensions, then metrics) under the
+    -- semantic field name. A SQL client asked for something else: its own order,
+    -- its own aliases, and -- unaliased -- the upper-case name the published view
+    -- advertises. Binding by position against the planner's order silently puts
+    -- the wrong data in each column, which is why this exists.
+    local inner = 'SELECT c.region AS "customer_region", SUM(x) AS "total_revenue" FROM t'
+
+    local reordered = sql_text.output_projection(inner, {
+        {source = "total_revenue", output = "a0"},
+        {source = "customer_region", output = "c11"},
+    })
+    assert_contains(reordered, '"total_revenue" AS "a0", "customer_region" AS "c11"')
+    assert_contains(reordered, "FROM (\n" .. inner)
+
+    -- Unaliased columns take the published SQL name.
+    assert_contains(sql_text.output_projection(inner, {
+        {source = "customer_region", output = "CUSTOMER_REGION"},
+    }), '"customer_region" AS "CUSTOMER_REGION"')
+
+    -- A name needing quotes survives it.
+    assert_contains(sql_text.output_projection(inner, {
+        {source = "customer_region", output = 'we"ird'},
+    }), '"customer_region" AS "we""ird"')
+
+    -- Nothing to project: the structured lane and any caller without a select
+    -- list pay nothing.
+    assert_equal(sql_text.output_projection(inner, {}), inner)
+    assert_equal(sql_text.output_projection(inner, nil), inner)
+    assert_equal(sql_text.output_projection(nil, {{source = "a", output = "b"}}), nil)
+    -- A column with no source would rename a column that does not exist; leave
+    -- the compiled SQL alone rather than emit SQL that cannot run.
+    assert_equal(sql_text.output_projection(inner, {{source = "", output = "b"}}), inner)
+    assert_branch("sql_text.output_projection",
+        sql_text.output_projection(inner, {}) == inner, true)
+    assert_branch("sql_text.output_projection",
+        sql_text.output_projection(inner, {{source = "a", output = "b"}}) == inner, false)
+end)

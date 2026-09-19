@@ -68,11 +68,17 @@
 -- just the result: a cache hit that still loaded the catalog would return the
 -- right SQL and cost 17 round trips, which is exactly the regression a
 -- result-only test cannot see. See plans/preprocessor-latency.md.
+-- sql_text.lua 99.4 -> 99.5 on 2026-09-19, when output projection was added so
+-- a SQL client gets its own select list back. Three defects shared one cause and
+-- one fix: the planner's column order was returned instead of the caller's
+-- (binding by position put the wrong data in each column, silently), `AS "c11"`
+-- was discarded, and an unaliased column came back lower-case where the
+-- published view advertises it upper-case. See plans/bi-and-generic-interface-support.md.
 return {
     lines = {
         ["lua/semantic_layer/shared/json.lua"] = 100,
         ["lua/semantic_layer/shared/rows.lua"] = 100,
-        ["lua/semantic_layer/shared/sql_text.lua"] = 99.4,
+        ["lua/semantic_layer/shared/sql_text.lua"] = 99.5,
         ["lua/semantic_layer/shared/catalog_rollback.lua"] = 100,
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.7,
         ["lua/semantic_layer/shared/source_columns.lua"] = 92.5,

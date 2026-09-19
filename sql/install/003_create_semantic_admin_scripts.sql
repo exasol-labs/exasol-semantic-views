@@ -10165,6 +10165,35 @@ function M.tokenize(text, options)
     return tokens
 end
 
+--- Re-project compiled SQL so its result columns are the ones the caller asked
+--- for, in the order they asked for them.
+--
+-- The planner emits columns in its own order (dimensions, then metrics) named
+-- after the semantic field. A SQL client gets neither: `SELECT total_revenue,
+-- customer_region` came back reversed, `AS "c11"` came back as
+-- `customer_region`, and an unaliased column came back lower-case where the
+-- published view advertises it upper-case. A client that binds by position gets
+-- the wrong data silently; one that binds by name gets nothing.
+--
+-- `columns` is an ordered list of {source = <name in the compiled SQL>,
+-- output = <name to present>}. Returns the SQL unchanged when the projection
+-- would be the identity, so the structured lane and `SELECT *` pay nothing.
+function M.output_projection(sql, columns)
+    if type(sql) ~= "string" or type(columns) ~= "table" or #columns == 0 then
+        return sql
+    end
+    local parts = {}
+    for index, column in ipairs(columns) do
+        local source = tostring(column.source or "")
+        local output = tostring(column.output or source)
+        if source == "" then
+            return sql
+        end
+        parts[index] = M.quote_ident(source) .. " AS " .. M.quote_ident(output)
+    end
+    return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)"
+end
+
 ESV_SQL_TEXT = M
 
 -- Canonical relationship graph and path-proof implementation shared by the
@@ -15917,7 +15946,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "16a678d8d852d4d3"
+ESV_RUNTIME_BUILD = "cbb1808c380bf8e3"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -16799,7 +16828,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "16a678d8d852d4d3"
+ESV_RUNTIME_BUILD = "cbb1808c380bf8e3"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17627,6 +17656,35 @@ function M.tokenize(text, options)
         table.remove(tokens, #tokens)
     end
     return tokens
+end
+
+--- Re-project compiled SQL so its result columns are the ones the caller asked
+--- for, in the order they asked for them.
+--
+-- The planner emits columns in its own order (dimensions, then metrics) named
+-- after the semantic field. A SQL client gets neither: `SELECT total_revenue,
+-- customer_region` came back reversed, `AS "c11"` came back as
+-- `customer_region`, and an unaliased column came back lower-case where the
+-- published view advertises it upper-case. A client that binds by position gets
+-- the wrong data silently; one that binds by name gets nothing.
+--
+-- `columns` is an ordered list of {source = <name in the compiled SQL>,
+-- output = <name to present>}. Returns the SQL unchanged when the projection
+-- would be the identity, so the structured lane and `SELECT *` pay nothing.
+function M.output_projection(sql, columns)
+    if type(sql) ~= "string" or type(columns) ~= "table" or #columns == 0 then
+        return sql
+    end
+    local parts = {}
+    for index, column in ipairs(columns) do
+        local source = tostring(column.source or "")
+        local output = tostring(column.output or source)
+        if source == "" then
+            return sql
+        end
+        parts[index] = M.quote_ident(source) .. " AS " .. M.quote_ident(output)
+    end
+    return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)"
 end
 
 ESV_SQL_TEXT = M
@@ -24291,14 +24349,27 @@ local function parse_semantic_sql(statement_text, options)
     local selected_metric_seen = {}
     local select_parts = split_top_level(tokens, 2, select_end, ",")
     local wildcard_select = #select_parts == 1 and #select_parts[1] == 1 and select_parts[1][1].text == "*"
+    -- The names and order the caller asked for. The planner orders columns its
+    -- own way and names them after the semantic field; a SQL client needs its
+    -- own select list back. Unaliased columns take the published SQL name, which
+    -- is what the view's metadata advertises.
+    local output_columns = {}
+    local function request_output(field, alias)
+        output_columns[#output_columns + 1] = {
+            source = field.name,
+            output = alias or upper(field.name),
+        }
+    end
     if wildcard_select then
         for _, field in ipairs(ctx.dimensions) do
             selected_output[#selected_output + 1] = field.name
+            request_output(field, nil)
             request.dimensions[#request.dimensions + 1] = field.name
             selected_dimension_seen[upper(field.name)] = true
         end
         for _, field in ipairs(ctx.metrics) do
             selected_output[#selected_output + 1] = field.name
+            request_output(field, nil)
             request.metrics[#request.metrics + 1] = field.name
             selected_metric_seen[upper(field.name)] = true
         end
@@ -24318,6 +24389,7 @@ local function parse_semantic_sql(statement_text, options)
         end
         selected_output[#selected_output + 1] = field.name
         local output_alias = alias_from_select_part(part)
+        request_output(field, output_alias)
         if output_alias ~= nil then
             select_aliases[upper(output_alias)] = field.name
         end
@@ -24429,6 +24501,7 @@ local function parse_semantic_sql(statement_text, options)
     -- meta carries the catalog context, not just a request: resolving field
     -- names above already cost a full load_catalog, and compile_request_table
     -- would otherwise issue the same 17 statements again for the same object.
+    meta.output_columns = output_columns
     return request, nil, model, meta
 end
 
@@ -24455,8 +24528,16 @@ local function compile_sql_internal(sql_text, options)
         error_prefix = "SEMANTIC_QUERY",
         source = "SEMANTIC_SQL",
     })
+    if result ~= nil and result.status == "OK" and meta ~= nil then
+        -- ESV_SQL_TEXT, not the `sql_text` alias: this function's first
+        -- parameter is named sql_text and shadows it.
+        result.generated_sql = ESV_SQL_TEXT.output_projection(result.generated_sql,
+                                                              meta.output_columns)
+    end
     if meta ~= nil and meta.cache_key ~= nil then
-        -- cache_store ignores anything that is not a successful compile.
+        -- Cache the projected form: the SQL-text key already covers the select
+        -- list's names and order, so a hit must return what that statement asked
+        -- for. cache_store ignores anything that is not a successful compile.
         compile_cache.cache_store(model.version_id, meta.cache_key, result)
     end
     if result ~= nil and result.status ~= "OK" then
@@ -25679,6 +25760,35 @@ function M.tokenize(text, options)
         table.remove(tokens, #tokens)
     end
     return tokens
+end
+
+--- Re-project compiled SQL so its result columns are the ones the caller asked
+--- for, in the order they asked for them.
+--
+-- The planner emits columns in its own order (dimensions, then metrics) named
+-- after the semantic field. A SQL client gets neither: `SELECT total_revenue,
+-- customer_region` came back reversed, `AS "c11"` came back as
+-- `customer_region`, and an unaliased column came back lower-case where the
+-- published view advertises it upper-case. A client that binds by position gets
+-- the wrong data silently; one that binds by name gets nothing.
+--
+-- `columns` is an ordered list of {source = <name in the compiled SQL>,
+-- output = <name to present>}. Returns the SQL unchanged when the projection
+-- would be the identity, so the structured lane and `SELECT *` pay nothing.
+function M.output_projection(sql, columns)
+    if type(sql) ~= "string" or type(columns) ~= "table" or #columns == 0 then
+        return sql
+    end
+    local parts = {}
+    for index, column in ipairs(columns) do
+        local source = tostring(column.source or "")
+        local output = tostring(column.output or source)
+        if source == "" then
+            return sql
+        end
+        parts[index] = M.quote_ident(source) .. " AS " .. M.quote_ident(output)
+    end
+    return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)"
 end
 
 ESV_SQL_TEXT = M

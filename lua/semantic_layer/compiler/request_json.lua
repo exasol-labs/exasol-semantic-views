@@ -3772,14 +3772,27 @@ local function parse_semantic_sql(statement_text, options)
     local selected_metric_seen = {}
     local select_parts = split_top_level(tokens, 2, select_end, ",")
     local wildcard_select = #select_parts == 1 and #select_parts[1] == 1 and select_parts[1][1].text == "*"
+    -- The names and order the caller asked for. The planner orders columns its
+    -- own way and names them after the semantic field; a SQL client needs its
+    -- own select list back. Unaliased columns take the published SQL name, which
+    -- is what the view's metadata advertises.
+    local output_columns = {}
+    local function request_output(field, alias)
+        output_columns[#output_columns + 1] = {
+            source = field.name,
+            output = alias or upper(field.name),
+        }
+    end
     if wildcard_select then
         for _, field in ipairs(ctx.dimensions) do
             selected_output[#selected_output + 1] = field.name
+            request_output(field, nil)
             request.dimensions[#request.dimensions + 1] = field.name
             selected_dimension_seen[upper(field.name)] = true
         end
         for _, field in ipairs(ctx.metrics) do
             selected_output[#selected_output + 1] = field.name
+            request_output(field, nil)
             request.metrics[#request.metrics + 1] = field.name
             selected_metric_seen[upper(field.name)] = true
         end
@@ -3799,6 +3812,7 @@ local function parse_semantic_sql(statement_text, options)
         end
         selected_output[#selected_output + 1] = field.name
         local output_alias = alias_from_select_part(part)
+        request_output(field, output_alias)
         if output_alias ~= nil then
             select_aliases[upper(output_alias)] = field.name
         end
@@ -3910,6 +3924,7 @@ local function parse_semantic_sql(statement_text, options)
     -- meta carries the catalog context, not just a request: resolving field
     -- names above already cost a full load_catalog, and compile_request_table
     -- would otherwise issue the same 17 statements again for the same object.
+    meta.output_columns = output_columns
     return request, nil, model, meta
 end
 
@@ -3936,8 +3951,16 @@ local function compile_sql_internal(sql_text, options)
         error_prefix = "SEMANTIC_QUERY",
         source = "SEMANTIC_SQL",
     })
+    if result ~= nil and result.status == "OK" and meta ~= nil then
+        -- ESV_SQL_TEXT, not the `sql_text` alias: this function's first
+        -- parameter is named sql_text and shadows it.
+        result.generated_sql = ESV_SQL_TEXT.output_projection(result.generated_sql,
+                                                              meta.output_columns)
+    end
     if meta ~= nil and meta.cache_key ~= nil then
-        -- cache_store ignores anything that is not a successful compile.
+        -- Cache the projected form: the SQL-text key already covers the select
+        -- list's names and order, so a hit must return what that statement asked
+        -- for. cache_store ignores anything that is not a successful compile.
         compile_cache.cache_store(model.version_id, meta.cache_key, result)
     end
     if result ~= nil and result.status ~= "OK" then
