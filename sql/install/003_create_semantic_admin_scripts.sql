@@ -20883,6 +20883,32 @@ do
         return "plan=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|" .. encoded
     end
 
+    -- The Semantic SQL lane cannot reach the request-keyed cache above until it
+    -- has resolved every field name in the SELECT list, and resolving them costs
+    -- a full load_catalog that a cache hit then throws away. Keying the same
+    -- cache by the token stream lets that lane answer a repeat query from the
+    -- model version alone.
+    --
+    -- The token stream is the right canonical form: it is insensitive to
+    -- whitespace and comments, and sensitive to everything else. Token text is
+    -- NOT case-folded, because folding would merge the literals in
+    -- `status = 'Complete'` and `status = 'COMPLETE'`, which are different
+    -- filters. Case variants of the same query therefore occupy separate
+    -- entries -- a cache-efficiency cost, never a correctness one. The kind is
+    -- part of the key so a string literal can never collide with the keyword
+    -- spelled the same way.
+    function compile_cache.canonical_sql_text(tokens)
+        if type(tokens) ~= "table" or #tokens == 0 then
+            return nil
+        end
+        local parts = {}
+        for i = 1, #tokens do
+            parts[i] = tostring(tokens[i].kind or "") .. "\30" .. tostring(tokens[i].text or "")
+        end
+        return "sql=" .. tostring(metric_plan_runtime.PLAN_VERSION) .. "|"
+            .. table.concat(parts, "\31")
+    end
+
     -- 64-bit polynomial hash (two parallel 32-bit polynomials with different bases
     -- and primes). Pure Lua 5.1 - no bitwise ops, all arithmetic stays under 2^53
     -- so doubles are exact.
@@ -23185,7 +23211,19 @@ local function compile_request_table(request, options)
     end
 
     local planning_started_ms = envelope.monotonic_ms()
-    local ctx, load_code, load_message = load_catalog(model, object_name)
+    -- The Semantic SQL lane already loaded this object's catalog to resolve the
+    -- field names in its SELECT list, so it hands the context over rather than
+    -- paying for it twice. Reuse only on an exact identity match -- same model
+    -- table, same object -- and fall back to loading otherwise, so a caller that
+    -- passes the wrong context loses the optimisation instead of the answer.
+    local ctx, load_code, load_message = options.ctx, nil, nil
+    if ctx ~= nil and not (ctx.model == model and ctx.object ~= nil
+            and upper(tostring(ctx.object.name)) == upper(tostring(object_name))) then
+        ctx = nil
+    end
+    if ctx == nil then
+        ctx, load_code, load_message = load_catalog(model, object_name)
+    end
     if ctx == nil then
         return error_result(load_code, load_message)
     end
@@ -24189,10 +24227,30 @@ local function parse_semantic_sql(statement_text, options)
         end
     end
 
+    -- Consult the cache before loading the catalog, not after. Everything below
+    -- this point exists to turn field names into a request, and a hit does not
+    -- need the request -- only the SQL that was compiled from it last time.
+    -- Confined to callers that do not log (the preprocessor lane), because a hit
+    -- returns before the request exists and a logging caller needs it.
+    local meta = {cache_key = nil, ctx = nil}
+    if options.sql_cache and not missing(model.version_id) then
+        meta.cache_key = compile_cache.compile_cache_key(compile_cache.canonical_sql_text(tokens))
+        if meta.cache_key ~= nil then
+            local cached = compile_cache.cache_lookup(model.version_id, meta.cache_key)
+            if cached ~= nil then
+                compile_cache.cache_touch(model.version_id, meta.cache_key)
+                meta.cached = compile_cache.cached_ok_result(cached)
+                envelope.recode_error_prefix(meta.cached, "SEMANTIC_QUERY")
+                return nil, nil, model, meta
+            end
+        end
+    end
+
     local ctx, load_code, load_message = load_catalog(model, object_name)
     if ctx == nil then
         return nil, envelope.recode_error_prefix(error_result(load_code, load_message), "SEMANTIC_QUERY")
     end
+    meta.ctx = ctx
 
     local request = {
         model = model.model_name,
@@ -24346,27 +24404,39 @@ local function parse_semantic_sql(statement_text, options)
         end
         request.limit = tonumber(tokens[limit_start].text)
     end
-    return request, nil, model
+    -- meta carries the catalog context, not just a request: resolving field
+    -- names above already cost a full load_catalog, and compile_request_table
+    -- would otherwise issue the same 17 statements again for the same object.
+    return request, nil, model, meta
 end
 
 local function compile_sql_internal(sql_text, options)
     options = options or {}
-    local request, parse_err, model = parse_semantic_sql(sql_text, {
+    local request, parse_err, model, meta = parse_semantic_sql(sql_text, {
         unchanged_nonsemantic = options.unchanged_nonsemantic,
         unchanged_unknown_schema = options.unchanged_unknown_schema,
+        sql_cache = options.sql_cache,
     })
     if parse_err ~= nil then
         return parse_err, nil, nil
+    end
+    if meta ~= nil and meta.cached ~= nil then
+        return meta.cached, nil, model
     end
     if request ~= nil and request.status == "UNCHANGED" then
         return request, nil, nil
     end
     local result, compiled_request, compiled_model = compile_request_table(request, {
         model = model,
+        ctx = meta and meta.ctx or nil,
         validate = options.validate,
         error_prefix = "SEMANTIC_QUERY",
         source = "SEMANTIC_SQL",
     })
+    if meta ~= nil and meta.cache_key ~= nil then
+        -- cache_store ignores anything that is not a successful compile.
+        compile_cache.cache_store(model.version_id, meta.cache_key, result)
+    end
     if result ~= nil and result.status ~= "OK" then
         envelope.recode_error_prefix(result, "SEMANTIC_QUERY")
     end
@@ -24427,6 +24497,9 @@ function M.compile_sql_for_preprocessor(sql_text)
         validate = false,
         unchanged_nonsemantic = true,
         unchanged_unknown_schema = true,
+        -- This lane writes no request log, so it is the one that can answer from
+        -- the cache before the request has been built. See parse_semantic_sql.
+        sql_cache = true,
     }
     local ok, result
     for attempt = 0, COLLISION_RETRIES do
@@ -24600,6 +24673,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         json_encode = json.encode,
         json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,
+        canonical_sql_text = compile_cache.canonical_sql_text,
         compile_cache_key = compile_cache.compile_cache_key,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,

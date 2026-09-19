@@ -36,6 +36,45 @@ Agents that need structured plans or durable handles should prefer
 semantic SQL, the official Exasol MCP Server can explicitly activate and verify
 the session preprocessor as described below.
 
+## What An Active Preprocessor Costs
+
+An active preprocessor runs for **every** statement in the session, and every
+nested query a Lua script issues is itself a statement. So the per-statement cost
+of the preprocessor is multiplied by the internal query count of every admin
+script that runs in that session — `VALIDATE_MODEL`, `PUBLISH_MODEL`, the
+`ADD_*` scripts, and the structured compile lane included. Exasol suppresses
+preprocessing *inside* the preprocessor, but not inside a script called from a
+preprocessed statement.
+
+The preprocessor is therefore written to decide what a statement could possibly
+be before importing either runtime, and to import neither when nothing can
+apply. A statement that names no published semantic schema costs one small
+catalog read rather than ~500 kB of Lua. Measured on the bundled sales model:
+
+| Statement in a preprocessor-enabled session | Before | Now |
+|---|---|---|
+| `SELECT 1` | 32 ms | 7 ms |
+| `SELECT COUNT(*) FROM MART.ORDERS` | 98 ms | 16 ms |
+| semantic SQL | 303 ms | 91 ms |
+| `EXECUTE SCRIPT VALIDATE_MODEL('sales')` | 2.9× its cost with the preprocessor off | ~1.1× |
+
+Two consequences for a database-wide rollout:
+
+- It is now a reasonable default. Before this change, `ALTER SYSTEM` applied a
+  multi-fold tax to every script in every session, including sessions that never
+  ran a semantic query.
+- The residual cost is not zero. A session that runs long administrative scripts
+  — a large `VALIDATE_MODEL`, an OSI import, a fusion apply — still pays the
+  per-statement gate on each of that script's internal queries. Run bulk
+  administrative work with the preprocessor off:
+
+```sql
+ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = NULL;
+```
+
+See [plans/preprocessor-latency.md](../plans/preprocessor-latency.md) for the
+measurements and the remaining upstream request.
+
 ## MCP Servers
 
 The official Exasol MCP Server exposes `list_exasol_preprocessors` and

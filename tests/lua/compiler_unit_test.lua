@@ -1740,6 +1740,85 @@ test("compiler retries collisions and tolerates best-effort cache failures", fun
     assert_equal(touch_state.cache_touches, 1)
 end)
 
+test("canonical SQL text keys on tokens, not on formatting", function()
+    -- The Semantic SQL lane keys the compile cache on the token stream so it can
+    -- answer before loading the catalog. That key must ignore everything the
+    -- tokenizer ignores and nothing else.
+    local function key_of(text) return api.canonical_sql_text(api.sql_tokens(text)) end
+
+    local plain = key_of("SELECT region, revenue FROM SEMANTIC_SALES.SALES")
+    assert_equal(key_of("SELECT   region ,\n revenue\tFROM SEMANTIC_SALES.SALES"), plain)
+    assert_equal(key_of("SELECT region, revenue FROM SEMANTIC_SALES.SALES /* a comment */"), plain)
+
+    -- ... and must separate anything that changes the compiled SQL.
+    assert_true(key_of("SELECT region FROM SEMANTIC_SALES.SALES") ~= plain)
+    assert_true(key_of("SELECT region, revenue FROM SEMANTIC_SALES.ORDER_HEADER") ~= plain)
+
+    -- String literals are case-sensitive filters, so folding them would merge
+    -- two different queries onto one cache entry.
+    local upper_literal = key_of("SELECT region FROM SEMANTIC_SALES.SALES WHERE s = 'COMPLETE'")
+    local mixed_literal = key_of("SELECT region FROM SEMANTIC_SALES.SALES WHERE s = 'Complete'")
+    assert_true(upper_literal ~= mixed_literal)
+
+    assert_equal(api.canonical_sql_text({}), nil)
+    assert_equal(api.canonical_sql_text(nil), nil)
+    assert_branch("compiler.cache.sql_text", api.canonical_sql_text({}) == nil, true)
+    assert_branch("compiler.cache.sql_text", plain == nil, false)
+end)
+
+test("preprocessor lane answers a repeat query without reloading the catalog", function()
+    -- The point of the SQL-text cache is not that the second call is a hit --
+    -- the request-keyed cache already gave that -- but that the hit costs no
+    -- catalog load. representation_reads counts load_catalog calls.
+    local mock, state = compiler_query_fixture()
+    local sql = "SELECT order_status, revenue FROM SEMANTIC_SALES.SALES"
+
+    local first = with_query(mock, function() return compile_sql_for_preprocessor(sql) end)
+    assert_equal(first.status, "OK")
+    -- One load for the miss: parse resolves the fields and hands the context on,
+    -- so compile_request_table does not load it a second time.
+    assert_equal(state.representation_reads, 1)
+
+    local second = with_query(mock, function() return compile_sql_for_preprocessor(sql) end)
+    assert_equal(second.status, "OK")
+    assert_equal(second.generated_sql, first.generated_sql)
+    assert_equal(state.representation_reads, 1)
+    assert_equal(state.cache_touches, 1)
+
+    -- Formatting-only differences reuse the same entry.
+    local reformatted = with_query(mock, function()
+        return compile_sql_for_preprocessor(
+            "SELECT order_status,\n       revenue\nFROM SEMANTIC_SALES.SALES")
+    end)
+    assert_equal(reformatted.status, "OK")
+    assert_equal(reformatted.generated_sql, first.generated_sql)
+    assert_equal(state.representation_reads, 1)
+    assert_branch("compiler.cache.sql_lane", state.representation_reads == 1, true)
+end)
+
+test("logging SQL lanes keep their request and do not use the SQL-text cache", function()
+    -- compile_sql_debug writes REQUESTED_DIMENSIONS / REQUESTED_METRICS from the
+    -- parsed request. A hit that returned before the request existed would log
+    -- them empty, so only the non-logging lane may short-circuit that far.
+    local mock, state = compiler_query_fixture()
+    local sql = "SELECT order_status, revenue FROM SEMANTIC_SALES.SALES"
+
+    local first = with_query(mock, function() return compile_sql_debug(sql, "lua-tests") end)
+    assert_equal(first.status, "OK")
+    local reads_after_first = state.representation_reads
+
+    local second = with_query(mock, function() return compile_sql_debug(sql, "lua-tests") end)
+    assert_equal(second.status, "OK")
+    assert_equal(second.generated_sql, first.generated_sql)
+    -- One catalog load per call: this lane always parses, so the count rises.
+    -- The preprocessor lane above holds at 1 over the same two calls.
+    assert_equal(state.representation_reads, reads_after_first + 1)
+    assert_equal(#state.query_logs, 2)
+    assert_true(state.query_logs[2].requested_dimensions ~= nil)
+    assert_contains(tostring(state.query_logs[2].requested_dimensions), "order_status")
+    assert_branch("compiler.cache.sql_lane", state.representation_reads == 1, false)
+end)
+
 test("grain metadata migration assistant is dry run and conservative", function()
     local calls = 0
     local mock = function(sql, params)

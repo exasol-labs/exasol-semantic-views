@@ -187,3 +187,29 @@ logs. It uses the latest successful validation run for the model version and
 fails if no valid snapshot exists. Explicit agent calls through
 `COMPILE_REQUEST_JSON` use the same validation gate and additionally write an
 agent request log; they do not rerun validation during compilation.
+
+Three properties keep that lane cheap, and each is load-bearing rather than
+incidental:
+
+1. **Nothing is imported until it can apply.** The script decides from the
+   statement text, plus one small read of `SYS_SEMANTIC.MODELS`, whether the
+   semantic-definition runtime, the compiler runtime, or neither could act.
+   Importing both unconditionally cost about 21 ms on every statement in the
+   session — including statements that never touch a semantic schema.
+2. **The compile cache is consulted before the catalog is loaded.** A repeat
+   query is answered from `SYS_SEMANTIC.COMPILE_CACHE` keyed on the token
+   stream, so it never pays the catalog load that resolving field names would
+   need. The key is insensitive to whitespace and comments and sensitive to
+   everything else, including the case of string literals, which are filter
+   values rather than identifiers.
+3. **The catalog is loaded at most once.** Parsing hands its catalog context to
+   the planner instead of letting it load the same object again.
+
+Because a cache hit returns before the request has been built, this shortcut is
+confined to the lane that writes no log. `COMPILE_SQL` and `COMPILE_SQL_DEBUG`
+always parse, so `QUERY_LOG` keeps its requested dimensions and metrics.
+
+An active preprocessor also taxes every *other* script in the session, because a
+script's internal queries are statements too. See
+[Admin setup for database-wide Semantic SQL](admin-db-wide-setup.md) for what
+that costs and when to turn it off.

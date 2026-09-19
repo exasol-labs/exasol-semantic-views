@@ -61,6 +61,13 @@
 -- of six branches previously uncovered), request_json.lua 87.1 -> 88.2 (the
 -- HAVING predicate parser, whose WHERE twin was the only one tested),
 -- query_spec.lua 96.7 -> 100.
+--
+-- request_json.lua 88.8 -> 88.9 on 2026-09-19, when the Semantic SQL lane
+-- stopped loading the catalog before consulting the compile cache and stopped
+-- loading it twice on a miss. The new tests assert the *statement* count, not
+-- just the result: a cache hit that still loaded the catalog would return the
+-- right SQL and cost 17 round trips, which is exactly the regression a
+-- result-only test cannot see. See plans/preprocessor-latency.md.
 return {
     lines = {
         ["lua/semantic_layer/shared/json.lua"] = 100,
@@ -75,7 +82,7 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 88.8,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 88.9,
         ["lua/semantic_layer/admin/validator.lua"] = 94.2,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
