@@ -16671,7 +16671,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "a533a415c231b4f8"
+ESV_RUNTIME_BUILD = "1d4a91011c33bd4a"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17553,7 +17553,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "a533a415c231b4f8"
+ESV_RUNTIME_BUILD = "1d4a91011c33bd4a"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -21511,6 +21511,65 @@ do
         return "Typed planning failed: " .. tostring(reason) .. "."
     end
 
+    -- What the layer was enforcing when this SQL was produced.
+    --
+    -- Written into the plan rather than left to be reconstructed, because the
+    -- two questions a governance surface has to answer -- "why can I not see
+    -- this" and "why is my number different from my colleague's" -- are asked
+    -- after the fact, about a statement that has already run. The effective
+    -- principal is part of it: compiled SQL is principal-independent, so
+    -- recording who compiled it is the only way to tell two runs apart.
+    --
+    -- Read from SOURCE_TRUST, which VALIDATE_MODEL derives, and skipped
+    -- entirely when there is nothing to say. This runs on a cold compile only:
+    -- a cache hit returns the plan that was stored with it.
+    function envelope.governance_block(model, generated_sql)
+        if model == nil or missing(model.version_id) then
+            return nil
+        end
+        local relations = compile_cache.qualified_relations(generated_sql)
+        if #relations == 0 then
+            return nil
+        end
+        local ok, rows = pcall(query, [[
+            SELECT UPPER(PHYSICAL_SCHEMA) || '.' || UPPER(PHYSICAL_OBJECT) AS RELATION_NAME,
+                   TRUST_CLASS
+              FROM SEMANTIC_SOURCE.SOURCE_TRUST
+             WHERE VERSION_ID = :version_id
+        ]], {version_id = model.version_id})
+        if not ok then
+            return nil
+        end
+        local classified = {}
+        for _, row in ipairs(rows or {}) do
+            classified[tostring(row_value(row, "RELATION_NAME", 1))] =
+                tostring(row_value(row, "TRUST_CLASS", 2))
+        end
+        local sources, unvouched = {}, {}
+        for _, relation in ipairs(relations) do
+            local trust_class = classified[relation] or "NOT_CLASSIFIED"
+            sources[#sources + 1] = {relation = relation, trust_class = trust_class}
+            if trust_class ~= "GOVERNED" and trust_class ~= "RAW" then
+                unvouched[#unvouched + 1] = relation
+            end
+        end
+        local principal = scalar("SELECT CURRENT_USER")
+        return {
+            governance_mode = upper(tostring(model.governance_mode or "OPEN")),
+            compiled_by = principal and tostring(principal) or nil,
+            sources = sources,
+            unvouched_sources = unvouched,
+        }
+    end
+
+    function envelope.with_governance(plan, model, generated_sql)
+        local block = envelope.governance_block(model, generated_sql)
+        if block ~= nil then
+            plan.governance = block
+        end
+        return plan
+    end
+
     function envelope.ok_result(sql_text, plan, validation_run_id)
         return {
             status = "OK",
@@ -24689,7 +24748,9 @@ local function compile_request_table(request, options)
         physical_plan.execution = {status = "EXECUTABLE"}
         local plan = plan_envelope(branch_decision)
         local result = envelope.attach_planning_runtime(
-            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
+            envelope.ok_result(internal_sql,
+                envelope.with_governance(plan, model, internal_sql),
+                validation_run_id), planning_started_ms)
         if cache_key ~= nil then
             compile_cache.cache_store(model.version_id, cache_key, result)
         end
@@ -24742,7 +24803,9 @@ local function compile_request_table(request, options)
     local plan = plan_envelope(materialization_decision, selected_materialization,
         relationship_paths)
     local result = envelope.attach_planning_runtime(
-        envelope.ok_result(sql_text, plan, validation_run_id), planning_started_ms)
+        envelope.ok_result(sql_text,
+            envelope.with_governance(plan, model, sql_text),
+            validation_run_id), planning_started_ms)
     if cache_key ~= nil then
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
@@ -25701,21 +25764,33 @@ do
     -- OBJECT_COLUMNS answers it in about ten. Principal-scoped, so an object in
     -- a model the caller is not granted resolves to no columns and expansion
     -- declines rather than leaking that the object exists.
-    function bi_expansion.published_columns(published_schema, object_name)
+    -- Scoped by the resolved model's id, not by its published schema.
+    --
+    -- More than one model can carry the same PUBLISHED_SCHEMA -- the OSI import
+    -- round-trip creates three beside the example model, all publishing to
+    -- SEMANTIC_SALES -- so matching on the schema name alone returned every
+    -- object called SALES in any of them. That produced a column list with each
+    -- name repeated once per model and a derived table with four columns called
+    -- CUSTOMER_REGION, which Exasol rejects as ambiguous. The reference's model
+    -- is resolved once, by the same lookup the inner compile uses, and the
+    -- columns are read against it.
+    function bi_expansion.published_columns(model, object_name)
+        if model == nil or missing(model.model_id) then
+            return nil
+        end
         local rows = query([[
             SELECT oc.COLUMN_NAME, oc.COLUMN_KIND
               FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
               JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
                 ON so.OBJECT_ID = oc.OBJECT_ID
-              JOIN SEMANTIC_SOURCE.MODELS m
-                ON m.MODEL_ID = so.MODEL_ID
-               AND m.ACTIVE_VERSION_ID = so.VERSION_ID
-             WHERE UPPER(m.PUBLISHED_SCHEMA) = UPPER(:published_schema)
+             WHERE so.MODEL_ID = :model_id
+               AND so.VERSION_ID = :version_id
                AND UPPER(so.OBJECT_NAME) = UPPER(:object_name)
                AND so.STATUS = 'ACTIVE'
                AND oc.IS_VISIBLE = TRUE
              ORDER BY oc.ORDINAL_POSITION
-        ]], {published_schema = published_schema, object_name = object_name})
+        ]], {model_id = model.model_id, version_id = model.version_id,
+             object_name = object_name})
         if rows == nil or #rows == 0 then
             return nil
         end
@@ -25990,8 +26065,11 @@ do
 
         local applicable = {}
         for _, reference in ipairs(references) do
+            -- Resolved once and carried: the column list, the compile and the
+            -- freeze record all have to mean the same model.
+            reference.model = load_model_by_published_schema(reference.published_schema)
             local columns, by_name =
-                bi_expansion.published_columns(reference.published_schema, reference.object_name)
+                bi_expansion.published_columns(reference.model, reference.object_name)
             if columns ~= nil then
                 reference.columns, reference.by_name = columns, by_name
                 applicable[#applicable + 1] = reference
@@ -26059,7 +26137,7 @@ do
             -- Freezing: this statement is about to store the compiled SQL in a
             -- view, where it will keep answering after the model moves on.
             if view_schema ~= nil then
-                local model = load_model_by_published_schema(reference.published_schema)
+                local model = reference.model
                 if model ~= nil then
                     if upper(tostring(model.governance_mode or "OPEN")) == "GOVERNED" then
                         local untrusted = bi_expansion.untrusted_relations(

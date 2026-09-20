@@ -496,6 +496,12 @@ Known issues and their current status are tracked in the checked-in `docs/known-
   should redefine a term. Includes what `grain` means, why `field`, `attribute`
   and `column` cover different sets, and what an `F3` in a refusal refers to
 - `docs/creating-metrics.md` — how to define metrics; mental model for entity → fact → metric
+- `docs/bi-tools.md` — connecting Tableau, Power BI and generic SQL clients; which
+  statement shapes compile, and the one that is refused
+- `docs/governance.md` — what the layer enforces, what it only reports, and where
+  it stops. Read §"The one rule everything else follows from" before adding a
+  control: the compiler runs with the caller's rights, so policy that only the
+  compiler applies is defence in depth, never a control
 - `docs/agent-contract.md` — the agent discovery and compilation contract
 - `docs/validation-rules.md` — all SEMANTIC_MODEL_* rule codes
 - `docs/semantic-compiler.md` — compiler entrypoints and supported features

@@ -99,6 +99,13 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- agent/runtime.lua 95.5 -> 95.5 on 2026-09-20, when the governance block got a
+-- prose rendering. The test asserts what the sentence has to *say*, not that a
+-- sentence exists: it names the principal, the mode, each relation with its
+-- trust class, and -- the part that matters -- the consequence, so a reader who
+-- does not know what DIVERGENT means still learns what it costs them. A plan
+-- from before this existed says nothing rather than guessing.
+--
 -- request_json.lua 90.3 -> 90.3 and validator.lua 94.8 -> 94.8 on 2026-09-20,
 -- when the policy columns stopped being decorative. IS_PRIVATE / IS_HIDDEN now
 -- refuse wherever the field is named -- filters included, or the filter lane

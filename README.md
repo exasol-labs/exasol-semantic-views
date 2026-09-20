@@ -581,6 +581,8 @@ Pass `--skip-package` to skip the Lua packaging step and use the already-generat
   - [Glossary](docs/glossary.md) — every term, in the order you meet them
 - Usage
   - [Creating metrics](docs/creating-metrics.md)
+  - [BI tools and generic SQL interfaces](docs/bi-tools.md) — Tableau, Power BI, JDBC/ODBC
+  - [Governance](docs/governance.md) — what is enforced, what is reported, where it stops
   - [Exasol MCP Server integration](docs/mcp-server-integration.md)
   - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)
   - [Databricks metric views](docs/databricks-metric-views.md)

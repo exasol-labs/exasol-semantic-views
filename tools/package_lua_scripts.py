@@ -166,8 +166,7 @@ SELECT VERSION_ID, 'MATERIALIZATION', PHYSICAL_SCHEMA, PHYSICAL_OBJECT
 UNION ALL
 SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
   FROM SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS WHERE STATUS = 'ACTIVE';
-{SOURCE_VIEWS_END}
-"""
+{SOURCE_VIEWS_END}"""
 # A callable admin script, with or without a RETURNS clause.
 #
 # Requiring `RETURNS` used to be the whole bug: the mutators that "complete
@@ -1043,7 +1042,8 @@ exit(rows or {{}}, [[
   PLAN_JSON VARCHAR(2000000),
   REQUESTED_DIMENSIONS VARCHAR(2000000),
   REQUESTED_METRICS VARCHAR(2000000),
-  SELECTED_MATERIALIZATION VARCHAR(512)
+  SELECTED_MATERIALIZATION VARCHAR(512),
+  GOVERNANCE VARCHAR(2000000)
 ]])
 /
 
@@ -1166,11 +1166,13 @@ def main() -> int:
         print(f"unchanged {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
 
     original_source = SOURCE_VIEWS_SQL.read_text(encoding="utf-8")
-    # rstrip + one newline: the generated block is the last thing in this file,
-    # so whatever followed the END marker is the file's trailing whitespace.
-    # replace_between_markers preserves it verbatim and then adds its own, which
-    # grew the file by a few blank lines on every run and reported "updated"
-    # each time -- a diff that is always dirty is a diff nobody reads.
+    # rstrip + one newline so the file ends exactly once. The generated block
+    # deliberately does not end with a newline: replace_between_markers keeps
+    # whatever followed the END marker verbatim, and that text already starts
+    # with one, so emitting a second grew the file by a blank line on every run
+    # and reported "updated" each time. A diff that is always dirty is a diff
+    # nobody reads -- which is how the ordering fault below survived as long as
+    # it did.
     updated_source = replace_between_markers(
         original_source, source_views_block(), SOURCE_VIEWS_BEGIN, SOURCE_VIEWS_END
     ).rstrip() + "\n"

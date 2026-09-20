@@ -4,6 +4,15 @@ This page is for admins and data engineers who want published semantic views to
 behave like a normal database feature for BI and SQL users, without asking every
 user to run `ENABLE_SEMANTIC_SQL()` manually.
 
+**For BI tools, database-wide activation is the supported deployment mode, not
+an advanced option.** A BI tool opens its own connections, pools them, and gives
+you nowhere to run a per-session setup statement — so session activation is not
+something a Tableau or Power BI deployment can use at all. Set it at the system
+level and published semantic views behave like ordinary views to every client.
+
+Session activation remains the right default for *development*: it is reversible
+in one statement and scoped to the person trying it.
+
 Semantic SQL depends on Exasol's `SQL_PREPROCESSOR_SCRIPT` setting. The safe
 default in this project is session activation:
 
@@ -372,3 +381,24 @@ References:
 
 - [Exasol SQL preprocessor](https://docs.exasol.com/db/latest/database_concepts/sql_preprocessor.htm)
 - [Exasol ALTER SYSTEM](https://docs.exasol.com/db/latest/sql/alter_system.htm)
+
+## What a tool can rely on
+
+Two catalog views answer the questions an integrator has before they start,
+so the boundary is not discovered by hitting it:
+
+```sql
+-- which SQL shapes are accepted, and what the layer says when one is not
+SELECT SHAPE, SUPPORT, REFUSAL_CODE, DETAIL
+FROM SEMANTIC_CATALOG.QUERY_CAPABILITIES ORDER BY SUPPORT, SHAPE;
+
+-- what a given model vouches for, in a sentence
+SELECT MODEL_NAME, GOVERNANCE_MODE, VISIBLE_TO_CALLER, SUMMARY
+FROM SEMANTIC_CATALOG.GOVERNANCE_FOR_MODEL;
+```
+
+And after a query has run, `EXPLAIN_COMPILED_SQL` carries a `GOVERNANCE` column
+saying in prose what was in force when the SQL was produced — which principal
+compiled it, the mode the model was in, and which relations the layer does or
+does not vouch for. That is the answer to "why is my number different from my
+colleague's" without reading generated SQL.

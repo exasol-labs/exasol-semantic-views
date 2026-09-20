@@ -6,6 +6,177 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+Two capabilities that were planned separately and shipped as one, because they
+turned out to be the same problem: **BI tools could not use this layer**, and
+**the layer could not tell you what it was protecting**. The BI work makes a
+semantic object usable from ordinary SQL, which immediately widens what a caller
+can reach; the governance work is what makes that safe to offer. Neither is
+useful alone.
+
+**Upgrading is not transparent.** Three changes alter behaviour for an existing
+deployment — the policy columns now refuse, callers are granted a new schema
+instead of `SYS_SEMANTIC`, and a statement that joins a published object to
+another table is refused by default. Each is called out below.
+
+### Added
+
+#### BI tools work, without asking every user to run a setup statement
+
+- **A statement that *wraps* a semantic object now compiles.** Previously only a
+  bare `SELECT … FROM SEMANTIC_X.OBJ` did, and a BI tool almost never emits
+  that — it emits the object inside a TopN wrapper, a CTE, a subquery, a union, a
+  window, arithmetic in the select list, `COUNT(*)`. Those are accepted by a
+  second path that replaces the *reference* with a derived table rather than
+  compiling the statement around it, leaving everything outside to Exasol.
+  Of the 16 shapes exercised by `tools/verify_reference_expansion.py`, 13 now
+  compile, 2 are refused as composition and 1 because no column of the object is
+  named — and the values of every accepted shape are checked against the model
+  rather than merely checked for not raising.
+- The cost is **+0.9 ms** on a compile. An earlier prototype measured 268 ms
+  against 96 ms and predicted the overhead was the column lookup rather than the
+  architecture; reading `OBJECT_COLUMNS` instead of `FIELDS_FOR_AGENT` confirms
+  it.
+- **Which columns get compiled is inferred and, when it cannot be, refused.**
+  `alias.column` references, unqualified names matching a published column, and
+  `*` — where a bare `*` counts only in the reference's own query block, so the
+  star in `SELECT * FROM (SELECT t0.A FROM obj t0) x` means the subquery's
+  columns. Reading it otherwise compiled nine columns where two were named,
+  which changed the grain and returned 0 for a region worth 3635 with no error.
+- **`CREATE VIEW` over a semantic object now works**, and the stored text is
+  compiled physical SQL, so the view answers with no preprocessor at all.
+- **Database-wide activation is documented as the supported BI deployment mode**
+  rather than an advanced option. A BI tool opens its own pooled connections and
+  gives you nowhere to run a per-session statement, so session activation is not
+  something a Tableau or Power BI deployment can use.
+
+#### A governance layer, without Virtual Schemas
+
+- **`SYS_SEMANTIC.SOURCE_TRUST`** classifies every physical relation the planner
+  may emit — representations *and* materializations — by one derivation:
+  resolve transitive base relations through `EXA_ALL_DEPENDENCIES`. Two objects
+  that were checked on their own terms and never compared are now one property.
+  This closes a demonstrated defect in which a rollup built over the raw mart
+  voided a representation's row-level security: a restricted principal saw one
+  region before the rollup was registered and every region after it, with no
+  error, no warning and no plan diagnostic.
+- **`SEMANTIC_SOURCE`, a fifth managed schema**: one thin, principal-scoped view
+  per `SYS_SEMANTIC` table the compiler reads, filtered to the models the caller
+  is authorized for. `MODEL_ROLE_GRANTS` existed and nothing read it; it does
+  now, and it counts **inherited** roles, which the previous
+  `IN (CURRENT_USER, 'PUBLIC')` matching could not see.
+- **`SYS_SEMANTIC.FROZEN_VIEWS`** records each view compiled from a semantic
+  object with the relations it froze, and `SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS`
+  recompiles and compares, because such a view keeps answering after the model
+  changes — with the old answer and no error.
+- **A compile-cache entry is checked before it is served.** `COMPILE_CACHE` is an
+  ordinary table, and whoever can `UPDATE` it chooses the text a published view
+  then runs with the view owner's rights. A cached statement may now only read
+  relations the model declares, and must read at least one — `SELECT 'PWNED'`
+  reads none.
+
+#### The controls explain themselves
+
+- **`SEMANTIC_CATALOG.GOVERNANCE_FOR_MODEL`** — one row per model with a
+  `SUMMARY` sentence: what mode it is in, what it can vouch for, what it cannot.
+- **`SEMANTIC_CATALOG.QUERY_CAPABILITIES`** — one row per SQL shape, supported or
+  refused, with the refusal code. A tool integrator should not discover the
+  boundary by hitting it.
+- **`PLAN_JSON` carries a `governance` block** — the principal who compiled it,
+  the mode in force, and every relation the SQL reads with its trust class — and
+  **`EXPLAIN_COMPILED_SQL` renders it in prose**, naming the *consequence* rather
+  than the classification: *"a principal entitled to fewer rows may still see all
+  of them here."*
+- **New admin scripts:** `SET_MODEL_GOVERNANCE_MODE`,
+  `SET_MODEL_DERIVED_COMPOSITION`, `CHECK_FROZEN_VIEWS`.
+
+### Changed
+
+#### The policy columns do what their names say — **breaking**
+
+- `IS_PRIVATE` on a metric and `IS_HIDDEN` on a dimension removed the field from
+  discovery and **not** from queries, so anyone who knew the name got the data.
+  They now refuse wherever the field is named — **filters included**, or the
+  filter lane becomes the way around a field you cannot discover
+  (`SEMANTIC_REQUEST_027`).
+- `DISPLAY_POLICY = 'MASK'` withholds the value from results
+  (`SEMANTIC_REQUEST_024`) while **filtering on it still works**. It refuses the
+  projection rather than substituting a redacted value: ESV groups by every
+  selected dimension, so a placeholder would either collapse every row into one
+  group or sit beside real counts, and both silently change what the number
+  means. Any other value in the column is reported as a policy nobody applies
+  (`SEMANTIC_MODEL_069`).
+- `SENSITIVITY_LABEL` is documented as what it is — a label, free text, enforced
+  by nothing. **None of this substitutes for source policy**: the compiler runs
+  with the caller's rights and the caller can read the physical sources directly.
+
+#### Callers are granted `SEMANTIC_SOURCE`, not `SYS_SEMANTIC` — **breaking**
+
+- The compiler runs as the caller, so a non-`SYS` principal needed `SELECT` on
+  `SYS_SEMANTIC` — every other model's metric definitions, every other user's
+  logged requests, and a map of the physical estate. The new `SEMANTIC_USER`
+  role names the baseline a caller actually needs, and `GRANT_MODEL_ROLE` grants
+  it. An unauthorized model now resolves to *not found* instead of
+  `SEMANTIC_REQUEST_080` "no active representation can traverse relationship …",
+  which reported an authorization outcome as a modelling defect.
+- Cost, measured: **+48% on a cold compile**, and the warm path — what BI tools
+  and repeat queries pay — is free.
+
+#### Joining a published object to another relation is refused by default — **breaking**
+
+- Expansion makes the semantic result a derived table, and a join can repeat its
+  rows: the same query across a join re-aggregates North to **7270** against a
+  truth of **3635**. Refused with `SEMANTIC_QUERY_012`; opt in per model with
+  `SET_MODEL_DERIVED_COMPOSITION`.
+
+#### Faster
+
+- **The preprocessor lane**: per nested query 77.75 ms → 6.75 ms. The runtimes
+  are imported only when the statement could possibly need them, the Semantic SQL
+  lane consults the compile cache before loading the catalog rather than after,
+  and the cache key now carries a build id hashed from the sources that decide
+  compiler output — so a parser or renderer change can no longer serve SQL
+  compiled by the previous runtime.
+- **`VALIDATE_MODEL`: 2.08 s → 0.90 s**, which is ~4 minutes off a full smoke run
+  (219 validations). It probed `SYS.EXA_ALL_COLUMNS` once per declared column —
+  48 times for a four-entity model, 43% of a validation — and now reads each
+  relation's column list once. Its catalog writes are batched into one statement
+  per table rather than one per row.
+
+### Fixed
+
+#### A SQL client got the wrong data in the right-looking columns
+
+- Three defects with one cause and one fix: the planner's column *order* was
+  returned instead of the caller's, so a client binding by position got the wrong
+  data silently; `AS "c11"` was discarded; and an unaliased column came back
+  lower-case where the published view advertises it upper-case.
+
+#### BI SQL was refused for things that were not wrong with it
+
+- An aggregate wrapper is honoured when the metric declares it and refused when
+  it does not — `SUM()` around a ratio returns the ratio otherwise.
+- `COUNT(*)` over a semantic object is refused rather than guessed, because its
+  answer depends on a grain the caller never named.
+- The `WHERE 1 = 0` and `LIMIT 0` driver probes return the correct shape with no
+  rows. `LIMIT 0` required relaxing `limit >= 1` to `limit >= 0` in the shared
+  validation — a deliberate contract change, since having the two lanes disagree
+  about what a limit means would be worse.
+- A parenthesised `WHERE` predicate leaked its closing paren into the generated
+  SQL. Latent, and reachable only once `SUM()` wrapping stopped being refused
+  earlier.
+
+#### Ordering faults that only a clean install finds
+
+- `GRANT_MODEL_ROLE` raised *"object SEMANTIC_X does not exist"* **after** writing
+  the grant row when the model was not yet published, leaving the caller an error
+  and the catalog a grant. Harmless while nothing read `MODEL_ROLE_GRANTS`;
+  with authorization reading it, a half-applied grant silently made a model
+  private. The schema grant is now conditional, and `PUBLISH_MODEL` catches up
+  every role already holding the model.
+- Registering or retiring a materialization left `SOURCE_TRUST` describing a
+  relation set that no longer existed. Both mutators clear it.
+
+
 ## [0.2] - 2026-09-02
 
 ### Changed

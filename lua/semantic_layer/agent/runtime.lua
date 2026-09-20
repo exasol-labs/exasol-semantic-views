@@ -1012,6 +1012,47 @@ local function extract_json_array_text(json_text, property_name)
     return match
 end
 
+-- The governance block, in prose.
+--
+-- "Why can I not see this metric" and "why is my number different from my
+-- colleague's" are asked after the fact, about a statement that already ran, by
+-- someone who should not have to read generated SQL to find out. The plan
+-- records what the layer was enforcing; this says it in a sentence.
+local function governance_narrative(plan_json)
+    if missing(plan_json) then
+        return null
+    end
+    local ok, plan = pcall(ESV_JSON.decode, tostring(plan_json))
+    if not ok or type(plan) ~= "table" or type(plan.governance) ~= "table" then
+        return null
+    end
+    local governance = plan.governance
+    local parts = {}
+    parts[#parts + 1] = "Compiled by " .. tostring(governance.compiled_by or "an unknown principal")
+        .. " with the model in " .. tostring(governance.governance_mode or "OPEN") .. " mode."
+    local sources = governance.sources or {}
+    if #sources > 0 then
+        local described = {}
+        for _, source in ipairs(sources) do
+            described[#described + 1] = tostring(source.relation)
+                .. " (" .. tostring(source.trust_class) .. ")"
+        end
+        parts[#parts + 1] = "It reads " .. table.concat(described, ", ") .. "."
+    end
+    local unvouched = governance.unvouched_sources or {}
+    if #unvouched > 0 then
+        parts[#parts + 1] = "The layer does not vouch for "
+            .. table.concat(unvouched, ", ")
+            .. ": whatever row or column policy this model's representations carry,"
+            .. " those relations do not necessarily carry it, so a principal"
+            .. " entitled to fewer rows may still see all of them here."
+            .. " SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL has the derivation."
+    else
+        parts[#parts + 1] = "Every relation it reads is one this model vouches for."
+    end
+    return table.concat(parts, " ")
+end
+
 function M.explain_compiled_sql(handle_type_arg, handle_id_arg)
     local _, _, handle = load_handle(handle_type_arg, handle_id_arg)
     local selected_materialization = row_value(handle, "MATERIALIZATION_USED", 14)
@@ -1040,6 +1081,7 @@ function M.explain_compiled_sql(handle_type_arg, handle_id_arg)
         requested_dimensions,
         requested_metrics,
         selected_materialization,
+        governance_narrative(row_value(handle, "PLAN_JSON", 11)),
     }}
 end
 
@@ -1130,6 +1172,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         like_pattern = like_pattern,
         json_unescape = json_unescape,
         extract_selected_materialization = extract_selected_materialization,
+        governance_narrative = governance_narrative,
         extract_json_array_text = extract_json_array_text,
         top_level_fields = top_level_fields,
         scope_request_json = scope_request_json,

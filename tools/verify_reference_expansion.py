@@ -130,6 +130,33 @@ def main() -> None:
         check("a statement naming no column is refused",
               refusal_code(exc), "SEMANTIC_QUERY_011")
 
+    # More than one model may carry the same PUBLISHED_SCHEMA -- the OSI
+    # round-trip creates three beside the example model, all publishing to
+    # SEMANTIC_SALES. Matching the column list on the schema name alone returned
+    # every object called SALES in any of them, so the derived table had four
+    # columns named CUSTOMER_REGION and Exasol rejected it as ambiguous. This
+    # verifier runs before those models exist, which is exactly why the failure
+    # survived a green suite: it only appeared once the later verifiers had run.
+    sharing = con.execute(
+        "SELECT COUNT(*) FROM SYS_SEMANTIC.MODELS WHERE UPPER(PUBLISHED_SCHEMA) = "
+        "UPPER('SEMANTIC_SALES')").fetchone()[0]
+    if sharing > 1:
+        ok("more than one model publishes to this schema", f"{sharing}")
+    else:
+        # Make the condition rather than wait for another verifier to create it.
+        con.execute(
+            "INSERT INTO SYS_SEMANTIC.MODELS (MODEL_NAME, PUBLISHED_SCHEMA, STATUS) "
+            "VALUES ('esv_schema_twin', 'SEMANTIC_SALES', 'DRAFT')")
+        con.commit()
+        try:
+            check("a second model on the same schema does not duplicate columns",
+                  rows_of(con, "SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE"
+                               " FROM SEMANTIC_SALES.SALES t0"), TRUTH)
+        finally:
+            con.execute("DELETE FROM SYS_SEMANTIC.MODELS "
+                        "WHERE MODEL_NAME = 'esv_schema_twin'")
+            con.commit()
+
     # The fan-out guard, and the arithmetic that justifies it.
     composed = ("SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE FROM SEMANTIC_SALES.SALES t0"
                 " JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION")

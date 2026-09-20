@@ -552,3 +552,135 @@ UNION ALL
 SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
   FROM SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS WHERE STATUS = 'ACTIVE';
 -- END GENERATED SEMANTIC_SOURCE_VIEWS
+
+
+
+
+
+
+
+
+-- SEMANTIC_CATALOG.GOVERNANCE_FOR_MODEL is created here, not with the other
+-- catalog views in 002, because it reads SEMANTIC_SOURCE.AUTHORIZED_MODELS and
+-- 002 runs before this file exists. Putting it in 002 installed fine over an
+-- existing deployment and failed on every clean install, which is the kind of
+-- ordering fault only a full reset finds.
+--
+-- What this model promises, what it can vouch for, and where it stops.
+--
+-- One row per model, and one surface rather than two: the governance state and
+-- the capability state are the same question asked twice -- "can I rely on this
+-- number" -- and answering them in separate views would let them disagree.
+-- Everything here is derived from what the other surfaces already hold, so
+-- nothing is declared twice.
+--
+-- SUMMARY is the sentence. An operator who reads nothing else should still learn
+-- whether the model is enforcing anything, whether anything is unvouched for,
+-- and whether a frozen view is carrying an old answer.
+-- Which SQL shapes this layer accepts, and what it says when it does not.
+--
+-- A tool integrator should not discover the boundary by hitting it. This is the
+-- companion to GOVERNANCE_FOR_MODEL below and deliberately the same kind of
+-- answer: that view says what the layer vouches for, this one says what it
+-- accepts, and between them "can I rely on this number" has one place to go.
+--
+-- Declared rather than derived, because there is nothing to derive it from --
+-- the shapes live in a parser. The refusal codes are the check: each one is a
+-- code the compiler actually emits, and tests/test_conventions.py already
+-- forbids a code from meaning two things, so a row naming a code that has gone
+-- away is visible.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.QUERY_CAPABILITIES AS
+SELECT * FROM (VALUES
+  ('SELECT over a published object', 'SUPPORTED',
+   'Semantic field names, SELECT *, and MEASURE(metric) / agg(metric).', NULL),
+  ('WHERE on dimensions', 'SUPPORTED',
+   '=, !=, <>, <, <=, >, >=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL. Text comparisons are case-insensitive.', NULL),
+  ('HAVING on metrics', 'SUPPORTED',
+   'A metric predicate written in WHERE is routed to HAVING during parsing.', NULL),
+  ('GROUP BY', 'SUPPORTED',
+   'Optional. Inferred from the selected dimensions when omitted; an explicit list must cover them exactly.', 'SEMANTIC_QUERY_008'),
+  ('ORDER BY and LIMIT', 'SUPPORTED',
+   'Selected output fields, output aliases, or ordinals. LIMIT 0 returns the shape with no rows.', NULL),
+  ('Statements that wrap the object', 'SUPPORTED',
+   'Subquery, CTE, union, window, TopN wrapper, CAST, arithmetic and COUNT(*) around a reference, by expanding the reference into a derived table.', NULL),
+  ('CREATE VIEW over an object', 'SUPPORTED',
+   'The stored text is compiled SQL, so the view answers with no preprocessor. Recorded in SEMANTIC_CATALOG.FROZEN_VIEWS and checked by CHECK_FROZEN_VIEWS.', NULL),
+  ('Joining an object to another relation', 'REFUSED BY DEFAULT',
+   'The join can repeat the semantic result''s rows and re-aggregation then double-counts. Opt in per model with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_012'),
+  ('Selecting a field the model withholds', 'REFUSED',
+   'IS_PRIVATE on a metric or IS_HIDDEN on a dimension removes the field from discovery and from queries, filters included.', 'SEMANTIC_REQUEST_027'),
+  ('Selecting a masked field', 'REFUSED',
+   'DISPLAY_POLICY = ''MASK'' withholds the value from results. Filtering on it still works.', 'SEMANTIC_REQUEST_024'),
+  ('A statement naming no column of the object', 'REFUSED',
+   'Which columns to compile cannot be inferred, and defaulting to all of them would change the grain silently.', 'SEMANTIC_QUERY_011'),
+  ('COUNT(*) over a semantic object', 'REFUSED',
+   'Its answer depends on a grain the caller never named. Wrap the object in a subquery and count that.', 'SEMANTIC_QUERY_010')
+) AS t (SHAPE, SUPPORT, DETAIL, REFUSAL_CODE);
+
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.GOVERNANCE_FOR_MODEL AS
+WITH trust AS (
+  SELECT MODEL_ID,
+         COUNT(CASE WHEN TRUST_CLASS = 'GOVERNED' THEN 1 END) AS GOVERNED_SOURCES,
+         COUNT(CASE WHEN TRUST_CLASS = 'RAW' THEN 1 END) AS RAW_SOURCES,
+         COUNT(CASE WHEN TRUST_CLASS = 'DIVERGENT' THEN 1 END) AS DIVERGENT_SOURCES,
+         COUNT(CASE WHEN TRUST_CLASS = 'UNKNOWN' THEN 1 END) AS UNKNOWN_SOURCES,
+         MAX(DERIVED_AT) AS TRUST_DERIVED_AT
+    FROM SYS_SEMANTIC.SOURCE_TRUST
+   GROUP BY MODEL_ID
+),
+frozen AS (
+  SELECT fv.MODEL_ID, COUNT(*) AS FROZEN_VIEWS
+    FROM SYS_SEMANTIC.FROZEN_VIEWS fv
+    JOIN SYS.EXA_ALL_VIEWS v
+      ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
+     AND UPPER(v.VIEW_NAME) = UPPER(fv.VIEW_NAME)
+   GROUP BY fv.MODEL_ID
+)
+SELECT
+  m.MODEL_NAME,
+  m.GOVERNANCE_MODE,
+  m.ALLOW_DERIVED_COMPOSITION,
+  CASE WHEN a.MODEL_ID IS NULL THEN FALSE ELSE TRUE END AS VISIBLE_TO_CALLER,
+  COALESCE(t.GOVERNED_SOURCES, 0) AS GOVERNED_SOURCES,
+  COALESCE(t.RAW_SOURCES, 0) AS RAW_SOURCES,
+  COALESCE(t.DIVERGENT_SOURCES, 0) AS DIVERGENT_SOURCES,
+  COALESCE(t.UNKNOWN_SOURCES, 0) AS UNKNOWN_SOURCES,
+  COALESCE(f.FROZEN_VIEWS, 0) AS FROZEN_VIEWS,
+  t.TRUST_DERIVED_AT,
+  CASE
+    WHEN t.MODEL_ID IS NULL THEN
+      'Not classified. VALIDATE_MODEL derives which sources this model can vouch'
+      || ' for, and has not run since the last change that could affect them.'
+    WHEN UPPER(m.GOVERNANCE_MODE) = 'GOVERNED' THEN
+      'Governed: every representation must resolve through a view that can carry'
+      || ' row and column policy, and ' || COALESCE(t.GOVERNED_SOURCES, 0)
+      || ' of ' || (COALESCE(t.GOVERNED_SOURCES,0) + COALESCE(t.RAW_SOURCES,0)
+                    + COALESCE(t.DIVERGENT_SOURCES,0) + COALESCE(t.UNKNOWN_SOURCES,0))
+      || ' sources do. '
+      || CASE WHEN COALESCE(t.DIVERGENT_SOURCES,0) + COALESCE(t.UNKNOWN_SOURCES,0) > 0
+              THEN 'It will refuse to compile or to freeze a view until the '
+                   || (COALESCE(t.DIVERGENT_SOURCES,0) + COALESCE(t.UNKNOWN_SOURCES,0))
+                   || ' it cannot vouch for are rebuilt or retired.'
+              ELSE 'Nothing is unvouched for.' END
+    ELSE
+      'Open: the layer reports on its sources but enforces nothing about them. '
+      || COALESCE(t.RAW_SOURCES, 0) || ' read base tables directly'
+      || CASE WHEN COALESCE(t.DIVERGENT_SOURCES,0) > 0
+              THEN ' and ' || t.DIVERGENT_SOURCES
+                   || ' substitute for a representation without carrying its policy'
+              ELSE '' END
+      || '. Row and column policy has to live in the sources themselves.'
+  END
+  || CASE WHEN COALESCE(f.FROZEN_VIEWS, 0) > 0
+          THEN ' ' || f.FROZEN_VIEWS || ' database view(s) hold SQL compiled from this'
+               || ' model and keep answering with it; CHECK_FROZEN_VIEWS says whether'
+               || ' they still match.'
+          ELSE '' END
+  || CASE WHEN m.ALLOW_DERIVED_COMPOSITION
+          THEN ' Composition is allowed: a published object may be joined to another'
+               || ' relation, which the layer does not supervise.'
+          ELSE '' END AS SUMMARY
+FROM SYS_SEMANTIC.MODELS m
+LEFT JOIN trust t ON t.MODEL_ID = m.MODEL_ID
+LEFT JOIN frozen f ON f.MODEL_ID = m.MODEL_ID
+LEFT JOIN SEMANTIC_SOURCE.AUTHORIZED_MODELS a ON a.MODEL_ID = m.MODEL_ID;

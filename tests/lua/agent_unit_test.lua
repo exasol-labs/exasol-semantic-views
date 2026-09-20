@@ -589,3 +589,50 @@ test("agent scopes a verified query request to its model and object", function()
         api.scope_request_json('["total_revenue"]', "sales", "SALES")
     end, "SEMANTIC_AGENT_040")
 end)
+
+test("the governance block is rendered as prose, or not at all", function()
+    -- "Why is my number different from my colleague's" is asked after the fact,
+    -- about a statement that already ran, by someone who should not have to read
+    -- generated SQL. The plan records what was in force; this says it.
+    local narrative = api.governance_narrative(api.json_encode({
+        governance = {
+            compiled_by = "ANALYST_NORTH",
+            governance_mode = "GOVERNED",
+            sources = {
+                {relation = "MART.ORDERS", trust_class = "GOVERNED"},
+                {relation = "MART.ROLLUP", trust_class = "DIVERGENT"},
+            },
+            unvouched_sources = {"MART.ROLLUP"},
+        },
+    }))
+    assert_contains(narrative, "ANALYST_NORTH")
+    assert_contains(narrative, "GOVERNED mode")
+    assert_contains(narrative, "MART.ORDERS (GOVERNED)")
+    assert_contains(narrative, "does not vouch for MART.ROLLUP")
+    -- It names the consequence, not just the classification: a reader who does
+    -- not know what DIVERGENT means still learns what it costs them.
+    assert_contains(narrative, "entitled to fewer rows")
+
+    -- Nothing unvouched for is worth saying too -- an absent sentence reads as
+    -- an absent check.
+    local clean = api.governance_narrative(api.json_encode({
+        governance = {compiled_by = "SYS", governance_mode = "OPEN",
+            sources = {{relation = "MART.ORDERS", trust_class = "RAW"}},
+            unvouched_sources = {}},
+    }))
+    assert_contains(clean, "Every relation it reads is one this model vouches for")
+
+    -- A plan from before this existed, or one that is not a plan at all, says
+    -- nothing rather than guessing. `null` is Exasol's SQL NULL sentinel, which
+    -- is what an absent column has to be -- not the string "nil".
+    local function says_nothing(value)
+        return type(value) ~= "string"
+    end
+    assert_true(says_nothing(api.governance_narrative(api.json_encode({plan_version = 1}))))
+    assert_true(says_nothing(api.governance_narrative("not json at all")))
+    assert_true(says_nothing(api.governance_narrative(nil)))
+
+    assert_branch("agent.governance.narrative", type(narrative) == "string", true)
+    assert_branch("agent.governance.narrative",
+        type(api.governance_narrative(nil)) == "string", false)
+end)
