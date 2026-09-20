@@ -90,8 +90,18 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE('sales', 'GOVERNED');
   representations read base tables has no policy to lose and warning about it
   would be noise.
 - **`GOVERNED`** — the layer refuses. Every representation must resolve through a
-  view, a divergent materialization is an error, and freezing a view over
-  anything unvouched-for is refused outright.
+  view, a divergent materialization is an error, and **a compile is refused**
+  (`SEMANTIC_REQUEST_028` / `SEMANTIC_QUERY_028`) when the SQL it produced would
+  read such a relation. That covers freezing too: a `CREATE VIEW` over a semantic
+  object has to compile the object first, and SQL that will not compile cannot be
+  frozen.
+
+  `RAW` is not refused. A materialization built *from* the governed views is a
+  table, so it classifies `RAW` rather than `GOVERNED` while carrying their
+  policy perfectly well; refusing it would make the mode unusable with any
+  pre-aggregate. What is refused is what the model cannot vouch for: `DIVERGENT`,
+  `UNKNOWN`, and a relation set no derivation has run against since it last
+  changed.
 
 A model is never moved to `GOVERNED` silently: you set it, then validate, and the
 validation tells you what it costs.
@@ -162,8 +172,8 @@ never fire.
 
 `VALIDATE_MODEL` reports the part the catalog can settle, which is the dangerous
 part — `SEMANTIC_MODEL_068`, a frozen view reading a relation the model no longer
-vouches for. In `GOVERNED` mode, freezing such a view is refused outright
-(`SEMANTIC_QUERY_015`).
+vouches for. In `GOVERNED` mode the view cannot be created in the first place,
+because the compile behind it is refused.
 
 ---
 

@@ -21,10 +21,15 @@ all. Set the preprocessor at the system level instead:
 ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR;
 ```
 
-See [Admin setup for database-wide Semantic SQL](admin-db-wide-setup.md) for the
-rollout and rollback procedure, and for what the preprocessor costs on statements
-that have nothing to do with this layer (a few milliseconds; it decides what a
-statement could possibly be before importing anything).
+This runs the preprocessor for **every** statement in the database, as the
+caller — so the script must be executable by everyone, or the setting denies
+service to principals who have nothing to do with this layer. The installer
+grants that; see
+[Admin setup for database-wide Semantic SQL](admin-db-wide-setup.md#what-every-principal-needs-before-you-do-that)
+for how to confirm it before switching a production system over, along with the
+rollback procedure and what the preprocessor costs on unrelated statements (a few
+milliseconds; it decides what a statement could possibly be before importing
+anything).
 
 Then grant the tool's role the model:
 

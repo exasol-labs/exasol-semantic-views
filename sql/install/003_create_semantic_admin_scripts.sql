@@ -16671,7 +16671,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "1d4a91011c33bd4a"
+ESV_RUNTIME_BUILD = "2867ab6b1c3552e7"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17553,7 +17553,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "1d4a91011c33bd4a"
+ESV_RUNTIME_BUILD = "2867ab6b1c3552e7"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -21570,6 +21570,44 @@ do
         return plan
     end
 
+    -- GOVERNED means refuse, and this is where an ordinary compile finds that out.
+    --
+    -- The mode used to be consulted in exactly one place -- the guard that
+    -- refuses to freeze a view -- so a model in GOVERNED mode reported
+    -- SEMANTIC_MODEL_065 from validation, printed "it will refuse to compile"
+    -- in its own summary, and then served the query. The rollup that drops a
+    -- representation's row filter is the scenario the mode was built for, and it
+    -- was still live in the mode that promises to stop it.
+    --
+    -- RAW is not refused. A materialization built *from* the governed views is a
+    -- table, so it classifies RAW rather than GOVERNED, and it carries their
+    -- policy perfectly well; refusing it would make the mode unusable with any
+    -- pre-aggregate. What is refused is what the model cannot vouch for:
+    -- DIVERGENT (reads relations the representations do not), UNKNOWN (the
+    -- dependencies cannot be resolved) and NOT_CLASSIFIED (no derivation has run
+    -- since the relation set last changed).
+    function envelope.governance_refusal(model, plan, error_prefix)
+        if model == nil or plan == nil or type(plan.governance) ~= "table" then
+            return nil
+        end
+        if upper(tostring(model.governance_mode or "OPEN")) ~= "GOVERNED" then
+            return nil
+        end
+        local unvouched = plan.governance.unvouched_sources or {}
+        if #unvouched == 0 then
+            return nil
+        end
+        return error_result(error_prefix .. "_028",
+            "This model runs in GOVERNED mode and the SQL for this request reads "
+            .. table.concat(unvouched, ", ") .. ", which the model does not vouch"
+            .. " for. Whatever row or column policy its representations carry,"
+            .. " that relation does not necessarily carry it, so answering would"
+            .. " return rows the caller may not be entitled to. Rebuild or retire"
+            .. " it, re-run VALIDATE_MODEL, or set the model back to OPEN with"
+            .. " SET_MODEL_GOVERNANCE_MODE."
+            .. " SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL has the derivation.")
+    end
+
     function envelope.ok_result(sql_text, plan, validation_run_id)
         return {
             status = "OK",
@@ -22022,8 +22060,15 @@ end
 
 
 local function load_model(model_name)
+    -- GOVERNANCE_MODE is part of the model's identity here, not an extra.
+    -- Omitting it did not read as absent: `model.governance_mode or "OPEN"` in
+    -- two consumers turned a missing column into the literal answer OPEN, so a
+    -- GOVERNED model reported OPEN in PLAN_JSON and skipped its own enforcement.
+    -- load_model_by_published_schema selects it, which is why the CREATE VIEW
+    -- path refused correctly while the ordinary compile did not.
     local rows = query([[
-        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER
+        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER,
+               m.GOVERNANCE_MODE
         FROM SEMANTIC_SOURCE.MODELS m
         LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -22036,6 +22081,7 @@ local function load_model(model_name)
         model_id = row_value(rows[1], "MODEL_ID", 1),
         version_id = row_value(rows[1], "VERSION_ID", 2),
         version_number = row_value(rows[1], "VERSION_NUMBER", 3),
+        governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 4),
         model_name = model_name,
     }
 end
@@ -24167,15 +24213,31 @@ local function orphaned_published_schema(published_schema)
     return tonumber(row_value(rows[1], "DISCOVERY_COUNT", 1) or 0) > 0
 end
 
-local function load_model_by_published_schema(schema_name)
+-- More than one model can carry the same PUBLISHED_SCHEMA, so this has to choose
+-- rather than take whichever row the database happened to return first. It
+-- prefers the model that actually contains the object being asked for, then the
+-- one with an active version, then the lowest id -- deterministic at every step.
+--
+-- Picking arbitrarily was survivable only while nothing else depended on the
+-- choice: a model without the object resolves, and the caller is told their
+-- object does not exist while it sits in the model next to it.
+local function load_model_by_published_schema(schema_name, object_name)
     local rows = query([[
         SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID,
                mv.VERSION_NUMBER, m.GOVERNANCE_MODE
         FROM SEMANTIC_SOURCE.MODELS m
         LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
+        LEFT JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
+          ON so.MODEL_ID = m.MODEL_ID
+         AND so.VERSION_ID = m.ACTIVE_VERSION_ID
+         AND so.STATUS = 'ACTIVE'
+         AND UPPER(so.OBJECT_NAME) = UPPER(:object_name)
         WHERE UPPER(m.PUBLISHED_SCHEMA) = UPPER(:schema_name)
-    ]], {schema_name = schema_name})
+        ORDER BY CASE WHEN so.OBJECT_ID IS NULL THEN 1 ELSE 0 END,
+                 CASE WHEN m.ACTIVE_VERSION_ID IS NULL THEN 1 ELSE 0 END,
+                 m.MODEL_ID
+    ]], {schema_name = schema_name, object_name = object_name})
     if rows == nil or #rows == 0 then
         return nil
     end
@@ -24746,11 +24808,14 @@ local function compile_request_table(request, options)
         end
         typed_plan.execution = {status = "EXECUTABLE"}
         physical_plan.execution = {status = "EXECUTABLE"}
-        local plan = plan_envelope(branch_decision)
+        local plan = envelope.with_governance(plan_envelope(branch_decision),
+            model, internal_sql)
+        local governance_refusal = envelope.governance_refusal(model, plan, error_prefix)
+        if governance_refusal ~= nil then
+            return governance_refusal, request, model
+        end
         local result = envelope.attach_planning_runtime(
-            envelope.ok_result(internal_sql,
-                envelope.with_governance(plan, model, internal_sql),
-                validation_run_id), planning_started_ms)
+            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
         if cache_key ~= nil then
             compile_cache.cache_store(model.version_id, cache_key, result)
         end
@@ -24800,12 +24865,17 @@ local function compile_request_table(request, options)
         sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
     end
 
-    local plan = plan_envelope(materialization_decision, selected_materialization,
-        relationship_paths)
+    local plan = envelope.with_governance(
+        plan_envelope(materialization_decision, selected_materialization, relationship_paths),
+        model, sql_text)
+    -- Refused before the result is cached, so a refusal is never stored and a
+    -- model returning to OPEN does not have to outlive one.
+    local governance_refusal = envelope.governance_refusal(model, plan, error_prefix)
+    if governance_refusal ~= nil then
+        return governance_refusal, request, model
+    end
     local result = envelope.attach_planning_runtime(
-        envelope.ok_result(sql_text,
-            envelope.with_governance(plan, model, sql_text),
-            validation_run_id), planning_started_ms)
+        envelope.ok_result(sql_text, plan, validation_run_id), planning_started_ms)
     if cache_key ~= nil then
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
@@ -25345,7 +25415,7 @@ local function parse_semantic_sql(statement_text, options)
         end
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
-    local model = load_model_by_published_schema(published_schema)
+    local model = load_model_by_published_schema(published_schema, object_name)
     if model == nil then
         if options.unchanged_unknown_schema then
             -- The preprocessor is active and declined, so the query falls
@@ -26025,34 +26095,6 @@ do
         return "", first
     end
 
-    -- What the compiled statement reads, checked against what the model
-    -- classifies. A GOVERNED model refuses to freeze anything it does not
-    -- vouch for -- a view compiled while a policy-divergent rollup was active
-    -- bakes that rollup in permanently, for every principal granted the view,
-    -- with nothing to show that it happened.
-    function bi_expansion.untrusted_relations(model_version_id, generated_sql)
-        local rows = query([[
-            SELECT UPPER(PHYSICAL_SCHEMA) || '.' || UPPER(PHYSICAL_OBJECT) AS RELATION_NAME,
-                   TRUST_CLASS
-              FROM SEMANTIC_SOURCE.SOURCE_TRUST
-             WHERE VERSION_ID = :version_id
-        ]], {version_id = model_version_id})
-        local classified = {}
-        for _, row in ipairs(rows or {}) do
-            classified[tostring(row_value(row, "RELATION_NAME", 1))] =
-                tostring(row_value(row, "TRUST_CLASS", 2))
-        end
-        local untrusted = {}
-        for _, relation in ipairs(compile_cache.qualified_relations(generated_sql)) do
-            local trust_class = classified[relation]
-            if trust_class == nil or trust_class == "DIVERGENT" or trust_class == "UNKNOWN" then
-                untrusted[#untrusted + 1] = relation
-                    .. " (" .. tostring(trust_class or "not classified") .. ")"
-            end
-        end
-        return untrusted
-    end
-
     function bi_expansion.rewrite(statement_text)
         local tokens = sql_text.tokenize(statement_text, SEMANTIC_SQL_LEXER)
         if #tokens == 0 then
@@ -26067,7 +26109,8 @@ do
         for _, reference in ipairs(references) do
             -- Resolved once and carried: the column list, the compile and the
             -- freeze record all have to mean the same model.
-            reference.model = load_model_by_published_schema(reference.published_schema)
+            reference.model = load_model_by_published_schema(
+                reference.published_schema, reference.object_name)
             local columns, by_name =
                 bi_expansion.published_columns(reference.model, reference.object_name)
             if columns ~= nil then
@@ -26136,24 +26179,15 @@ do
 
             -- Freezing: this statement is about to store the compiled SQL in a
             -- view, where it will keep answering after the model moves on.
+            --
+            -- There is no separate governance refusal here any more. The compile
+            -- above is refused in GOVERNED mode when it reads a relation the
+            -- model does not vouch for, and you cannot freeze SQL you cannot
+            -- compile -- so the freeze-specific code tested the same condition
+            -- one step later and could no longer fire. One condition, one code.
             if view_schema ~= nil then
                 local model = reference.model
                 if model ~= nil then
-                    if upper(tostring(model.governance_mode or "OPEN")) == "GOVERNED" then
-                        local untrusted = bi_expansion.untrusted_relations(
-                            model.version_id, compiled.generated_sql)
-                        if #untrusted > 0 then
-                            return error_result("SEMANTIC_QUERY_015",
-                                "This view would freeze SQL that reads "
-                                .. table.concat(untrusted, ", ")
-                                .. ", which this model does not vouch for. A frozen view"
-                                .. " keeps answering after the model changes, so what it"
-                                .. " reads becomes permanent -- including a rollup that"
-                                .. " drops the row policy its representations carry."
-                                .. " Retire or rebuild that relation, or run the model in"
-                                .. " OPEN mode.")
-                        end
-                    end
                     frozen[#frozen + 1] = {
                         model = model, reference = reference,
                         columns = table.concat(wanted, ","),

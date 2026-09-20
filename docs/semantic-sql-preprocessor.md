@@ -174,7 +174,9 @@ whatever row policy those representations carry. It is an error in a model
 running in `GOVERNED` mode, a warning otherwise.
 
 A `GOVERNED` model refuses to freeze at all unless it can vouch for everything
-the compiled SQL reads (`SEMANTIC_QUERY_015`).
+the compiled SQL reads — the refusal comes from the compile behind the
+`CREATE VIEW` (`SEMANTIC_QUERY_028`), because SQL that will not compile cannot be
+frozen.
 
 ### Composition is refused by default
 

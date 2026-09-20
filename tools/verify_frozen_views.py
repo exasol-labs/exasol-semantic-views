@@ -199,8 +199,11 @@ ADD OR REPLACE METRIC total_amount AS SUM(amount) * 1 ON ENTITY "order"
                    f" t0.TOTAL_AMOUNT FROM {PUBLISHED}.ORDERS t0")
         fail("a governed model refuses to freeze what it cannot vouch for", "it was accepted")
     except Exception as exc:
+        # The refusal comes from the compile, not from a freeze-specific guard:
+        # you cannot freeze SQL you cannot compile, so a second code for the same
+        # condition one step later could never fire.
         check("a governed model refuses to freeze what it cannot vouch for",
-              "SEMANTIC_QUERY_015" in str(exc), True)
+              "SEMANTIC_QUERY_028" in str(exc), True)
 
     # ... and once it can vouch for them again, freezing works.
     validate(con)

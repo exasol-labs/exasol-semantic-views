@@ -27,6 +27,44 @@ system level:
 ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR;
 ```
 
+### What every principal needs before you do that
+
+Exasol runs the preprocessor **as the caller**, for every statement in the
+database — including statements from principals who have never heard of this
+layer. So the script has to be executable by all of them, or `ALTER SYSTEM`
+denies service database-wide: a user with nothing but `CREATE SESSION` gets
+`insufficient privileges for executing a script` on `SELECT 1`.
+
+The installer grants it:
+
+```sql
+GRANT EXECUTE ON SCRIPT SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR TO PUBLIC;
+```
+
+Check it is in place before switching a production system over:
+
+```sql
+SELECT GRANTEE FROM EXA_DBA_OBJ_PRIVS
+WHERE OBJECT_SCHEMA = 'SEMANTIC_ADMIN' AND OBJECT_NAME = 'SEMANTIC_PREPROCESSOR';
+```
+
+The grant is safe to make to `PUBLIC`: the script decides whether a statement is
+semantic and does nothing else. The runtimes that read the catalog are imported
+only when a statement could need them, and a caller who may not execute those
+has their SQL passed through unchanged rather than refused — so an ordinary
+statement from an unprivileged principal behaves exactly as it did before
+activation.
+
+### Rolling back
+
+```sql
+ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT = NULL;
+```
+
+Takes effect for sessions opened afterwards. Published semantic views then
+refuse with `SEMANTIC_SURFACE_001` until a session enables the preprocessor
+itself; ordinary SQL is unaffected either way.
+
 Use system-wide activation only after testing the same script in normal user
 sessions. A broken system preprocessor can affect all new sessions.
 

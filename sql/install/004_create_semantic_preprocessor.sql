@@ -86,14 +86,27 @@ end
 
 local result = {status = "UNCHANGED"}
 
+-- Importing a runtime needs EXECUTE on it, which a principal outside this layer
+-- does not have. That must not turn their ordinary SQL into an error: the
+-- preprocessor's job is to rewrite semantic statements, and one it cannot
+-- rewrite goes to the database exactly as written. A genuinely semantic query
+-- then meets the published view's own guard, which says what to do about it.
+local function with_runtime(script_name, alias, apply)
+    local imported = pcall(exa.import, script_name, alias)
+    if not imported then
+        return {status = "UNCHANGED"}
+    end
+    return apply()
+end
+
 if needs_definition then
-    exa.import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-    result = semantic_definition.preprocess_sql(original_sql)
+    result = with_runtime("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition",
+        function() return semantic_definition.preprocess_sql(original_sql) end)
 end
 
 if result.status == "UNCHANGED" and looks_like_query and references_semantic_schema() then
-    exa.import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
-    result = compiler.compile_sql_for_preprocessor(original_sql)
+    result = with_runtime("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler",
+        function() return compiler.compile_sql_for_preprocessor(original_sql) end)
 end
 
 if result.status == "UNCHANGED" then
@@ -104,3 +117,17 @@ else
     error((result.error_code or "SEMANTIC_QUERY_999") .. ": " .. (result.error_message or "Semantic SQL preprocessing failed."), 0)
 end
 /
+
+-- Database-wide activation is the supported BI deployment mode
+-- (docs/admin-db-wide-setup.md), and Exasol runs the preprocessor as the caller.
+-- Without this grant, `ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT` denies *every*
+-- statement to every principal that has not been granted SEMANTIC_USER --
+-- including `SELECT 1` from a user with no relationship to this layer at all.
+-- The supported deployment mode was a database-wide outage.
+--
+-- The grant is safe to make to PUBLIC because this script decides whether a
+-- statement is semantic and does nothing else. It reads no model data of its
+-- own: the catalog probe below is wrapped, and the runtimes that can read the
+-- catalog are imported only when the statement could possibly need them and are
+-- still subject to the caller's own privileges.
+GRANT EXECUTE ON SCRIPT SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR TO PUBLIC;

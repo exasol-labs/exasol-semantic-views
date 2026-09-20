@@ -165,6 +165,47 @@ another table is refused by default. Each is called out below.
   SQL. Latent, and reachable only once `SUM()` wrapping stopped being refused
   earlier.
 
+#### `GOVERNED` mode reported the error and served the data anyway
+
+- The trust boundary's whole purpose is the rollup that substitutes for a proven
+  branch and drops the row policy its representations carry. The detection
+  shipped and worked — `SEMANTIC_MODEL_065`, a trust class, a prose explanation,
+  a plan block — but **`GOVERNED` mode was consulted in exactly one place**, the
+  guard that refuses to freeze a view. An ordinary query against the same model
+  compiled and returned every region to a principal entitled to one, while
+  `GOVERNANCE_FOR_MODEL.SUMMARY` said *"it will refuse to compile or to freeze a
+  view"*. That is the specific failure `docs/governance.md` opens by warning
+  against.
+- An ordinary compile in `GOVERNED` mode is now refused when the SQL it produced
+  reads a relation the model does not vouch for
+  (`SEMANTIC_REQUEST_028` / `SEMANTIC_QUERY_028`). `RAW` is deliberately not
+  refused: a materialization built *from* the governed views is a table, so it
+  classifies `RAW` while carrying their policy, and refusing it would make the
+  mode unusable with any pre-aggregate.
+- **`PLAN_JSON` reported `OPEN` for a `GOVERNED` model.** `load_model` never
+  selected `GOVERNANCE_MODE`, and `model.governance_mode or "OPEN"` in two
+  consumers turned the missing column into a confident wrong answer rather than
+  an absent one — which is also why the `CREATE VIEW` path refused correctly and
+  the compile path did not: the other loader selected it.
+
+#### Database-wide activation denied service to everyone else
+
+- `ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT` — the deployment mode this release
+  documents as the supported one for BI tools — made **every statement fail for
+  every principal without `SEMANTIC_USER`**, including principals with no
+  relationship to this layer: `SELECT 1` returned `insufficient privileges for
+  executing a script`. Exasol runs the preprocessor as the caller, so a script
+  they cannot execute is a script that stops them executing anything.
+- The installer now grants `EXECUTE` on `SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR`
+  to `PUBLIC`, which is safe because that script only decides whether a statement
+  is semantic. And a caller who may run it but may *not* run the compiler
+  runtimes now has their SQL **passed through unchanged** rather than refused —
+  the preprocessor rewrites semantic statements, and one it cannot rewrite
+  belongs to the database as written.
+- The rest of the suite activates per session, which is exactly the configuration
+  in which this cannot appear, so it shipped past a green run.
+  `tools/verify_database_wide_activation.py` now covers the documented mode.
+
 #### Ordering faults that only a clean install finds
 
 - `GRANT_MODEL_ROLE` raised *"object SEMANTIC_X does not exist"* **after** writing
