@@ -12859,7 +12859,8 @@ local function load_catalog(ctx)
     ctx.dimension_by_name = {}
     local dimension_rows = query([[
         SELECT DIMENSION_ID, DIMENSION_NAME, ENTITY_ID, EXPRESSION, DATA_TYPE,
-               DESCRIPTION, UNIT_HINT, FORMAT_HINT, IS_HIDDEN, IS_CERTIFIED
+               DESCRIPTION, UNIT_HINT, FORMAT_HINT, IS_HIDDEN, IS_CERTIFIED,
+               DISPLAY_POLICY
         FROM SYS_SEMANTIC.DIMENSIONS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -12879,6 +12880,7 @@ local function load_catalog(ctx)
             format_hint = row_value(row, "FORMAT_HINT", 8),
             is_hidden = row_value(row, "IS_HIDDEN", 9),
             is_certified = row_value(row, "IS_CERTIFIED", 10),
+            display_policy = row_value(row, "DISPLAY_POLICY", 11),
         }
         table.insert(ctx.dimensions, dimension)
         ctx.dimension_by_id[key(id)] = dimension
@@ -13040,7 +13042,7 @@ local function load_catalog(ctx)
                IS_PRIVATE, IS_CERTIFIED,
                COALESCE(METRIC_KIND, METRIC_TYPE) AS METRIC_KIND,
                AGGREGATION_FUNCTION, DISTINCT_KEY_EXPR,
-               NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON
+               NON_ADDITIVE_DIMENSION_ID, WINDOW_SPEC_JSON, DISPLAY_POLICY
         FROM SYS_SEMANTIC.METRICS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -13061,6 +13063,7 @@ local function load_catalog(ctx)
             unit_hint = row_value(row, "UNIT_HINT", 9),
             format_hint = row_value(row, "FORMAT_HINT", 10),
             is_private = row_value(row, "IS_PRIVATE", 11),
+            display_policy = row_value(row, "DISPLAY_POLICY", 18),
             is_certified = row_value(row, "IS_CERTIFIED", 12),
             -- Carried for the planner's classification, which decides whether
             -- this metric has a mergeable aggregate state and a known input
@@ -15440,6 +15443,38 @@ end
 -- longer vouches for. That is a policy hole which has already opened -- a rollup
 -- that was retired, or that diverged from the representations it stands in for
 -- -- and the view keeps answering for every principal granted it.
+-- DISPLAY_POLICY is a free-text column with, until now, no vocabulary and no
+-- reader. It has one of each now -- MASK means the value is not returned -- so
+-- anything else in it is a policy nobody will apply, and an operator who wrote
+-- `REDACT` there is entitled to be told rather than to find out later.
+--
+-- SENSITIVITY_LABEL is deliberately not checked. It is a label: free text is the
+-- point, and the honest thing is to document it as a hint rather than invent a
+-- vocabulary for it and enforce that.
+local DISPLAY_POLICIES = {MASK = true}
+
+local function check_display_policies(ctx)
+    local function check(kind, items)
+        for _, item in ipairs(items or {}) do
+            -- `missing`, not `~= nil`: a SQL NULL arrives as userdata, which is
+            -- truthy, so every unset policy would otherwise be reported as the
+            -- unrecognised policy `userdata: 0xffff8a586a44`. See CLAUDE.md.
+            local policy = item.display_policy
+            if not missing(policy)
+                and not DISPLAY_POLICIES[upper(tostring(policy))] then
+                add_issue(ctx, "WARNING", kind, item.name, "SEMANTIC_MODEL_069",
+                    "DISPLAY_POLICY '" .. tostring(policy) .. "' is not a policy this"
+                    .. " layer applies, so it does nothing. The only value with an"
+                    .. " effect is MASK, which withholds the value from results while"
+                    .. " still allowing filters on it. For a label that is only meant"
+                    .. " to inform, use SENSITIVITY_LABEL.")
+            end
+        end
+    end
+    check("DIMENSION", ctx.dimensions)
+    check("METRIC", ctx.metrics)
+end
+
 local function check_frozen_views(ctx)
     if missing(ctx.model_id) then
         return
@@ -16521,6 +16556,7 @@ function M.validate_model(model_name_arg)
         -- After the trust classes exist, because a frozen view is judged
         -- against them.
         check_frozen_views(ctx)
+        check_display_policies(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
         validate_metric_plannability(ctx)
@@ -16635,7 +16671,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "bad6a06decf8544e"
+ESV_RUNTIME_BUILD = "a533a415c231b4f8"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17517,7 +17553,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "bad6a06decf8544e"
+ESV_RUNTIME_BUILD = "a533a415c231b4f8"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -22172,7 +22208,7 @@ local function load_catalog(model, object_name)
 
     local dimension_rows = query([[
         SELECT d.DIMENSION_ID, d.DIMENSION_NAME, d.ENTITY_ID, d.EXPRESSION,
-               d.DATA_TYPE, d.DISPLAY_NAME
+               d.DATA_TYPE, d.DISPLAY_NAME, d.IS_HIDDEN, d.DISPLAY_POLICY
         FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
         JOIN SEMANTIC_SOURCE.DIMENSIONS d
           ON d.DIMENSION_ID = oc.OBJECT_REF_ID
@@ -22191,6 +22227,8 @@ local function load_catalog(model, object_name)
             expression = row_value(row, "EXPRESSION", 4),
             data_type = row_value(row, "DATA_TYPE", 5),
             display_name = row_value(row, "DISPLAY_NAME", 6),
+            withheld = row_value(row, "IS_HIDDEN", 7) == true,
+            display_policy = row_value(row, "DISPLAY_POLICY", 8),
         }
         ctx.dimensions[#ctx.dimensions + 1] = dimension
         ctx.dimension_by_id[key(dimension.id)] = dimension
@@ -22205,7 +22243,8 @@ local function load_catalog(model, object_name)
                mt.AGGREGATION_FUNCTION, mt.MEASURE_EXPR,
                mt.SEMANTIC_FILTER_EXPR, mt.SQL_FILTER_EXPR,
                mt.DISTINCT_KEY_EXPR, mt.NON_ADDITIVE_DIMENSION_ID,
-               mt.WINDOW_SPEC_JSON, mt.TYPE_PARAMS_JSON
+               mt.WINDOW_SPEC_JSON, mt.TYPE_PARAMS_JSON,
+               mt.IS_PRIVATE, mt.DISPLAY_POLICY
         FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
         JOIN SEMANTIC_SOURCE.METRICS mt
           ON mt.METRIC_ID = oc.OBJECT_REF_ID
@@ -22235,6 +22274,8 @@ local function load_catalog(model, object_name)
             non_additive_dimension_id = row_value(row, "NON_ADDITIVE_DIMENSION_ID", 15),
             window_spec_json = row_value(row, "WINDOW_SPEC_JSON", 16),
             type_params_json = row_value(row, "TYPE_PARAMS_JSON", 17),
+            withheld = row_value(row, "IS_PRIVATE", 18) == true,
+            display_policy = row_value(row, "DISPLAY_POLICY", 19),
             inputs = {},
             filters = {},
         }
@@ -22653,6 +22694,19 @@ local function resolve_field(ctx, field_name, expected_kind)
     if exact ~= nil then
         if expected_kind ~= nil and exact.kind ~= expected_kind then
             return nil, error_result("SEMANTIC_REQUEST_022", "Field " .. tostring(field_name) .. " is not a " .. expected_kind .. ".")
+        end
+        -- `IS_PRIVATE` on a metric and `IS_HIDDEN` on a dimension already remove
+        -- the field from discovery. They did not remove it from compilation, so
+        -- anyone who knew the name got the data -- which made a column whose
+        -- vocabulary reads like a control into a naming convention. Refused
+        -- here, at the one place every lane resolves a name, so the filter
+        -- lanes cannot reach a field the projection lane refuses.
+        if exact.withheld then
+            return nil, error_result("SEMANTIC_REQUEST_027",
+                "Field " .. tostring(field_name) .. " is withheld by the model:"
+                .. " it is marked " .. (exact.kind == "METRIC" and "IS_PRIVATE" or "IS_HIDDEN")
+                .. ", which removes it from discovery and from queries. Ask the"
+                .. " model's owner to publish it if you need it.")
         end
         return exact, nil
     end
@@ -24156,12 +24210,36 @@ local function compile_request_table(request, options)
         return error_result(load_code, load_message)
     end
 
+    -- `DISPLAY_POLICY = 'MASK'` says the value may not be shown. It is enforced
+    -- by refusing to *return* the field, not by substituting a redacted value,
+    -- and that choice is deliberate: ESV groups by every selected dimension, so
+    -- masking a dimension's output would either collapse every row into one
+    -- group or emit a column of identical placeholders beside real counts.
+    -- Either one silently changes what the number means, which is the failure
+    -- this layer exists to prevent. Filtering on a masked field still works --
+    -- slice by it without seeing it -- which is the useful half.
+    local function refuse_masked(field, field_name)
+        -- `missing`, not `~= nil`: an unset DISPLAY_POLICY arrives as truthy
+        -- userdata, so the comparison has to survive that before it compares.
+        if field ~= nil and not missing(field.display_policy)
+            and upper(tostring(field.display_policy)) == "MASK" then
+            return error_result(error_prefix .. "_024",
+                "Field " .. tostring(field_name) .. " carries DISPLAY_POLICY = 'MASK',"
+                .. " so its value is not returned. You can still filter on it.")
+        end
+        return nil
+    end
+
     local selected_dimensions = {}
     local selected_dimension_seen = {}
     for _, dimension_name in ipairs(as_array(request.dimensions, "dimensions")) do
         local field, err = resolve_field(ctx, dimension_name, "DIMENSION")
         if err ~= nil then
             return err
+        end
+        local masked = refuse_masked(field, dimension_name)
+        if masked ~= nil then
+            return masked
         end
         add_unique(selected_dimensions, selected_dimension_seen, field)
     end
@@ -24172,6 +24250,10 @@ local function compile_request_table(request, options)
         local field, err = resolve_field(ctx, metric_name, "METRIC")
         if err ~= nil then
             return err
+        end
+        local masked = refuse_masked(field, metric_name)
+        if masked ~= nil then
+            return masked
         end
         add_unique(selected_metrics, selected_metric_seen, field)
     end

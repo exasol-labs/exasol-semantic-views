@@ -1899,6 +1899,40 @@ test("reference expansion sees composition, which is what the guard refuses", fu
         composed("SELECT t0.A FROM SEMANTIC_SALES.SALES t0"), false)
 end)
 
+test("a withheld field is refused wherever it is named, and a masked one only in the output", function()
+    -- These columns used to be read by discovery and nothing else, so a metric
+    -- marked IS_PRIVATE / RESTRICTED / MASK was hidden from the field list and
+    -- still returned its data to anyone who typed the name. That is a discovery
+    -- convenience wearing the vocabulary of enforcement, which is worse than
+    -- having neither.
+    local ctx = compiler_context()
+    local private_metric = ctx.metrics[1]
+    local masked_dimension = ctx.dimensions[1]
+
+    -- IS_PRIVATE / IS_HIDDEN reach every lane, filters included: a field that
+    -- cannot be discovered must not be nameable, or the filter lane is the way
+    -- around it.
+    private_metric.withheld = true
+    local resolved, refusal = api.resolve_field(ctx, private_metric.name, nil)
+    assert_equal(resolved, nil)
+    assert_equal(refusal.error_code, "SEMANTIC_REQUEST_027")
+    assert_contains(refusal.error_message, "IS_PRIVATE")
+
+    masked_dimension.withheld = true
+    local _, dimension_refusal = api.resolve_field(ctx, masked_dimension.name, nil)
+    assert_equal(dimension_refusal.error_code, "SEMANTIC_REQUEST_027")
+    assert_contains(dimension_refusal.error_message, "IS_HIDDEN")
+    masked_dimension.withheld = false
+    private_metric.withheld = false
+
+    -- A resolvable field stays resolvable.
+    local allowed = api.resolve_field(ctx, private_metric.name, nil)
+    assert_equal(allowed.name, private_metric.name)
+
+    assert_branch("compiler.policy.withheld", resolved == nil, true)
+    assert_branch("compiler.policy.withheld", allowed == nil, false)
+end)
+
 test("a cached statement is checked against the model's declared relations", function()
     -- COMPILE_CACHE is a table, and whoever can UPDATE it picks the text a
     -- published guarded view then runs with the view owner's rights. The entry

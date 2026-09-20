@@ -1166,8 +1166,14 @@ def main() -> int:
         print(f"unchanged {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
 
     original_source = SOURCE_VIEWS_SQL.read_text(encoding="utf-8")
+    # rstrip + one newline: the generated block is the last thing in this file,
+    # so whatever followed the END marker is the file's trailing whitespace.
+    # replace_between_markers preserves it verbatim and then adds its own, which
+    # grew the file by a few blank lines on every run and reported "updated"
+    # each time -- a diff that is always dirty is a diff nobody reads.
     updated_source = replace_between_markers(
-        original_source, source_views_block(), SOURCE_VIEWS_BEGIN, SOURCE_VIEWS_END)
+        original_source, source_views_block(), SOURCE_VIEWS_BEGIN, SOURCE_VIEWS_END
+    ).rstrip() + "\n"
     if updated_source != original_source:
         SOURCE_VIEWS_SQL.write_text(updated_source, encoding="utf-8")
         print(f"updated {SOURCE_VIEWS_SQL.relative_to(ROOT)}")

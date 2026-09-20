@@ -39,6 +39,7 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_semantic_sql_phase1.py
 "$PYTHON_BIN" tools/verify_reference_expansion.py
 "$PYTHON_BIN" tools/verify_frozen_views.py
+"$PYTHON_BIN" tools/verify_policy_columns.py
 "$PYTHON_BIN" tools/verify_group_by_inference.py
 "$PYTHON_BIN" tools/run_sql_files.py tests/sql/validation_smoke.sql tests/sql/compile_request_smoke.sql
 

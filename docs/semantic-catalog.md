@@ -1030,3 +1030,26 @@ SEMANTIC_<MODEL>.SEMANTIC_DISCOVERY
 
 These tables are entry points only. The authoritative semantic metadata remains
 in the catalog tables and views described above.
+
+## The policy columns, and what each one does
+
+Three columns look like access control and only one and a half are. This is the
+whole of it:
+
+| column | on | effect |
+|---|---|---|
+| `IS_PRIVATE` | metrics | The field is removed from discovery **and refused wherever it is named**, filters included — `SEMANTIC_REQUEST_027`. |
+| `IS_HIDDEN` | dimensions | The same. A field you cannot discover is not nameable, or the filter lane becomes the way around it. |
+| `DISPLAY_POLICY = 'MASK'` | either | The value is **not returned** — `SEMANTIC_REQUEST_024` — while filtering on it still works. Slice by it without seeing it. Any other value is reported by validation as a policy nobody applies (`SEMANTIC_MODEL_069`). |
+| `SENSITIVITY_LABEL` | either | **A label.** Free text, surfaced in the catalog and to agents, enforced by nothing. It is for whoever wants to act on it. |
+
+`MASK` refuses the projection rather than returning a redacted value, and that
+is deliberate. ESV groups by every selected dimension, so masking a dimension's
+output would either collapse every row into one group or put a column of
+identical placeholders beside real counts — either one silently changes what the
+number means.
+
+**None of this is a substitute for source policy.** The compiler runs with the
+caller's rights and the caller can query the physical sources directly, so these
+are defence in depth over a control that lives in the database — a row filter in
+a governed view, a grant. They are additional to it, never instead of it.

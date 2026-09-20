@@ -99,6 +99,15 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- request_json.lua 90.3 -> 90.3 and validator.lua 94.8 -> 94.8 on 2026-09-20,
+-- when the policy columns stopped being decorative. IS_PRIVATE / IS_HIDDEN now
+-- refuse wherever the field is named -- filters included, or the filter lane
+-- becomes the way around a field you cannot discover -- and DISPLAY_POLICY =
+-- MASK refuses the projection while permitting the filter. The live behaviour
+-- is proven in tools/verify_policy_columns.py, which this gate cannot see; the
+-- unit test covers the resolver refusal, which is the one place every lane goes
+-- through.
+--
 -- validator.lua 94.4 -> 94.8 on 2026-09-19, when a view compiled from a semantic
 -- object started being tracked. Such a view is the one object here that can be
 -- right when it is made and wrong later with nothing in it changing, so the
