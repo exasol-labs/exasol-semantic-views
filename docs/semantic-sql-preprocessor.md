@@ -145,6 +145,37 @@ is referenced at all, the statement is refused with `SEMANTIC_QUERY_011` rather
 than defaulting to every column: a wrong grain returns plausible totals, which is
 the hardest kind of wrong to notice.
 
+### A view over a semantic object freezes its SQL
+
+Because the stored text is compiled, the view answers forever, for anyone, with
+no preprocessor — and with the model *as it was when the view was made*. Nothing
+in the view says so, so ESV records it:
+
+```sql
+SELECT VIEW_SCHEMA, VIEW_NAME, PRESENCE, FROZEN_RELATIONS
+FROM SEMANTIC_CATALOG.FROZEN_VIEWS;
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS('sales');
+-- VIEW_SCHEMA VIEW_NAME  STATUS   DETAIL
+-- MART        V_BI       STALE    The model now compiles different SQL ...
+```
+
+`CHECK_FROZEN_VIEWS` recompiles the columns the view froze and compares. That is
+the exact test, and it is a script rather than a `VALIDATE_MODEL` rule because
+answering it needs the compiler. There is deliberately no version comparison:
+ESV creates one model version per model and authoring mutates it in place, so a
+version check could never fire.
+
+`VALIDATE_MODEL` reports the part the catalog *can* settle, which is also the
+dangerous part — `SEMANTIC_MODEL_068`, a frozen view reading a relation the model
+no longer vouches for, because a rollup was retired or has diverged from the
+representations it stands in for. That view has already stopped inheriting
+whatever row policy those representations carry. It is an error in a model
+running in `GOVERNED` mode, a warning otherwise.
+
+A `GOVERNED` model refuses to freeze at all unless it can vouch for everything
+the compiled SQL reads (`SEMANTIC_QUERY_015`).
+
 ### Composition is refused by default
 
 A derived table can be joined, and a join can repeat the semantic result's rows:

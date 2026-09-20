@@ -1059,6 +1059,43 @@ LEFT JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = s.MODEL_ID;
 -- whether a problem refuses (GOVERNED) or reports (OPEN). Derived by
 -- VALIDATE_MODEL, so a model that has not been validated since its sources
 -- changed has no rows here -- absence is "not yet established", not "fine".
+-- Every database view whose text was compiled from a semantic object, and
+-- whether it still reflects the model.
+--
+-- A frozen view is the one object in the system that can be correct on the day
+-- it is created and wrong later, with nothing changing in it.
+--
+-- PRESENCE is all this view can answer on its own: LIVE or DROPPED. Whether a
+-- live one still matches what the model compiles today is an exact question
+-- that needs the compiler, so it is answered by
+-- SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS rather than guessed at here. There is no
+-- version comparison to make -- ESV creates exactly one model version and
+-- authoring mutates it in place -- and a column called STALENESS that could
+-- only ever say CURRENT would be worse than no column.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.FROZEN_VIEWS AS
+SELECT
+  fv.FROZEN_VIEW_ID,
+  m.MODEL_NAME,
+  fv.VIEW_SCHEMA,
+  fv.VIEW_NAME,
+  fv.OBJECT_NAME,
+  fv.VERSION_ID AS FROZEN_VERSION_ID,
+  mv.VERSION_NUMBER AS FROZEN_VERSION_NUMBER,
+  m.ACTIVE_VERSION_ID,
+  CASE WHEN v.VIEW_NAME IS NULL THEN 'DROPPED' ELSE 'LIVE' END AS PRESENCE,
+  fv.FROZEN_COLUMNS,
+  fv.FROZEN_RELATIONS,
+  fv.FROZEN_AT,
+  fv.FROZEN_BY
+FROM SYS_SEMANTIC.FROZEN_VIEWS fv
+JOIN SYS_SEMANTIC.MODELS m
+  ON m.MODEL_ID = fv.MODEL_ID
+LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
+  ON mv.VERSION_ID = fv.VERSION_ID
+LEFT JOIN SYS.EXA_ALL_VIEWS v
+  ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
+ AND UPPER(v.VIEW_NAME) = UPPER(fv.VIEW_NAME);
+
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL AS
 SELECT
   m.MODEL_NAME,
@@ -1401,6 +1438,7 @@ FROM (VALUES
   ('ADD_MATERIALIZATION_COLUMN', 6, 6, 'ROLLUP_POLICY', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN(<model_name>, <materialization_name>, <object_type>, <object_name>, <physical_column>, <rollup_policy>)'),
   ('SET_MODEL_GOVERNANCE_MODE', 2, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE(<model_name>, <governance_mode>)'),
   ('SET_MODEL_GOVERNANCE_MODE', 2, 2, 'GOVERNANCE_MODE', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE(<model_name>, <governance_mode>)'),
+  ('CHECK_FROZEN_VIEWS', 1, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS(<model_name>)'),
   ('SET_MODEL_DERIVED_COMPOSITION', 2, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION(<model_name>, <allowed>)'),
   ('SET_MODEL_DERIVED_COMPOSITION', 2, 2, 'ALLOWED', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION(<model_name>, <allowed>)'),
   ('SET_MATERIALIZATION_STATUS', 3, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS(<model_name>, <materialization_name>, <status>)'),

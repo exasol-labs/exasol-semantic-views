@@ -2790,7 +2790,8 @@ end
 
 local function load_model_by_published_schema(schema_name)
     local rows = query([[
-        SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER
+        SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID,
+               mv.VERSION_NUMBER, m.GOVERNANCE_MODE
         FROM SEMANTIC_SOURCE.MODELS m
         LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -2804,6 +2805,7 @@ local function load_model_by_published_schema(schema_name)
         model_name = row_value(rows[1], "MODEL_NAME", 2),
         version_id = row_value(rows[1], "VERSION_ID", 3),
         version_number = row_value(rows[1], "VERSION_NUMBER", 4),
+        governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 5),
     }
 end
 
@@ -4556,6 +4558,78 @@ do
 
     -- Replace each semantic reference with the compiled SQL for exactly the
     -- columns the statement uses.
+    -- `CREATE VIEW x AS SELECT ... FROM <semantic object>` stores *compiled* SQL,
+    -- so the view keeps answering after the model changes -- with the old
+    -- answer, and no error. That is a capability and a liability in the same
+    -- statement, so a freeze is recorded rather than left to be discovered.
+    --
+    -- Returns the target schema and name, or nil when the statement is not a
+    -- view definition.
+    function bi_expansion.frozen_view_target(tokens)
+        local index = 1
+        if sql_text.token_upper(tokens[index]) ~= "CREATE" then
+            return nil
+        end
+        index = index + 1
+        if sql_text.token_upper(tokens[index]) == "OR"
+            and sql_text.token_upper(tokens[index + 1]) == "REPLACE" then
+            index = index + 2
+        end
+        if sql_text.token_upper(tokens[index]) == "FORCE" then
+            index = index + 1
+        end
+        if sql_text.token_upper(tokens[index]) ~= "VIEW" then
+            return nil
+        end
+        index = index + 1
+        if sql_text.token_upper(tokens[index]) == "IF"
+            and sql_text.token_upper(tokens[index + 1]) == "NOT"
+            and sql_text.token_upper(tokens[index + 2]) == "EXISTS" then
+            index = index + 3
+        end
+        local first = token_identifier_value(tokens[index])
+        if first == nil then
+            return nil
+        end
+        if tokens[index + 1] ~= nil and tokens[index + 1].text == "."
+            and token_identifier_value(tokens[index + 2]) ~= nil then
+            return first, token_identifier_value(tokens[index + 2])
+        end
+        -- An unqualified view lands in whatever schema the session has open,
+        -- which the preprocessor cannot see. Recorded with an empty schema
+        -- rather than guessed at: a wrong schema in the catalog would be worse
+        -- than an absent one, because it reads as a fact.
+        return "", first
+    end
+
+    -- What the compiled statement reads, checked against what the model
+    -- classifies. A GOVERNED model refuses to freeze anything it does not
+    -- vouch for -- a view compiled while a policy-divergent rollup was active
+    -- bakes that rollup in permanently, for every principal granted the view,
+    -- with nothing to show that it happened.
+    function bi_expansion.untrusted_relations(model_version_id, generated_sql)
+        local rows = query([[
+            SELECT UPPER(PHYSICAL_SCHEMA) || '.' || UPPER(PHYSICAL_OBJECT) AS RELATION_NAME,
+                   TRUST_CLASS
+              FROM SEMANTIC_SOURCE.SOURCE_TRUST
+             WHERE VERSION_ID = :version_id
+        ]], {version_id = model_version_id})
+        local classified = {}
+        for _, row in ipairs(rows or {}) do
+            classified[tostring(row_value(row, "RELATION_NAME", 1))] =
+                tostring(row_value(row, "TRUST_CLASS", 2))
+        end
+        local untrusted = {}
+        for _, relation in ipairs(compile_cache.qualified_relations(generated_sql)) do
+            local trust_class = classified[relation]
+            if trust_class == nil or trust_class == "DIVERGENT" or trust_class == "UNKNOWN" then
+                untrusted[#untrusted + 1] = relation
+                    .. " (" .. tostring(trust_class or "not classified") .. ")"
+            end
+        end
+        return untrusted
+    end
+
     function bi_expansion.rewrite(statement_text)
         local tokens = sql_text.tokenize(statement_text, SEMANTIC_SQL_LEXER)
         if #tokens == 0 then
@@ -4584,6 +4658,9 @@ do
                 .. " at most " .. bi_expansion.MAX_REFERENCES .. " are expanded."
                 .. " Each one is a separate compile.")
         end
+
+        local view_schema, view_name = bi_expansion.frozen_view_target(tokens)
+        local frozen = {}
 
         -- Reverse order, so an earlier reference's character offsets are still
         -- valid after a later one has been spliced.
@@ -4631,6 +4708,35 @@ do
                     "Expansion could not compile " .. inner)
             end
 
+            -- Freezing: this statement is about to store the compiled SQL in a
+            -- view, where it will keep answering after the model moves on.
+            if view_schema ~= nil then
+                local model = load_model_by_published_schema(reference.published_schema)
+                if model ~= nil then
+                    if upper(tostring(model.governance_mode or "OPEN")) == "GOVERNED" then
+                        local untrusted = bi_expansion.untrusted_relations(
+                            model.version_id, compiled.generated_sql)
+                        if #untrusted > 0 then
+                            return error_result("SEMANTIC_QUERY_015",
+                                "This view would freeze SQL that reads "
+                                .. table.concat(untrusted, ", ")
+                                .. ", which this model does not vouch for. A frozen view"
+                                .. " keeps answering after the model changes, so what it"
+                                .. " reads becomes permanent -- including a rollup that"
+                                .. " drops the row policy its representations carry."
+                                .. " Retire or rebuild that relation, or run the model in"
+                                .. " OPEN mode.")
+                        end
+                    end
+                    frozen[#frozen + 1] = {
+                        model = model, reference = reference,
+                        columns = table.concat(wanted, ","),
+                        sql = compiled.generated_sql,
+                        relations = compile_cache.qualified_relations(compiled.generated_sql),
+                    }
+                end
+            end
+
             -- A derived table needs a name for the outer statement to qualify
             -- it. When the author gave none they cannot be referring to it by
             -- alias, so any name works and a generated one cannot collide with
@@ -4641,6 +4747,31 @@ do
                 .. replacement
                 .. string.sub(rewritten, tokens[reference.last].end_pos + 1)
             expanded = expanded + 1
+        end
+
+        -- Recorded after every reference compiled, so a statement that refuses
+        -- half way leaves no record of a view it never created. Best effort:
+        -- losing the record must not fail a CREATE VIEW that otherwise works,
+        -- and VALIDATE_MODEL reconciles against EXA_ALL_VIEWS either way.
+        for _, entry in ipairs(frozen) do
+            pcall(query, [[
+                INSERT INTO SYS_SEMANTIC.FROZEN_VIEWS (
+                  MODEL_ID, VERSION_ID, VIEW_SCHEMA, VIEW_NAME, OBJECT_NAME,
+                  FROZEN_COLUMNS, FROZEN_SQL, FROZEN_RELATIONS
+                ) VALUES (
+                  :model_id, :version_id, :view_schema, :view_name, :object_name,
+                  :columns, :sql, :relations
+                )
+            ]], {
+                model_id = entry.model.model_id,
+                version_id = entry.model.version_id,
+                view_schema = upper(view_schema),
+                view_name = upper(view_name),
+                object_name = entry.reference.object_name,
+                columns = entry.columns,
+                sql = entry.sql,
+                relations = table.concat(entry.relations, ","),
+            })
         end
 
         return {status = "OK", generated_sql = rewritten, expanded_references = expanded}

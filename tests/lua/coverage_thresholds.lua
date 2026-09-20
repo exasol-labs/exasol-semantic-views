@@ -99,6 +99,14 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- validator.lua 94.4 -> 94.8 on 2026-09-19, when a view compiled from a semantic
+-- object started being tracked. Such a view is the one object here that can be
+-- right when it is made and wrong later with nothing in it changing, so the
+-- tests cover both ways that happens and the difference between them: a
+-- superseded version is old and rebuildable, while a relation the model no
+-- longer vouches for is a policy hole that has already opened -- an error in a
+-- model that promised to be governed, a warning otherwise.
+--
 -- request_json.lua 90.1 -> 90.3 on 2026-09-19, when a statement that *wraps* a
 -- semantic object started compiling instead of being refused. The tests cover
 -- the two things that decide whether the answer is right rather than merely
@@ -129,7 +137,7 @@ return {
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
         ["lua/semantic_layer/compiler/request_json.lua"] = 90.3,
-        ["lua/semantic_layer/admin/validator.lua"] = 94.4,
+        ["lua/semantic_layer/admin/validator.lua"] = 94.8,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.3,

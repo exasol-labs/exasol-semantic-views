@@ -65,7 +65,7 @@ SELECT 1;
         for name, splitter in SPLITTERS.items():
             with self.subTest(splitter=name):
                 statements = splitter(sql)
-                self.assertEqual(278, len(statements))
+                self.assertEqual(284, len(statements))
                 self.assertFalse(
                     any(
                         "CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.ATTRIBUTE_BINDINGS" in item
@@ -90,11 +90,11 @@ SELECT 1;
                 statements = splitter(sql)
                 adds = [s for s in statements if "ADD CONSTRAINT" in s]
                 drops = [s for s in statements if "DROP CONSTRAINT IF EXISTS" in s]
-                self.assertEqual(103, len(adds))
+                self.assertEqual(105, len(adds))
                 # Seven more drops than adds: the AGENT_SUGGESTION* constraints
                 # were renamed with their tables, and an upgraded catalog has to
                 # lose the predecessors by name or it keeps both.
-                self.assertEqual(110, len(drops))
+                self.assertEqual(112, len(drops))
                 for item in adds:
                     self.assertNotIn("DROP CONSTRAINT", item)
                     self.assertEqual(1, item.count("ADD CONSTRAINT"))

@@ -459,8 +459,19 @@ local function columns_response(names)
     return rows
 end
 
+-- Both spellings of each name, because a column lookup matches what it was
+-- asked for or the upper-cased form of it -- never a lower-case column for an
+-- upper-case request. A permissive fixture relation therefore has to carry
+-- both, which is what `{{1}}` used to mean in effect.
 local function any_columns()
-    return columns_response(ANY_COLUMN_NAMES)
+    local names = {}
+    for _, name in ipairs(ANY_COLUMN_NAMES) do
+        names[#names + 1] = name
+        if string.upper(name) ~= name then
+            names[#names + 1] = string.upper(name)
+        end
+    end
+    return columns_response(names)
 end
 
 -- The validator writes its catalog rows in batches now -- one statement per
@@ -510,6 +521,38 @@ test("source catalog probes preserve non-uppercase identifiers", function()
         assert_true(api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "_id"))
         assert_true(not api.source_column_exists("EJT_CAMPAIGNS_VIEW", "campaigns", "absent"))
     end)
+end)
+
+test("a column lookup matches the name asked for, not a case variant of it", function()
+    -- The probe this replaced said `COLUMN_NAME = :name OR COLUMN_NAME =
+    -- UPPER(:name)`: the *asked-for* name is upper-cased, never the stored one.
+    -- So a source carrying only `customer_id` does not answer a request for
+    -- `CUSTOMER_ID`, and a model whose expression names the upper-case column is
+    -- correctly reported as referencing one that is not there.
+    --
+    -- Caching the column list made this easy to get wrong in the direction that
+    -- hides a defect: indexing each column under both spellings is one extra
+    -- line, looks equivalent, and made a promotion-gate fixture built around
+    -- exactly this case validate clean with no issues at all.
+    api.reset_source_column_cache()
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+            return columns_response({"customer_id", "REGION"})
+        end
+        return {}
+    end, function()
+        assert_true(api.source_column_exists("SRC", "MIXED", "customer_id"))
+        assert_true(not api.source_column_exists("SRC", "MIXED", "CUSTOMER_ID"))
+        -- ... while an upper-case column still answers a lower-case request,
+        -- which is the half the UPPER() in the old predicate was for.
+        assert_true(api.source_column_exists("SRC", "MIXED", "region"))
+        assert_true(api.source_column_exists("SRC", "MIXED", "REGION"))
+    end)
+
+    assert_branch("validator.columns.case",
+        api.source_column_exists("SRC", "MIXED", "CUSTOMER_ID"), false)
+    assert_branch("validator.columns.case",
+        api.source_column_exists("SRC", "MIXED", "customer_id"), true)
 end)
 
 test("validator rejects type-incompatible relationship endpoints", function()
@@ -871,10 +914,16 @@ test("F2 bindings monotonically repair renamed representation columns", function
                 -- The rename this test is about is now stated as two column
                 -- lists rather than as a per-name answer: the original relation
                 -- has the old names, the renamed one has the new.
+                -- Both spellings: the fixture's expressions name these in
+                -- lower case and the validator asks in upper, and a column
+                -- lookup does not match a lower-case column for an upper-case
+                -- request.
                 if params.object_name == "CUSTOMERS" then
-                    return columns_response({"loyalty_tier", "city"})
+                    return columns_response({"loyalty_tier", "LOYALTY_TIER",
+                                             "city", "CITY"})
                 elseif params.object_name == "CUSTOMERS_RENAMED" then
-                    return columns_response({"tier_code", "town_name"})
+                    return columns_response({"tier_code", "TIER_CODE",
+                                             "town_name", "TOWN_NAME"})
                 end
                 return {}
             end
@@ -2708,7 +2757,11 @@ test("validator public entry point loads and validates a coherent catalog", func
             or contains(sql, "DELETE FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX")
             or contains(sql, "DELETE FROM SYS_SEMANTIC.SOURCE_TRUST")
             or contains(sql, "INSERT INTO SYS_SEMANTIC.SOURCE_TRUST")
-            or contains(sql, "INSERT INTO SYS_SEMANTIC.VALIDATION_RESULTS") then
+            or contains(sql, "INSERT INTO SYS_SEMANTIC.VALIDATION_RESULTS")
+            or contains(sql, "FROM SYS_SEMANTIC.FROZEN_VIEWS")
+            or contains(sql, "FROM SYS_SEMANTIC.SOURCE_TRUST") then
+            -- No frozen views for this model, so nothing to report stale, and
+            -- no trust classes to judge one against.
             return {}
         elseif contains(sql, "FROM SYS.EXA_ALL_VIEWS")
             or contains(sql, "FROM SYS.EXA_ALL_DEPENDENCIES")
@@ -3051,6 +3104,96 @@ test("source trust walks views to their base tables and stops honestly", functio
         select(2, api.resolve_base_relations(graph, "GOV.ORPHAN")), false)
 end)
 
+
+test("a frozen view is judged against the model it froze", function()
+    -- A view compiled from a semantic object is the one object here that can be
+    -- right when it is made and wrong later, with nothing in it changing. These
+    -- are the two ways that happens, and they are separate codes because they
+    -- call for different actions: a superseded view is merely old, while one
+    -- reading a relation the model no longer vouches for is a policy hole that
+    -- has already opened.
+    local api = ESV_VALIDATOR_TEST_API
+
+    local function run(options)
+        local ctx = {
+            model_id = 1, version_id = 7, issues = {}, issue_seen = {},
+            error_count = 0, warning_count = 0, precondition_count = 0,
+            governance_mode = options.governance_mode or "OPEN",
+            validation_run_id = nil,
+        }
+        with_query(function(sql)
+            if contains(sql, "FROM SYS_SEMANTIC.FROZEN_VIEWS") then
+                return options.frozen or {}
+            end
+            if contains(sql, "FROM SYS_SEMANTIC.SOURCE_TRUST") then
+                return options.trust or {}
+            end
+            return {}
+        end, function() api.check_frozen_views(ctx) end)
+        return ctx
+    end
+
+    local trusted = {{"MART.ORDERS", "GOVERNED"}}
+
+    -- Frozen at the active version, reading a relation the model still vouches
+    -- for: nothing to say.
+    local current = run({
+        frozen = {{"MART", "V_CURRENT", 7, "MART.ORDERS", 1}},
+        trust = trusted,
+    })
+    assert_equal(#current.issues, 0)
+
+    -- There is no superseded-version case to test: ESV creates exactly one model
+    -- version and authoring mutates it in place, so a version comparison could
+    -- never fire. Whether a live view still matches what the model compiles is
+    -- answered exactly by SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS, which has the
+    -- compiler; this rule answers the part the catalog alone can settle.
+
+    -- The record outliving the view is how a view is correctly retired, not a
+    -- finding.
+    local dropped = run({
+        frozen = {{"MART", "V_GONE", 6, "MART.ORDERS", 0}},
+        trust = trusted,
+    })
+    assert_equal(#dropped.issues, 0)
+
+    -- Reading a relation the model no longer declares at all.
+    local undeclared = run({
+        frozen = {{"MART", "V_ROLLUP", 7, "MART.GOV_ROLLUP", 1}},
+        trust = trusted,
+    })
+    assert_true(has_rule(undeclared, "SEMANTIC_MODEL_068"))
+    assert_equal(undeclared.warning_count, 1)
+    assert_equal(undeclared.error_count, 0)
+
+    -- The same view under a model that promised to be governed: an error, because
+    -- the policy the representations carry is exactly what the view stopped
+    -- inheriting.
+    local governed = run({
+        frozen = {{"MART", "V_ROLLUP", 7, "MART.GOV_ROLLUP", 1}},
+        trust = trusted, governance_mode = "GOVERNED",
+    })
+    assert_true(has_rule(governed, "SEMANTIC_MODEL_068"))
+    assert_equal(governed.error_count, 1)
+
+    -- A relation that is declared but has diverged from the representations it
+    -- stands in for is the same hole by a different route.
+    local divergent = run({
+        frozen = {{"MART", "V_ROLLUP", 7, "MART.ROLLUP", 1}},
+        trust = {{"MART.ROLLUP", "DIVERGENT"}},
+    })
+    assert_true(has_rule(divergent, "SEMANTIC_MODEL_068"))
+
+    -- A model with no id has no frozen views to judge.
+    local ctx = {model_id = nil, issues = {}, issue_seen = {}, error_count = 0,
+        warning_count = 0, precondition_count = 0}
+    with_query(function() error("should not query") end,
+        function() api.check_frozen_views(ctx) end)
+    assert_equal(#ctx.issues, 0)
+
+    assert_branch("validator.frozen.untrusted", has_rule(undeclared, "SEMANTIC_MODEL_068"), true)
+    assert_branch("validator.frozen.untrusted", has_rule(current, "SEMANTIC_MODEL_068"), false)
+end)
 
 test("source trust classifies every relation the planner may emit", function()
     -- Representations and materializations are the same question asked of

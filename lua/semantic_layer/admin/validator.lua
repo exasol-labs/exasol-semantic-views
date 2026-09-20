@@ -443,15 +443,13 @@ local function source_relation_columns(schema_name, object_name)
         for _, row in ipairs(rows) do
             local name = row_value(row, "COLUMN_NAME", 1)
             if name ~= nil then
-                local entry = {data_type = row_value(row, "COLUMN_TYPE", 2)}
-                -- Indexed under both spellings, exact first, which is what the
-                -- `= :name OR = UPPER(:name)` predicates and the ORDER BY that
-                -- preferred an exact match used to express.
-                columns[tostring(name)] = entry
-                local folded = upper(tostring(name))
-                if columns[folded] == nil then
-                    columns[folded] = entry
-                end
+                -- Indexed under the column's own spelling only. The lookup
+                -- below tries the asked-for name and then its upper-cased form,
+                -- which is what `= :name OR = UPPER(:name)` meant; folding the
+                -- *stored* names too would additionally match a lower-case
+                -- column when an upper-case one was asked for, which the probe
+                -- never did.
+                columns[tostring(name)] = {data_type = row_value(row, "COLUMN_TYPE", 2)}
             end
         end
     end
@@ -470,6 +468,12 @@ end
 
 local function source_column_entry(schema_name, object_name, column_name)
     local columns = source_relation_columns(schema_name, object_name)
+    -- Exact spelling first, then the upper-cased form of what was *asked for*.
+    -- This is the predicate the per-column probe used, and the distinction is
+    -- load-bearing: asking for CUSTOMER_ID must not match a column named
+    -- customer_id. Indexing each column under both spellings looked equivalent
+    -- and was not -- it made a missing column resolve, and a fixture built
+    -- around exactly that case validated clean.
     return columns[tostring(column_name)] or columns[upper(tostring(column_name))]
 end
 
@@ -3386,6 +3390,81 @@ local function resolve_base_relations(graph, start_key)
     return bases, resolved
 end
 
+-- A view compiled from a semantic object keeps answering after the model
+-- changes, and nothing about the view says so. This is where it gets said.
+--
+-- What it reports is the dangerous case: a view reading a relation the model no
+-- longer vouches for. That is a policy hole which has already opened -- a rollup
+-- that was retired, or that diverged from the representations it stands in for
+-- -- and the view keeps answering for every principal granted it.
+local function check_frozen_views(ctx)
+    if missing(ctx.model_id) then
+        return
+    end
+    local rows = query([[
+        SELECT fv.VIEW_SCHEMA, fv.VIEW_NAME, fv.VERSION_ID, fv.FROZEN_RELATIONS,
+               CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS
+          FROM SYS_SEMANTIC.FROZEN_VIEWS fv
+          LEFT JOIN SYS.EXA_ALL_VIEWS v
+            ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
+           AND UPPER(v.VIEW_NAME) = UPPER(fv.VIEW_NAME)
+         WHERE fv.MODEL_ID = :model_id
+    ]], {model_id = ctx.model_id})
+
+    -- What this model currently vouches for, by the same derivation that wrote
+    -- SOURCE_TRUST a moment ago -- read back rather than recomputed so the two
+    -- answers cannot disagree.
+    local trusted = {}
+    local trust_rows = query([[
+        SELECT UPPER(PHYSICAL_SCHEMA) || '.' || UPPER(PHYSICAL_OBJECT) AS RELATION_NAME,
+               TRUST_CLASS
+          FROM SYS_SEMANTIC.SOURCE_TRUST
+         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(trust_rows or {}) do
+        trusted[tostring(row_value(row, "RELATION_NAME", 1))] =
+            tostring(row_value(row, "TRUST_CLASS", 2))
+    end
+
+    for _, row in ipairs(rows or {}) do
+        -- A record whose view is gone is not a finding. Someone dropped it,
+        -- which is the correct way to retire one.
+        if tonumber(row_value(row, "STILL_EXISTS", 5) or 0) == 1 then
+            local view_name = tostring(row_value(row, "VIEW_SCHEMA", 1)) .. "."
+                .. tostring(row_value(row, "VIEW_NAME", 2))
+            local frozen_version = row_value(row, "VERSION_ID", 3)
+
+            -- No version comparison here, deliberately. ESV creates exactly one
+            -- model version -- CREATE_MODEL makes version 1 and nothing ever
+            -- makes a second; authoring mutates in place, and MODELS.UPDATED_AT
+            -- does not move either. A rule keyed on the version changing could
+            -- never fire, which is worse than no rule: it reads like coverage.
+            -- Whether a frozen view still matches what the model would compile
+            -- today is an exact question, and answering it needs the compiler,
+            -- so it lives in SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS. What is checked
+            -- here is the part that can be answered from the catalog alone, and
+            -- it is the dangerous part.
+
+            local frozen_relations = row_value(row, "FROZEN_RELATIONS", 4)
+            for relation in string.gmatch(tostring(frozen_relations or ""), "[^,]+") do
+                local trust_class = trusted[relation]
+                if trust_class == nil or trust_class == "DIVERGENT" then
+                    local governed = upper(tostring(ctx.governance_mode or "OPEN")) == "GOVERNED"
+                    add_issue(ctx, governed and "ERROR" or "WARNING", "FROZEN_VIEW", view_name,
+                        "SEMANTIC_MODEL_068",
+                        "View " .. view_name .. " froze SQL that reads " .. relation
+                        .. ", which this model "
+                        .. (trust_class == nil and "no longer declares"
+                            or "now classifies as " .. trust_class)
+                        .. ". Whatever row or column policy that relation used to carry,"
+                        .. " the view no longer inherits -- and it answers for every"
+                        .. " principal granted it. Re-create the view, or drop it.")
+                end
+            end
+        end
+    end
+end
+
 local function derive_source_trust(ctx)
     query([[
         DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
@@ -4396,6 +4475,9 @@ function M.validate_model(model_name_arg)
         validate_null_placeholder_bindings(ctx)
         extract_metric_dependencies(ctx)
         derive_source_trust(ctx)
+        -- After the trust classes exist, because a frozen view is judged
+        -- against them.
+        check_frozen_views(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
         validate_metric_plannability(ctx)
@@ -4434,6 +4516,7 @@ if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
         relation_key = relation_key,
         reset_source_column_cache = reset_source_column_cache,
+        check_frozen_views = check_frozen_views,
         resolve_base_relations = resolve_base_relations,
         derive_source_trust = derive_source_trust,
         valid_json_text = valid_json_text,

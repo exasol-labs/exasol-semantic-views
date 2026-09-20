@@ -9190,6 +9190,124 @@ query([[
 ]], {model_name = model_name})
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS(
+  MODEL_NAME
+)
+RETURNS TABLE AS
+-- Which views compiled from this model no longer match what it would compile.
+--
+-- This is the exact question, and it needs the compiler to answer, which is why
+-- it is a script rather than a VALIDATE_MODEL rule. The cheaper proxies do not
+-- work here: ESV creates exactly one model version -- CREATE_MODEL makes version
+-- 1 and nothing makes a second -- and MODELS.UPDATED_AT does not move on
+-- authoring either, so there is nothing to compare a version against. What does
+-- move is the definition, and the only faithful test of that is to compile the
+-- same columns again and see whether the SQL comes back the same.
+--
+-- STATUS is CURRENT, STALE or DROPPED. A STALE view still answers; it answers
+-- with the model as it was when the view was made.
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+local function quote_ident(name)
+    return '"' .. string.gsub(tostring(name), '"', '""') .. '"'
+end
+local function sql_string(value)
+    return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
+end
+
+if missing(MODEL_NAME) then
+    error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
+end
+local model_name = trim(MODEL_NAME)
+
+local model_rows = query([[
+    SELECT MODEL_ID, PUBLISHED_SCHEMA FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if model_rows == nil or #model_rows == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+local model_id = row_value(model_rows[1], "MODEL_ID", 1)
+local published_schema = row_value(model_rows[1], "PUBLISHED_SCHEMA", 2)
+
+local frozen = query([[
+    SELECT fv.VIEW_SCHEMA, fv.VIEW_NAME, fv.OBJECT_NAME, fv.FROZEN_COLUMNS,
+           fv.FROZEN_SQL,
+           CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS
+      FROM SYS_SEMANTIC.FROZEN_VIEWS fv
+      LEFT JOIN SYS.EXA_ALL_VIEWS v
+        ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
+       AND UPPER(v.VIEW_NAME) = UPPER(fv.VIEW_NAME)
+     WHERE fv.MODEL_ID = :model_id
+     ORDER BY fv.FROZEN_VIEW_ID
+]], {model_id = model_id})
+
+local output_rows = {}
+for _, row in ipairs(frozen or {}) do
+    local view_schema = tostring(row_value(row, "VIEW_SCHEMA", 1))
+    local view_name = tostring(row_value(row, "VIEW_NAME", 2))
+    local object_name = row_value(row, "OBJECT_NAME", 3)
+    local frozen_columns = tostring(row_value(row, "FROZEN_COLUMNS", 4) or "")
+    local frozen_sql = row_value(row, "FROZEN_SQL", 5)
+    local still_exists = tonumber(row_value(row, "STILL_EXISTS", 6) or 0) == 1
+
+    if not still_exists then
+        output_rows[#output_rows + 1] = {view_schema, view_name, "DROPPED",
+            "The view is gone; the record can be deleted."}
+    elseif missing(frozen_sql) or frozen_columns == "" then
+        -- Frozen by a build that did not record a baseline. Saying so beats
+        -- reporting CURRENT, which would be a guess wearing an answer's clothes.
+        output_rows[#output_rows + 1] = {view_schema, view_name, "UNKNOWN",
+            "No compiled baseline was recorded for this view; re-create it to"
+            .. " start tracking it."}
+    else
+        local parts = {}
+        for column in string.gmatch(frozen_columns, "[^,]+") do
+            parts[#parts + 1] = quote_ident(column)
+        end
+        local probe = "SELECT " .. table.concat(parts, ", ") .. " FROM "
+            .. quote_ident(published_schema) .. "." .. quote_ident(tostring(object_name))
+        local compiled = query("EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL("
+            .. sql_string(probe) .. ")")
+        local status = row_value(compiled and compiled[1], "STATUS", 1)
+        local current_sql = row_value(compiled and compiled[1], "GENERATED_SQL", 5)
+        if status ~= "OK" then
+            output_rows[#output_rows + 1] = {view_schema, view_name, "STALE",
+                "The model no longer compiles the columns this view froze: "
+                .. tostring(row_value(compiled and compiled[1], "ERROR_MESSAGE", 3))}
+        elseif tostring(current_sql) ~= tostring(frozen_sql) then
+            output_rows[#output_rows + 1] = {view_schema, view_name, "STALE",
+                "The model now compiles different SQL for the same columns."
+                .. " This view still answers, with the definition as it was when"
+                .. " the view was created. Re-create it to pick the change up."}
+        else
+            output_rows[#output_rows + 1] = {view_schema, view_name, "CURRENT",
+                "Matches what the model compiles today."}
+        end
+    end
+end
+
+if #output_rows == 0 then
+    output_rows[#output_rows + 1] = {null, null, "NONE",
+        "No view has been compiled from this model."}
+end
+
+exit(output_rows, [[
+  VIEW_SCHEMA VARCHAR(256),
+  VIEW_NAME VARCHAR(256),
+  STATUS VARCHAR(32),
+  DETAIL VARCHAR(2000000)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION(
   MODEL_NAME,
   ALLOWED
@@ -12368,15 +12486,13 @@ local function source_relation_columns(schema_name, object_name)
         for _, row in ipairs(rows) do
             local name = row_value(row, "COLUMN_NAME", 1)
             if name ~= nil then
-                local entry = {data_type = row_value(row, "COLUMN_TYPE", 2)}
-                -- Indexed under both spellings, exact first, which is what the
-                -- `= :name OR = UPPER(:name)` predicates and the ORDER BY that
-                -- preferred an exact match used to express.
-                columns[tostring(name)] = entry
-                local folded = upper(tostring(name))
-                if columns[folded] == nil then
-                    columns[folded] = entry
-                end
+                -- Indexed under the column's own spelling only. The lookup
+                -- below tries the asked-for name and then its upper-cased form,
+                -- which is what `= :name OR = UPPER(:name)` meant; folding the
+                -- *stored* names too would additionally match a lower-case
+                -- column when an upper-case one was asked for, which the probe
+                -- never did.
+                columns[tostring(name)] = {data_type = row_value(row, "COLUMN_TYPE", 2)}
             end
         end
     end
@@ -12395,6 +12511,12 @@ end
 
 local function source_column_entry(schema_name, object_name, column_name)
     local columns = source_relation_columns(schema_name, object_name)
+    -- Exact spelling first, then the upper-cased form of what was *asked for*.
+    -- This is the predicate the per-column probe used, and the distinction is
+    -- load-bearing: asking for CUSTOMER_ID must not match a column named
+    -- customer_id. Indexing each column under both spellings looked equivalent
+    -- and was not -- it made a missing column resolve, and a fixture built
+    -- around exactly that case validated clean.
     return columns[tostring(column_name)] or columns[upper(tostring(column_name))]
 end
 
@@ -15311,6 +15433,81 @@ local function resolve_base_relations(graph, start_key)
     return bases, resolved
 end
 
+-- A view compiled from a semantic object keeps answering after the model
+-- changes, and nothing about the view says so. This is where it gets said.
+--
+-- What it reports is the dangerous case: a view reading a relation the model no
+-- longer vouches for. That is a policy hole which has already opened -- a rollup
+-- that was retired, or that diverged from the representations it stands in for
+-- -- and the view keeps answering for every principal granted it.
+local function check_frozen_views(ctx)
+    if missing(ctx.model_id) then
+        return
+    end
+    local rows = query([[
+        SELECT fv.VIEW_SCHEMA, fv.VIEW_NAME, fv.VERSION_ID, fv.FROZEN_RELATIONS,
+               CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS
+          FROM SYS_SEMANTIC.FROZEN_VIEWS fv
+          LEFT JOIN SYS.EXA_ALL_VIEWS v
+            ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
+           AND UPPER(v.VIEW_NAME) = UPPER(fv.VIEW_NAME)
+         WHERE fv.MODEL_ID = :model_id
+    ]], {model_id = ctx.model_id})
+
+    -- What this model currently vouches for, by the same derivation that wrote
+    -- SOURCE_TRUST a moment ago -- read back rather than recomputed so the two
+    -- answers cannot disagree.
+    local trusted = {}
+    local trust_rows = query([[
+        SELECT UPPER(PHYSICAL_SCHEMA) || '.' || UPPER(PHYSICAL_OBJECT) AS RELATION_NAME,
+               TRUST_CLASS
+          FROM SYS_SEMANTIC.SOURCE_TRUST
+         WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    for _, row in ipairs(trust_rows or {}) do
+        trusted[tostring(row_value(row, "RELATION_NAME", 1))] =
+            tostring(row_value(row, "TRUST_CLASS", 2))
+    end
+
+    for _, row in ipairs(rows or {}) do
+        -- A record whose view is gone is not a finding. Someone dropped it,
+        -- which is the correct way to retire one.
+        if tonumber(row_value(row, "STILL_EXISTS", 5) or 0) == 1 then
+            local view_name = tostring(row_value(row, "VIEW_SCHEMA", 1)) .. "."
+                .. tostring(row_value(row, "VIEW_NAME", 2))
+            local frozen_version = row_value(row, "VERSION_ID", 3)
+
+            -- No version comparison here, deliberately. ESV creates exactly one
+            -- model version -- CREATE_MODEL makes version 1 and nothing ever
+            -- makes a second; authoring mutates in place, and MODELS.UPDATED_AT
+            -- does not move either. A rule keyed on the version changing could
+            -- never fire, which is worse than no rule: it reads like coverage.
+            -- Whether a frozen view still matches what the model would compile
+            -- today is an exact question, and answering it needs the compiler,
+            -- so it lives in SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS. What is checked
+            -- here is the part that can be answered from the catalog alone, and
+            -- it is the dangerous part.
+
+            local frozen_relations = row_value(row, "FROZEN_RELATIONS", 4)
+            for relation in string.gmatch(tostring(frozen_relations or ""), "[^,]+") do
+                local trust_class = trusted[relation]
+                if trust_class == nil or trust_class == "DIVERGENT" then
+                    local governed = upper(tostring(ctx.governance_mode or "OPEN")) == "GOVERNED"
+                    add_issue(ctx, governed and "ERROR" or "WARNING", "FROZEN_VIEW", view_name,
+                        "SEMANTIC_MODEL_068",
+                        "View " .. view_name .. " froze SQL that reads " .. relation
+                        .. ", which this model "
+                        .. (trust_class == nil and "no longer declares"
+                            or "now classifies as " .. trust_class)
+                        .. ". Whatever row or column policy that relation used to carry,"
+                        .. " the view no longer inherits -- and it answers for every"
+                        .. " principal granted it. Re-create the view, or drop it.")
+                end
+            end
+        end
+    end
+end
+
 local function derive_source_trust(ctx)
     query([[
         DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
@@ -16321,6 +16518,9 @@ function M.validate_model(model_name_arg)
         validate_null_placeholder_bindings(ctx)
         extract_metric_dependencies(ctx)
         derive_source_trust(ctx)
+        -- After the trust classes exist, because a frozen view is judged
+        -- against them.
+        check_frozen_views(ctx)
         detect_metric_cycles(ctx)
         validate_agent_metadata(ctx)
         validate_metric_plannability(ctx)
@@ -16359,6 +16559,7 @@ if rawget(_G, "ESV_TEST_MODE") then
     ESV_VALIDATOR_TEST_API = {
         relation_key = relation_key,
         reset_source_column_cache = reset_source_column_cache,
+        check_frozen_views = check_frozen_views,
         resolve_base_relations = resolve_base_relations,
         derive_source_trust = derive_source_trust,
         valid_json_text = valid_json_text,
@@ -16434,7 +16635,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "63d65c5ca9295f5b"
+ESV_RUNTIME_BUILD = "bad6a06decf8544e"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17316,7 +17517,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "63d65c5ca9295f5b"
+ESV_RUNTIME_BUILD = "bad6a06decf8544e"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -23855,7 +24056,8 @@ end
 
 local function load_model_by_published_schema(schema_name)
     local rows = query([[
-        SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID, mv.VERSION_NUMBER
+        SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID,
+               mv.VERSION_NUMBER, m.GOVERNANCE_MODE
         FROM SEMANTIC_SOURCE.MODELS m
         LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -23869,6 +24071,7 @@ local function load_model_by_published_schema(schema_name)
         model_name = row_value(rows[1], "MODEL_NAME", 2),
         version_id = row_value(rows[1], "VERSION_ID", 3),
         version_number = row_value(rows[1], "VERSION_NUMBER", 4),
+        governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 5),
     }
 end
 
@@ -25621,6 +25824,78 @@ do
 
     -- Replace each semantic reference with the compiled SQL for exactly the
     -- columns the statement uses.
+    -- `CREATE VIEW x AS SELECT ... FROM <semantic object>` stores *compiled* SQL,
+    -- so the view keeps answering after the model changes -- with the old
+    -- answer, and no error. That is a capability and a liability in the same
+    -- statement, so a freeze is recorded rather than left to be discovered.
+    --
+    -- Returns the target schema and name, or nil when the statement is not a
+    -- view definition.
+    function bi_expansion.frozen_view_target(tokens)
+        local index = 1
+        if sql_text.token_upper(tokens[index]) ~= "CREATE" then
+            return nil
+        end
+        index = index + 1
+        if sql_text.token_upper(tokens[index]) == "OR"
+            and sql_text.token_upper(tokens[index + 1]) == "REPLACE" then
+            index = index + 2
+        end
+        if sql_text.token_upper(tokens[index]) == "FORCE" then
+            index = index + 1
+        end
+        if sql_text.token_upper(tokens[index]) ~= "VIEW" then
+            return nil
+        end
+        index = index + 1
+        if sql_text.token_upper(tokens[index]) == "IF"
+            and sql_text.token_upper(tokens[index + 1]) == "NOT"
+            and sql_text.token_upper(tokens[index + 2]) == "EXISTS" then
+            index = index + 3
+        end
+        local first = token_identifier_value(tokens[index])
+        if first == nil then
+            return nil
+        end
+        if tokens[index + 1] ~= nil and tokens[index + 1].text == "."
+            and token_identifier_value(tokens[index + 2]) ~= nil then
+            return first, token_identifier_value(tokens[index + 2])
+        end
+        -- An unqualified view lands in whatever schema the session has open,
+        -- which the preprocessor cannot see. Recorded with an empty schema
+        -- rather than guessed at: a wrong schema in the catalog would be worse
+        -- than an absent one, because it reads as a fact.
+        return "", first
+    end
+
+    -- What the compiled statement reads, checked against what the model
+    -- classifies. A GOVERNED model refuses to freeze anything it does not
+    -- vouch for -- a view compiled while a policy-divergent rollup was active
+    -- bakes that rollup in permanently, for every principal granted the view,
+    -- with nothing to show that it happened.
+    function bi_expansion.untrusted_relations(model_version_id, generated_sql)
+        local rows = query([[
+            SELECT UPPER(PHYSICAL_SCHEMA) || '.' || UPPER(PHYSICAL_OBJECT) AS RELATION_NAME,
+                   TRUST_CLASS
+              FROM SEMANTIC_SOURCE.SOURCE_TRUST
+             WHERE VERSION_ID = :version_id
+        ]], {version_id = model_version_id})
+        local classified = {}
+        for _, row in ipairs(rows or {}) do
+            classified[tostring(row_value(row, "RELATION_NAME", 1))] =
+                tostring(row_value(row, "TRUST_CLASS", 2))
+        end
+        local untrusted = {}
+        for _, relation in ipairs(compile_cache.qualified_relations(generated_sql)) do
+            local trust_class = classified[relation]
+            if trust_class == nil or trust_class == "DIVERGENT" or trust_class == "UNKNOWN" then
+                untrusted[#untrusted + 1] = relation
+                    .. " (" .. tostring(trust_class or "not classified") .. ")"
+            end
+        end
+        return untrusted
+    end
+
     function bi_expansion.rewrite(statement_text)
         local tokens = sql_text.tokenize(statement_text, SEMANTIC_SQL_LEXER)
         if #tokens == 0 then
@@ -25649,6 +25924,9 @@ do
                 .. " at most " .. bi_expansion.MAX_REFERENCES .. " are expanded."
                 .. " Each one is a separate compile.")
         end
+
+        local view_schema, view_name = bi_expansion.frozen_view_target(tokens)
+        local frozen = {}
 
         -- Reverse order, so an earlier reference's character offsets are still
         -- valid after a later one has been spliced.
@@ -25696,6 +25974,35 @@ do
                     "Expansion could not compile " .. inner)
             end
 
+            -- Freezing: this statement is about to store the compiled SQL in a
+            -- view, where it will keep answering after the model moves on.
+            if view_schema ~= nil then
+                local model = load_model_by_published_schema(reference.published_schema)
+                if model ~= nil then
+                    if upper(tostring(model.governance_mode or "OPEN")) == "GOVERNED" then
+                        local untrusted = bi_expansion.untrusted_relations(
+                            model.version_id, compiled.generated_sql)
+                        if #untrusted > 0 then
+                            return error_result("SEMANTIC_QUERY_015",
+                                "This view would freeze SQL that reads "
+                                .. table.concat(untrusted, ", ")
+                                .. ", which this model does not vouch for. A frozen view"
+                                .. " keeps answering after the model changes, so what it"
+                                .. " reads becomes permanent -- including a rollup that"
+                                .. " drops the row policy its representations carry."
+                                .. " Retire or rebuild that relation, or run the model in"
+                                .. " OPEN mode.")
+                        end
+                    end
+                    frozen[#frozen + 1] = {
+                        model = model, reference = reference,
+                        columns = table.concat(wanted, ","),
+                        sql = compiled.generated_sql,
+                        relations = compile_cache.qualified_relations(compiled.generated_sql),
+                    }
+                end
+            end
+
             -- A derived table needs a name for the outer statement to qualify
             -- it. When the author gave none they cannot be referring to it by
             -- alias, so any name works and a generated one cannot collide with
@@ -25706,6 +26013,31 @@ do
                 .. replacement
                 .. string.sub(rewritten, tokens[reference.last].end_pos + 1)
             expanded = expanded + 1
+        end
+
+        -- Recorded after every reference compiled, so a statement that refuses
+        -- half way leaves no record of a view it never created. Best effort:
+        -- losing the record must not fail a CREATE VIEW that otherwise works,
+        -- and VALIDATE_MODEL reconciles against EXA_ALL_VIEWS either way.
+        for _, entry in ipairs(frozen) do
+            pcall(query, [[
+                INSERT INTO SYS_SEMANTIC.FROZEN_VIEWS (
+                  MODEL_ID, VERSION_ID, VIEW_SCHEMA, VIEW_NAME, OBJECT_NAME,
+                  FROZEN_COLUMNS, FROZEN_SQL, FROZEN_RELATIONS
+                ) VALUES (
+                  :model_id, :version_id, :view_schema, :view_name, :object_name,
+                  :columns, :sql, :relations
+                )
+            ]], {
+                model_id = entry.model.model_id,
+                version_id = entry.model.version_id,
+                view_schema = upper(view_schema),
+                view_name = upper(view_name),
+                object_name = entry.reference.object_name,
+                columns = entry.columns,
+                sql = entry.sql,
+                relations = table.concat(entry.relations, ","),
+            })
         end
 
         return {status = "OK", generated_sql = rewritten, expanded_references = expanded}
