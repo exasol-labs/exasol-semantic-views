@@ -147,13 +147,21 @@ def main() -> None:
         return {r[0] for r in probe.execute(
             "SELECT MODEL_NAME FROM SEMANTIC_SOURCE.AUTHORIZED_MODELS").fetchall()}
 
-    # Counted for this model rather than globally: other models may exist by the
-    # time this runs, and an ungranted one stays visible by design, so a global
-    # zero would be asserting something this step never claimed.
+    # Counted for this model rather than globally, which the comment here has
+    # always claimed and the query did not do. Other verifiers leave models
+    # behind that carry no role grant, and an ungranted model stays visible to
+    # everyone by design -- so a global count made this assertion depend on
+    # which verifiers had run before it. It passed in suite order and failed
+    # standalone, which is the most expensive way for a check to be wrong.
+    model_id = con.execute(
+        f"SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS WHERE MODEL_NAME = '{MODEL}'"
+    ).fetchone()[0]
+
     def mart_representations():
         return probe.execute(
-            "SELECT COUNT(*) FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS "
-            "WHERE SOURCE_SCHEMA = 'MART'").fetchone()[0]
+            "SELECT COUNT(*) FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS r"
+            " WHERE r.SOURCE_SCHEMA = 'MART'"
+            f" AND r.MODEL_ID = {model_id}").fetchone()[0]
 
     def visible_columns():
         return probe.execute(

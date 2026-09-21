@@ -726,6 +726,60 @@ Use these rules when adding metrics:
 | Percentage | Gross margin % | `gross_margin / NULLIF(total_revenue, 0)` as `RATIO` |
 | Private helper | Cost component | private fact or metric used by certified public metrics |
 
+## When A Model Has To Split By Grain, And What It Costs
+
+A metric aggregates at its base entity's grain. If that entity is *coarser* than
+the semantic view's root, the join repeats each row and the aggregate is
+multiplied by the fan-out — so `SEMANTIC_MODEL_059` refuses it, and the remedy is
+to expose that metric in a second semantic view rooted at its own entity. The
+reference model does exactly this: `SALES` is rooted at the order line and
+`ORDER_HEADER` at the order, because freight is charged per order and cannot be
+attributed to a line.
+
+That is a sound rule. What is easy to miss is that **three further rules follow
+from it**, and an author currently meets them one at a time, each in a different
+place:
+
+| you try | you get |
+|---|---|
+| add the same dimension to both views, so each can be sliced the same way | `SEMANTIC_ADMIN_019` — dimension names are unique per *model*, not per view, and there is no operation that shares one between views |
+| ask for a field of the other view | `SEMANTIC_QUERY_020` — naming the view that does have it |
+| join the two published views to put the numbers side by side | `SEMANTIC_QUERY_012` — the join can repeat rows and re-aggregation double-counts |
+
+So one business question — *"revenue and freight by region"* — becomes two
+queries, and slicing both by region needs two differently named dimensions over
+the same column (`customer_region` on one view, `order_customer_region` on the
+other). That is the design working as intended: the alternative is a single view
+that answers the question with a number inflated by the fan-out. But it is worth
+knowing at design time rather than discovering across three refusals.
+
+If you get the shape wrong, `REMOVE_SEMANTIC_OBJECT(model, object)` takes a view
+back out — with the dimensions and metrics it exposes, freeing their names, and
+dropping its published view. Facts and entities stay, because a fact belongs to
+an entity and may feed other views. This matters more than tidiness: a semantic
+view with no visible columns cannot be published at all
+(`SEMANTIC_SURFACE_014`), so before this existed a single mistyped
+`ADD_SEMANTIC_OBJECT` left a model that could neither be published nor repaired
+except by dropping it.
+
+**What to decide up front:**
+
+- Which grains does this model genuinely have? Each one is a semantic view.
+- Which dimensions does each need? Name them per view from the start
+  (`order_ship_mode`, `line_product_category`) rather than discovering the
+  collision when the second view is authored.
+- Is the split real? A metric that *can* be evaluated at the finer root belongs
+  in the one view. Only a genuinely coarser aggregate forces the split.
+
+Joining the two views is refused by default, not forbidden: a model that accepts
+ordinary-SQL semantics can opt in with `SET_MODEL_DERIVED_COMPOSITION`, which
+means accepting that a join may repeat rows. See
+[data fusion](data-fusion.md) for combining *sources* for one entity, which is a
+different problem from combining *grains*.
+
+`tools/verify_fanout_guardrails.py` asserts each of the four steps above, so this
+section cannot drift from what the layer does.
+
 ## Common Mistakes
 
 ### Repeating Physical SQL In Every Metric

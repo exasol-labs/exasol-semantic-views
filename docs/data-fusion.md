@@ -478,6 +478,17 @@ entity-level document bindings arrive after the representation has already been
 validated and rolled back. The workaround was to pre-join the source into a
 widened view — which is what the null-cast `FALLBACK` binding exists to replace.
 
+**Narrower in columns, not in rows.** The `FALLBACK` binding settles a source
+that carries *fewer attributes* for the same entities. It does not settle one
+that carries *fewer keys*: bindings declare where a column comes from and say
+nothing about which rows exist, so a 67-of-120 extract is still refused, by
+`SEMANTIC_MODEL_038` where the entity has no semantic identity and by
+`SEMANTIC_MODEL_049` where it has one. For that case the widened view is not a
+workaround but the answer — present the source over the full key set, LEFT JOINed
+onto the primary's keys, and let the attributes it does not carry be NULL.
+Temporal `coverage` is for a source that covers a time *range*, not one that is
+simply incomplete.
+
 Properties worth relying on:
 
 - **Ordered by dependency, not by the file.** The identity is created before a

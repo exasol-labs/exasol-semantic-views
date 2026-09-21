@@ -93,7 +93,7 @@ messages — it may fall, and it may not rise.
 | `SEMANTIC_MODEL_035` | error | An active entity does not have exactly one active `PRIMARY` representation. |
 | `SEMANTIC_MODEL_036` | error | An active representation has invalid F1 metadata, a duplicate name, a missing entity, an unstable alias, or unsupported temporal coverage. |
 | `SEMANTIC_MODEL_037` | error | F1 equivalence cannot be proven: no key is declared, a key probe failed, or a representation violates a declared key's grain. |
-| `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. |
+| `SEMANTIC_MODEL_038` | error | An alternate representation's declared key cardinality or key set differs from the `PRIMARY` representation. The message names this as a difference in rows rather than columns, and points at presenting the source over the full key set; attribute bindings cannot settle it. |
 | `SEMANTIC_MODEL_039` | error | An attribute binding has invalid ownership, role, priority, representation, or duplicate active membership. |
 | `SEMANTIC_MODEL_040` | error | An attribute binding expression leaks another alias, uses a function outside the permitted set below, or references a column absent from its target representation. The unsupported-function diagnostic names the permitted set. |
 | `SEMANTIC_MODEL_041` | precondition | A multi-representation F1/F3 key probe would run without a bounded session `QUERY_TIMEOUT` of 1 to 60 seconds. This is a blocking session precondition, not a defect in the model. The guard applies regardless of declared source kind or view dependencies. |
@@ -122,6 +122,7 @@ messages — it may fall, and it may not rise.
 | `SEMANTIC_MODEL_064` | error | A representation reads a base table directly while the model runs in `GOVERNED` mode, where every representation must resolve through a view that can carry row and column policy. |
 | `SEMANTIC_MODEL_065` | error in `GOVERNED`, warning otherwise | A materialization reads relations none of the model's representations read. Substituting it drops whatever row or column policy those representations carry, silently and for every caller — a rollup over the raw mart returned every region to a principal entitled to one. |
 | `SEMANTIC_MODEL_066` | error in `GOVERNED`, warning otherwise | The transitive base relations of a representation or materialization cannot be resolved, so its trust class is unknown. A virtual-schema relation, or a view whose dependencies Exasol does not record, will do this. |
+| `SEMANTIC_MODEL_067` | warning | Views compiled from this model are frozen: they answer with the model as it was when each was made, for anyone granted them, with no preprocessor. Whether any still matches what the model would compile today **cannot be answered from the catalog** — the version never changes, `MODELS.UPDATED_AT` does not move on authoring, and `METRICS`/`DIMENSIONS`/`FACTS` carry no timestamps. The notice names `CHECK_FROZEN_VIEWS`, which recompiles each one and answers exactly. It clears when the views are dropped. |
 | `SEMANTIC_MODEL_068` | error in `GOVERNED`, warning otherwise | A view compiled from this model reads a relation the model no longer vouches for: retired, or diverged from the representations it substitutes for. The view keeps answering for every principal granted it, without the policy those representations carry. Whether a frozen view still matches what the model *compiles* is a separate, exact question answered by `SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS`. |
 | `SEMANTIC_MODEL_069` | warning | `DISPLAY_POLICY` holds a value this layer does not apply. The only value with an effect is `MASK`, which withholds the field from results while still permitting filters on it. A policy nobody applies is worse than none, because the vocabulary reads like a control. For a value that is only meant to inform, use `SENSITIVITY_LABEL`, which is a hint and is documented as one. |
 | `SEMANTIC_REQUEST_028` / `SEMANTIC_QUERY_028` | refusal | The model runs in `GOVERNED` mode and the SQL for this request reads a relation the model does not vouch for — `DIVERGENT`, `UNKNOWN`, or not classified since the relation set last changed. Answering would return rows the caller may not be entitled to, because the relation does not necessarily carry the row or column policy the representations carry. `RAW` is deliberately not refused: a materialization built *from* the governed views is a table, so it classifies `RAW` while carrying their policy, and refusing it would make the mode unusable with any pre-aggregate. |
@@ -162,6 +163,14 @@ fact's own entity, or remove it from the object where it fans out.
 The mirror-image shape — a metric on a **finer** entity than the root, such as
 line revenue in an order-rooted view — is refused by `SEMANTIC_MODEL_030`
 instead, because the root cannot safely reach the base at all.
+
+Splitting a model this way has consequences the author meets later and
+separately: a dimension cannot be shared between the two views
+(`SEMANTIC_ADMIN_019`), a field of one is refused on the other
+(`SEMANTIC_QUERY_020`), and the two published views cannot be joined back
+together (`SEMANTIC_QUERY_012`). They are set out in one place under
+[When a model has to split by grain](creating-metrics.md#when-a-model-has-to-split-by-grain-and-what-it-costs),
+because deciding the shape up front is much cheaper than meeting three refusals.
 
 ### Why the base entity and not the fact's entity
 

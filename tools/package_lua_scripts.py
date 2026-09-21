@@ -42,7 +42,7 @@ FUSION_END = "-- END GENERATED FUSION_RUNTIME"
 SCRIPT_PARAMETERS_BEGIN = "-- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS"
 SCRIPT_PARAMETERS_END = "-- END GENERATED ADMIN_SCRIPT_PARAMETERS"
 CATALOG_VIEWS_SQL = ROOT / "sql/install/002_create_semantic_catalog_views.sql"
-SOURCE_VIEWS_SQL = ROOT / "sql/install/007_create_semantic_source_views.sql"
+SOURCE_VIEWS_SQL = ROOT / "sql/install/001b_create_semantic_source_views.sql"
 SOURCE_VIEWS_BEGIN = "-- BEGIN GENERATED SEMANTIC_SOURCE_VIEWS"
 SOURCE_VIEWS_END = "-- END GENERATED SEMANTIC_SOURCE_VIEWS"
 
@@ -57,6 +57,17 @@ SOURCE_VIEWS_HANDWRITTEN = {"EFFECTIVE_PRINCIPAL", "AUTHORIZED_MODELS", "MODEL_R
 # run by modellers against SYS_SEMANTIC, and scoping them would hide a model
 # from the person maintaining it.
 SOURCE_VIEW_READERS = [
+    # The human catalog and the agent discovery surface read it as well. Both
+    # used to read SYS_SEMANTIC directly and were granted to every caller, so a
+    # principal holding one model could read every other model's metric and
+    # dimension expressions from the view beside the one that correctly reported
+    # the model as not visible.
+    ROOT / "sql/install/002_create_semantic_catalog_views.sql",
+    ROOT / "sql/install/006_create_semantic_agent_views.sql",
+    # The agent runtime reads the scoped log views for EXPLAIN_COMPILED_SQL, so
+    # it is scanned too -- otherwise a read it adds would have no view and fail
+    # for exactly the non-SYS caller the surface exists for.
+    ROOT / "lua/semantic_layer/agent/runtime.lua",
     ROOT / "lua/semantic_layer/compiler/request_json.lua",
     ROOT / "lua/semantic_layer/compiler/materializations.lua",
     ROOT / "lua/semantic_layer/compiler/query_spec.lua",
@@ -72,6 +83,9 @@ SOURCE_VIEW_READERS = [
 # could read back. Maps table -> (parent table, shared key column).
 SOURCE_VIEW_PARENT_SCOPE = {
     "MATERIALIZATION_COLUMNS":   ("MATERIALIZATIONS", "MATERIALIZATION_ID"),
+    "MODEL_EVOLUTION_REVIEWS":   ("MODEL_EVOLUTION_SUGGESTIONS", "SUGGESTION_ID"),
+    "MODEL_EVOLUTION_TARGETS":   ("MODEL_EVOLUTION_SUGGESTIONS", "SUGGESTION_ID"),
+    "VALIDATION_RESULTS":        ("VALIDATION_RUNS", "VALIDATION_RUN_ID"),
     "METRIC_DEPENDENCIES":       ("METRICS", "METRIC_ID"),
     "METRIC_FILTERS":            ("METRICS", "METRIC_ID"),
     "METRIC_INPUTS":             ("METRICS", "METRIC_ID"),

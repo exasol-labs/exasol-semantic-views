@@ -103,6 +103,21 @@ CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MY_QUERY_LOG AS
 SELECT * FROM SYS_SEMANTIC.QUERY_LOG WHERE USER_NAME = CURRENT_USER;
 
 -- BEGIN GENERATED SEMANTIC_SOURCE_VIEWS
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.AGENT_INSTRUCTIONS AS
+SELECT * FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
 CREATE OR REPLACE VIEW SEMANTIC_SOURCE.ATTRIBUTE_BINDINGS AS
 SELECT * FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
@@ -120,6 +135,21 @@ SELECT * FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
 
 CREATE OR REPLACE VIEW SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES AS
 SELECT * FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.CUSTOM_EXTENSIONS AS
+SELECT * FROM SYS_SEMANTIC.CUSTOM_EXTENSIONS
  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
        WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
                           WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
@@ -180,6 +210,21 @@ SELECT * FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
 
 CREATE OR REPLACE VIEW SEMANTIC_SOURCE.FACTS AS
 SELECT * FROM SYS_SEMANTIC.FACTS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.FROZEN_VIEWS AS
+SELECT * FROM SYS_SEMANTIC.FROZEN_VIEWS
  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
        WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
                           WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
@@ -347,6 +392,68 @@ SELECT * FROM SYS_SEMANTIC.MODELS
                                                          FROM EXA_SESSION_ROLES)))
           OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
 
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_EVOLUTION_REVIEWS AS
+SELECT * FROM SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS
+ WHERE SUGGESTION_ID IN (SELECT SUGGESTION_ID FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_EVOLUTION_SUGGESTIONS AS
+SELECT * FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_EVOLUTION_TARGETS AS
+SELECT * FROM SYS_SEMANTIC.MODEL_EVOLUTION_TARGETS
+ WHERE SUGGESTION_ID IN (SELECT SUGGESTION_ID FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_ROLE_GRANTS AS
+SELECT * FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
 CREATE OR REPLACE VIEW SEMANTIC_SOURCE.MODEL_VERSIONS AS
 SELECT * FROM SYS_SEMANTIC.MODEL_VERSIONS
  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
@@ -411,6 +518,21 @@ SELECT * FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
 
 CREATE OR REPLACE VIEW SEMANTIC_SOURCE.REPRESENTATION_AUTHORITIES AS
 SELECT * FROM SYS_SEMANTIC.REPRESENTATION_AUTHORITIES
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.SEMANTIC_DEFINITION_SOURCES AS
+SELECT * FROM SYS_SEMANTIC.SEMANTIC_DEFINITION_SOURCES
  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
        WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
                           WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
@@ -515,8 +637,39 @@ SELECT * FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS
                                                          FROM EXA_SESSION_ROLES)))
           OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
 
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.VALIDATION_RESULTS AS
+SELECT * FROM SYS_SEMANTIC.VALIDATION_RESULTS
+ WHERE VALIDATION_RUN_ID IN (SELECT VALIDATION_RUN_ID FROM SYS_SEMANTIC.VALIDATION_RUNS
+                  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA')));
+
 CREATE OR REPLACE VIEW SEMANTIC_SOURCE.VALIDATION_RUNS AS
 SELECT * FROM SYS_SEMANTIC.VALIDATION_RUNS
+ WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
+       WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                          WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
+          OR UPPER(m.OWNER_ROLE) = UPPER(CURRENT_USER)
+          OR UPPER(m.OWNER_ROLE) IN (SELECT UPPER(ROLE_NAME) FROM EXA_SESSION_ROLES)
+          OR EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
+                      WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE'
+                        AND (UPPER(g.ROLE_NAME) = UPPER(CURRENT_USER)
+                             OR UPPER(g.ROLE_NAME) = 'PUBLIC'
+                             OR UPPER(g.ROLE_NAME) IN (SELECT UPPER(ROLE_NAME)
+                                                         FROM EXA_SESSION_ROLES)))
+          OR EXISTS (SELECT 1 FROM EXA_SESSION_ROLES WHERE ROLE_NAME = 'DBA'));
+
+CREATE OR REPLACE VIEW SEMANTIC_SOURCE.VERIFIED_QUERIES AS
+SELECT * FROM SYS_SEMANTIC.VERIFIED_QUERIES
  WHERE MODEL_ID IN (SELECT m.MODEL_ID FROM SYS_SEMANTIC.MODELS m
        WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS g
                           WHERE g.MODEL_ID = m.MODEL_ID AND g.STATUS = 'ACTIVE')
@@ -592,30 +745,46 @@ SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.QUERY_CAPABILITIES AS
 SELECT * FROM (VALUES
   ('SELECT over a published object', 'SUPPORTED',
-   'Semantic field names, SELECT *, and MEASURE(metric) / agg(metric).', NULL),
+   'Semantic field names, SELECT *, and MEASURE(metric) / agg(metric).', NULL, NULL),
   ('WHERE on dimensions', 'SUPPORTED',
-   '=, !=, <>, <, <=, >, >=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL. Text comparisons are case-insensitive.', NULL),
+   '=, !=, <>, <, <=, >, >=, LIKE, IN, BETWEEN, IS NULL, IS NOT NULL. Text comparisons are case-insensitive.', NULL, NULL),
   ('HAVING on metrics', 'SUPPORTED',
-   'A metric predicate written in WHERE is routed to HAVING during parsing.', NULL),
+   'A metric predicate written in WHERE is routed to HAVING during parsing. HAVING without a metric to group by is refused.', 'SEMANTIC_QUERY_026', NULL),
   ('GROUP BY', 'SUPPORTED',
-   'Optional. Inferred from the selected dimensions when omitted; an explicit list must cover them exactly.', 'SEMANTIC_QUERY_008'),
+   'Optional. Inferred from the selected dimensions when omitted; an explicit list must cover them exactly.', 'SEMANTIC_QUERY_008', NULL),
   ('ORDER BY and LIMIT', 'SUPPORTED',
-   'Selected output fields, output aliases, or ordinals. LIMIT 0 returns the shape with no rows.', NULL),
+   'Selected output fields, output aliases, or ordinals. LIMIT 0 returns the shape with no rows.', NULL, NULL),
+  ('ORDER BY a field that is not selected', 'SUPPORTED',
+   'Also OFFSET, SELECT DISTINCT, arithmetic and CASE in the select list, IN (subquery) and correlated EXISTS.', NULL, NULL),
   ('Statements that wrap the object', 'SUPPORTED',
-   'Subquery, CTE, union, window, TopN wrapper, CAST, arithmetic and COUNT(*) around a reference, by expanding the reference into a derived table.', NULL),
+   'Subquery, CTE, union, window, TopN wrapper, CAST, arithmetic and COUNT(*) around a reference, by expanding the reference into a derived table.', NULL, NULL),
+  ('The shape of the statement around the object', 'DOES NOT MATTER',
+   'A construct is accepted or refused the same way whether the object is referenced bare or wrapped in a subquery. Wrapping a statement is never a workaround for a refusal.', NULL, NULL),
   ('CREATE VIEW over an object', 'SUPPORTED',
-   'The stored text is compiled SQL, so the view answers with no preprocessor. Recorded in SEMANTIC_CATALOG.FROZEN_VIEWS and checked by CHECK_FROZEN_VIEWS.', NULL),
+   'The stored text is compiled SQL, so the view answers with no preprocessor. Recorded in SEMANTIC_CATALOG.FROZEN_VIEWS and checked by CHECK_FROZEN_VIEWS.', NULL, NULL),
   ('Joining an object to another relation', 'REFUSED BY DEFAULT',
-   'The join can repeat the semantic result''s rows and re-aggregation then double-counts. Opt in per model with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_012'),
+   'The join can repeat the semantic result''s rows and re-aggregation then double-counts. Opt in per model with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_012', NULL),
+  ('Grouping the object where the layer cannot read the statement', 'REFUSED BY DEFAULT',
+   'The object is already aggregated to the grain its fields imply, so GROUP BY or HAVING beside the reference groups a grouped result. Where the statement is one the whole-statement path reads, it says something sharper -- see the GROUP BY, HAVING and COUNT(*) rows. Opt in with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_015', NULL),
   ('Selecting a field the model withholds', 'REFUSED',
-   'IS_PRIVATE on a metric or IS_HIDDEN on a dimension removes the field from discovery and from queries, filters included.', 'SEMANTIC_REQUEST_027'),
+   'IS_PRIVATE on a metric or IS_HIDDEN on a dimension removes the field from discovery and from queries, filters included.', 'SEMANTIC_QUERY_027', 'SEMANTIC_REQUEST_027'),
   ('Selecting a masked field', 'REFUSED',
-   'DISPLAY_POLICY = ''MASK'' withholds the value from results. Filtering on it still works.', 'SEMANTIC_REQUEST_024'),
-  ('A statement naming no column of the object', 'REFUSED',
-   'Which columns to compile cannot be inferred, and defaulting to all of them would change the grain silently.', 'SEMANTIC_QUERY_011'),
+   'DISPLAY_POLICY = ''MASK'' withholds the value from results. Filtering on it still works.', 'SEMANTIC_QUERY_024', 'SEMANTIC_REQUEST_024'),
+  ('Naming a field the object does not publish', 'REFUSED',
+   'The refusal names the field and, where one is close enough to suggest, what it might have meant.', 'SEMANTIC_QUERY_020', 'SEMANTIC_REQUEST_020'),
+  ('An aggregate the metric does not declare', 'REFUSED',
+   'MEASURE() and agg() may only wrap a metric, and only with the aggregate that metric declares.', 'SEMANTIC_QUERY_007', NULL),
+  ('A SELECT list that names no field', 'REFUSED',
+   'SELECT supports semantic field names, MEASURE(metric), or *.', 'SEMANTIC_QUERY_005', NULL),
+  ('A wrapper naming no column of the object', 'REFUSED',
+   'Which columns to compile cannot be inferred, and defaulting to all of them would change the grain silently.', 'SEMANTIC_QUERY_011', NULL),
   ('COUNT(*) over a semantic object', 'REFUSED',
-   'Its answer depends on a grain the caller never named. Wrap the object in a subquery and count that.', 'SEMANTIC_QUERY_010')
-) AS t (SHAPE, SUPPORT, DETAIL, REFUSAL_CODE);
+   'Its answer depends on a grain the caller never named. Wrap the object in a subquery and count that.', 'SEMANTIC_QUERY_010', NULL),
+  ('Reading a relation the model does not vouch for', 'REFUSED',
+   'In GOVERNED mode every representation must resolve through a relation that can carry row and column policy.', 'SEMANTIC_QUERY_028', 'SEMANTIC_REQUEST_028'),
+  ('Malformed or non-Exasol SQL around the object', 'REPORTED BY THE DATABASE',
+   'A statement the layer rewrote but Exasol then rejects -- a syntax error, DISTINCT ON, LIMIT -1 -- comes back with Exasol''s own message naming the problem, not a rule code. The line it reports is a line of your statement; the column counts the rewritten text, so read the line and ignore the column.', NULL, NULL)
+) AS t (SHAPE, SUPPORT, DETAIL, SQL_REFUSAL_CODE, REQUEST_REFUSAL_CODE);
 
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.GOVERNANCE_FOR_MODEL AS
 WITH trust AS (

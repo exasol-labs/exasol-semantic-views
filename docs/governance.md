@@ -26,9 +26,17 @@ depth over it, and each section says which.
 
 ## 1. Which models a caller can see — enforced
 
-`SEMANTIC_SOURCE` is a schema of thin views, one per catalog table the compiler
+`SEMANTIC_SOURCE` is a schema of thin views, one per catalog table the layer
 reads, each filtered to the models the caller is authorized for. **Callers are
-granted `SEMANTIC_SOURCE`; nobody is granted `SYS_SEMANTIC`.** A view is
+granted `SEMANTIC_SOURCE`; nobody is granted `SYS_SEMANTIC`.**
+
+`SEMANTIC_CATALOG` and `SEMANTIC_AGENT` are granted to callers too, and they are
+scoped by *reading* `SEMANTIC_SOURCE` rather than the tables — so the human
+introspection surface and the agent discovery surface show a caller the same
+models the compiler will let it query, and a view added to either inherits the
+scoping by construction. The one exception is deployment identity
+(`PRODUCT_VERSION`), which is a property of the installation rather than of any
+model. A view is
 owner-rights while `CURRENT_USER` and `EXA_SESSION_ROLES` inside it resolve to
 the caller, so the filter is applied by the database rather than by the compiler
 agreeing to apply it.
@@ -128,6 +136,50 @@ beside real counts — and both silently change what the number means.
 Only `MASK` has an effect; validation reports any other value in
 `DISPLAY_POLICY` as a policy nobody applies (`SEMANTIC_MODEL_069`).
 
+### How to set them
+
+Two surfaces, split by what each column says about a field.
+
+`IS_PRIVATE` and `IS_HIDDEN` say what the field **is** — an invisible one — so
+they live with its definition, as the `PRIVATE` keyword in the semantic DDL:
+
+```sql
+ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION cost_centre
+  ON ENTITY order AS o.cost_centre RETURNS VARCHAR(40) PRIVATE;
+```
+
+`PRIVATE` on a `DIMENSION` writes `IS_HIDDEN`, which is how `DIMENSIONS` spells
+what `METRICS` and `FACTS` call `IS_PRIVATE`. The full DDL grammar is in
+[the preprocessor page](semantic-sql-preprocessor.md).
+
+`DISPLAY_POLICY` and `SENSITIVITY_LABEL` say how a **visible** field must be
+handled. That is a decision made about a model that already exists, usually by
+someone who did not write it, so it is a script — the field-level member of the
+same family as `SET_MODEL_GOVERNANCE_MODE`:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_FIELD_POLICY(
+  'sales', 'SALES', 'customer_email', 'MASK', 'pii');
+
+-- and NULL clears one; it is a value, not a no-op
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_FIELD_POLICY(
+  'sales', 'SALES', 'customer_email', NULL, NULL);
+```
+
+It refuses a name that is a fact, because neither column has a reader for one —
+a fact is never returned to a caller, and the policy belongs on the metric built
+from it. The value itself is not judged at write time: `VALIDATE_MODEL` owns the
+`DISPLAY_POLICY` vocabulary and reports `SEMANTIC_MODEL_069` against it, so run
+it before relying on what you set. Setting a policy clears the model's compile
+cache, or a statement compiled under the old policy would go on being served
+under the new one.
+
+Until this release these two columns had no writer a steward could reach: the
+only thing in the product that wrote either was a private helper inside the OSI
+document importer, so the documented route to `MASK` was a direct `UPDATE` on
+`SYS_SEMANTIC` — which this page tells you never to do, and which callers are no
+longer granted.
+
 **This is defence in depth, not a control.** A caller with rights on the physical
 source reads the column regardless. Put the real control in the source.
 
@@ -209,6 +261,12 @@ After a query has run, `EXPLAIN_COMPILED_SQL` carries a `GOVERNANCE` column
 saying the same thing about that statement — who compiled it, the mode in force,
 and every relation it read with its trust class. `PLAN_JSON` carries the same as
 a `governance` block for anything that wants to read it programmatically.
+
+This works for statements from every lane, including the preprocessor, whose
+rows land in `SEMANTIC_SOURCE.MY_QUERY_LOG`. Where a compile was served from the
+cache the prose names the principal who *ran* the statement as well as the one
+who compiled the plan: the generated SQL is identical, and what decided the rows
+returned is the runner's own rights.
 
 ---
 

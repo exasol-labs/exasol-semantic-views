@@ -40,6 +40,8 @@ SCHEMA = "FUSION_DECL_VERIFY"
 MODEL = "fusion_decl_verify"
 MIRROR = "fusion_decl_mirror"
 NARROW = "fusion_decl_narrow"
+COVERED = "fusion_decl_coverage"
+FEWKEYS = "fusion_decl_fewkeys"
 
 
 def connect():
@@ -122,15 +124,27 @@ def representation_count(con: Any, model: str) -> int:
 def build_sources(con: Any) -> None:
     con.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
     con.execute(f"CREATE SCHEMA {SCHEMA}")
-    con.execute(f"CREATE TABLE {SCHEMA}.C_MDM (CUSTOMER_ID DECIMAL(18,0), NAME VARCHAR(50))")
-    con.execute(f"CREATE TABLE {SCHEMA}.C_CRM (ACCOUNT_ID VARCHAR(20), NAME VARCHAR(50))")
+    # OPENED_AT exists so the coverage case below can declare a canonical
+    # half-open partition; SEMANTIC_MODEL_042 requires the predicate to be
+    # `<qualified column> < / >= TIMESTAMP '...'` matching the declared bounds.
+    con.execute(f"CREATE TABLE {SCHEMA}.C_MDM (CUSTOMER_ID DECIMAL(18,0), NAME VARCHAR(50), OPENED_AT TIMESTAMP)")
+    # CUSTOMER_ID as well as ACCOUNT_ID: the identity cases below map one to the
+    # other through XREF, but the coverage case has no identity -- and without one
+    # an alternate has to expose the entity's own key (SEMANTIC_MODEL_036).
+    con.execute(f"CREATE TABLE {SCHEMA}.C_CRM (ACCOUNT_ID VARCHAR(20), NAME VARCHAR(50),"
+                f" OPENED_AT TIMESTAMP, CUSTOMER_ID DECIMAL(18,0))")
     con.execute(f"CREATE TABLE {SCHEMA}.XREF (ACCOUNT_ID VARCHAR(20), CUSTOMER_ID DECIMAL(18,0))")
-    con.execute(f"INSERT INTO {SCHEMA}.C_MDM VALUES (1,'Alice'),(2,'Bob')")
-    con.execute(f"INSERT INTO {SCHEMA}.C_CRM VALUES ('A-1','Alice'),('A-2','Bob')")
+    con.execute(f"INSERT INTO {SCHEMA}.C_MDM VALUES "
+                f"(1,'Alice',TIMESTAMP '2025-06-01 00:00:00'),"
+                f"(2,'Bob',TIMESTAMP '2025-07-01 00:00:00')")
+    con.execute(f"INSERT INTO {SCHEMA}.C_CRM VALUES "
+                f"('A-1','Alice',TIMESTAMP '2026-06-01 00:00:00',1),"
+                f"('A-2','Bob',TIMESTAMP '2026-07-01 00:00:00',2)")
     con.execute(f"INSERT INTO {SCHEMA}.XREF VALUES ('A-1',1),('A-2',2)")
 
 
-def build_model(con: Any, model: str, published: bool) -> None:
+def build_model(con: Any, model: str, published: bool,
+                with_identity: bool = True) -> None:
     try:
         execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(model)})")
     except Exception:  # noqa: BLE001 - absent on the first run
@@ -146,10 +160,11 @@ def build_model(con: Any, model: str, published: bool) -> None:
         f"ADD_SEMANTIC_OBJECT({literal(model)}, 'C360', 'customer', 'Customer 360')",
         f"ADD_DIMENSION({literal(model)}, 'C360', 'customer', 'cname', 'c.name',"
         f" 'VARCHAR(50)', 'Name', 'Resolved name', NULL, TRUE)",
+    ) + ((
         f"ADD_SEMANTIC_IDENTITY({literal(model)}, 'customer', 'cid', 'GLOBAL',"
         f" 'DECIMAL(18,0)', 'Certified identity')",
         f"ADD_IDENTITY_BINDING({literal(model)}, 'cid', 'primary', 'c.customer_id', 'DIRECT')",
-    ):
+    ) if with_identity else ()):
         execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.{statement}")
     if published:
         execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL({literal(model)})")
@@ -468,10 +483,133 @@ def main() -> int:
         rows = {str(row[0]) for row in execute(con, result["generated_sql"])}
         assert_equal("the fused model returns the resolved names", rows, {"Alice", "Bob"})
 
+        # A representation-scoped `coverage`, which docs/data-fusion.md presents
+        # as one of the three ways to complete an alternate. It could never be
+        # applied: the document builds the batch entry the coverage script wants
+        # but left off the representation it is about, so every such declaration
+        # came back as "COVERAGE_JSON[1].representation_name is required" -- for a
+        # name the author had no way to supply, because the document schema has
+        # no field for it. The enclosing representation *is* the subject, which
+        # is the contract that page states and that `attribute_bindings` already
+        # kept.
+        # A representation-scoped `coverage`, which docs/data-fusion.md presents
+        # as one of the three ways to complete an alternate, and which could
+        # never be applied.
+        #
+        # Its own model, because temporal coverage and a certified semantic
+        # identity are mutually exclusive on one entity (SEMANTIC_MODEL_047) and
+        # the fixture above has an identity.
+        CUT = "2026-01-01 00:00:00"
+        build_model(con, COVERED, published=True, with_identity=False)
+
+        def coverage_document(crm_coverage: dict, primary_coverage=None) -> dict:
+            representations = [{
+                "name": "crm", "source_kind": "RELATION", "source_schema": SCHEMA,
+                "source_object": "C_CRM", "priority": 20,
+                "coverage": crm_coverage}]
+            if primary_coverage is not None:
+                representations.insert(0, {
+                    "name": "primary", "source_kind": "RELATION",
+                    "source_schema": SCHEMA, "source_object": "C_MDM",
+                    "priority": 10, "coverage": primary_coverage})
+            document = {"entities": {"customer": {
+                "representations": representations}}}
+            if primary_coverage is not None:
+                # A partitioned set needs every attribute bound on every
+                # partition (SEMANTIC_MODEL_052) -- the compiler clones each leaf
+                # branch per partition, so an attribute missing from one of them
+                # has nothing to read there.
+                document["entities"]["customer"]["attribute_bindings"] = [{
+                    "attribute_type": "DIMENSION", "attribute_name": "cname",
+                    "representation": "crm", "source_expression": "c.name",
+                    "binding_role": "PREFER", "binding_priority": 1}]
+            return document
+
+        # Coverage is all-or-nothing by design -- a partitioned set cannot be
+        # initialized one representation at a time -- so naming only the new
+        # representation is refused, and says which one is missing. Before, it
+        # asked for `COVERAGE_JSON[1].representation_name`: a field the document
+        # schema does not have, naming nothing the author could supply.
+        partial = apply_document(con, COVERED, coverage_document(
+            {"valid_from": CUT, "predicate": f"c.opened_at >= TIMESTAMP '{CUT}'"}),
+            dry_run=False)
+        assert_equal("coverage for one representation names the one it lacks",
+                     "missing: primary" in str(partial["message"]), True)
+        assert_equal("and not a field the document cannot carry",
+                     "representation_name" in str(partial["message"]), False)
+
+        # The whole partition, which is what the batch has always wanted. This is
+        # the route the report found unreachable.
+        result = apply_document(con, COVERED, coverage_document(
+            {"valid_from": CUT, "predicate": f"c.opened_at >= TIMESTAMP '{CUT}'"},
+            {"valid_to": CUT, "predicate": f"c.opened_at < TIMESTAMP '{CUT}'"}),
+            dry_run=False)
+        assert_equal("a representation-scoped coverage applies",
+                     (result["status"], result["error_code"]), ("OK", None))
+        stored = execute(con, (
+            "SELECT r.REPRESENTATION_NAME, r.COVERAGE_PREDICATE"
+            " FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS r"
+            " JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = r.MODEL_ID"
+            f" WHERE UPPER(m.MODEL_NAME) = UPPER({literal(COVERED)})"
+            " AND r.STATUS = 'ACTIVE' AND r.COVERAGE_PREDICATE IS NOT NULL"))
+        assert_equal("and lands on both representations", len(stored), 2)
+
+        # Re-applying the same document is a no-op, which is the contract the
+        # whole document form is built on. It also proves coverage reaches a
+        # representation that already exists: that path carried authority and
+        # identity and dropped coverage silently -- accepted, applied nothing,
+        # reported OK.
+        again = apply_document(con, COVERED, coverage_document(
+            {"valid_from": CUT, "predicate": f"c.opened_at >= TIMESTAMP '{CUT}'"},
+            {"valid_to": CUT, "predicate": f"c.opened_at < TIMESTAMP '{CUT}'"}),
+            dry_run=False)
+        assert_equal("re-applying it changes nothing",
+                     (again["status"], again["applied"]), ("OK", 0))
+
+        # ---- narrower in *rows*, which is a different failure ---------------
+        #
+        # The case above is narrower in columns: the same customers, fewer
+        # attributes, which representation-scoped FALLBACK bindings settle. A
+        # source that carries fewer *keys* fails SEMANTIC_MODEL_038 instead, and
+        # its message used to offer the same three completions as everything
+        # else -- of which one was broken (the coverage route above), one does
+        # not apply (bindings are about columns), and one refuses on its own
+        # grounds (SEMANTIC_MODEL_049). A reader was sent round all three.
+        con.execute(f"CREATE TABLE {SCHEMA}.C_PARTIAL"
+                    " (CUSTOMER_ID DECIMAL(18,0), LOYALTY_TIER VARCHAR(20))")
+        con.execute(f"INSERT INTO {SCHEMA}.C_PARTIAL VALUES (1,'GOLD')")
+        # Without a semantic identity, so the key-set comparison that answers is
+        # SEMANTIC_MODEL_038. With one, the identity's own key-set check answers
+        # first (SEMANTIC_MODEL_049) -- which is the report's point: the same
+        # source is refused by a different rule depending on which route you try,
+        # and none of the routes _038 offered could settle it.
+        build_model(con, FEWKEYS, published=True, with_identity=False)
+        partial_doc = {"entities": {"customer": {
+            "representations": [{
+                "name": "partial", "source_kind": "RELATION",
+                "source_schema": SCHEMA, "source_object": "C_PARTIAL",
+                "priority": 50, "authority": "SUPPLEMENTAL",
+                "attribute_bindings": [{
+                    "attribute_type": "DIMENSION", "attribute_name": "cname",
+                    "source_expression": "CAST(NULL AS VARCHAR(50))",
+                    "binding_role": "FALLBACK", "binding_priority": 3}]}]}}}
+        fewer_keys = apply_document(con, FEWKEYS, partial_doc, dry_run=True)
+        message = str(fewer_keys["message"])
+        assert_equal("a source with fewer keys is refused",
+                     fewer_keys["status"], "ERROR")
+        assert_equal("and the refusal says it is about rows, not columns",
+                     "difference in rows, not in columns" in message, True)
+        assert_equal("and names the route that works",
+                     "LEFT JOINs it onto the primary's keys" in message, True)
+        # The three it used to offer, one of which cannot help here.
+        assert_equal("and no longer offers attribute bindings as a completion",
+                     "attribute bindings with ADD_ATTRIBUTE_BINDING" in message,
+                     False)
+
         print("fusion declaration document verified")
         return 0
     finally:
-        for model in (NARROW, MIRROR, MODEL):
+        for model in (FEWKEYS, COVERED, NARROW, MIRROR, MODEL):
             try:
                 execute(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL({literal(model)})")
             except Exception:  # noqa: BLE001 - best effort

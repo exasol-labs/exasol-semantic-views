@@ -42,6 +42,45 @@ compiler needs, and records the authorization the catalog reads. It does **not**
 grant the physical source tables — those are your data and your grant to make,
 and they are where row-level security actually lives.
 
+### Who needs what
+
+Measured by granting one privilege at a time and seeing what starts working.
+`CREATE SESSION` is assumed throughout.
+
+| to do this | they need | notes |
+|---|---|---|
+| set the preprocessor for their own session | nothing extra | `ALTER SESSION` is allowed to everyone; it is running the script that needs the grant |
+| list the models they may use, browse the catalog, read `QUERY_CAPABILITIES`, read their own `MY_QUERY_LOG`, call `COMPILE_SQL` | `GRANT_MODEL_ROLE(model, role)` | one call; carries the `SEMANTIC_USER` baseline |
+| **run a semantic query and get rows** | that **plus `SELECT` on the physical sources** | without it: `SEMANTIC_QUERY_080` if the statement has not been compiled before, a plain privilege error if a cached compile is served |
+| read the physical tables directly | `SELECT` on them | the semantic layer neither adds nor removes this |
+| `CREATE VIEW` over a semantic object, in a schema they own | `CREATE VIEW` | **not a BI privilege** — see below |
+| `CREATE VIEW` over a semantic object, in a shared schema | `CREATE ANY VIEW` | |
+| let others read that view | grantable `SELECT` on every relation its compiled SQL reads | an author with plain `SELECT` cannot grant it on |
+| read someone else's frozen view | `SELECT` on the view alone | **no rights on the sources, no preprocessor** |
+
+**The row that matters most is the third.** The compiler runs as the caller, so
+the SQL it generates reads your `MART` tables with the caller's rights. A BI role
+granted the model but not the sources can browse every field, compile every
+query, and retrieve nothing. That is the design — it is what makes row-level
+security in the sources the real control — but it surprises people who expect
+the model grant to be sufficient.
+
+It used to surprise them badly: with a cold cache the compiler could not see the
+source metadata either, concluded that no representation could traverse a
+relationship, and reported an authorization outcome as `SEMANTIC_QUERY_080`, a
+modelling defect. That message now names the other possibility, so the reader is
+not sent looking for a bug that is not there.
+
+**`CREATE VIEW` over a semantic object is not a BI capability.** It appears in §3
+below as a statement that *compiles*, and it does, but it needs a privilege a
+reporting role does not have, and the last two rows are why it is a governance
+act rather than a convenience: the stored text is compiled physical SQL, the view
+runs with its owner's rights, and a reader with no access to `MART` and no
+preprocessor gets rows from it. That is a durable grant of data through a view
+that keeps answering after the model moves on. Treat it as a deployment step
+with an owner, not something an analyst does — see
+[Governance](governance.md#5-frozen-views).
+
 ---
 
 ## 2. What the tool sees
@@ -96,6 +135,13 @@ returns plausible totals, which is the hardest kind of wrong to notice.
 
 ### Creating views on top
 
+**This is not something the BI tool does.** It needs `CREATE VIEW` — or
+`CREATE ANY VIEW` for a schema the author does not own — which a reporting role
+should not hold, and the result is readable by anyone granted the view, with no
+rights on the sources and no preprocessor. See
+[Who needs what](#who-needs-what) above. It is here because it is a useful
+deployment step, not because a dashboard can do it.
+
 ```sql
 CREATE VIEW MART.V_REGIONAL_SALES AS
 SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE FROM SEMANTIC_SALES.SALES t0;
@@ -105,6 +151,33 @@ The stored text is compiled physical SQL, so this view answers for anyone, with
 no preprocessor at all. It is also **frozen**: it keeps answering after the model
 changes, with the model as it was when the view was made. ESV records that and
 can tell you — see [Governance](governance.md#5-frozen-views).
+
+### What the shapes cost
+
+Wrapping is not free, and how much it costs depends on the shape. Measured
+interleaved, 25 rounds, all cache-warm, on Exasol `2026.2.0-dev.0` (Exasol
+Personal, single node) on an Apple M3 Pro / 36 GB / macOS 26.6.1 — so read the
+*differences*, not the absolute numbers, which do not travel between machines:
+
+| shape | median | vs bare |
+|---|---|---|
+| bare `SELECT a, b FROM obj` | 104.2 ms | — |
+| aliased, and TopN over it | 103–104 ms | about the same |
+| subquery wrapper | 131.6 ms | +28 ms |
+| CTE | 131.3 ms | +27 ms |
+| arithmetic in the select list, or `ORDER BY` a non-selected field, **written bare** | 341–357 ms | +237 to +253 ms |
+
+`tools/measure_expansion_cost.py` regenerates this table on your own hardware.
+
+The last row is the one to know about. Those constructs work bare, and that is
+recent — but the layer reaches them by trying the whole-statement path first and
+falling through when it cannot compile them, and that failed attempt has already
+read the catalog. Nothing caches the outcome, so it is paid on every execution.
+**Writing the same query with the object aliased, or wrapped in a subquery, is
+several times faster**, because the whole-statement path then declines
+immediately instead of failing late. A BI tool emits the aliased and wrapped
+forms anyway; this matters to someone hand-writing the bare form in a dashboard's
+custom SQL box.
 
 ---
 
@@ -150,7 +223,7 @@ Two catalog views answer the integrator's questions up front:
 
 ```sql
 -- which SQL shapes are accepted, and the code you get when one is not
-SELECT SHAPE, SUPPORT, REFUSAL_CODE, DETAIL
+SELECT SHAPE, SUPPORT, SQL_REFUSAL_CODE, DETAIL
 FROM SEMANTIC_CATALOG.QUERY_CAPABILITIES
 ORDER BY SUPPORT, SHAPE;
 
@@ -159,8 +232,16 @@ SELECT MODEL_NAME, GOVERNANCE_MODE, VISIBLE_TO_CALLER, SUMMARY
 FROM SEMANTIC_CATALOG.GOVERNANCE_FOR_MODEL;
 ```
 
-Every refusal code in `QUERY_CAPABILITIES` is one the compiler actually emits —
-that is asserted by a test, so the published contract cannot drift from the code.
+**The codes are per lane.** The same condition has two spellings: SQL through the
+preprocessor gets `SEMANTIC_QUERY_027`, the structured request lane gets
+`SEMANTIC_REQUEST_027`. Match on `SQL_REFUSAL_CODE` if you send SQL. The view
+used to publish only the request-lane spelling, so a BI integrator matching the
+published code never matched.
+
+Every row is asserted by running it: `tools/verify_query_capabilities_contract.py`
+executes a statement for each published shape, in the lane the row names, and
+fails if the code that comes back is not the one published. A row nobody
+demonstrates fails too, so the contract cannot grow claims it does not keep.
 
 ---
 
@@ -177,11 +258,48 @@ that names the cause and, where there is one, the remedy. The common ones:
 | `SEMANTIC_REQUEST_027` | the field is withheld by the model (`IS_PRIVATE` / `IS_HIDDEN`) |
 | `SEMANTIC_REQUEST_024` | the field carries `DISPLAY_POLICY = 'MASK'`; you can still filter on it |
 | `SEMANTIC_REQUEST_011` | the model does not exist, or is not granted to you |
+| `SEMANTIC_QUERY_015` | the statement groups the object in its own query block, which groups an already-grouped result; aggregate over a subquery instead |
+| `SEMANTIC_QUERY_020` | a name in the select list is not a field of the object; the message says what it might have meant |
 
-For "why is my number different from my colleague's", `EXPLAIN_COMPILED_SQL`
-carries a `GOVERNANCE` column that says in prose what was in force when the SQL
-was produced — which principal compiled it, the mode the model was in, and which
-relations the layer does and does not vouch for.
+**The shape of your statement is not the reason.** A construct is accepted or
+refused the same way whether you reference the object bare or wrap it in a
+subquery, so wrapping a refused statement is not a workaround — it was, once,
+and the difference was invisible from every surface. If a refusal names a
+construct, it is the construct.
+
+One boundary the table cannot cover: a statement the layer rewrites but Exasol
+then rejects — a syntax error, `DISTINCT ON`, `LIMIT -1` — comes back with
+Exasol's own message rather than a `SEMANTIC_*` code. The message names the
+problem; it just is not one of these. **Read the line it gives you and ignore the
+column**: the line is one of yours, but the column counts the compiled SQL that
+was spliced into your statement. A *valid* statement never fails this way — if
+the layer cannot compile it, you get a code.
+
+For "why is my number different from my colleague's", start from your own log:
+
+```sql
+-- your queries, newest first; nobody else's
+SELECT QUERY_LOG_ID, CLIENT_NAME, STATUS, ORIGINAL_SQL
+FROM SEMANTIC_SOURCE.MY_QUERY_LOG ORDER BY QUERY_LOG_ID DESC;
+
+-- then ask what was in force for one of them
+EXECUTE SCRIPT SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL('QUERY_LOG', <id>);
+```
+
+Every statement the preprocessor rewrites is recorded there, including ones
+served from the compile cache. `CLIENT_NAME` says which path produced the SQL —
+`PREPROCESSOR` for a statement compiled whole, `PREPROCESSOR:EXPANSION` for one
+where the object was expanded into a derived table.
+
+`EXPLAIN_COMPILED_SQL` carries a `GOVERNANCE` column that says in prose what was
+in force — the mode the model was in, and which relations the layer does and
+does not vouch for. When the plan came from the cache it names both principals:
+the one who ran the statement and the one whose compile it reused. The SQL is the
+same either way, and **the rows you saw were still resolved with your rights** —
+which is usually the answer to the question.
+
+You can only explain your own queries. A handle belonging to someone else
+reports as not found.
 
 ---
 

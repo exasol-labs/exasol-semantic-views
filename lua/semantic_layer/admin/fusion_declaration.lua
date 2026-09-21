@@ -595,6 +595,40 @@ local function authority_matches(query_fn, model, entity_name, representation_na
     return rows ~= nil and #rows > 0
 end
 
+-- Coverage is stored on the representation row itself rather than in a side
+-- table, so this compares the three columns the batch script writes. NULL and
+-- the empty string both mean "not declared", which is why each is normalized
+-- before comparison rather than compared with `=`.
+local function coverage_matches(query_fn, model, entity_name, representation_name,
+        valid_from, valid_to, predicate)
+    local rows = query_fn([[
+        SELECT r.VALID_FROM, r.VALID_TO, r.COVERAGE_PREDICATE
+        FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS r
+        JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = r.ENTITY_ID
+        WHERE r.MODEL_ID = :model_id AND r.VERSION_ID = :version_id
+          AND r.STATUS = 'ACTIVE'
+          AND UPPER(e.ENTITY_NAME) = UPPER(:entity_name)
+          AND UPPER(r.REPRESENTATION_NAME) = UPPER(:representation_name)
+    ]], {model_id = model.model_id, version_id = model.version_id,
+        entity_name = entity_name, representation_name = representation_name})
+    if rows == nil or #rows == 0 then return false end
+    -- A TIMESTAMP comes back with a fractional part that the document never
+    -- writes -- "2026-01-01 00:00:00.000000" against "2026-01-01 00:00:00" --
+    -- so an all-zero fraction is dropped from both sides before comparing. A
+    -- non-zero one is kept, because that is a real difference.
+    local function normalize(value)
+        if value == nil or value == null then return "" end
+        local text = trim(tostring(value))
+        return (string.gsub(text, "%.0+$", ""))
+    end
+    local function same(stored, wanted)
+        return normalize(stored) == normalize(wanted)
+    end
+    return same(rows[1][1], valid_from)
+        and same(rows[1][2], valid_to)
+        and same(rows[1][3], predicate)
+end
+
 local function attribute_binding_matches(query_fn, model, attribute_type,
         attribute_name, representation_name, source_expression)
     local rows = query_fn([[
@@ -694,6 +728,7 @@ local function plan_entity(query_fn, model, entity_name, entity)
 
     local present = existing_representations(query_fn, model, entity_name)
     local declared_primary = nil
+    local entity_coverage = {}
     for _, representation in ipairs(entity.representations or {}) do
         reject_unknown(representation, REPRESENTATION_KEYS,
             "entity '" .. entity_name .. "' representation")
@@ -707,12 +742,38 @@ local function plan_entity(query_fn, model, entity_name, entity)
             declarations.authority = upper(representation.authority)
         end
         if representation.coverage ~= nil then
+            -- Collected for the entity rather than attached to this
+            -- representation, because SET_REPRESENTATION_COVERAGE_BATCH is
+            -- all-or-nothing: it refuses a list that does not name every active
+            -- representation, which is what makes a partitioned set initializable
+            -- at all. A per-representation call therefore cannot succeed, however
+            -- it is spelled -- the entry that named only `primary` was refused
+            -- for "missing: crm" and the one that named only `crm` for "missing:
+            -- primary".
+            --
+            -- The entry still has to say which representation it is about, and
+            -- the enclosing one is the subject, exactly as docs/data-fusion.md
+            -- states for a representation-scoped declaration. Leaving that off is
+            -- what made the whole route unreachable: every such `coverage` came
+            -- back as "COVERAGE_JSON[1].representation_name is required" for a
+            -- name the author had no way to supply, since the document schema has
+            -- no field for it.
+            -- Shape-checked like attribute_bindings above. Without this a
+            -- scalar `coverage` reached `coverage.valid_from` and failed as
+            -- "attempt to index a string value", which names the runtime rather
+            -- than the document.
+            if type(representation.coverage) ~= "table" then
+                error("SEMANTIC_FUSION_019: representation '" .. name
+                    .. "' coverage must be an object with valid_from, valid_to"
+                    .. " and/or predicate")
+            end
             local coverage = representation.coverage
-            declarations.coverage = {{
+            entity_coverage[#entity_coverage + 1] = {
+                representation_name = name,
                 valid_from = trim(coverage.valid_from) ~= "" and trim(coverage.valid_from) or nil,
                 valid_to = trim(coverage.valid_to) ~= "" and trim(coverage.valid_to) or nil,
                 coverage_predicate = trim(coverage.predicate) ~= "" and trim(coverage.predicate) or nil,
-            }}
+            }
         end
         -- Bindings declared on the representation travel with it into the one
         -- call that registers it, because a supplemental source narrower than
@@ -877,6 +938,40 @@ local function plan_entity(query_fn, model, entity_name, entity)
                 binding_priority = tonumber(tostring(binding.binding_priority or 1)) or 1},
         }
     end
+
+    -- One call for the entity, after every representation *and every attribute
+    -- binding* in the document has been applied.
+    --
+    -- Emitted here rather than inside the compound create so that it also reaches
+    -- representations that already exist: those take a different branch above,
+    -- which carried authority and identity and silently dropped coverage --
+    -- accepted, applied nothing, reported OK.
+    --
+    -- And last, because coverage turns the set into a partition, and a partition
+    -- is validated attribute by attribute: every attribute must resolve on every
+    -- partition (SEMANTIC_MODEL_052). Run before the bindings, the batch is
+    -- rejected for a binding the same document was about to add.
+    if #entity_coverage > 0 then
+        operations[#operations + 1] = {
+            label = "SET_REPRESENTATION_COVERAGE_BATCH " .. entity_name,
+            statement = "SET_REPRESENTATION_COVERAGE_BATCH(:model_name,"
+                .. " :entity_name, :coverage_json)",
+            params = {model_name = model.model_name, entity_name = entity_name,
+                coverage_json = json.encode(entity_coverage)},
+            skip_fn = function(runtime_query, runtime_model)
+                for _, entry in ipairs(entity_coverage) do
+                    if not coverage_matches(runtime_query, runtime_model,
+                            entity_name, entry.representation_name,
+                            entry.valid_from, entry.valid_to,
+                            entry.coverage_predicate) then
+                        return false
+                    end
+                end
+                return true
+            end,
+        }
+    end
+
 
     for _, policy in ipairs(entity.attribute_policies or {}) do
         reject_unknown(policy, ATTRIBUTE_POLICY_KEYS,

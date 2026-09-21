@@ -1488,6 +1488,36 @@ local function add_unique(list, seen, item)
     end
 end
 
+-- Which of `candidates` is the author plausibly reaching for with `normalized`?
+--
+-- Two lanes ask this about the same typo. `SELECT bogus FROM obj` is read by the
+-- whole-statement lane, which resolves each field and answers "Unknown semantic
+-- field: bogus. Did you mean: ...?"; the same statement inside a subquery is
+-- read by reference expansion, which has to decide which published columns to
+-- put in the derived table and finds none named. Both must reach the same
+-- suggestions, or a redundant wrapper changes the diagnosis -- which is the
+-- defect this whole fallthrough exists to remove. So the rule lives here once.
+--
+-- `candidates` is an array of `{key = <normalized name>, display = <as shown>}`;
+-- the callers hold different structures, and only the comparison is shared.
+local function near_field_names(normalized, candidates)
+    local near, seen = {}, {}
+    for _, candidate in ipairs(candidates) do
+        local key, display = candidate.key, candidate.display
+        if not seen[display]
+            and (string.find(key, normalized, 1, true)
+                or string.find(normalized, key, 1, true)
+                or (#normalized >= 3
+                    and string.sub(key, 1, 3) == string.sub(normalized, 1, 3))) then
+            seen[display] = true
+            near[#near + 1] = display
+        end
+    end
+    table.sort(near)
+    while #near > 5 do table.remove(near) end
+    return near
+end
+
 local function resolve_field(ctx, field_name, expected_kind)
     if missing(field_name) then
         return nil, error_result("SEMANTIC_REQUEST_020", "Field name is required.")
@@ -1541,23 +1571,16 @@ local function resolve_field(ctx, field_name, expected_kind)
     -- field exists in a different semantic view of the same model. Both are put
     -- in CLARIFICATION_JSON, which was documented as the disambiguation channel
     -- and never populated for anything but ambiguity.
-    local near = {}
-    local seen_near = {}
+    local considered = {}
     for candidate_name, candidate in pairs(ctx.canonical_fields or {}) do
         if expected_kind == nil or candidate.kind == expected_kind then
-            local display = tostring(candidate.name or candidate_name)
-            if not seen_near[display]
-                and (string.find(candidate_name, normalized, 1, true)
-                    or string.find(normalized, candidate_name, 1, true)
-                    or (#normalized >= 3
-                        and string.sub(candidate_name, 1, 3) == string.sub(normalized, 1, 3))) then
-                seen_near[display] = true
-                near[#near + 1] = display
-            end
+            considered[#considered + 1] = {
+                key = candidate_name,
+                display = tostring(candidate.name or candidate_name),
+            }
         end
     end
-    table.sort(near)
-    while #near > 5 do table.remove(near) end
+    local near = near_field_names(normalized, considered)
 
     local elsewhere = {}
     if ctx.model ~= nil and ctx.object ~= nil then
@@ -2826,11 +2849,21 @@ local function log_request(result, request_json, request, model)
     ]])
 end
 
-local function log_query_result(result, original_sql, request, model, client_name)
+-- `want_id` reads the row back so a caller can hand the id to
+-- EXPLAIN_COMPILED_SQL. The preprocessor lane passes false: nothing there can
+-- return an id to anybody, and the read-back is a second statement on the path
+-- every semantic query in the session takes.
+local function log_query_result(result, original_sql, request, model, client_name, want_id)
     local request_model_id = model and model.model_id or null
     local request_version_id = model and model.version_id or null
-    local dimensions = request and request.dimensions or {}
-    local metrics = request and request.metrics or {}
+    -- NULL, not `[]`, when there is no canonical request to read them from.
+    -- EXPLAIN_COMPILED_SQL falls back to PLAN_JSON for these two columns, and
+    -- that fallback tests whether the column is missing -- an empty array is
+    -- present, so writing one suppresses the fallback and reports a statement as
+    -- having asked for no fields at all. The preprocessor lane has no request on
+    -- a cache hit or an expansion, which is most of what it logs.
+    local dimensions = request and request.dimensions or nil
+    local metrics = request and request.metrics or nil
     query([[
         INSERT INTO SYS_SEMANTIC.QUERY_LOG (
           MODEL_ID, VERSION_ID, CLIENT_NAME, ORIGINAL_SQL, GENERATED_SQL,
@@ -2850,14 +2883,19 @@ local function log_query_result(result, original_sql, request, model, client_nam
         original_sql = null_if_missing(original_sql),
         generated_sql = null_if_missing(result.generated_sql),
         plan_json = null_if_missing(result.plan_json),
-        requested_dimensions = null_if_missing(json.encode(dimensions)),
-        requested_metrics = null_if_missing(json.encode(metrics)),
+        requested_dimensions = dimensions ~= nil
+            and null_if_missing(json.encode(dimensions)) or null,
+        requested_metrics = metrics ~= nil
+            and null_if_missing(json.encode(metrics)) or null,
         materialization_used = null_if_missing(result.materialization_used),
         status = null_if_missing(result.status),
         error_code = null_if_missing(result.error_code),
         error_message = null_if_missing(result.error_message),
         runtime_ms = null_if_missing(result.planning_runtime_ms),
     })
+    if want_id == false then
+        return
+    end
     result.query_log_id = scalar([[
         SELECT MAX(QUERY_LOG_ID)
         FROM SEMANTIC_SOURCE.MY_QUERY_LOG
@@ -3234,7 +3272,21 @@ local function compile_request_table(request, options)
     local binding_ok, binding_error = select_attribute_bindings(
         ctx, all_dimensions, planning_metrics, needed_entities)
     if binding_ok == nil then
-        return error_result(error_prefix .. "_080", binding_error)
+        -- The same shape as the model-authorization case above, one level down.
+        -- A caller who cannot read a physical source gets an empty source-column
+        -- probe, and the planner concludes from that that no representation can
+        -- traverse the relationship -- reporting an authorization outcome as a
+        -- modelling defect and sending the reader to look for a bug that is not
+        -- there. The compiler runs with the caller's rights, so being authorized
+        -- for the model is not the same as being able to read what it is built
+        -- on. Named as a possibility, not asserted: this code fires for genuine
+        -- modelling defects too, and for those the sentence costs one line.
+        return error_result(error_prefix .. "_080", tostring(binding_error)
+            .. " If the model is otherwise sound, check that you can read the"
+            .. " relations it is built on: the compiler runs with your rights, so"
+            .. " a model you are authorized for still needs SELECT on its"
+            .. " physical sources."
+            .. " SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL lists them.")
     end
 
     -- Filters and HAVING expressions were resolved while discovering required
@@ -3914,14 +3966,31 @@ local function parse_predicates(ctx, tokens, start_index, end_index, clause)
     for _, chunk in ipairs(chunks) do
         -- and `(a = 1) AND (b = 2)` wraps each conjunct separately.
         local first, last = strip_outer_parens(tokens, chunk[1], chunk[2])
+        -- A conjunct carrying its own SELECT is a subquery predicate -- `EXISTS
+        -- (...)`, `IN (SELECT ...)` -- which this lane does not model. It used
+        -- to find the `=` *inside* the subquery, treat the whole thing as one
+        -- comparison, and emit `WHERE c.region = t0 . CUSTOMER_REGION )`: SQL
+        -- that does not parse, reported to the caller as a syntax error at a
+        -- line of text they never wrote. Refusing here hands the statement to
+        -- reference expansion, which leaves the subquery to Exasol.
+        local conjunct_depth = tokens[first] ~= nil and tokens[first].depth or 0
+        for idx = first, last do
+            if tokens[idx].kind == "word" and sql_text.token_upper(tokens[idx]) == "SELECT" then
+                return nil, error_result("SEMANTIC_QUERY_030", clause.unsupported)
+            end
+        end
         local op_index = nil
         local op = nil
         for idx = first, last do
-            local candidate = predicate_operator_at(tokens, idx)
-            if candidate ~= nil then
-                op_index = idx
-                op = candidate
-                break
+            -- At the conjunct's own depth: an operator nested inside parentheses
+            -- belongs to something this predicate is not.
+            if tokens[idx].depth == conjunct_depth then
+                local candidate = predicate_operator_at(tokens, idx)
+                if candidate ~= nil then
+                    op_index = idx
+                    op = candidate
+                    break
+                end
             end
         end
         if op_index == nil then
@@ -4453,6 +4522,13 @@ function M.compile_sql(sql_text)
         local code = collision_error(msg) and "SEMANTIC_QUERY_100" or "SEMANTIC_QUERY_999"
         return error_result(code, msg), nil, nil
     end
+    -- Expansion's result describes a statement the whole-statement planner never
+    -- built, so the request and model from its failed attempt would misdescribe
+    -- it. Nil is the honest answer until the expanded lane reports its own.
+    local answer = M.with_expansion_fallthrough(sql_text, result)
+    if answer ~= result then
+        return answer, nil, nil
+    end
     return result, request, model
 end
 
@@ -4476,24 +4552,36 @@ end
 -- load-bearing, not tidiness: COMPILER_RUNTIME is nine concatenated sources
 -- sharing one 200-local chunk and had 14 locals of headroom when this was
 -- written. See CLAUDE.md.
--- Refusals that mean "this is not a bare semantic query", which is exactly what
--- expansion exists to handle. Anything else the whole-statement lane says is a
--- real answer and is kept.
-local EXPANDABLE_REFUSALS = {
-    SEMANTIC_QUERY_002 = true,   -- no FROM clause the lane could read
-    SEMANTIC_QUERY_003 = true,   -- FROM is not exactly one schema.object
-    SEMANTIC_QUERY_005 = true,   -- select list is not bare field names
-    SEMANTIC_QUERY_006 = true,   -- a wrapper the lane does not model
-    SEMANTIC_QUERY_008 = true,   -- GROUP BY the lane cannot match to the select
-    SEMANTIC_QUERY_009 = true,   -- statement does not start with SELECT
+-- The refusals expansion owns. Everything else it reports is a failure to read
+-- the statement, and there the whole-statement lane's message is the better one
+-- because it got further into understanding it.
+local EXPANSION_REFUSALS = {
+    SEMANTIC_QUERY_012 = true,   -- composition the layer does not supervise
+    SEMANTIC_QUERY_013 = true,   -- more references than one statement should carry
+    SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
--- SEMANTIC_QUERY_005 is two conditions sharing one code -- the select-list shape
--- above, and an orphaned publication found while resolving the FROM. Letting
--- both fall through is safe rather than sloppy: an orphaned schema resolves to
--- no published columns, so expansion declines and the original refusal is what
--- the caller gets. Splitting the code is worth doing when that file is next
--- touched for its own sake.
+-- `SEMANTIC_QUERY_011` -- "cannot tell which columns of X this statement needs"
+-- -- is expansion's own refusal too, but it is about the statement as a whole,
+-- and the whole-statement lane often has something better to say about the same
+-- text: `Unknown semantic field: bogus. Did you mean: customer_region?` names
+-- what the author wrote and offers the correction. So it wins only where that
+-- lane had no opinion at all.
+local EXPANSION_REFUSALS_WHEN_UNJUDGED = {
+    SEMANTIC_QUERY_011 = true,
+    -- Expansion names an unknown field too, for the statements the other lane
+    -- never looks at -- `SELECT bogus FROM obj` inside a subquery. Where both
+    -- lanes see it, they now produce the same code, which is what
+    -- verify_sql_lane_parity.py holds.
+    SEMANTIC_QUERY_020 = true,
+    -- Re-aggregation, likewise. Where the other lane read the statement it says
+    -- something sharper about the same mistake -- which dimensions an explicit
+    -- GROUP BY failed to cover (`_008`), that HAVING needs a metric (`_026`),
+    -- that COUNT(*) depends on a grain nobody named (`_010`). `_015` is the
+    -- answer for the statements it never looked at, such as a grouped SELECT on
+    -- one side of a UNION.
+    SEMANTIC_QUERY_015 = true,
+}
 
 local bi_expansion = {}
 do
@@ -4621,6 +4709,104 @@ do
     -- it could not tell, and returned seven rows where three were correct --
     -- with correct totals, which is the most dangerous shape of wrong, because
     -- the number a human checks first agrees.
+    -- Words a SELECT statement carries that are syntax, not field names. The
+    -- list exists because the near-match rule is deliberately generous --
+    -- substring in either direction -- and would otherwise answer "Unknown
+    -- semantic field: SELECT. Did you mean: selection?" for a model that
+    -- happens to have a column whose name starts the same way. Only words that
+    -- can stand unqualified in the statements this lane sees need to be here.
+    local STATEMENT_WORDS = {}
+    for word in ([[SELECT DISTINCT ALL FROM WHERE GROUP BY HAVING ORDER ASC DESC
+        LIMIT OFFSET FETCH FIRST NEXT ROWS ONLY JOIN INNER LEFT RIGHT FULL OUTER
+        CROSS NATURAL ON USING UNION INTERSECT EXCEPT MINUS AS AND OR NOT IN
+        EXISTS BETWEEN LIKE IS NULL TRUE FALSE CASE WHEN THEN ELSE END WITH
+        OVER PARTITION LATERAL VALUES]]):gmatch("%S+") do
+        STATEMENT_WORDS[word] = true
+    end
+
+    -- Names the reference's own SELECT list uses as if they were its fields,
+    -- but which the object does not publish. Returns a ready refusal per name so
+    -- the caller does not rebuild the message.
+    --
+    -- Scoped to that SELECT list on purpose. Every other word in the statement
+    -- is somebody else's: `SELECT * FROM (SELECT bogus FROM obj) w` also
+    -- contains `w`, and a wider scan reported the wrapper's alias as an unknown
+    -- field. The list between this block's `SELECT` and the `FROM` above the
+    -- reference is exactly the set that has to resolve against it.
+    function bi_expansion.unresolved_field_names(tokens, reference, by_name)
+        local from_index, select_index
+        for index = reference.first - 1, 1, -1 do
+            local token = tokens[index]
+            if token.depth == reference.depth then
+                local word = sql_text.token_upper(token)
+                if from_index == nil and word == "FROM" then
+                    from_index = index
+                elseif from_index ~= nil and word == "SELECT" then
+                    select_index = index
+                    break
+                end
+            end
+        end
+        if select_index == nil or from_index == nil then return {} end
+
+        local candidates = {}
+        for _, column in ipairs(reference.columns or {}) do
+            candidates[#candidates + 1] = {
+                key = string.lower(tostring(column.name)),
+                display = column.name,
+            }
+        end
+
+        local found, seen = {}, {}
+        for index = select_index + 1, from_index - 1 do
+            local token = tokens[index]
+            local previous = tokens[index - 1]
+            local following = tokens[index + 1]
+            local is_bare_word = (token.kind == "word" or token.kind == "identifier")
+                and (previous == nil or previous.kind ~= "symbol" or previous.text ~= ".")
+                -- `x.y` -- a qualifier, not a field of ours.
+                and (following == nil or following.kind ~= "symbol"
+                     or (following.text ~= "." and following.text ~= "("))
+                -- `f(` -- a function call, not a field.
+            -- `x AS name` declares an output column; the name is not a field
+            -- of the object and must not be reported as an unknown one.
+            if is_bare_word and sql_text.token_upper(previous) == "AS" then
+                is_bare_word = false
+            end
+            if is_bare_word then
+                local text = token_identifier_value(token) or ""
+                local normalized = string.lower(text)
+                if text ~= "" and not STATEMENT_WORDS[upper(text)]
+                    and by_name[upper(text)] == nil and not seen[normalized] then
+                    seen[normalized] = true
+                    local near = near_field_names(normalized, candidates)
+                    local detail = ""
+                    local clarification = nil
+                    -- An empty clarification would turn every typo into
+                    -- NEEDS_CLARIFICATION with nothing to act on, which is the
+                    -- same reason the whole-statement lane omits it.
+                    if #near > 0 then
+                        detail = " Did you mean: " .. table.concat(near, ", ") .. "?"
+                        clarification = {
+                            message = "Unknown semantic field.",
+                            field = text,
+                            object = tostring(reference.object_name),
+                            candidates = near,
+                            clarification_question = "Which field did you mean instead of "
+                                .. text .. "?",
+                        }
+                    end
+                    -- The SQL family, not SEMANTIC_REQUEST: expansion runs only
+                    -- in the SQL lane, and this is the same refusal the bare form
+                    -- of the statement gets there.
+                    found[#found + 1] = error_result("SEMANTIC_QUERY_020",
+                        "Unknown semantic field: " .. text .. "." .. detail, clarification)
+                end
+            end
+        end
+        return found
+    end
+
     function bi_expansion.infer_columns(tokens, reference, columns, by_name)
         local wanted, seen = {}, {}
         local alias_upper = reference.alias and upper(reference.alias) or nil
@@ -4690,6 +4876,23 @@ do
             end
         end
 
+        -- Checked whether or not anything resolved, because a *partial* match is
+        -- the dangerous one. `SELECT CUSTOMER_REGION, TOTAL_FREIGHT FROM
+        -- ORDER_HEADER` resolves the metric and not the dimension -- that
+        -- dimension belongs to a different semantic view of the same model --
+        -- and building the derived table from the half that resolved leaves the
+        -- outer statement selecting a column the derived table does not have.
+        -- Exasol then says `object CUSTOMER_REGION not found`, which is true of
+        -- the generated text and useless about the query: the answer the author
+        -- needs is that the field belongs to another view, and the
+        -- whole-statement path already says exactly that. Silently dropping a
+        -- requested column is the worse half -- it is how a statement comes back
+        -- answering a question nobody asked.
+        local unresolved = bi_expansion.unresolved_field_names(tokens, reference, by_name)
+        if #unresolved > 0 then
+            return nil, nil, unresolved[1]
+        end
+
         if #wanted == 0 then
             return nil, "no column of " .. tostring(reference.published_schema) .. "."
                 .. tostring(reference.object_name) .. " is referenced"
@@ -4713,6 +4916,45 @@ do
     -- ordinary SQL can repeat its rows, and re-aggregating the result then
     -- double-counts. The layer stops supervising at the edge of the derived
     -- table, and the number is wrong with nothing to show for it.
+    -- Does the reference's own query block re-aggregate it?
+    --
+    -- A semantic object is already aggregated to the grain its fields imply.
+    -- `SELECT region, COUNT(*) FROM obj GROUP BY region` groups that result
+    -- again, and the number it returns is a count of already-grouped rows --
+    -- which is not the count anyone asked for. Before the two lanes were joined
+    -- the whole-statement lane refused this outright; expansion would have
+    -- turned it into `SELECT region, COUNT(*) FROM (<compiled>) GROUP BY region`
+    -- and answered with a plausible, wrong number, which is the worst shape a
+    -- defect can take because the figure a reviewer checks first looks sane.
+    --
+    -- Depth is what separates this from the supported wrapper. In
+    -- `SELECT COUNT(*) FROM (SELECT t0.REGION FROM obj t0) z` the aggregation
+    -- sits in the *outer* block and the reference in the inner one, so the
+    -- caller has named the grain explicitly -- that is the documented way to
+    -- count a semantic result, and it stays supported. Only a GROUP BY or
+    -- HAVING in the same block as the reference is re-aggregation.
+    function bi_expansion.reaggregated_in_block(tokens, reference)
+        for index = reference.last + 1, #tokens do
+            local token = tokens[index]
+            if token.depth < reference.depth then
+                return false
+            end
+            if token.depth == reference.depth then
+                local word = sql_text.token_upper(token)
+                if word == "GROUP" or word == "HAVING" then
+                    return true
+                end
+                -- A set operator starts a new query block; anything past it
+                -- belongs to a different SELECT and is not this one's grain.
+                if word == "UNION" or word == "INTERSECT"
+                    or word == "EXCEPT" or word == "MINUS" then
+                    return false
+                end
+            end
+        end
+        return false
+    end
+
     function bi_expansion.composed_in_from(tokens, reference)
         for index = reference.last + 1, #tokens do
             local token = tokens[index]
@@ -4833,8 +5075,28 @@ do
         -- valid after a later one has been spliced.
         local rewritten = statement_text
         local expanded = 0
+        local inner_plan_json, inner_model
         for index = #applicable, 1, -1 do
             local reference = applicable[index]
+
+            -- Behind the same opt-in as the join guard, and for the same
+            -- reason: SET_MODEL_DERIVED_COMPOSITION says this model accepts
+            -- ordinary-SQL semantics over its published objects, and
+            -- re-aggregation is ordinary-SQL semantics. Refusing it anyway would
+            -- make the opt-in mean two different things depending on which
+            -- hazard the statement happened to reach.
+            if bi_expansion.reaggregated_in_block(tokens, reference)
+                and not bi_expansion.allows_composition(reference.published_schema) then
+                return error_result("SEMANTIC_QUERY_015",
+                    "This statement groups " .. tostring(reference.published_schema) .. "."
+                    .. tostring(reference.object_name) .. " again. The object is already"
+                    .. " aggregated to the grain its fields imply, so grouping it a"
+                    .. " second time counts rows that are themselves groups. Select the"
+                    .. " fields you want the grain to be, or wrap the object in a"
+                    .. " subquery and aggregate that, which names the grain explicitly."
+                    .. " A model may accept ordinary-SQL semantics instead with"
+                    .. " SET_MODEL_DERIVED_COMPOSITION.")
+            end
 
             if bi_expansion.composed_in_from(tokens, reference)
                 and not bi_expansion.allows_composition(reference.published_schema) then
@@ -4848,8 +5110,14 @@ do
                     .. " SET_MODEL_DERIVED_COMPOSITION.")
             end
 
-            local wanted, why =
+            local wanted, why, named_refusal =
                 bi_expansion.infer_columns(tokens, reference, reference.columns, reference.by_name)
+            if named_refusal ~= nil then
+                -- The author named a field this object does not have. Saying so
+                -- beats saying the projection could not be inferred, and it is
+                -- what the same statement gets without the wrapper.
+                return named_refusal
+            end
             if wanted == nil then
                 return error_result("SEMANTIC_QUERY_011",
                     "Cannot tell which columns of " .. tostring(reference.published_schema)
@@ -4875,6 +5143,18 @@ do
                     "Expansion could not compile " .. inner)
             end
 
+            -- Kept so the statement can be explained afterwards. The governance
+            -- prose, the materialization and the requested fields are all read
+            -- back out of PLAN_JSON, so a log row without one records that a
+            -- query happened and answers nothing about it -- which is the state
+            -- QUERY_LOG was in for this lane. Only a single-reference statement
+            -- carries one: with two, there are two plans and no honest way to
+            -- present them as the plan for the statement.
+            if #applicable == 1 then
+                inner_plan_json = compiled.plan_json
+                inner_model = reference.model
+            end
+
             -- Freezing: this statement is about to store the compiled SQL in a
             -- view, where it will keep answering after the model moves on.
             --
@@ -4898,9 +5178,21 @@ do
             -- A derived table needs a name for the outer statement to qualify
             -- it. When the author gave none they cannot be referring to it by
             -- alias, so any name works and a generated one cannot collide with
-            -- theirs.
-            local alias = reference.alias_text or ("__esv_ref_" .. index)
-            local replacement = "(\n" .. compiled.generated_sql .. "\n) " .. alias
+            -- theirs -- but it has to be *quoted*: Exasol rejects a bare
+            -- identifier beginning with an underscore, so the unquoted form
+            -- turned every alias-free statement into generated SQL that did not
+            -- parse. The caller then saw a syntax error pointing at a line of
+            -- text they never wrote.
+            local alias = reference.alias_text or ('"__esv_ref_' .. index .. '"')
+            -- On one line, so the statement Exasol parses has the same line
+            -- numbering as the statement the author wrote. Splicing eight lines
+            -- of compiled SQL into the middle of a one-line query is what made
+            -- every later error report a line that did not exist -- see
+            -- sql_text.flatten_lines. The pretty form is still what a frozen
+            -- view stores and what EXPLAIN shows; only the text handed back to
+            -- the parser is folded.
+            local replacement = "(" .. sql_text.flatten_lines(compiled.generated_sql)
+                .. ") " .. alias
             rewritten = string.sub(rewritten, 1, tokens[reference.first].start_pos - 1)
                 .. replacement
                 .. string.sub(rewritten, tokens[reference.last].end_pos + 1)
@@ -4932,8 +5224,78 @@ do
             })
         end
 
-        return {status = "OK", generated_sql = rewritten, expanded_references = expanded}
+        return {
+            status = "OK",
+            generated_sql = rewritten,
+            expanded_references = expanded,
+            plan_json = inner_plan_json,
+            model = inner_model,
+        }
     end
+end
+
+-- Ask reference expansion about a statement the whole-statement lane could not
+-- compile, and decide which of the two answers the caller gets.
+--
+-- On the module table, and called through it, for two reasons that are both
+-- about this chunk rather than about design. It has to be defined *after* the
+-- expansion namespace, because a local declared later is not in scope for a
+-- function defined earlier and the body would bind `bi_expansion` as a nil
+-- global. And it cannot be a forward-declared local, because the chunk is at
+-- the 200-local ceiling -- adding one failed the install with "too many local
+-- variables in main function", 8000 lines away from the declaration. Reaching
+-- it through `M` costs no local and resolves at call time.
+--
+-- Shared, and that is the point. This logic lived in the preprocessor entry
+-- point alone, so the *same statement* got two answers depending on how the
+-- caller reached the layer: `SELECT region FROM obj ORDER BY revenue DESC` ran
+-- through the preprocessor and was refused by COMPILE_SQL, which is also what
+-- EXPLAIN_COMPILED_SQL and COMPILE_SQL_DEBUG call -- so the surfaces an author
+-- reaches for to find out *why* a query behaved a certain way disagreed with
+-- the query. Joining the two SQL lanes is only true if every door opens on the
+-- same one.
+--
+-- The rule that keeps precise refusals precise: expansion may turn a refusal
+-- into a *success*, never into a different refusal. `SELECT bogus FROM obj`
+-- keeps "Unknown semantic field: bogus. Did you mean: ...?" rather than being
+-- re-described as a statement whose columns could not be inferred.
+function M.with_expansion_fallthrough(sql_text, result)
+    if result ~= nil and result.status == "OK" then
+        return result
+    end
+    local lane_had_an_opinion = result ~= nil and result.status ~= "UNCHANGED"
+    local expanded_ok, expanded = pcall(bi_expansion.rewrite, sql_text)
+    if not expanded_ok then
+        -- Expansion broke rather than refused. If the other lane read the
+        -- statement and said why it would not compile it, that answer is still
+        -- true and still the best one available -- replacing `COUNT(*) over a
+        -- semantic object is refused` with `reference expansion failed` would
+        -- hide a good reason behind a bad one.
+        if lane_had_an_opinion then
+            return result
+        end
+        -- With no such answer the alternative is passing the statement through
+        -- untouched, so Exasol reports `object SEMANTIC_X.Y not found` -- which
+        -- names the symptom and hides the cause. Surfaced rather than swallowed.
+        return error_result("SEMANTIC_QUERY_014",
+            "Reference expansion failed on this statement: " .. tostring(expanded))
+    end
+    -- Expansion's answer is taken when it compiled the statement, and also
+    -- when it *refused on its own terms*: the composition guard, the
+    -- projection it could not infer, and the governance refusal from the
+    -- compile behind it are decisions about this statement, not a failure
+    -- to read it. Returning the whole-statement lane's "FROM must reference
+    -- one published semantic object" in place of "this joins the object to
+    -- another relation and the re-aggregation will double-count" would
+    -- describe the shape and lose the reason.
+    if expanded ~= nil
+        and (expanded.status == "OK"
+             or EXPANSION_REFUSALS[expanded.error_code or ""]
+             or (not lane_had_an_opinion
+                 and EXPANSION_REFUSALS_WHEN_UNJUDGED[expanded.error_code or ""])) then
+        return expanded
+    end
+    return result
 end
 
 function M.compile_sql_for_preprocessor(sql_text)
@@ -4945,13 +5307,17 @@ function M.compile_sql_for_preprocessor(sql_text)
         validate = false,
         unchanged_nonsemantic = true,
         unchanged_unknown_schema = true,
-        -- This lane writes no request log, so it is the one that can answer from
-        -- the cache before the request has been built. See parse_semantic_sql.
+        -- This lane builds no canonical request before answering, so it is the
+        -- one that can serve from the cache before the request exists. See
+        -- parse_semantic_sql. It does write QUERY_LOG, after the fact and from
+        -- whatever the compile produced -- a cache hit has no `request`, and the
+        -- fields that would have come from one are read back out of PLAN_JSON by
+        -- EXPLAIN_COMPILED_SQL.
         sql_cache = true,
     }
-    local ok, result
+    local ok, result, request, model
     for attempt = 0, COLLISION_RETRIES do
-        ok, result = pcall(compile_sql_internal, sql_text, options)
+        ok, result, request, model = pcall(compile_sql_internal, sql_text, options)
         if ok then break end
         if not collision_error(tostring(result)) then break end
         if attempt < COLLISION_RETRIES then busy_backoff() end
@@ -4964,30 +5330,42 @@ function M.compile_sql_for_preprocessor(sql_text)
 
     -- The whole-statement lane is tried first and kept: it is faster, and it
     -- already does `SELECT *` expansion and GROUP BY inference for the pure
-    -- case. Expansion is what happens when the statement is *not* pure -- a
-    -- join, a CTE, a union, a TopN wrapper, `CREATE VIEW` -- which the lane
-    -- declines by shape rather than by anything being wrong with it.
+    -- case. Expansion is what happens when that lane cannot compile the
+    -- statement -- a join, a CTE, a union, a TopN wrapper, `CREATE VIEW`,
+    -- arithmetic in the select list, `ORDER BY` a column it did not select,
+    -- `OFFSET`, `IN (subquery)`, `SELECT DISTINCT`, a predicate over somebody
+    -- else's table.
     --
-    -- Only those shape refusals fall through. A statement that named an unknown
-    -- field keeps that answer: re-reading it as a reference to expand would
-    -- replace a precise refusal with a vaguer one.
-    if result == nil
-        or result.status == "UNCHANGED"
-        or (result.status == "ERROR" and EXPANDABLE_REFUSALS[result.error_code or ""]) then
-        local expanded_ok, expanded = pcall(bi_expansion.rewrite, sql_text)
-        if not expanded_ok then
-            -- Surfaced rather than swallowed. Expansion only runs on a statement
-            -- the lane already declined, so the alternative to an error here is
-            -- Exasol reporting `object SEMANTIC_X.Y not found` -- which names the
-            -- symptom and hides the cause.
-            return error_result("SEMANTIC_QUERY_014",
-                "Reference expansion failed on this statement: " .. tostring(expanded))
-        end
-        if expanded ~= nil and expanded.status ~= "UNCHANGED" then
-            return expanded
-        end
+    -- This used to fall through only for a short list of refusal codes, which
+    -- meant a redundant subquery was the difference between a statement working
+    -- and not: wrapping it routed it here, and nothing told the caller that. The
+    -- bare form is the one the documentation teaches, so the two lanes are now
+    -- one path -- whatever the first cannot compile, the second is asked about.
+    --
+    local answer = M.with_expansion_fallthrough(sql_text, result)
+
+    -- The lane most queries take is the one that recorded nothing. QUERY_LOG was
+    -- written only by COMPILE_SQL_DEBUG, so `MY_QUERY_LOG` stayed empty,
+    -- EXPLAIN_COMPILED_SQL had no handle to explain, and the answer this project
+    -- offers to "why is my number different from my colleague's" was reachable
+    -- from every lane except the one BI tools use. SEMANTIC_USER was even
+    -- granted INSERT on the table, for a writer that never ran.
+    --
+    -- Only statements this lane actually rewrote are recorded. UNCHANGED means
+    -- the text was somebody else's ordinary SQL, and logging those would fill
+    -- the table with rows the semantic layer had no part in -- with the
+    -- preprocessor set database-wide, that is every statement in every session.
+    --
+    -- Best effort, and deliberately so: a query that answered correctly must not
+    -- fail because the layer could not describe it afterwards.
+    if answer ~= nil and answer.status == "OK" then
+        local logged_model = answer.model or model
+        pcall(log_query_result, answer, sql_text, request, logged_model,
+            answer.expanded_references ~= nil and "PREPROCESSOR:EXPANSION"
+                or "PREPROCESSOR",
+            false)
     end
-    return result
+    return answer
 end
 
 function M.compile_request_json(request_json)

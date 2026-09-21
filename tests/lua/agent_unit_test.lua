@@ -317,12 +317,16 @@ local function handle_row(handle_type, handle_id)
         GENERATED_SQL = "SELECT 1",
         PLAN_JSON = '{"dimensions":["region"],"metrics":["total_revenue"],'
             .. '"selected_materialization":{"materialization_name":"sales_by_region"}}',
+        -- Read through the principal-scoped views, so the row carries the
+        -- principal it belongs to; the governance prose says who ran a query
+        -- when that is not who compiled the cached plan.
+        USER_NAME = "ANA_NORTH",
     }
 end
 
 test("agent explain normalizes handles and derives missing plan fields", function()
     local explained = with_query(function(sql, params)
-        if contains(sql, "FROM SYS_SEMANTIC.AGENT_REQUEST_LOG") then
+        if contains(sql, "FROM SEMANTIC_SOURCE.MY_AGENT_REQUESTS") then
             return {handle_row("AGENT_REQUEST", params.handle_id)}
         end
         error("unexpected handle SQL")
@@ -340,7 +344,7 @@ test("agent feedback links the correct handle and optional suggestion", function
     local feedback_params = nil
     local suggestion_params = nil
     local function mock(sql, params)
-        if contains(sql, "FROM SYS_SEMANTIC.QUERY_LOG") then
+        if contains(sql, "FROM SEMANTIC_SOURCE.MY_QUERY_LOG") then
             local row = handle_row("QUERY_LOG", params.handle_id)
             row.REQUESTED_DIMENSIONS = '["region"]'
             row.REQUESTED_METRICS = '["total_revenue"]'
@@ -621,6 +625,28 @@ test("the governance block is rendered as prose, or not at all", function()
             unvouched_sources = {}},
     }))
     assert_contains(clean, "Every relation it reads is one this model vouches for")
+
+    -- A compile is cached and served to anyone inside the same trust boundary,
+    -- so the plan carries whoever compiled it first. Telling the person who just
+    -- ran the query that SYS compiled it answers a question they did not ask,
+    -- and hides the one that matters: the rows they saw were resolved with their
+    -- own rights, not SYS's.
+    local cached = api.governance_narrative(api.json_encode({
+        governance = {compiled_by = "SYS", governance_mode = "OPEN",
+            sources = {}, unvouched_sources = {}},
+    }), "ANA_NORTH")
+    assert_contains(cached, "Run by ANA_NORTH")
+    assert_contains(cached, "compiled by SYS")
+    assert_contains(cached, "ANA_NORTH's rights")
+
+    -- Same principal, so there is nothing to distinguish and the plain sentence
+    -- stands. Passing the runner must not make every narrative wordier.
+    local own = api.governance_narrative(api.json_encode({
+        governance = {compiled_by = "ANA_NORTH", governance_mode = "OPEN",
+            sources = {}, unvouched_sources = {}},
+    }), "ANA_NORTH")
+    assert_contains(own, "Compiled by ANA_NORTH")
+    assert_true(string.find(own, "Run by", 1, true) == nil)
 
     -- A plan from before this existed, or one that is not a plan at all, says
     -- nothing rather than guessing. `null` is Exasol's SQL NULL sentinel, which

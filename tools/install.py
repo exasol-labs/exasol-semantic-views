@@ -35,12 +35,15 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALL_FILES = [
     ROOT / "sql/install/000_create_schemas.sql",
     ROOT / "sql/install/001_create_semantic_catalog.sql",
+    # Before the catalog views, which read it. SEMANTIC_SOURCE is what makes
+    # those views principal-scoped: they read the filtered views rather than the
+    # tables, so the scoping is inherited rather than restated 46 times.
+    ROOT / "sql/install/001b_create_semantic_source_views.sql",
     ROOT / "sql/install/002_create_semantic_catalog_views.sql",
     ROOT / "sql/install/003_create_semantic_admin_scripts.sql",
     ROOT / "sql/install/004_create_semantic_preprocessor.sql",
     ROOT / "sql/install/005_create_semantic_surface_helpers.sql",
     ROOT / "sql/install/006_create_semantic_agent_views.sql",
-    ROOT / "sql/install/007_create_semantic_source_views.sql",
 ]
 
 EXAMPLE_FILES = [

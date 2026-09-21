@@ -252,6 +252,69 @@ def main() -> None:
         )
     print(f"ok fan-out would have overstated freight by {inflated - total_freight}")
 
+    # ---- what the split costs the person asking the question ---------------
+    #
+    # The three rules that follow from it, in the order an author meets them.
+    # Documented in docs/creating-metrics.md; asserted here so the documentation
+    # cannot drift from the behaviour.
+    import re as _re
+
+    lane = connect()
+    lane.execute("ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT ="
+                 " SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR")
+
+    def refusal(sql):
+        try:
+            lane.execute(sql).fetchall()
+            return "OK"
+        except Exception as exception:  # noqa: BLE001 -- the refusal is the result
+            text = " ".join(str(exception).split())
+            found = _re.search(r"SEMANTIC_[A-Z]+_\d+", text)
+            return (found.group(0), text) if found else ("RAW", text)
+
+    # 2. The dimension cannot simply be added to the second view: names are
+    #    unique per model, so the author needs a second, differently named copy.
+    admin = connect()
+    try:
+        admin.execute(
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_DIMENSION('sales', 'ORDER_HEADER',"
+            " 'customer', 'customer_region', 'c.region', 'VARCHAR(100)',"
+            " 'Region', 'probe', NULL, TRUE)")
+        raise AssertionError(
+            "customer_region was accepted on a second view; dimension names are"
+            " supposed to be unique per model")
+    except AssertionError:
+        raise
+    except Exception as exception:  # noqa: BLE001
+        text = " ".join(str(exception).split())
+        if "SEMANTIC_ADMIN_019" not in text:
+            raise AssertionError(f"expected SEMANTIC_ADMIN_019, got {text[:160]}")
+    admin.rollback()
+    print("ok a dimension name cannot be shared between the two views"
+          " (SEMANTIC_ADMIN_019)")
+
+    # 3. Asking for it on the view that does not expose it names the view that
+    #    does, rather than failing as a missing column of generated SQL.
+    code, text = refusal("SELECT CUSTOMER_REGION, TOTAL_FREIGHT"
+                         " FROM SEMANTIC_SALES.ORDER_HEADER")
+    if code != "SEMANTIC_QUERY_020":
+        raise AssertionError(f"expected SEMANTIC_QUERY_020, got {code}: {text[:160]}")
+    if "semantic view SALES" not in text:
+        raise AssertionError(
+            f"the refusal does not name the view that has the field: {text[:200]}")
+    print("ok a field of the other view is refused by name, and names that view")
+
+    # 4. And the two published views cannot be joined back together.
+    code, _ = refusal(
+        "SELECT a.CUSTOMER_REGION, a.TOTAL_REVENUE, b.TOTAL_FREIGHT"
+        " FROM SEMANTIC_SALES.SALES a"
+        " JOIN SEMANTIC_SALES.ORDER_HEADER b ON 1 = 1")
+    if code != "SEMANTIC_QUERY_012":
+        raise AssertionError(f"expected SEMANTIC_QUERY_012, got {code}")
+    print("ok the two views cannot be joined back together (SEMANTIC_QUERY_012)")
+
+    lane.close()
+    admin.close()
     con.close()
     print()
     print("fan-out guardrails verified.")

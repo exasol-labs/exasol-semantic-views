@@ -1603,7 +1603,7 @@ end
 -- REMOVE_ENTITY_REPRESENTATION -- appeared in no message. The suffix is added
 -- only when every named representation is an ALTERNATE: a PRIMARY cannot be
 -- removed, so suggesting it would be wrong.
-local function alternate_representation_remedy(ctx, names)
+local function alternate_representation_remedy(ctx, names, reason)
     if names == nil or #names == 0 then return "" end
     local role_by_name = {}
     for _, representation in ipairs(ctx.representations or {}) do
@@ -1633,6 +1633,27 @@ local function alternate_representation_remedy(ctx, names)
             .. " (SEMANTIC_MODEL_060). Add it with ADD_IDENTITY_BINDING -- plus"
             .. " ADD_IDENTITY_MAPPING_RELATION for a MAPPED binding -- or remove"
             .. " the representation with REMOVE_ENTITY_REPRESENTATION."
+    end
+    -- A key-set difference is not something the three generic completions fix,
+    -- and offering them sends the reader round all three. Attribute bindings
+    -- declare where a *column* comes from and say nothing about which keys
+    -- exist; a certified semantic identity is checked against the same key set
+    -- and refuses on its own terms (SEMANTIC_MODEL_049); temporal coverage
+    -- describes a source that is a time partition, not one that is simply
+    -- incomplete. What does work is presenting the source over the full key set,
+    -- so the message says that instead.
+    if reason == "KEY_SET" then
+        return " " .. subject .. " resolves to a different set of keys than"
+            .. " PRIMARY. That is a difference in rows, not in columns:"
+            .. " attribute bindings declare where a column comes from and cannot"
+            .. " settle which keys exist, a certified semantic identity is"
+            .. " checked against this same key set (SEMANTIC_MODEL_049), and"
+            .. " temporal coverage describes a source that covers a time range"
+            .. " rather than one that is incomplete. A source that genuinely"
+            .. " carries fewer keys is registered by presenting it over the full"
+            .. " set -- a view that LEFT JOINs it onto the primary's keys, with"
+            .. " the attributes it does not carry left NULL -- or removed with"
+            .. " REMOVE_ENTITY_REPRESENTATION."
     end
     return " " .. subject .. " is registered but not yet usable, and blocks"
         .. " unrelated authoring until it is. Complete the declaration (temporal"
@@ -2512,7 +2533,7 @@ local function validate_representation_data_equivalence(ctx)
                                     .. tostring(primary_probe.distinct_count)
                                     .. ", alternate=" .. tostring(probe.distinct_count) .. "."
                                     .. alternate_representation_remedy(ctx,
-                                        {representation_name}))
+                                        {representation_name}, "KEY_SET"))
                         elseif primary_probe.grouped_keys ~= nil
                             and probe.grouped_keys ~= nil then
                             local missing_from_alternate, forward_error = probe_count(
@@ -2541,7 +2562,7 @@ local function validate_representation_data_equivalence(ctx)
                                         .. ", missing_in_primary="
                                         .. tostring(missing_from_primary) .. "."
                                         .. alternate_representation_remedy(ctx,
-                                            {representation_name}))
+                                            {representation_name}, "KEY_SET"))
                             end
                         end
                     end
@@ -3461,6 +3482,7 @@ local function check_frozen_views(ctx)
             tostring(row_value(row, "TRUST_CLASS", 2))
     end
 
+    local frozen_view_count = 0
     for _, row in ipairs(rows or {}) do
         -- A record whose view is gone is not a finding. Someone dropped it,
         -- which is the correct way to retire one.
@@ -3480,6 +3502,22 @@ local function check_frozen_views(ctx)
             -- here is the part that can be answered from the catalog alone, and
             -- it is the dangerous part.
 
+            -- Whether this view still matches what the model would compile is
+            -- the question nobody is asked. It cannot be answered here: there is
+            -- no catalog signal to key it on. The version never changes,
+            -- MODELS.UPDATED_AT does not move on authoring, and METRICS,
+            -- DIMENSIONS and FACTS carry no timestamps at all -- so "was the
+            -- definition edited since this view was frozen" is not a question the
+            -- catalog can answer. Comparing the frozen column list would catch a
+            -- rename and miss the case that matters, an expression changed under
+            -- the same name.
+            --
+            -- So this says what it knows and names the one thing that does
+            -- answer exactly. A frozen view is silent by construction: it goes on
+            -- serving the model as it was, correctly, for as long as nobody
+            -- asks. This is the moment someone is looking.
+            frozen_view_count = frozen_view_count + 1
+
             local frozen_relations = row_value(row, "FROZEN_RELATIONS", 4)
             for relation in string.gmatch(tostring(frozen_relations or ""), "[^,]+") do
                 local trust_class = trusted[relation]
@@ -3497,6 +3535,21 @@ local function check_frozen_views(ctx)
                 end
             end
         end
+    end
+
+    if frozen_view_count > 0 then
+        add_issue(ctx, "WARNING", "MODEL", tostring(ctx.model_name),
+            "SEMANTIC_MODEL_067",
+            tostring(frozen_view_count) .. " view(s) compiled from this model are"
+            .. " frozen: they answer with the model as it was when each was made,"
+            .. " for anyone granted them, with no preprocessor. Whether any of"
+            .. " them still matches what this model would compile today cannot be"
+            .. " answered from the catalog -- run EXECUTE SCRIPT"
+            .. " SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS("
+            .. sql_text.sql_string(tostring(ctx.model_name))
+            .. "), which recompiles each"
+            .. " one and reports CURRENT, STALE or DROPPED. Drop a view to retire"
+            .. " it and this notice with it.")
     end
 end
 

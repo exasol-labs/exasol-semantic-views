@@ -27,6 +27,7 @@ agrees.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -61,11 +62,13 @@ def rows_of(con, sql: str) -> set:
 
 
 def refusal_code(exc: Exception) -> str:
+    # Matched, not enumerated. This was a list of three codes, so when a refusal
+    # legitimately changed to a fourth the check reported the whole Exasol
+    # message as the "code" and the failure read as if the statement had been
+    # accepted -- the diagnosis cost more than the defect.
     text = str(exc)
-    for code in ("SEMANTIC_QUERY_011", "SEMANTIC_QUERY_012", "SEMANTIC_QUERY_013"):
-        if code in text:
-            return code
-    return text.replace("\n", " ")[:100]
+    found = re.search(r"SEMANTIC_[A-Z]+_\d+", text)
+    return found.group(0) if found else text.replace("\n", " ")[:100]
 
 
 # Every shape here was refused before expansion. Each is checked for the values
@@ -122,13 +125,19 @@ def main() -> None:
           con.execute("SELECT COUNT(*) FROM (SELECT t0.CUSTOMER_REGION"
                       " FROM SEMANTIC_SALES.SALES t0) z").fetchone()[0], 3)
 
-    # Projection inference refuses instead of guessing.
+    # Projection inference refuses instead of guessing. The code is the
+    # whole-statement lane's `_005` rather than expansion's `_011`, because both
+    # lanes now see every statement (see verify_sql_lane_parity.py) and the one
+    # that can name what is wrong with this SELECT list wins: "SELECT supports
+    # semantic field names, MEASURE(metric), or *" says more than "cannot tell
+    # which columns this needs". Expansion's `_011` still surfaces where the
+    # other lane had no opinion at all.
     try:
         con.execute("SELECT 1 FROM SEMANTIC_SALES.SALES t0").fetchall()
         fail("a statement naming no column is refused", "it was accepted")
     except Exception as exc:
         check("a statement naming no column is refused",
-              refusal_code(exc), "SEMANTIC_QUERY_011")
+              refusal_code(exc), "SEMANTIC_QUERY_005")
 
     # More than one model may carry the same PUBLISHED_SCHEMA -- the OSI
     # round-trip creates three beside the example model, all publishing to

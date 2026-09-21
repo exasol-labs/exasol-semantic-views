@@ -147,6 +147,71 @@ test("a representation carries its own attribute bindings into one call", functi
     assert_contains(tostring(empty_err), "SEMANTIC_FUSION_017")
 end)
 
+test("representation-scoped coverage becomes one call for the entity", function()
+    -- It used to become none at all. The batch entry was built without naming
+    -- the representation it was about, so every representation-scoped `coverage`
+    -- was refused with "COVERAGE_JSON[1].representation_name is required" -- for
+    -- a field the document schema does not have.
+    --
+    -- And one entry per representation could not have worked either:
+    -- SET_REPRESENTATION_COVERAGE_BATCH refuses a list that does not name every
+    -- active representation, which is what makes a partitioned set
+    -- initializable at all. So the entries are collected for the entity.
+    local document = {entities = {customer = {
+        representations = {
+            {name = "primary", source_schema = "MDM", source_object = "C_MDM",
+             priority = 10,
+             coverage = {valid_to = "2026-01-01 00:00:00",
+                         predicate = "c.opened_at < TIMESTAMP '2026-01-01 00:00:00'"}},
+            {name = "crm", source_schema = "CRM", source_object = "C_CRM",
+             priority = 20,
+             coverage = {valid_from = "2026-01-01 00:00:00",
+                         predicate = "c.opened_at >= TIMESTAMP '2026-01-01 00:00:00'"}},
+        },
+    }}}
+    local query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "PUBLISHED"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
+        end
+        return {}
+    end)
+    local planned, operations = api.plan_document(query, "sales", encode_json(document))
+    assert_branch("fusion.document.representation_coverage", planned ~= nil, true)
+
+    local coverage_ops = {}
+    for _, operation in ipairs(operations) do
+        if tostring(operation.label):find("SET_REPRESENTATION_COVERAGE_BATCH", 1, true) then
+            coverage_ops[#coverage_ops + 1] = operation
+        end
+    end
+    -- One, for the entity -- not one per representation.
+    assert_equal(#coverage_ops, 1)
+    assert_contains(coverage_ops[1].label, "customer")
+    -- Each entry names its own representation, which is the assignment that was
+    -- missing, and both are in the one payload.
+    assert_contains(coverage_ops[1].params.coverage_json, "\"representation_name\"")
+    assert_contains(coverage_ops[1].params.coverage_json, "primary")
+    assert_contains(coverage_ops[1].params.coverage_json, "crm")
+
+    -- Coverage is applied last: it turns the set into a partition, and a
+    -- partition is validated attribute by attribute, so it has to follow any
+    -- bindings the same document adds.
+    assert_equal(operations[#operations].params.coverage_json ~= nil, true)
+
+    -- A scalar where the object belongs is refused by name. Without the check it
+    -- reached `coverage.valid_from` and failed as "attempt to index a string
+    -- value", which names the runtime rather than the document.
+    local scalar = {entities = {customer = {representations = {{
+        name = "crm", source_schema = "CRM", source_object = "C",
+        coverage = "2026-01-01",
+    }}}}}
+    local ok, err = pcall(api.plan_document, query, "sales", encode_json(scalar))
+    assert_branch("fusion.document.representation_coverage", ok, false)
+    assert_contains(tostring(err), "SEMANTIC_FUSION_019")
+end)
+
 test("fusion document refuses an identity binding with no identity", function()
     local document = {entities = {customer = {representations = {{
         name = "crm", source_schema = "CRM", source_object = "C",

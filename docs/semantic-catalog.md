@@ -166,6 +166,17 @@ published model to `NEEDS_VALIDATION` over a cosmetic fix. Renaming to the name
 a representation already carries is a no-op (`CHANGED = FALSE`), and a name the
 entity already uses is refused with `SEMANTIC_ADMIN_046`.
 
+`tools/verify_representation_promotion.py` runs a promotion end to end — roles
+swap, the entity's source moves, a query returns rows from the promoted source,
+and the warning above appears with its remedy. That verifier exists because the
+behaviour was reported twice as an open question and never actually observed:
+both studies were refused before the promotion ran, so what they saw afterwards
+described a promotion that had not happened. Getting past those refusals needs a
+single-column unique key, both sources exposing that column, and a bare `DIRECT`
+identity binding on it — plus a session `QUERY_TIMEOUT`, without which validation
+returns `PRECONDITION` rather than an error and the promotion is refused later
+for a reason that looks unrelated.
+
 Promotion never renames on your behalf. The name is a durable identifier that
 authoring scripts and fusion documents address representations by, so moving it
 silently under a caller would be the worse failure; the warning tells you, and

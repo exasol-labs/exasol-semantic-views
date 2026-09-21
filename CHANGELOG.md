@@ -32,10 +32,382 @@ another table is refused by default. Each is called out below.
   compile, 2 are refused as composition and 1 because no column of the object is
   named — and the values of every accepted shape are checked against the model
   rather than merely checked for not raising.
-- The cost is **+0.9 ms** on a compile. An earlier prototype measured 268 ms
-  against 96 ms and predicted the overhead was the column lookup rather than the
-  architecture; reading `OBJECT_COLUMNS` instead of `FIELDS_FOR_AGENT` confirms
-  it.
+- **What expansion costs, per shape.** The single figure this entry used to
+  quote — "+0.9 ms on a compile" — was measured on the shape where expansion does
+  the least work, and is about 30× low for the shapes a BI tool actually emits.
+  Measured interleaved, 25 rounds, all cache-warm, median:
+
+  | shape | median | vs bare |
+  |---|---|---|
+  | bare `SELECT a, b FROM obj` | 104.2 ms | — |
+  | aliased `SELECT t0.a, t0.b FROM obj t0` | 103.9 ms | −0.2 ms |
+  | TopN `… ORDER BY 2 DESC LIMIT 5` | 103.2 ms | −1.0 ms |
+  | subquery `SELECT x.a FROM (…) x` | 131.6 ms | **+27.5 ms** |
+  | CTE `WITH z AS (…) SELECT …` | 131.3 ms | **+27.1 ms** |
+  | arithmetic in the select list, **bare** | 340.8 ms | **+236.6 ms** |
+  | `ORDER BY` a non-selected field, **bare** | 357.3 ms | **+253.2 ms** |
+  | a composed statement, refused | 76.1 ms | −28.1 ms |
+
+  The last two working shapes are the constructs the single-lane change above
+  made compile bare, and they are the expensive ones — which nothing measured at
+  the time. The cause is not expansion. It is that the whole-statement path has
+  to *fail* first, and a late failure has already read the catalog and resolved
+  every field; the composed statement in the last row is refused before any of
+  that and comes in under the bare baseline. Nothing caches the outcome either:
+  the compile cache stores successes only, and the *expanded* statement is never
+  stored under its own text — only the inner compile it wraps — so the failed
+  attempt is repeated on every execution. Caching the expansion outcome would
+  remove both halves. It touches the cache-integrity boundary, so it is not a
+  change to make without its own verifier, and it is not in this release.
+- Measured on Exasol `2026.2.0-dev.0` (Exasol Personal, single node) on an Apple
+  M3 Pro, 11 cores, 36 GB, macOS 26.6.1. The earlier `+0.9 ms` named no hardware
+  at all, which is part of why it survived being wrong.
+  `tools/measure_expansion_cost.py` regenerates this table, so the next person to
+  doubt it does not have to write a script first.
+- **The two SQL paths are one path, so the shape of a statement is never the
+  reason it works.** Whatever the whole-statement path cannot compile is now
+  handed to reference expansion, instead of only a short list of refusal codes
+  being retried. Before this, a redundant subquery was the difference between a
+  working report and a refusal: `SELECT region FROM obj ORDER BY revenue DESC`
+  was refused while `SELECT * FROM (<the same query>) x` ran, and no surface said
+  so, which made the workaround undiscoverable rather than merely undocumented.
+  Constructs that were refused bare now work bare: `ORDER BY` a non-selected
+  field, `OFFSET`, `SELECT DISTINCT`, arithmetic and `CASE` in the select list,
+  `IN (subquery)`, correlated `EXISTS`, `CAST`, window functions, set operators
+  and CTEs. `tools/verify_sql_lane_parity.py` runs the bare and
+  wrapped form of each construct and requires the same rows or the same refusal
+  code.
+- The generated derived-table alias is quoted. `__esv_ref_1` is not a legal
+  Exasol identifier unquoted, so every expanded statement that did not already
+  carry an alias produced SQL that could not be parsed.
+- **A refusal now comes from whichever path has more to say about the statement.**
+  Expansion may turn a refusal into a success, but not into a vaguer refusal:
+  `SELECT bogus FROM obj` keeps `Unknown semantic field: bogus. Did you mean: …?`
+  rather than being re-described as a statement whose columns could not be
+  inferred. Expansion reaches that same refusal itself (`SEMANTIC_QUERY_020`) for
+  the wrapped form, which the whole-statement path never reads — so the two
+  forms agree there too.
+- **Grouping a published object in its own query block is refused
+  (`SEMANTIC_QUERY_015`).** An object is already aggregated to the grain its
+  fields imply, so `SELECT region, COUNT(*) FROM obj GROUP BY region` groups a
+  grouped result. Joining the two paths made this reachable for the first time:
+  expansion turns it into valid SQL over the derived table and it returned `1`
+  per region — a count of groups, and the most dangerous shape of wrong, because
+  the figure a reviewer checks first looks sane. Aggregating in an *outer* block
+  is unaffected and remains the supported way to count a semantic result, because
+  there the caller has named the grain. The refusal sits behind the same
+  `SET_MODEL_DERIVED_COMPOSITION` opt-in as the join guard: that setting says the
+  model accepts ordinary-SQL semantics, and re-aggregation is ordinary-SQL
+  semantics, so gating only one of the two hazards would make the opt-in mean
+  different things depending on which one a statement reached.
+- **Every SQL entry point now answers the same way.** The fallthrough above
+  originally reached only the preprocessor, so `COMPILE_SQL`, `COMPILE_SQL_DEBUG`
+  and `EXPLAIN_COMPILED_SQL` still refused every construct it had just made work
+  — the same statement ran through one door and was refused at another, and the
+  surfaces an author reaches for to find out *why* a query behaved a certain way
+  were the ones that disagreed with the query. The decision is now one shared
+  routine that all three call.
+- **A failing statement is reported at a line the author actually wrote.** The
+  compiled SQL spliced into a statement runs to eight or so lines, so everything
+  after the reference moved down by that many: a one-line query that Exasol
+  rejected came back as `syntax error … [line 10, column 3]`, pointing into text
+  the author had never seen. That was the second half of B09 and it outlived the
+  first. The derived table is now emitted on one line
+  (`sql_text.flatten_lines`), so line numbers survive the rewrite. The column
+  still counts the spliced characters, which inline rewriting cannot avoid, and
+  both the docs and `QUERY_CAPABILITIES` now say to read the line and ignore the
+  column. Newlines inside string literals are not folded, and a statement
+  carrying a line comment is left alone rather than having the rest of it
+  commented out.
+- **A valid statement is never reported by a parser.**
+  `tools/verify_no_raw_parse_errors.py` runs a corpus of statement shapes — not
+  the three that were reported — and requires each to answer or carry a rule
+  code, then requires every position in the malformed corpus to name a real line.
+- When reference expansion *breaks* rather than refuses, the whole-statement
+  lane's refusal is kept if it had one. Returning `reference expansion failed`
+  in place of `COUNT(*) over a semantic object is refused` hid a good reason
+  behind a bad one.
+- **The preprocessor lane records what it did.** `QUERY_LOG` was written by
+  `COMPILE_SQL_DEBUG` and nothing else, so after a day of dashboards it held no
+  rows from the lane BI tools actually use: `SEMANTIC_SOURCE.MY_QUERY_LOG` was
+  permanently empty, and `EXPLAIN_COMPILED_SQL('QUERY_LOG', …)` had no handle to
+  explain — the remedy this project's own docs offer for "why is my number
+  different from my colleague's". `SEMANTIC_USER` was granted `INSERT` on the
+  table for a writer that never ran. Every statement the preprocessor rewrites is
+  now recorded; statements it leaves alone are not, which matters because a
+  database-wide preprocessor sees every statement in every session.
+  `CLIENT_NAME` distinguishes the two paths, `PREPROCESSOR` and
+  `PREPROCESSOR:EXPANSION`.
+- **The row carries the plan, so it can be explained.** Everything
+  `EXPLAIN_COMPILED_SQL` reports — the governance prose, the materialization,
+  which fields were asked for — is read back out of `PLAN_JSON`, and reference
+  expansion used to discard the inner compile's plan. A lane that logged
+  diligently without one would have satisfied the letter of the fix and left the
+  story exactly as unreachable.
+- **`EXPLAIN_COMPILED_SQL` works for a non-`SYS` caller.** It read
+  `SYS_SEMANTIC.QUERY_LOG` and `SYS_SEMANTIC.AGENT_REQUEST_LOG` directly, and
+  the script runs with the caller's rights, so a BI user reaching for the answer
+  got `insufficient privileges: SELECT on table QUERY_LOG`. It now reads the
+  principal-scoped views. A handle belonging to another principal reports as not
+  found rather than as forbidden — the existence of someone else's query is not
+  ours to confirm.
+- **The governance prose no longer misattributes a cached plan.** A compile is
+  served to anyone inside the same trust boundary, so the plan carries whoever
+  compiled it first; the prose told the person who had just run a query that SYS
+  compiled it. It now names both when they differ, and says that the rows were
+  still resolved with the runner's own rights.
+- Cost: about **20–30 ms** per rewritten statement on the reference deployment,
+  measured A/B. It is the single-row `INSERT` itself and not the payload —
+  logging with `PLAN_JSON` omitted was no faster — so there is no cheaper version
+  of this that still explains anything. The agent lane has always paid the same.
+- `tools/verify_sql_lane_logging.py` runs as a scoped principal rather than as
+  `SYS`, because `SYS` has SELECT on everything and would not have noticed any of
+  the three defects above.
+- **`QUERY_CAPABILITIES` names the code each lane actually emits.** The view is
+  cited from `docs/bi-tools.md`, a BI-facing document, and carried only the
+  structured lane's `SEMANTIC_REQUEST_*` spellings — so an integrator sending SQL
+  and matching the published code never matched, because that lane emits
+  `SEMANTIC_QUERY_*`. `REFUSAL_CODE` is replaced by `SQL_REFUSAL_CODE` and
+  `REQUEST_REFUSAL_CODE`, and a row names both only where both lanes reach the
+  condition.
+- **The drift test runs the shapes instead of grepping for the codes.** It used
+  to search the Lua sources for each published code and pass if the string
+  appeared anywhere, which it always did — both spellings exist in the source, so
+  the view could publish the wrong one and nothing failed. A spell-checker is not
+  a contract. `tools/verify_query_capabilities_contract.py` now executes a
+  statement for every published shape, in the lane the row names, and compares
+  the code that comes back. Rows and demonstrations are keyed on the view's own
+  `SHAPE` text, so neither can outlive the other: a row nobody demonstrates fails,
+  and a demonstration whose row has gone fails too.
+- Added the shapes the view was missing: `SEMANTIC_QUERY_007` (an aggregate the
+  metric does not declare), `_005` (a SELECT list naming no field), `_026`
+  (HAVING with no metric) and `_028` (reading a relation the model does not vouch
+  for). The report also listed `_033`, `_050` and `_061` as missing; those shapes
+  now *work* rather than refuse, so they are published as supported instead.
+- Corrected two rows that named codes nobody receives, both of them added earlier
+  in this release: a statement naming no column of the object reports `_005`, not
+  `_011` — `_011` is what a *wrapper* gets, where the whole-statement path has no
+  opinion — and re-aggregation reports `_015` only where that path cannot read the
+  statement, such as a CTE; where it can, it says something sharper (`_008`,
+  `_010`, `_026`). Both were found by running the shapes rather than by reading.
+- One row of the report is stale: an `IS_PRIVATE` metric is refused as withheld
+  (`_027`) in both lanes, not reported as an unknown field. That was fixed by the
+  policy-column work earlier in this release.
+- **`DISPLAY_POLICY` and `SENSITIVITY_LABEL` have a writer.**
+  `SEMANTIC_ADMIN.SET_FIELD_POLICY(model, object, field, display_policy,
+  sensitivity_label)` sets both on a dimension or a metric, and `NULL` clears
+  one. `docs/governance.md` has presented these two as a control table and
+  `docs/validation-rules.md` has documented `SEMANTIC_MODEL_069` for a bad value,
+  while the only thing in the product that wrote either was a private helper
+  inside the OSI document importer — so the documented route to `MASK` was a
+  direct `UPDATE` on `SYS_SEMANTIC`, which the same page tells stewards never to
+  do and which this release stopped granting them. The gap was never enforcement;
+  enforcement worked, and the study set the columns by hand to prove it. Nothing
+  in the product would set them.
+- A script rather than a DDL clause beside `PRIVATE`, and the split is the point:
+  `PRIVATE` says what a field *is* — an invisible one — and belongs with its
+  definition; these two say how a *visible* field must be handled, which is a
+  decision made about a model that already exists, usually by someone who did not
+  write it. That is the shape of `SET_MODEL_GOVERNANCE_MODE`, and this is its
+  field-level member. `docs/governance.md` now documents all four columns
+  together with the surface each uses and why; the preprocessor page keeps only
+  the `PRIVATE` grammar and points at it.
+- The value is not judged at write time. `VALIDATE_MODEL` owns the
+  `DISPLAY_POLICY` vocabulary and reports `SEMANTIC_MODEL_069` against it, so
+  checking it in the script too would put the list in two places and let them
+  disagree — the script says to validate instead, which is the idiom
+  `SET_MODEL_GOVERNANCE_MODE` already states.
+- Naming a fact is refused rather than written: neither column has a reader for
+  one, because a fact is never returned to a caller, and the refusal says the
+  policy belongs on the metric built from it. Setting a policy clears the model's
+  compile cache, or a statement compiled under the old policy would go on being
+  served under the new one.
+- `tools/verify_field_policy_writer.py` holds the whole path rather than the
+  writer alone — set, refused in both lanes, cleared, allowed again — because
+  each half already existed and what was missing was that they were never joined.
+  A writer that wrote without being enforced would pass half of it.
+- **A representation-scoped `coverage` in a fusion document can be applied.**
+  `docs/data-fusion.md` presents it as one of three ways to complete an
+  alternate, and it could never be used. The reported cause was one missing
+  assignment — the constructed batch entry did not name the representation it was
+  about, so every such declaration came back asking for
+  `COVERAGE_JSON[1].representation_name`, a field the document schema does not
+  have. Fixing that alone was not enough, and the rest only showed up once the
+  route got far enough to fail differently:
+  - `SET_REPRESENTATION_COVERAGE_BATCH` is all-or-nothing by design — a
+    partitioned set cannot be initialized one representation at a time — so a
+    per-representation call could never succeed however it was spelled. Coverage
+    is now collected across the entity and applied in one call.
+  - Coverage declared on a representation that already existed was dropped in
+    silence: that path carried authority and identity, ignored coverage, and
+    reported `OK` having done nothing. That is the worse half of the same defect,
+    because the other half at least raised.
+  - The batch now runs after the document's attribute bindings, because coverage
+    turns the set into a partition and a partition is validated attribute by
+    attribute (`SEMANTIC_MODEL_052`). Run first, it was rejected for a binding
+    the same document was about to add.
+- **`SEMANTIC_MODEL_038` says what is actually wrong.** It offered the same three
+  completions as every other incomplete-representation error — temporal coverage,
+  attribute bindings, or a certified semantic identity — for a failure none of
+  them settles: the alternate resolves to a different *set of keys*. Attribute
+  bindings declare where a column comes from and say nothing about which rows
+  exist; a semantic identity is checked against the same key set and refuses on
+  its own terms (`SEMANTIC_MODEL_049`); temporal coverage describes a source that
+  covers a time range, not one that is incomplete. The message now says it is a
+  difference in rows rather than columns and names the route that works —
+  presenting the source over the full key set, LEFT JOINed onto the primary's
+  keys, with the attributes it does not carry left NULL.
+- `docs/data-fusion.md` said the null-cast `FALLBACK` binding exists to replace
+  that widened view. True for a source narrower in columns, and the sentence was
+  being read as covering both — it now says which case each settles.
+- `tools/measure_expansion_cost.py` is new and deliberately not a verifier: it
+  measures rather than asserts, and a threshold on a wall-clock median would be
+  flaky on a laptop. It prints the table above, with the database version and the
+  machine, so the figure cannot go stale unnoticed again.
+- **A statement naming a field of a *different* semantic view is refused, not
+  half-compiled.** `SELECT CUSTOMER_REGION, TOTAL_FREIGHT FROM …ORDER_HEADER`
+  resolved the metric, found no dimension of that name on that view, and built
+  the derived table from the half that resolved — leaving the outer statement
+  selecting a column the derived table did not have. Exasol answered `object
+  CUSTOMER_REGION not found`, which is true of the generated text and useless
+  about the query. Silently dropping a requested column is the dangerous half:
+  it is how a statement comes back answering a question nobody asked. The
+  projection check now runs whether or not anything else resolved, so the
+  refusal is the one the whole-statement path already had — *"Unknown semantic
+  field: CUSTOMER_REGION. It is a column of semantic view SALES, not of
+  ORDER_HEADER."* An `x AS name` output alias is a declaration rather than a
+  reference and is not reported as an unknown field.
+- **The cost of splitting a model by grain is written down once.**
+  `SEMANTIC_MODEL_059` forces a coarser metric into its own semantic view;
+  `SEMANTIC_ADMIN_019` then refuses to share a dimension name between the two,
+  `SEMANTIC_QUERY_020` refuses a field of one on the other, and
+  `SEMANTIC_QUERY_012` refuses to join the published views back together. Each
+  rule was clear on its own and the consequence was only discoverable by meeting
+  all four. `docs/creating-metrics.md` now sets out what to decide up front, and
+  `tools/verify_fanout_guardrails.py` asserts all four steps so the section
+  cannot drift from the behaviour.
+- **`SEMANTIC_ADMIN.REMOVE_SEMANTIC_OBJECT(model, object)`** — a semantic view
+  can be taken out of a model. `ADD_SEMANTIC_OBJECT` had no counterpart: the DDL
+  edits an object's *interior* and cannot remove the object, no apply path
+  reconciles a model by deleting one, and `DROP_MODEL` takes the entities,
+  relationships, published views, grants and frozen-view records with it.
+  That was not a tidiness problem. `PUBLISH_MODEL` refuses an object with no
+  visible columns (`SEMANTIC_SURFACE_014`), so a single mistyped
+  `ADD_SEMANTIC_OBJECT` left a model that **could not be published and could not
+  be repaired** — and filling the object in instead was no escape, because its
+  dimensions would need new names (`SEMANTIC_ADMIN_019`), making the typo
+  permanent in a different form.
+- It removes the view and the dimensions and metrics it exposes, so their names
+  are free again, and drops the published view — `PUBLISH_MODEL` only ever issues
+  `CREATE OR REPLACE VIEW` and would never notice the object was gone, leaving a
+  view answering from the SQL it was compiled with, which is the frozen-view
+  hazard arrived at by accident. It clears the model's compile cache for the same
+  reason.
+- It keeps facts and entities. A fact is declared on an *entity*, not on a view,
+  and may feed metrics in other views; an entity is the model's graph. `ADD_ENTITY`
+  still has no counterpart, which is now the only `ADD_*` that has none.
+- It refuses when another view's metric is built on one of the metrics it would
+  take (`SEMANTIC_ADMIN_099`), rather than cascading and leaving that metric
+  naming something that is gone. The dependency is read from
+  `METRIC_DEPENDENCIES`, which `VALIDATE_MODEL` derives — not `METRIC_INPUTS`,
+  which records what an admin call declared and stays empty for a metric whose
+  *expression* names another metric. The cost of that is staleness: a dependency
+  added since the last validation is not seen here, and the next `VALIDATE_MODEL`
+  reports the broken metric instead.
+- The dependent tables were taken from `SEMANTIC_CATALOG.CATALOG_RELATIONSHIPS`
+  rather than from grepping for a column called `OBJECT_ID`. Two of the five
+  references reach a semantic object through `SCOPE_ID`, and the grep would have
+  missed both.
+- The gap was deliberate, not an oversight: `tests/test_install.py` pinned
+  `ADD_SEMANTIC_OBJECT` as intentionally having no removal, with the reason
+  *"semantic objects are part of the published contract and currently require
+  model rebuild"*, and failed the moment a `REMOVE_` appeared — telling us to
+  retire the exception. The reason did not cover the case that makes it an
+  obstacle: a view with no columns cannot be published, so the deferral left a
+  model that could not be repaired at all. The exception is now removed, and
+  `ADD_ENTITY` is the only `ADD_*` with no counterpart and a reason that still
+  holds.
+- **`docs/bi-tools.md` says who needs what**, measured by granting one privilege
+  at a time and recording what starts working. The row that matters: a role
+  granted the model but not the physical sources browses every field, compiles
+  every query and **retrieves nothing** — the compiler runs as the caller, which
+  is what makes row-level security in the sources the real control.
+- **`CREATE VIEW` over a semantic object is marked as not a BI capability.** It
+  was listed among the statements a BI tool emits, and it compiles — but it needs
+  `CREATE VIEW` (or `CREATE ANY VIEW` outside a schema the author owns), which a
+  reporting role should not hold, and what it produces is readable by anyone
+  granted the view with no rights on the sources and no preprocessor. Two further
+  facts are now written down because they were measured: the author cannot pass
+  the view on without *grantable* rights on every relation its compiled SQL
+  reads, and the reader needs nothing but `SELECT` on the view.
+- **`SEMANTIC_QUERY_080` no longer reports an authorization outcome as a
+  modelling defect.** A caller who cannot read a physical source gets an empty
+  source-column probe, and the planner concluded from that that no representation
+  could traverse the relationship. This is the same shape that was fixed for an
+  unauthorized *model* — where the comment records that it "sent modellers
+  looking for a bug that did not exist" — one level down, for the sources. The
+  message now names the privilege possibility without asserting it, because the
+  code fires for genuine modelling defects too.
+- **`SELECT COUNT(*)` on a published object without the preprocessor is refused.**
+  The guard raises from every column, and a statement that selects no column
+  never evaluated one: `COUNT(*)` counted the guard view's own single row and
+  returned **1** — a plausible number for a question the view exists to refuse.
+  The guard is now in the `WHERE` clause as well, which a row has to pass to be
+  counted. The `WHERE 1 = 0` driver metadata probe still returns the column shape
+  with no rows.
+- **`VALIDATE_MODEL` says when a model has frozen views (`SEMANTIC_MODEL_067`).**
+  A view compiled from a semantic object stores physical SQL, which is what lets
+  it answer with no preprocessor — and also why it goes on answering with the
+  model as it was when it was made. It does not fail, it does not warn, and the
+  number still looks right. Nothing asked, and `CHECK_FROZEN_VIEWS` existed but
+  ran only when somebody remembered.
+- The notice says what the catalog knows and no more. Whether a frozen view still
+  matches what the model would compile **cannot** be answered there: the version
+  never changes, `MODELS.UPDATED_AT` does not move on authoring, and `METRICS`,
+  `DIMENSIONS` and `FACTS` carry no timestamps at all — so "was this edited since
+  the view was frozen" has no signal to key on. Comparing the frozen column list
+  would catch a rename and miss the case that matters, an expression changed
+  under the same name. So the rule counts the views and names
+  `CHECK_FROZEN_VIEWS`, which recompiles each one and answers exactly.
+- It is a standing condition, not permanent noise: dropping the view retires the
+  warning with it, and a record whose view is already gone is not reported at all.
+- Making `VALIDATE_MODEL` prove staleness itself was considered and rejected. It
+  would mean the validator calling the compiler, and the compiler binds to the
+  latest *successful* validation run — inverting a dependency the architecture
+  keeps deliberately one-way.
+- `docs/admin-db-wide-setup.md` schedules the check: run it wherever model
+  changes land, act on `STALE` by re-creating or dropping the view, and leave
+  `DROPPED` alone.
+- **A representation promotion is verified end to end, and F17 is closed.** It
+  had been carried forward as an open finding through two studies: after
+  promoting a representation, the one *named* `primary` holds role `ALTERNATE`.
+  No promotion had ever completed — both studies were refused first by
+  `SEMANTIC_ADMIN_045` and then by `SEMANTIC_ADMIN_058` — so what they observed
+  afterwards described a promotion that had not happened.
+- It is not a defect. With a fixture that gets past those gates the roles swap,
+  exactly one representation holds `PRIMARY`, the entity's source moves, the
+  model still validates, and a query returns rows from the promoted source. What
+  is left is a representation *called* `primary` whose role is `ALTERNATE` —
+  correct, because a name is a label and the role is what the layer reads — and
+  the promotion already reports it (`SEMANTIC_ADMIN_221`) and hands back the
+  `RENAME_ENTITY_REPRESENTATION` call that settles it, which this now checks
+  works.
+- Reaching the promotion needs a single-column unique key, both sources exposing
+  that column, and a bare `DIRECT` identity binding on it. A third gate is worth
+  naming because it is easy to misread: multi-representation key probes need a
+  session `QUERY_TIMEOUT`, and without one `VALIDATE_MODEL` returns
+  `PRECONDITION` (`SEMANTIC_MODEL_041`). That is not an error, so a caller
+  counting only errors reads it as a clean run and the promotion is refused later
+  by `SEMANTIC_ADMIN_048` for what looks like an unrelated reason.
+- Known boundary: a statement the layer rewrites but Exasol then rejects — a
+  syntax error, `DISTINCT ON`, `LIMIT -1`, `ORDER BY` an unknown column — now
+  comes back with Exasol's message instead of a `SEMANTIC_QUERY_*` code. Exasol
+  names the specific problem in each case, so none is a wrong answer, but nine
+  statements that the layer used to recognise it no longer does. They are pinned
+  as a ratchet in `tools/verify_sql_lane_parity.py`, which may shrink and may not
+  grow. Widening the field scan into `WHERE` and `ORDER BY` would recover two of
+  them at the cost of a keyword list whose every omission refuses a *valid*
+  query, so the fix belongs with routing all refusals through a rule code.
 - **Which columns get compiled is inferred and, when it cannot be, refused.**
   `alias.column` references, unqualified names matching a published column, and
   `*` — where a bare `*` counts only in the reference's own query block, so the
@@ -140,7 +512,10 @@ another table is refused by default. Each is called out below.
   (219 validations). It probed `SYS.EXA_ALL_COLUMNS` once per declared column —
   48 times for a four-entity model, 43% of a validation — and now reads each
   relation's column list once. Its catalog writes are batched into one statement
-  per table rather than one per row.
+  per table rather than one per row. Re-measured on the hardware named above it
+  is **1.06 s** for the demo model (median of 5, preprocessor off): the direction
+  and the size of the win hold, the absolute figure does not travel between
+  machines, and the original quoted none.
 
 ### Fixed
 
@@ -164,6 +539,25 @@ another table is refused by default. Each is called out below.
 - A parenthesised `WHERE` predicate leaked its closing paren into the generated
   SQL. Latent, and reachable only once `SUM()` wrapping stopped being refused
   earlier.
+
+#### The catalog and agent surfaces showed every model to every caller
+
+- `SEMANTIC_SOURCE` was scoped correctly, but `SEMANTIC_USER` also grants
+  `SELECT` on `SEMANTIC_CATALOG` and `SEMANTIC_AGENT`, and **every view in them
+  read the tables directly**. So the disclosure came back through the surface
+  beside the one that had been fixed: `GOVERNANCE_FOR_MODEL` reported a model as
+  not visible while `SEMANTIC_CATALOG.METRICS` next to it returned that model's
+  metric expressions, and `FIELDS_FOR_AGENT` — the surface an agent boots from —
+  listed fields of a model it would be refused on.
+- Both surfaces now read the **already-filtered `SEMANTIC_SOURCE` views** rather
+  than the tables: 227 base reads repointed, so the scoping is inherited rather
+  than restated in 59 places, and a view added later inherits it by
+  construction. The generated set grew from 32 to 43 scoped views to cover what
+  the catalog reads and the compiler does not.
+- `PRODUCT_INSTALLATIONS` is deliberately left unscoped: deployment identity is a
+  property of the installation, not of any model.
+- The source views now install directly after the catalog tables
+  (`001b_create_semantic_source_views.sql`), because the catalog views read them.
 
 #### `GOVERNED` mode reported the error and served the data anyway
 

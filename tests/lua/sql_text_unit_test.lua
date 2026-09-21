@@ -88,6 +88,33 @@ test("shared literal stripping blanks contents and preserves offsets", function(
         "oops", 1, true) == nil)
 end)
 
+test("flattening keeps a spliced statement on the author's line numbers", function()
+    -- The reason this exists: expansion splices compiled SQL into the middle of
+    -- somebody else's statement, and eight lines of it moved every later line
+    -- down by eight. Exasol then reported failures at "line 10" of a one-line
+    -- query, pointing into text the author had never seen.
+    assert_equal(sql_text.flatten_lines("SELECT a\nFROM t\nWHERE b = 1"),
+        "SELECT a FROM t WHERE b = 1")
+    assert_equal(sql_text.flatten_lines("a\r\nb"), "a  b")
+    assert_equal(sql_text.flatten_lines("no newlines"), "no newlines")
+    assert_equal(sql_text.flatten_lines(nil), nil)
+
+    -- The part that has to be right: a newline inside a literal is data, and
+    -- folding it would change the value rather than the layout.
+    local with_literal = "SELECT 'two\nlines'\nFROM t"
+    assert_equal(sql_text.flatten_lines(with_literal), "SELECT 'two\nlines' FROM t")
+
+    -- A line comment cannot be folded at all: removing its newline would
+    -- comment out the rest of the statement, so the text is left alone.
+    local commented = "SELECT a -- why\nFROM t"
+    assert_equal(sql_text.flatten_lines(commented), commented)
+    local block = "SELECT a /* why */\nFROM t"
+    assert_equal(sql_text.flatten_lines(block), block)
+
+    -- A `--` that is only inside a literal is not a comment, so folding stands.
+    assert_equal(sql_text.flatten_lines("SELECT '--'\nFROM t"), "SELECT '--' FROM t")
+end)
+
 test("shared lexer tokenizes the Exasol dialect once for both parsers", function()
     local tokens = sql_text.tokenize(
         "SELECT a, 'lit''x', \"Qu\"\"oted\", 12.5 FROM s.o -- trailing\n;")

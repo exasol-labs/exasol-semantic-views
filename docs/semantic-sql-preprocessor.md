@@ -122,6 +122,33 @@ window, arithmetic in the select list, `COUNT(*)`.
 Those are accepted too, by a second path: **reference expansion** replaces the
 reference rather than compiling the statement around it.
 
+**You do not choose between the two, and you cannot tell which one answered.**
+Whatever the whole-statement path cannot compile is handed to expansion, so a
+construct works, or does not, regardless of how the statement is shaped around
+the object. This used to be untrue and the difference was invisible:
+
+```sql
+-- was refused: the whole-statement path would not order by an unselected field
+SELECT CUSTOMER_REGION FROM SEMANTIC_SALES.SALES ORDER BY TOTAL_REVENUE DESC
+
+-- worked, because the pointless subquery routed it to expansion instead
+SELECT * FROM (
+  SELECT CUSTOMER_REGION FROM SEMANTIC_SALES.SALES ORDER BY TOTAL_REVENUE DESC
+) x
+```
+
+Both run now. A redundant subquery used to be the difference between a working
+report and a refusal naming a construct SQL has had for forty years, and nothing
+on any surface said so — the workaround could not be discovered, only stumbled
+upon. `tools/verify_sql_lane_parity.py` holds the invariant: for each construct
+it runs the bare and wrapped forms and requires the same rows, or the same
+refusal code.
+
+One consequence worth stating plainly: a refusal may now come from either path,
+and the one with more to say wins. `SELECT bogus FROM obj` keeps `Unknown
+semantic field: bogus. Did you mean: …?` rather than being re-described as a
+statement whose columns could not be inferred.
+
 ```sql
 -- you write
 SELECT t0.CUSTOMER_REGION, RANK() OVER (ORDER BY t0.TOTAL_REVENUE DESC) r
@@ -143,7 +170,53 @@ as the reference, so the star in `SELECT * FROM (SELECT t0.A FROM obj t0) x`
 means the subquery's columns and not the object's. When no column of the object
 is referenced at all, the statement is refused with `SEMANTIC_QUERY_011` rather
 than defaulting to every column: a wrong grain returns plausible totals, which is
-the hardest kind of wrong to notice.
+the hardest kind of wrong to notice. If the statement's select list names
+something that *looks* like a field but the object does not publish, the refusal
+says which name and what it might have meant instead (`SEMANTIC_QUERY_020`).
+
+### When a statement still fails, the position is yours
+
+Expansion splices compiled SQL into your statement, so the text Exasol parses is
+not the text you wrote. That used to show in the worst possible way: the compiled
+SQL runs to eight or so lines, so everything after the reference moved down by
+that many, and a one-line query that Exasol rejected was reported at *line 10*.
+There is nothing at line 10 to look at.
+
+The derived table is now emitted on a single line, so **line numbers survive the
+rewrite** — the line Exasol names is a line you wrote. The *column* still counts
+the spliced characters and can point past the end of that line, which inline
+rewriting cannot avoid. Read the line; ignore the column.
+
+A valid statement never fails this way at all: if the layer cannot compile one it
+refuses with a `SEMANTIC_*` code, and `tools/verify_no_raw_parse_errors.py` holds
+that over a corpus of statement shapes rather than over the three that were
+reported.
+
+### Grouping an object again is refused
+
+A published object is already aggregated to the grain its fields imply, so a
+`GROUP BY` or `HAVING` **in the same query block as the reference** groups a
+grouped result:
+
+```sql
+-- refused: counts rows that are themselves groups
+SELECT CUSTOMER_REGION, COUNT(*) FROM SEMANTIC_SALES.SALES GROUP BY CUSTOMER_REGION
+```
+
+Left to expansion that becomes `SELECT CUSTOMER_REGION, COUNT(*) FROM (<compiled>)
+GROUP BY CUSTOMER_REGION` — valid SQL returning `1` per region, which is the
+count of groups rather than of anything anyone asked about. It is refused with
+`SEMANTIC_QUERY_015`, or with whichever of `SEMANTIC_QUERY_008`, `_010` or `_026`
+has more to say about the particular statement — unless the model has opted into
+ordinary-SQL semantics with `SET_MODEL_DERIVED_COMPOSITION`, which covers this
+hazard and the join hazard together.
+
+Aggregating in an *outer* block is the supported form, because there the caller
+has named the grain:
+
+```sql
+SELECT COUNT(*) FROM (SELECT t0.CUSTOMER_REGION FROM SEMANTIC_SALES.SALES t0) z
+```
 
 ### A view over a semantic object freezes its SQL
 
@@ -234,7 +307,10 @@ REPLACE DIMENSIONS (
 ```
 
 `PRIVATE` maps to the catalog's `IS_HIDDEN`, which is how `DIMENSIONS` spells
-what `FACTS` calls `IS_PRIVATE`. `AS` requires `SEMANTIC_DDL_026` and `RETURNS`
+what `FACTS` calls `IS_PRIVATE`. What it *means* — that the field is refused
+wherever it is named, filters included — is on the
+[governance page](governance.md), beside the other three policy columns and the
+scripts that set them; this page describes only the grammar. `AS` requires `SEMANTIC_DDL_026` and `RETURNS`
 requires `SEMANTIC_DDL_027`, mirroring a fact's `_021`/`_022`.
 
 **Column order is a side effect of block order.** Each `REPLACE` block deletes

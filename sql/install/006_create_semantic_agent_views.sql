@@ -59,21 +59,21 @@ SELECT
     AS DATABASE_NAME,
   (SELECT RUNTIME_CHECKSUM FROM SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT)
     AS RUNTIME_CHECKSUM
-FROM SYS_SEMANTIC.MODELS m
-LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
+FROM SEMANTIC_SOURCE.MODELS m
+LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
   ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
 LEFT JOIN (
   SELECT MODEL_ID, VERSION_ID, MAX(VALIDATION_RUN_ID) AS VALIDATION_RUN_ID
-  FROM SYS_SEMANTIC.VALIDATION_RUNS
+  FROM SEMANTIC_SOURCE.VALIDATION_RUNS
   GROUP BY MODEL_ID, VERSION_ID
 ) latest
   ON latest.MODEL_ID = m.MODEL_ID
  AND latest.VERSION_ID = m.ACTIVE_VERSION_ID
-LEFT JOIN SYS_SEMANTIC.VALIDATION_RUNS vr
+LEFT JOIN SEMANTIC_SOURCE.VALIDATION_RUNS vr
   ON vr.VALIDATION_RUN_ID = latest.VALIDATION_RUN_ID
 LEFT JOIN (
   SELECT VALIDATION_RUN_ID, COUNT(*) AS PRECONDITION_COUNT
-  FROM SYS_SEMANTIC.VALIDATION_RESULTS
+  FROM SEMANTIC_SOURCE.VALIDATION_RESULTS
   WHERE SEVERITY = 'PRECONDITION'
   GROUP BY VALIDATION_RUN_ID
 ) pc
@@ -109,7 +109,7 @@ SELECT
   -- are based on; SEMANTIC_AGENT.FUSION_FOR_AGENT has the declarations.
   (
     SELECT COUNT(*)
-    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
     WHERE er.ENTITY_ID = so.ROOT_ENTITY_ID
       AND er.VERSION_ID = so.VERSION_ID
       AND er.STATUS = 'ACTIVE'
@@ -117,7 +117,7 @@ SELECT
   COALESCE(
     (
       SELECT 'UNION'
-      FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
       WHERE er.ENTITY_ID = so.ROOT_ENTITY_ID
         AND er.VERSION_ID = so.VERSION_ID
         AND er.STATUS = 'ACTIVE'
@@ -126,7 +126,7 @@ SELECT
     ),
     (
       SELECT MAX(afp.FUSION_STRATEGY)
-      FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES afp
+      FROM SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES afp
       WHERE afp.ENTITY_ID = so.ROOT_ENTITY_ID
         AND afp.VERSION_ID = so.VERSION_ID
         AND afp.STATUS = 'ACTIVE'
@@ -135,10 +135,10 @@ SELECT
     'NONE'
   ) AS FUSION_STRATEGY
 FROM SEMANTIC_AGENT.MODELS_FOR_AGENT m
-JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
+JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
   ON so.MODEL_ID = m.MODEL_ID
  AND so.VERSION_ID = m.VERSION_ID
-LEFT JOIN SYS_SEMANTIC.ENTITIES re
+LEFT JOIN SEMANTIC_SOURCE.ENTITIES re
   ON re.ENTITY_ID = so.ROOT_ENTITY_ID
 -- What an agent may see is decided by what it may read: MODELS_FOR_AGENT is
 -- reached through SEMANTIC_AGENT, and the published schema through Exasol's own
@@ -181,7 +181,7 @@ SELECT
   o.QUERY_MODES,
   (
     SELECT COUNT(*)
-    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
     WHERE er.ENTITY_ID = d.ENTITY_ID
       AND er.VERSION_ID = o.VERSION_ID
       AND er.STATUS = 'ACTIVE'
@@ -189,7 +189,7 @@ SELECT
   COALESCE(
     (
       SELECT afp.FUSION_STRATEGY
-      FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES afp
+      FROM SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES afp
       WHERE afp.ATTRIBUTE_TYPE = 'DIMENSION'
         AND afp.ATTRIBUTE_ID = d.DIMENSION_ID
         AND afp.VERSION_ID = o.VERSION_ID
@@ -198,7 +198,7 @@ SELECT
     ),
     (
       SELECT 'UNION'
-      FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
       WHERE er.ENTITY_ID = d.ENTITY_ID
         AND er.VERSION_ID = o.VERSION_ID
         AND er.STATUS = 'ACTIVE'
@@ -208,11 +208,11 @@ SELECT
     'NONE'
   ) AS FUSION_STRATEGY
 FROM SEMANTIC_AGENT.OBJECTS_FOR_AGENT o
-JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+JOIN SEMANTIC_SOURCE.OBJECT_COLUMNS oc
   ON oc.OBJECT_ID = o.OBJECT_ID
  AND oc.COLUMN_KIND = 'DIMENSION'
  AND oc.IS_VISIBLE = TRUE
-JOIN SYS_SEMANTIC.DIMENSIONS d
+JOIN SEMANTIC_SOURCE.DIMENSIONS d
   ON d.DIMENSION_ID = oc.OBJECT_REF_ID
 WHERE d.STATUS = 'ACTIVE'
   AND d.IS_HIDDEN = FALSE
@@ -249,7 +249,7 @@ SELECT
   o.QUERY_MODES,
   (
     SELECT COUNT(*)
-    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
     WHERE er.ENTITY_ID = mt.BASE_ENTITY_ID
       AND er.VERSION_ID = o.VERSION_ID
       AND er.STATUS = 'ACTIVE'
@@ -257,7 +257,7 @@ SELECT
   COALESCE(
     (
       SELECT afp.FUSION_STRATEGY
-      FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES afp
+      FROM SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES afp
       WHERE afp.ATTRIBUTE_TYPE = 'METRIC'
         AND afp.ATTRIBUTE_ID = mt.METRIC_ID
         AND afp.VERSION_ID = o.VERSION_ID
@@ -266,7 +266,7 @@ SELECT
     ),
     (
       SELECT 'UNION'
-      FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
       WHERE er.ENTITY_ID = mt.BASE_ENTITY_ID
         AND er.VERSION_ID = o.VERSION_ID
         AND er.STATUS = 'ACTIVE'
@@ -276,11 +276,11 @@ SELECT
     'NONE'
   ) AS FUSION_STRATEGY
 FROM SEMANTIC_AGENT.OBJECTS_FOR_AGENT o
-JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+JOIN SEMANTIC_SOURCE.OBJECT_COLUMNS oc
   ON oc.OBJECT_ID = o.OBJECT_ID
  AND oc.COLUMN_KIND = 'METRIC'
  AND oc.IS_VISIBLE = TRUE
-JOIN SYS_SEMANTIC.METRICS mt
+JOIN SEMANTIC_SOURCE.METRICS mt
   ON mt.METRIC_ID = oc.OBJECT_REF_ID
 WHERE mt.STATUS = 'ACTIVE'
   AND mt.IS_PRIVATE = FALSE
@@ -317,7 +317,7 @@ SELECT
   o.QUERY_MODES,
   (
     SELECT COUNT(*)
-    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+    FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
     WHERE er.ENTITY_ID = f.ENTITY_ID
       AND er.VERSION_ID = o.VERSION_ID
       AND er.STATUS = 'ACTIVE'
@@ -325,7 +325,7 @@ SELECT
   COALESCE(
     (
       SELECT afp.FUSION_STRATEGY
-      FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES afp
+      FROM SEMANTIC_SOURCE.ATTRIBUTE_FUSION_POLICIES afp
       WHERE afp.ATTRIBUTE_TYPE = 'FACT'
         AND afp.ATTRIBUTE_ID = f.FACT_ID
         AND afp.VERSION_ID = o.VERSION_ID
@@ -334,7 +334,7 @@ SELECT
     ),
     (
       SELECT 'UNION'
-      FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
+      FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
       WHERE er.ENTITY_ID = f.ENTITY_ID
         AND er.VERSION_ID = o.VERSION_ID
         AND er.STATUS = 'ACTIVE'
@@ -344,11 +344,11 @@ SELECT
     'NONE'
   ) AS FUSION_STRATEGY
 FROM SEMANTIC_AGENT.OBJECTS_FOR_AGENT o
-JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+JOIN SEMANTIC_SOURCE.OBJECT_COLUMNS oc
   ON oc.OBJECT_ID = o.OBJECT_ID
  AND oc.COLUMN_KIND = 'FACT'
  AND oc.IS_VISIBLE = TRUE
-JOIN SYS_SEMANTIC.FACTS f
+JOIN SEMANTIC_SOURCE.FACTS f
   ON f.FACT_ID = oc.OBJECT_REF_ID
 WHERE f.STATUS = 'ACTIVE'
   AND f.IS_PRIVATE = FALSE;
@@ -369,7 +369,7 @@ SELECT
   mdm.REASON_CODE,
   mdm.RELATIONSHIP_PATH,
   mdm.VALIDATION_RUN_ID
-FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX mdm
+FROM SEMANTIC_SOURCE.METRIC_DIMENSION_MATRIX mdm
 JOIN SEMANTIC_AGENT.FIELDS_FOR_AGENT mf
   ON mf.MODEL_ID = mdm.MODEL_ID
  AND mf.VERSION_ID = mdm.VERSION_ID
@@ -396,9 +396,9 @@ SELECT
   res.RULE_CODE,
   res.MESSAGE
 FROM SEMANTIC_AGENT.MODELS_FOR_AGENT m
-JOIN SYS_SEMANTIC.VALIDATION_RUNS vr
+JOIN SEMANTIC_SOURCE.VALIDATION_RUNS vr
   ON vr.VALIDATION_RUN_ID = m.LATEST_VALIDATION_RUN_ID
-JOIN SYS_SEMANTIC.VALIDATION_RESULTS res
+JOIN SEMANTIC_SOURCE.VALIDATION_RESULTS res
   ON res.VALIDATION_RUN_ID = vr.VALIDATION_RUN_ID
 WHERE res.SEVERITY IN ('ERROR', 'PRECONDITION');
 
@@ -723,7 +723,7 @@ SELECT
   vq.VERIFIED_BY,
   vq.STATUS,
   o.LATEST_VALIDATION_RUN_ID
-FROM SYS_SEMANTIC.VERIFIED_QUERIES vq
+FROM SEMANTIC_SOURCE.VERIFIED_QUERIES vq
 JOIN SEMANTIC_AGENT.OBJECTS_FOR_AGENT o
   ON o.MODEL_ID = vq.MODEL_ID
  AND o.VERSION_ID = vq.VERSION_ID
@@ -802,23 +802,23 @@ SELECT
   ai.STATUS,
   ai.CREATED_AT,
   ai.CREATED_BY
-FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS ai
+FROM SEMANTIC_SOURCE.AGENT_INSTRUCTIONS ai
 JOIN SEMANTIC_AGENT.MODELS_FOR_AGENT m
   ON m.MODEL_ID = ai.MODEL_ID
  AND m.VERSION_ID = ai.VERSION_ID
-LEFT JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so
+LEFT JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
   ON ai.SCOPE_TYPE = 'SEMANTIC_OBJECT'
  AND so.OBJECT_ID = ai.SCOPE_ID
-LEFT JOIN SYS_SEMANTIC.ENTITIES e
+LEFT JOIN SEMANTIC_SOURCE.ENTITIES e
   ON ai.SCOPE_TYPE = 'ENTITY'
  AND e.ENTITY_ID = ai.SCOPE_ID
-LEFT JOIN SYS_SEMANTIC.DIMENSIONS d
+LEFT JOIN SEMANTIC_SOURCE.DIMENSIONS d
   ON ai.SCOPE_TYPE = 'DIMENSION'
  AND d.DIMENSION_ID = ai.SCOPE_ID
-LEFT JOIN SYS_SEMANTIC.FACTS f
+LEFT JOIN SEMANTIC_SOURCE.FACTS f
   ON ai.SCOPE_TYPE = 'FACT'
  AND f.FACT_ID = ai.SCOPE_ID
-LEFT JOIN SYS_SEMANTIC.METRICS mt
+LEFT JOIN SEMANTIC_SOURCE.METRICS mt
   ON ai.SCOPE_TYPE = 'METRIC'
  AND mt.METRIC_ID = ai.SCOPE_ID
 WHERE ai.STATUS = 'ACTIVE'
@@ -894,7 +894,7 @@ SELECT
   ar.STARTED_AT AS REQUEST_TIME,
   ar.FINISHED_AT
 FROM SYS_SEMANTIC.AGENT_REQUEST_LOG ar
-LEFT JOIN SYS_SEMANTIC.MODELS m
+LEFT JOIN SEMANTIC_SOURCE.MODELS m
   ON m.MODEL_ID = ar.MODEL_ID
 WHERE (CURRENT_USER = 'SYS' OR ar.USER_NAME = CURRENT_USER)
 UNION ALL
@@ -918,7 +918,7 @@ SELECT
   ql.STARTED_AT AS REQUEST_TIME,
   ql.FINISHED_AT
 FROM SYS_SEMANTIC.QUERY_LOG ql
-LEFT JOIN SYS_SEMANTIC.MODELS m
+LEFT JOIN SEMANTIC_SOURCE.MODELS m
   ON m.MODEL_ID = ql.MODEL_ID
 WHERE (CURRENT_USER = 'SYS' OR ql.USER_NAME = CURRENT_USER);
 
@@ -2356,6 +2356,13 @@ local function load_handle(handle_type_arg, handle_id_arg)
     elseif handle_type == "QUERY_LOG_ID" or handle_type == "SQL" then
         handle_type = "QUERY_LOG"
     end
+    -- Read through the principal-scoped views, not the base tables. This script
+    -- runs with the caller's rights, so a BI user reaching for the answer to
+    -- "why is my number different from my colleague's" got `insufficient
+    -- privileges: SELECT on table QUERY_LOG` -- SEMANTIC_USER is granted INSERT
+    -- there and nothing else. It also means a handle that belongs to somebody
+    -- else reports as not found rather than as forbidden, which is the right
+    -- shape: the existence of another principal's query is not ours to confirm.
     local sql_text
     if handle_type == "AGENT_REQUEST" then
         sql_text = [[
@@ -2363,9 +2370,10 @@ local function load_handle(handle_type_arg, handle_id_arg)
                    ar.MODEL_ID, m.MODEL_NAME, ar.VERSION_ID, ar.STATUS,
                    ar.ERROR_CODE, ar.ERROR_MESSAGE, ar.REQUEST_JSON AS REQUEST_TEXT,
                    ar.GENERATED_SQL, ar.PLAN_JSON, NULL AS REQUESTED_DIMENSIONS,
-                   NULL AS REQUESTED_METRICS, NULL AS MATERIALIZATION_USED
-            FROM SYS_SEMANTIC.AGENT_REQUEST_LOG ar
-            LEFT JOIN SYS_SEMANTIC.MODELS m
+                   NULL AS REQUESTED_METRICS, NULL AS MATERIALIZATION_USED,
+                   ar.USER_NAME
+            FROM SEMANTIC_SOURCE.MY_AGENT_REQUESTS ar
+            LEFT JOIN SEMANTIC_SOURCE.MODELS m
               ON m.MODEL_ID = ar.MODEL_ID
             WHERE ar.AGENT_REQUEST_ID = :handle_id
         ]]
@@ -2375,9 +2383,10 @@ local function load_handle(handle_type_arg, handle_id_arg)
                    ql.MODEL_ID, m.MODEL_NAME, ql.VERSION_ID, ql.STATUS,
                    ql.ERROR_CODE, ql.ERROR_MESSAGE, ql.ORIGINAL_SQL AS REQUEST_TEXT,
                    ql.GENERATED_SQL, ql.PLAN_JSON, ql.REQUESTED_DIMENSIONS,
-                   ql.REQUESTED_METRICS, ql.MATERIALIZATION_USED
-            FROM SYS_SEMANTIC.QUERY_LOG ql
-            LEFT JOIN SYS_SEMANTIC.MODELS m
+                   ql.REQUESTED_METRICS, ql.MATERIALIZATION_USED,
+                   ql.USER_NAME
+            FROM SEMANTIC_SOURCE.MY_QUERY_LOG ql
+            LEFT JOIN SEMANTIC_SOURCE.MODELS m
               ON m.MODEL_ID = ql.MODEL_ID
             WHERE ql.QUERY_LOG_ID = :handle_id
         ]]
@@ -2425,7 +2434,13 @@ end
 -- colleague's" are asked after the fact, about a statement that already ran, by
 -- someone who should not have to read generated SQL to find out. The plan
 -- records what the layer was enforcing; this says it in a sentence.
-local function governance_narrative(plan_json)
+-- `ran_by` is the principal the log row belongs to. It is not always the one in
+-- the plan: a compile is cached and served to anyone inside the same trust
+-- boundary, so the plan carries whoever compiled it first. Saying "Compiled by
+-- SYS" to the person who just ran the query answers the wrong question -- the
+-- SQL is identical either way, and what decides the rows they saw is their own
+-- rights at execution. So when the two differ, both are stated.
+local function governance_narrative(plan_json, ran_by)
     if missing(plan_json) then
         return null
     end
@@ -2435,8 +2450,18 @@ local function governance_narrative(plan_json)
     end
     local governance = plan.governance
     local parts = {}
-    parts[#parts + 1] = "Compiled by " .. tostring(governance.compiled_by or "an unknown principal")
-        .. " with the model in " .. tostring(governance.governance_mode or "OPEN") .. " mode."
+    local compiled_by = tostring(governance.compiled_by or "an unknown principal")
+    local mode = tostring(governance.governance_mode or "OPEN")
+    if not missing(ran_by) and tostring(ran_by) ~= compiled_by then
+        parts[#parts + 1] = "Run by " .. tostring(ran_by) .. " with the model in "
+            .. mode .. " mode. The plan was compiled by " .. compiled_by
+            .. " and served from the compile cache, so the SQL is the same one"
+            .. " they ran; the rows it returns are still resolved with "
+            .. tostring(ran_by) .. "'s rights."
+    else
+        parts[#parts + 1] = "Compiled by " .. compiled_by
+            .. " with the model in " .. mode .. " mode."
+    end
     local sources = governance.sources or {}
     if #sources > 0 then
         local described = {}
@@ -2488,7 +2513,8 @@ function M.explain_compiled_sql(handle_type_arg, handle_id_arg)
         requested_dimensions,
         requested_metrics,
         selected_materialization,
-        governance_narrative(row_value(handle, "PLAN_JSON", 11)),
+        governance_narrative(row_value(handle, "PLAN_JSON", 11),
+            row_value(handle, "USER_NAME", 15)),
     }}
 end
 

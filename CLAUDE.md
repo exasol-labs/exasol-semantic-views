@@ -121,7 +121,7 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/admin/validator.lua` | `003_create_semantic_admin_scripts.sql` | inline in `VALIDATE_MODEL` |
 
 `package_lua_scripts.py` replaces `-- BEGIN GENERATED … / -- END GENERATED …` marker blocks in the install SQL files. It also generates
-`007_create_semantic_source_views.sql` by scanning the compiler modules for
+`001b_create_semantic_source_views.sql` by scanning the compiler modules for
 `SEMANTIC_SOURCE.<TABLE>` references: the compiler's own reads decide which
 scoped views exist, so adding a catalog read without a view fails the build
 rather than failing at runtime for a non-`SYS` caller. The public TABLE-returning scripts (`COMPILE_REQUEST_JSON`, `COMPILE_SQL`, etc.) are thin wrappers that `import(...)` the runtime library and call one function.
@@ -328,6 +328,16 @@ a concept is absent from one of them.
 So: bootstrap the graph with the scripts, and keep an object's dimensions, facts
 and metrics in DDL, where the file is the record.
 
+**Removing a semantic view is `REMOVE_SEMANTIC_OBJECT(model, object)`,** not the
+DDL — the DDL edits an object's interior and cannot remove the object itself. It
+takes the view and the dimensions and metrics it exposes, drops the published
+view, and keeps facts and entities, because a fact is declared on an *entity* and
+may feed other views. It refuses when another view's metric is built on one of
+the metrics it would take (`SEMANTIC_ADMIN_099`), reading the dependency from
+`METRIC_DEPENDENCIES`, which `VALIDATE_MODEL` derives — so a dependency added
+since the last validation is not seen, and that validation reports it instead.
+`ADD_ENTITY` still has no counterpart.
+
 The fusion layer (F1–F5) is a third surface with a third job: it has its own
 document, `APPLY_FUSION_DECLARATION` / `EXPORT_FUSION_DECLARATION`, because on a
 published model fusion is not incrementally authorable at all — every
@@ -478,7 +488,7 @@ the six names.
 | `sql/install/003_create_semantic_admin_scripts.sql` | Generated — wraps compiler + validator Lua into Exasol scripts |
 | `sql/install/006_create_semantic_agent_views.sql` | Generated — wraps agent runtime + all SEMANTIC_AGENT views |
 | `sql/examples/sales_model_seed.sql` | Reference model definition (canonical example) |
-| `sql/install/007_create_semantic_source_views.sql` | Generated — principal-scoped catalog views the compiler reads |
+| `sql/install/001b_create_semantic_source_views.sql` | Generated — principal-scoped catalog views the compiler reads |
 | `tools/package_lua_scripts.py` | Regenerates install SQL from Lua source |
 | `tools/install.py` | Full installer: package → connect → reset? → run SQL files |
 | `tools/import_databricks.py` | Host helper: reads a Databricks UCMV YAML file and calls the in-DB importer |

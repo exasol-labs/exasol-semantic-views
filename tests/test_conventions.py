@@ -914,5 +914,55 @@ class TermsAreDefinedOnce(unittest.TestCase):
             "in docs/glossary.md has no row for it")
 
 
+class ADecisionColumnIsAlwaysSelected(unittest.TestCase):
+    """A column a decision is made from is read, or the decision is made wrongly.
+
+    `load_model()` did not select `GOVERNANCE_MODE`, and the two places that
+    consult it read `model.governance_mode or "OPEN"`. That is the shape of the
+    defect: the missing column did not read as *absent*, it read as the literal
+    answer `OPEN`. A model in `GOVERNED` mode reported `OPEN` in `PLAN_JSON` and
+    skipped its own enforcement, while the loader beside it -- which did select
+    the column -- refused correctly, so the two paths disagreed about the same
+    model.
+
+    The `or "OPEN"` is still there and should be: it is a sane default for a
+    genuinely unset value. What must not happen again is a loader that hands it
+    a table where the key was never populated.
+    """
+
+    LOADERS = ROOT / "lua/semantic_layer/compiler/request_json.lua"
+
+    def test_every_model_loader_selects_the_governance_mode(self):
+        text = self.LOADERS.read_text(encoding="utf-8")
+        # Each `SELECT ... FROM SEMANTIC_SOURCE.MODELS` that builds a model table
+        # for the compiler. The governance decision is made from that table.
+        # No intervening FROM in the select list, or a non-greedy match starts
+        # at some earlier SELECT and captures a span that happens to contain the
+        # column -- which is how this test first passed while the defect was
+        # still present.
+        selects = re.findall(
+            r"SELECT\s+((?:(?!\bFROM\b).)*?)\s+FROM\s+SEMANTIC_SOURCE\.MODELS\s+m\b",
+            text, re.S)
+        self.assertGreaterEqual(
+            len(selects), 2,
+            "the scan found fewer model loaders than exist; it has broken")
+        missing = [s.split("\n")[0].strip()[:60]
+                   for s in selects if "GOVERNANCE_MODE" not in s.upper()]
+        self.assertEqual(
+            [], missing,
+            "these model loaders do not select GOVERNANCE_MODE, so every "
+            "governance decision made from what they return silently reads OPEN")
+
+    def test_the_default_is_only_a_default(self):
+        """The fallback must not be the only source of the value."""
+        text = self.LOADERS.read_text(encoding="utf-8")
+        consumers = text.count('governance_mode or "OPEN"')
+        producers = text.count('governance_mode = row_value(')
+        self.assertGreaterEqual(
+            producers, 1,
+            "nothing populates governance_mode, so every consumer reads the "
+            f"default -- {consumers} of them")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

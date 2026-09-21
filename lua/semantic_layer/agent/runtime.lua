@@ -949,6 +949,13 @@ local function load_handle(handle_type_arg, handle_id_arg)
     elseif handle_type == "QUERY_LOG_ID" or handle_type == "SQL" then
         handle_type = "QUERY_LOG"
     end
+    -- Read through the principal-scoped views, not the base tables. This script
+    -- runs with the caller's rights, so a BI user reaching for the answer to
+    -- "why is my number different from my colleague's" got `insufficient
+    -- privileges: SELECT on table QUERY_LOG` -- SEMANTIC_USER is granted INSERT
+    -- there and nothing else. It also means a handle that belongs to somebody
+    -- else reports as not found rather than as forbidden, which is the right
+    -- shape: the existence of another principal's query is not ours to confirm.
     local sql_text
     if handle_type == "AGENT_REQUEST" then
         sql_text = [[
@@ -956,9 +963,10 @@ local function load_handle(handle_type_arg, handle_id_arg)
                    ar.MODEL_ID, m.MODEL_NAME, ar.VERSION_ID, ar.STATUS,
                    ar.ERROR_CODE, ar.ERROR_MESSAGE, ar.REQUEST_JSON AS REQUEST_TEXT,
                    ar.GENERATED_SQL, ar.PLAN_JSON, NULL AS REQUESTED_DIMENSIONS,
-                   NULL AS REQUESTED_METRICS, NULL AS MATERIALIZATION_USED
-            FROM SYS_SEMANTIC.AGENT_REQUEST_LOG ar
-            LEFT JOIN SYS_SEMANTIC.MODELS m
+                   NULL AS REQUESTED_METRICS, NULL AS MATERIALIZATION_USED,
+                   ar.USER_NAME
+            FROM SEMANTIC_SOURCE.MY_AGENT_REQUESTS ar
+            LEFT JOIN SEMANTIC_SOURCE.MODELS m
               ON m.MODEL_ID = ar.MODEL_ID
             WHERE ar.AGENT_REQUEST_ID = :handle_id
         ]]
@@ -968,9 +976,10 @@ local function load_handle(handle_type_arg, handle_id_arg)
                    ql.MODEL_ID, m.MODEL_NAME, ql.VERSION_ID, ql.STATUS,
                    ql.ERROR_CODE, ql.ERROR_MESSAGE, ql.ORIGINAL_SQL AS REQUEST_TEXT,
                    ql.GENERATED_SQL, ql.PLAN_JSON, ql.REQUESTED_DIMENSIONS,
-                   ql.REQUESTED_METRICS, ql.MATERIALIZATION_USED
-            FROM SYS_SEMANTIC.QUERY_LOG ql
-            LEFT JOIN SYS_SEMANTIC.MODELS m
+                   ql.REQUESTED_METRICS, ql.MATERIALIZATION_USED,
+                   ql.USER_NAME
+            FROM SEMANTIC_SOURCE.MY_QUERY_LOG ql
+            LEFT JOIN SEMANTIC_SOURCE.MODELS m
               ON m.MODEL_ID = ql.MODEL_ID
             WHERE ql.QUERY_LOG_ID = :handle_id
         ]]
@@ -1018,7 +1027,13 @@ end
 -- colleague's" are asked after the fact, about a statement that already ran, by
 -- someone who should not have to read generated SQL to find out. The plan
 -- records what the layer was enforcing; this says it in a sentence.
-local function governance_narrative(plan_json)
+-- `ran_by` is the principal the log row belongs to. It is not always the one in
+-- the plan: a compile is cached and served to anyone inside the same trust
+-- boundary, so the plan carries whoever compiled it first. Saying "Compiled by
+-- SYS" to the person who just ran the query answers the wrong question -- the
+-- SQL is identical either way, and what decides the rows they saw is their own
+-- rights at execution. So when the two differ, both are stated.
+local function governance_narrative(plan_json, ran_by)
     if missing(plan_json) then
         return null
     end
@@ -1028,8 +1043,18 @@ local function governance_narrative(plan_json)
     end
     local governance = plan.governance
     local parts = {}
-    parts[#parts + 1] = "Compiled by " .. tostring(governance.compiled_by or "an unknown principal")
-        .. " with the model in " .. tostring(governance.governance_mode or "OPEN") .. " mode."
+    local compiled_by = tostring(governance.compiled_by or "an unknown principal")
+    local mode = tostring(governance.governance_mode or "OPEN")
+    if not missing(ran_by) and tostring(ran_by) ~= compiled_by then
+        parts[#parts + 1] = "Run by " .. tostring(ran_by) .. " with the model in "
+            .. mode .. " mode. The plan was compiled by " .. compiled_by
+            .. " and served from the compile cache, so the SQL is the same one"
+            .. " they ran; the rows it returns are still resolved with "
+            .. tostring(ran_by) .. "'s rights."
+    else
+        parts[#parts + 1] = "Compiled by " .. compiled_by
+            .. " with the model in " .. mode .. " mode."
+    end
     local sources = governance.sources or {}
     if #sources > 0 then
         local described = {}
@@ -1081,7 +1106,8 @@ function M.explain_compiled_sql(handle_type_arg, handle_id_arg)
         requested_dimensions,
         requested_metrics,
         selected_materialization,
-        governance_narrative(row_value(handle, "PLAN_JSON", 11)),
+        governance_narrative(row_value(handle, "PLAN_JSON", 11),
+            row_value(handle, "USER_NAME", 15)),
     }}
 end
 

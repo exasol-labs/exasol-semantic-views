@@ -26,7 +26,6 @@ it is believed.
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -76,21 +75,23 @@ def main() -> None:
               sales[1].lower() in (sales[7] or "").lower(), True)
         check("the summary is a sentence, not a shrug", len(sales[7] or "") > 80, True)
 
-    # 2. the capability list names only codes the compiler can emit
+    # 2. the capability list is published and complete enough to be worth citing.
+    #
+    # What each row *promises* is checked by tools/verify_query_capabilities_contract.py,
+    # which runs the shape and compares the code that comes back. This used to
+    # grep the Lua sources for each published code and pass if the string
+    # appeared anywhere -- which it always did, because both lane spellings exist
+    # in the source, so the view could tell BI users to match on
+    # SEMANTIC_REQUEST_027 while the SQL lane emitted SEMANTIC_QUERY_027 and
+    # nothing failed. A spell-checker is not a contract; the check lives with the
+    # demonstrations now.
     capabilities = con.execute(
-        "SELECT SHAPE, SUPPORT, REFUSAL_CODE FROM SEMANTIC_CATALOG.QUERY_CAPABILITIES").fetchall()
+        "SELECT SHAPE, SUPPORT, SQL_REFUSAL_CODE, REQUEST_REFUSAL_CODE"
+        " FROM SEMANTIC_CATALOG.QUERY_CAPABILITIES").fetchall()
     check("the capability list is published", len(capabilities) >= 10, True)
-    emitted = set()
-    for source in ("lua/semantic_layer/compiler/request_json.lua",
-                   "lua/semantic_layer/admin/validator.lua"):
-        text = (ROOT / source).read_text()
-        emitted.update(re.findall(r"SEMANTIC_[A-Z]+_\d{3}", text))
-        # codes built from the lane prefix, e.g. error_prefix .. "_024"
-        for suffix in re.findall(r'error_prefix \.\. "_(\d{3})"', text):
-            emitted.add(f"SEMANTIC_REQUEST_{suffix}")
-            emitted.add(f"SEMANTIC_QUERY_{suffix}")
-    unknown = [r[2] for r in capabilities if r[2] and r[2] not in emitted]
-    check("every refusal code it names is one the compiler emits", unknown, [])
+    check("and says which lane each refusal belongs to",
+          any(row[2] for row in capabilities) and any(row[3] for row in capabilities),
+          True)
 
     # 3. the plan records what was in force, and EXPLAIN says it in prose
     con.execute("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE")

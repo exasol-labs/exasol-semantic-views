@@ -3136,12 +3136,20 @@ test("a frozen view is judged against the model it froze", function()
     local trusted = {{"MART.ORDERS", "GOVERNED"}}
 
     -- Frozen at the active version, reading a relation the model still vouches
-    -- for: nothing to say.
+    -- for. There is no policy hole -- and one thing still worth saying, which is
+    -- that the view is there. It answers with the model as it was when it was
+    -- made, and nothing in the catalog can tell whether that still matches what
+    -- the model compiles today, so the notice names CHECK_FROZEN_VIEWS rather
+    -- than guessing. A warning, not an error: the view is not wrong, it is
+    -- unexamined.
     local current = run({
         frozen = {{"MART", "V_CURRENT", 7, "MART.ORDERS", 1}},
         trust = trusted,
     })
-    assert_equal(#current.issues, 0)
+    assert_true(has_rule(current, "SEMANTIC_MODEL_067"))
+    assert_equal(current.warning_count, 1)
+    assert_equal(current.error_count, 0)
+    assert_true(not has_rule(current, "SEMANTIC_MODEL_068"))
 
     -- There is no superseded-version case to test: ESV creates exactly one model
     -- version and authoring mutates it in place, so a version comparison could
@@ -3150,7 +3158,8 @@ test("a frozen view is judged against the model it froze", function()
     -- compiler; this rule answers the part the catalog alone can settle.
 
     -- The record outliving the view is how a view is correctly retired, not a
-    -- finding.
+    -- finding -- and it is not counted by the notice either, so dropping a view
+    -- clears the warning rather than leaving it standing for a record.
     local dropped = run({
         frozen = {{"MART", "V_GONE", 6, "MART.ORDERS", 0}},
         trust = trusted,
@@ -3163,7 +3172,9 @@ test("a frozen view is judged against the model it froze", function()
         trust = trusted,
     })
     assert_true(has_rule(undeclared, "SEMANTIC_MODEL_068"))
-    assert_equal(undeclared.warning_count, 1)
+    -- Two warnings now: the policy hole, and the standing notice that a frozen
+    -- view exists at all.
+    assert_equal(undeclared.warning_count, 2)
     assert_equal(undeclared.error_count, 0)
 
     -- The same view under a model that promised to be governed: an error, because
@@ -3175,6 +3186,7 @@ test("a frozen view is judged against the model it froze", function()
     })
     assert_true(has_rule(governed, "SEMANTIC_MODEL_068"))
     assert_equal(governed.error_count, 1)
+    assert_true(has_rule(governed, "SEMANTIC_MODEL_067"))
 
     -- A relation that is declared but has diverged from the representations it
     -- stands in for is the same hole by a different route.

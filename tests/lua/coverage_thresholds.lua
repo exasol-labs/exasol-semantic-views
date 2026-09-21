@@ -68,6 +68,12 @@
 -- just the result: a cache hit that still loaded the catalog would return the
 -- right SQL and cost 17 round trips, which is exactly the regression a
 -- result-only test cannot see. See plans/preprocessor-latency.md.
+-- sql_text.lua 99.5 -> 99.54 on 2026-09-20, when flatten_lines was added so a
+-- spliced statement keeps the author's line numbers. The tests are worth more
+-- than the ratchet here: the two cases that must not fold -- a newline inside a
+-- string literal, and a line comment whose newline ends it -- are the ones that
+-- would corrupt data or comment out the rest of a statement, and neither shows
+-- up in the happy path this function was written for.
 -- sql_text.lua 99.4 -> 99.5 on 2026-09-19, when output projection was added so
 -- a SQL client gets its own select list back. Three defects shared one cause and
 -- one fix: the planner's column order was returned instead of the caller's
@@ -142,7 +148,7 @@ return {
     lines = {
         ["lua/semantic_layer/shared/json.lua"] = 100,
         ["lua/semantic_layer/shared/rows.lua"] = 100,
-        ["lua/semantic_layer/shared/sql_text.lua"] = 99.5,
+        ["lua/semantic_layer/shared/sql_text.lua"] = 99.54,
         ["lua/semantic_layer/shared/catalog_rollback.lua"] = 100,
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.7,
         ["lua/semantic_layer/shared/source_columns.lua"] = 92.5,
@@ -152,12 +158,12 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 90.3,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 90.39,
         ["lua/semantic_layer/admin/validator.lua"] = 94.8,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
-        ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.3,
-        ["lua/semantic_layer/agent/runtime.lua"] = 95.5,
+        ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,
+        ["lua/semantic_layer/agent/runtime.lua"] = 95.78,
     },
     branches = 100,
 }

@@ -173,6 +173,43 @@ function M.strip_string_literals(text)
     return table.concat(out)
 end
 
+-- Put `text` on one line, without disturbing what is inside a string literal.
+--
+-- Reference expansion splices compiled SQL into the middle of somebody else's
+-- statement. The compiled text is eight or so lines, so everything after the
+-- splice moved down by that many lines -- and when Exasol then rejected the
+-- surrounding statement it reported the failure at "line 10" of a statement the
+-- author had written on one line. The position pointed into text they had never
+-- seen, which is the whole of BUG-B09: the number is not merely unhelpful, it
+-- sends the reader looking at the wrong thing.
+--
+-- Only newlines *outside* literals are folded. A newline inside a string is
+-- part of the value, and turning it into a space would change the data rather
+-- than the layout -- strip_string_literals masks literal bodies while keeping
+-- offsets, so the mask says which is which.
+--
+-- Comments are the one shape this cannot fold: `-- …` ends at a newline, so
+-- removing the newline would swallow the rest of the statement. The renderer
+-- emits none, but a caller's frozen SQL could, so the guard is here rather than
+-- assumed away.
+function M.flatten_lines(text)
+    if text == nil then return text end
+    local masked = M.strip_string_literals(text)
+    if string.find(masked, "--", 1, true) or string.find(masked, "/*", 1, true) then
+        return text
+    end
+    local out = {}
+    for index = 1, #text do
+        local masked_char = string.sub(masked, index, index)
+        if masked_char == "\n" or masked_char == "\r" then
+            out[index] = " "
+        else
+            out[index] = string.sub(text, index, index)
+        end
+    end
+    return table.concat(out)
+end
+
 -- Is this expression a bare SQL NULL constant?
 --
 -- A binding whose expression is a literal NULL means one thing: "this

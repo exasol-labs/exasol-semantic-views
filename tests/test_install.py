@@ -239,7 +239,10 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("STRUCTURED_REQUEST does not require session setup", instructions)
         self.assertIn("ALTER SESSION SET QUERY_TIMEOUT=60", instructions)
         self.assertIn("'PRECONDITION' AS INSTRUCTION_KIND", instructions)
-        self.assertIn("FROM SYS_SEMANTIC.AGENT_INSTRUCTIONS ai", instructions)
+        # Through the principal-scoped view, not the table: an agent discovery
+        # surface granted to every caller must not hand over instructions
+        # attached to a model that caller cannot see.
+        self.assertIn("FROM SEMANTIC_SOURCE.AGENT_INSTRUCTIONS ai", instructions)
 
         validation_issues = next(
             sql
@@ -628,8 +631,6 @@ class InstallerResetTest(unittest.TestCase):
                 "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
             "ADD_MATERIALIZATION_COLUMN":
                 "Column removal is unsupported; deactivate the owning materialization instead.",
-            "ADD_SEMANTIC_OBJECT":
-                "Semantic objects are part of the published contract and currently require model rebuild.",
             "ADD_SYNONYM":
                 "Synonym removal is intentionally deferred until ambiguity revalidation is transactional.",
         }
@@ -948,7 +949,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_every_baseline_role_is_granted_something_by_007(self):
         """A role nothing grants to is a role that does nothing."""
-        source = (INSTALL.ROOT / "sql/install/007_create_semantic_source_views.sql").read_text()
+        source = (INSTALL.ROOT / "sql/install/001b_create_semantic_source_views.sql").read_text()
         for role in INSTALL.BASELINE_ROLES:
             self.assertIn(f"TO {role};", source, role)
 

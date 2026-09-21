@@ -405,6 +405,31 @@ whether the existing preprocessor should be replaced.
 
 ## Operational Notes
 
+### Schedule `CHECK_FROZEN_VIEWS`
+
+A view created over a semantic object stores **compiled physical SQL**. That is
+what makes it answer with no preprocessor, for anyone granted it — and it is
+also why it keeps answering with the model as it was when the view was made,
+after the model has moved on. It does not fail, it does not warn, and the number
+it returns still looks right. A frozen view is silent by construction.
+
+`VALIDATE_MODEL` now says they exist (`SEMANTIC_MODEL_067`), which is as much as
+the catalog can know: nothing there records that a definition was edited. The
+exact question needs the compiler, so run the check on a schedule and after every
+model change:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS('sales');
+-- STATUS is CURRENT, STALE or DROPPED, one row per recorded view
+```
+
+Put it wherever your model changes land — the same job that runs
+`VALIDATE_MODEL` after a deployment, or a nightly task if models are edited by
+hand. Act on `STALE` by re-creating the view from the current model, or dropping
+it if nobody needs it; `DROPPED` means the record outlived the view and is safe
+to leave. Treat a `STALE` view the way you would a report nobody owns: it is
+still being read.
+
 - `ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT = ...` changes behavior for new
   sessions.
 - `ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = ...` overrides behavior for the
@@ -427,7 +452,7 @@ so the boundary is not discovered by hitting it:
 
 ```sql
 -- which SQL shapes are accepted, and what the layer says when one is not
-SELECT SHAPE, SUPPORT, REFUSAL_CODE, DETAIL
+SELECT SHAPE, SUPPORT, SQL_REFUSAL_CODE, REQUEST_REFUSAL_CODE, DETAIL
 FROM SEMANTIC_CATALOG.QUERY_CAPABILITIES ORDER BY SUPPORT, SHAPE;
 
 -- what a given model vouches for, in a sentence

@@ -306,7 +306,14 @@ for _, object_row in ipairs(object_rows or {}) do
 
     query("CREATE OR REPLACE VIEW " .. quote_qualified(model.published_schema, object_name)
         .. " (\n  " .. table.concat(column_declarations, ",\n  ") .. "\n) AS\nSELECT\n  "
-        .. table.concat(select_parts, ",\n  ") .. "\nFROM DUAL\nCOMMENT IS "
+        -- The guard is in the WHERE clause as well as in every column, because a
+        -- statement that selects no column never evaluates one. `SELECT COUNT(*)
+        -- FROM <object>` without the preprocessor counted the guard view's own
+        -- single row and returned 1 -- a plausible number for a question this
+        -- view exists to refuse, and the worst shape of wrong. A predicate has to
+        -- be evaluated for the row to be counted at all.
+        .. table.concat(select_parts, ",\n  ")
+        .. "\nFROM DUAL\nWHERE SEMANTIC_ADMIN.SEMANTIC_GUARD() IS NOT NULL\nCOMMENT IS "
         .. sql_string(semantic_comment(
             "Semantic object " .. tostring(model.name) .. "." .. tostring(object_name)
                 .. (missing(object_description) and "." or ": " .. tostring(object_description) .. "."),

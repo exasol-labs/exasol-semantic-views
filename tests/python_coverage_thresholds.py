@@ -38,6 +38,7 @@ LINE_THRESHOLDS: dict[str, float] = {
 # them here keeps the coverage report readable and prevents them from
 # dragging a per-file gate down to 0%.
 OMIT_PATTERNS: list[str] = [
+    "tools/measure_*.py",                # live-database measurement, not asserted
     "tools/verify_*.py",
     "tools/fuzz_semantic_differential.py",
     "tools/import_databricks.py",

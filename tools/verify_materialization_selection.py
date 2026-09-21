@@ -264,7 +264,13 @@ def main() -> int:
         assert_equal("preprocessed materialized rows", fetchall(con, semantic_sql), [("North", "3635"), ("West", "1500")])
         con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()")
         assert_equal("preprocessor validation hot path", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.VALIDATION_RUNS"), validation_runs_before)
-        assert_equal("preprocessor query log hot path", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.QUERY_LOG"), query_logs_before)
+        # One row, not none. This asserted zero, which pinned the absence that
+        # made MY_QUERY_LOG permanently empty and left EXPLAIN_COMPILED_SQL with
+        # no handle to explain -- the remedy the docs offer for "why is my number
+        # different from my colleague's" was unreachable from the lane BI tools
+        # use. The hot-path guarantee it was really protecting is that the lane
+        # writes a bounded amount, so it is kept as exactly one.
+        assert_equal("preprocessor query log hot path", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.QUERY_LOG"), query_logs_before + 1)
 
         debug = compile_sql_debug(con, semantic_sql, "verify_materialization_selection")
         assert_status_ok("COMPILE_SQL_DEBUG materialization", debug)

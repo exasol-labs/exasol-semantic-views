@@ -175,14 +175,31 @@ ADD OR REPLACE METRIC total_amount AS SUM(amount) * 1 ON ENTITY "order"
     check("and it still answers, with the older definition",
           len(plain.execute(f"SELECT * FROM {VIEW_SCHEMA}.{VIEW_NAME}").fetchall()), 2)
 
+    # 2b. validation says the view is there at all
+    #
+    # A frozen view is silent by construction: it goes on serving the model as it
+    # was, correctly, for as long as nobody asks. Nothing asked. Whether it still
+    # matches what the model would compile today cannot be answered from the
+    # catalog -- the version never changes, MODELS.UPDATED_AT does not move on
+    # authoring, and METRICS, DIMENSIONS and FACTS carry no timestamps -- so the
+    # notice says what it knows and names CHECK_FROZEN_VIEWS, which recompiles
+    # and answers exactly.
+    check("validation says frozen views exist",
+          "SEMANTIC_MODEL_067" in codes(validate(con), "WARNING"), True)
+
     # 3. a dropped view is how one is retired, not a finding
     plain.execute(f"DROP VIEW {VIEW_SCHEMA}.{VIEW_NAME}")
     plain.commit()
     rows = [r for r in frozen_rows(con) if r["name"].upper() == VIEW_NAME]
     check("a dropped view reads as DROPPED", rows[0]["presence"] if rows else None, "DROPPED")
     check("and the check reports it as dropped too", frozen_status(), "DROPPED")
+    after_drop = codes(validate(con))
     check("and is not reported as a problem",
-          "SEMANTIC_MODEL_068" in codes(validate(con)), False)
+          "SEMANTIC_MODEL_068" in after_drop, False)
+    # The notice clears with the view, so it is a standing condition rather than
+    # permanent noise: retiring the view retires the warning.
+    check("and the frozen-view notice clears with it",
+          "SEMANTIC_MODEL_067" in after_drop, False)
 
     # 4. a governed model refuses to freeze what it cannot vouch for.
     #    Registering a materialization clears the derived trust classes, so until
