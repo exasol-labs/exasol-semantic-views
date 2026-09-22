@@ -1882,11 +1882,36 @@ test("reference expansion sees composition, which is what the guard refuses", fu
     assert_equal(composed(
         "SELECT t0.A FROM SEMANTIC_SALES.SALES t0 LEFT JOIN MART.C c ON c.R = t0.A"), true)
 
-    -- A join *outside* the reference's own block is not this reference's
-    -- composition: the derived table is already closed by then.
+    -- A join *outside* the reference's own block is this reference's
+    -- composition too. This asserted `false` on the reasoning that "the derived
+    -- table is already closed by then" -- but the derived table is what the join
+    -- is joining. Expansion puts the semantic result where the reference is, so
+    -- wrapping the object in a subquery and joining that reached the very
+    -- fan-out the guard exists to prevent: North came back 7270 against a truth
+    -- of 3635, the pair docs/bi-tools.md prints to justify the refusal.
     assert_equal(composed(
         "SELECT * FROM (SELECT t0.A FROM SEMANTIC_SALES.SALES t0) x JOIN MART.C c ON c.R = x.A"),
+        true)
+
+    -- The same one level further out, and through a CTE, which is how the two
+    -- shapes were reported.
+    assert_equal(composed(
+        "SELECT * FROM (SELECT * FROM (SELECT t0.A FROM SEMANTIC_SALES.SALES t0) x) y"
+        .. " JOIN MART.C c ON c.R = y.A"), true)
+    assert_equal(composed(
+        "WITH q AS (SELECT t0.A FROM SEMANTIC_SALES.SALES t0)"
+        .. " SELECT q.A FROM q JOIN MART.C c ON c.R = q.A"), true)
+
+    -- ...but a wrapper with no join is still just a wrapper. The commas in an
+    -- outer SELECT list separate expressions, not relations, and reading them
+    -- as relations refused a CTE that had no join in it at all.
+    assert_equal(composed(
+        "SELECT * FROM (SELECT t0.A FROM SEMANTIC_SALES.SALES t0) x"), false)
+    assert_equal(composed(
+        "WITH q AS (SELECT t0.A, t0.B FROM SEMANTIC_SALES.SALES t0) SELECT A, B FROM q"),
         false)
+    assert_equal(composed(
+        "SELECT COUNT(*) FROM (SELECT t0.A FROM SEMANTIC_SALES.SALES t0) x"), false)
 
     -- A union is two separate statements, not a composition of one.
     assert_equal(composed(

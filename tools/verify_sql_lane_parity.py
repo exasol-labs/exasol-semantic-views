@@ -116,6 +116,31 @@ PAIRS = [
      f"SELECT SUM(TOTAL_REVENUE) FROM {OBJECT}"),
 ]
 
+# Composition, which the fan-out guard refuses. Its own pairs, because the
+# wrapped form here is not "the bare form inside a subquery" -- it is the join
+# moved one block out, which is the shape that walked past the guard: bare it was
+# refused, wrapped it returned North 7270 against a truth of 3635.
+COMPOSITION_PAIRS = [
+    ("joined to another relation",
+     f"SELECT t0.CUSTOMER_REGION FROM {OBJECT} t0"
+     " JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION",
+     f"SELECT y.R FROM (SELECT t0.CUSTOMER_REGION AS R FROM {OBJECT} t0) y"
+     " JOIN MART.CUSTOMERS c ON c.REGION = y.R"),
+    ("comma-joined",
+     f"SELECT t0.CUSTOMER_REGION FROM {OBJECT} t0, MART.CUSTOMERS c",
+     f"SELECT y.R FROM (SELECT t0.CUSTOMER_REGION AS R FROM {OBJECT} t0) y,"
+     " MART.CUSTOMERS c"),
+    ("CROSS JOIN",
+     f"SELECT t0.CUSTOMER_REGION FROM {OBJECT} t0 CROSS JOIN MART.CUSTOMERS c",
+     f"SELECT y.R FROM (SELECT t0.CUSTOMER_REGION AS R FROM {OBJECT} t0) y"
+     " CROSS JOIN MART.CUSTOMERS c"),
+    ("through a CTE",
+     f"SELECT t0.CUSTOMER_REGION FROM {OBJECT} t0"
+     " JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION",
+     f"WITH y AS (SELECT t0.CUSTOMER_REGION AS R FROM {OBJECT} t0)"
+     " SELECT y.R FROM y JOIN MART.CUSTOMERS c ON c.REGION = y.R"),
+]
+
 # Refusals the expansion lane is entitled to reach that the other cannot: they
 # are judgements about composition and provenance, not about parsing.
 EXPANSION_OWNED = {"SEMANTIC_QUERY_012", "SEMANTIC_QUERY_013", "SEMANTIC_QUERY_028"}
@@ -244,6 +269,21 @@ def main() -> int:
              "the sales model has SET_MODEL_DERIVED_COMPOSITION on, which accepts"
              " ordinary-SQL semantics -- these checks cannot run")
         REAGGREGATION.clear()
+
+    # Composition must be refused whichever block the join sits in. Compared as
+    # codes rather than as rows: both forms are refusals, and what matters is
+    # that neither slips through into a number.
+    for name, bare, wrapped in COMPOSITION_PAIRS:
+        bare_outcome, wrapped_outcome = outcome(con, bare), outcome(con, wrapped)
+        if bare_outcome[0] != "refused" or wrapped_outcome[0] != "refused":
+            fail(f"composition refused whether or not it is wrapped: {name}",
+                 f"bare {str(bare_outcome)[:50]}, wrapped {str(wrapped_outcome)[:50]}")
+        elif wrapped_outcome[1] != "SEMANTIC_QUERY_012":
+            fail(f"composition refused whether or not it is wrapped: {name}",
+                 f"wrapped gave {wrapped_outcome[1]}")
+        else:
+            ok(f"composition refused whether or not it is wrapped: {name}",
+               wrapped_outcome[1])
 
     for name, sql in REAGGREGATION:
         got = outcome(con, sql)

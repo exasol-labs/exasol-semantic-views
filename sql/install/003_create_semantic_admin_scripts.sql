@@ -17143,7 +17143,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "5087a581ab439c24"
+ESV_RUNTIME_BUILD = "ec3b0f64677afd64"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18025,7 +18025,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "5087a581ab439c24"
+ESV_RUNTIME_BUILD = "ec3b0f64677afd64"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -26882,24 +26882,84 @@ do
     end
 
     function bi_expansion.composed_in_from(tokens, reference)
+        -- Walked outward, not just across the reference's own FROM clause.
+        --
+        -- Expansion puts the derived table where the reference is. If that
+        -- position is inside a subquery, the subquery is a relation in the
+        -- enclosing FROM clause -- and a join *there* carries the same semantic
+        -- result into the same fan-out. Stopping at the block boundary meant
+        -- wrapping the object first walked straight past the guard: the join
+        -- refused bare returned North 7270 against a truth of 3635 once the
+        -- object sat in a subquery, which is the exact pair docs/bi-tools.md
+        -- prints to justify the refusal.
+        --
+        -- Block scoping is right for the sibling guard `reaggregated_in_block`,
+        -- because aggregating in an outer block is supported -- there the caller
+        -- has named the grain. It is wrong for a join, which fans out wherever
+        -- it sits.
+        -- Where each enclosing block opens. Both parentheses of a group carry
+        -- the outer depth, so the opener for the block at depth d+1 is the
+        -- nearest `(` at depth d before the reference.
+        local openers = {}
+        do
+            local want = reference.depth - 1
+            for index = reference.first - 1, 1, -1 do
+                if want < 0 then break end
+                local token = tokens[index]
+                if token.kind == "symbol" and token.text == "("
+                    and token.depth == want then
+                    openers[want] = index
+                    want = want - 1
+                end
+            end
+        end
+
+        -- Is the block opened here a relation, or something else in parentheses?
+        -- `FROM ( … ) y` is a relation and the FROM clause continues around it;
+        -- `WITH q AS ( … )` is a CTE body and what follows the close is the main
+        -- query's SELECT list, whose commas separate expressions. Reading those
+        -- as relation separators refused `WITH q AS (…) SELECT a, b FROM q`,
+        -- which has no join in it at all.
+        local function opens_a_relation(opener_index)
+            if opener_index == nil then return false end
+            local previous = tokens[opener_index - 1]
+            if previous == nil then return false end
+            local word = sql_text.token_upper(previous)
+            return (previous.kind == "word" and (word == "FROM" or JOIN_WORDS[word]))
+                or (previous.kind == "symbol" and previous.text == ",")
+        end
+
+        local level = reference.depth
+        -- The reference itself is in a FROM clause, so scanning starts on.
+        local scanning = true
         for index = reference.last + 1, #tokens do
             local token = tokens[index]
-            if token.depth < reference.depth then
-                return false
+            -- A token shallower than the level being scanned means the block
+            -- closed. Keyed on depth rather than on seeing `)`, because a
+            -- closing paren carries the depth it *returns to*.
+            if token.depth < level then
+                local left = level
+                level = token.depth
+                -- Inside the enclosing FROM clause already if the block was a
+                -- relation there; otherwise wait for that block's own FROM.
+                scanning = opens_a_relation(openers[left - 1])
             end
-            if token.depth == reference.depth then
+            if token.depth == level then
                 local word = sql_text.token_upper(token)
-                if token.kind == "word" and ENDS_FROM[word] then
-                    return false
-                end
-                if token.kind == "symbol" and token.text == ")" then
-                    return false
-                end
-                if token.kind == "symbol" and token.text == "," then
-                    return true
-                end
-                if token.kind == "word" and JOIN_WORDS[word] then
-                    return true
+                if scanning then
+                    if token.kind == "symbol" and token.text == "," then
+                        return true
+                    end
+                    if token.kind == "word" and JOIN_WORDS[word] then
+                        return true
+                    end
+                    if token.kind == "word" and ENDS_FROM[word] then
+                        scanning = false
+                    end
+                elseif token.kind == "word" and word == "FROM" then
+                    -- The CTE's consumer: a join here carries the semantic
+                    -- result just as one beside the reference would.
+                    scanning = true
                 end
             end
         end

@@ -439,6 +439,33 @@ another table is refused by default. Each is called out below.
   implementation happens to handle is testing the implementation. Reported by the
   2026-09-21 evaluation, which also suggested taking shapes from `docs/`
   verbatim — worth doing, and not done here.
+- **The composition guard follows the derived table out of its block.**
+  `bi_expansion.composed_in_from` stopped scanning at the edge of the reference's
+  own parenthesised block, so putting the object in a subquery and joining *that*
+  was invisible to it — and expansion puts the semantic result exactly where the
+  reference was, so the join fans out either way. With
+  `ALLOW_DERIVED_COMPOSITION = FALSE` the wrapped form was accepted and returned
+  **North 7270 against a truth of 3635**, which is the literal pair
+  `docs/bi-tools.md` prints to justify the refusal; `CROSS JOIN` after wrapping
+  reached 14540, and the CTE form behaved the same. Block scoping stays correct
+  for the sibling guard `reaggregated_in_block`, because aggregating in an outer
+  block is supported — there the caller has named the grain. A join is not: it
+  fans out wherever it sits.
+- Two things had to be got right for the walk outward. A closing paren carries
+  the depth it *returns to* rather than the one it closes, so keying the step on
+  seeing `)` at the inner depth never fired and the scan never left the first
+  block. And after leaving a block the scan is only inside a `FROM` clause if
+  that block was a relation in one: for a CTE body what follows the close is the
+  main query's select list, whose commas separate expressions — reading those as
+  relation separators refused `WITH q AS (…) SELECT a, b FROM q`, which contains
+  no join at all. The scan now waits for that block's own `FROM`, which is also
+  what catches the CTE consumer's join.
+- A unit assertion had encoded the defect as intended, reasoning that a join
+  outside the block "is not this reference's composition: the derived table is
+  already closed by then". The derived table is what the join is joining.
+- `tools/verify_sql_lane_parity.py` holds four composition shapes bare against
+  wrapped, which is the invariant the reporter suggested and the one that would
+  have caught this.
 - Known boundary: a statement the layer rewrites but Exasol then rejects — a
   syntax error, `DISTINCT ON`, `LIMIT -1`, `ORDER BY` an unknown column — now
   comes back with Exasol's message instead of a `SEMANTIC_QUERY_*` code. Exasol
