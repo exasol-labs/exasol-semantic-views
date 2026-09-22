@@ -83,6 +83,12 @@ VALID = [
     "SELECT CUSTOMER_REGION AS r FROM {o} ORDER BY r",
     "SELECT CUSTOMER_REGION FROM {o} WHERE ORDER_MONTH > DATE '2020-01-01'",
     "SELECT CUSTOMER_REGION, MEASURE(TOTAL_REVENUE) FROM {o} GROUP BY CUSTOMER_REGION",
+    # Valid Semantic SQL by the project's own documentation -- "there is no GROUP
+    # BY to write, it is inferred" -- which came back as `not a single-group
+    # group function`, an Exasol message about generated text.
+    "SELECT CUSTOMER_REGION, MAX(TOTAL_REVENUE) FROM {o}",
+    "SELECT SUM(GROSS_MARGIN_PCT) FROM {o}",
+    "SELECT MEASURE(CUSTOMER_REGION) FROM {o}",
     "SELECT CUSTOMER_REGION FROM {o} ORDER BY 1",
     "SELECT CUSTOMER_REGION FROM {o} LIMIT 0",
     # Multi-line, because the line-shift defect only shows once a statement has

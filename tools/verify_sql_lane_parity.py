@@ -98,6 +98,22 @@ PAIRS = [
      f"SELECT CUSTOMER_REGION FROM {OBJECT} WHERE TOTAL_REVENUE BETWEEN 0 AND 99999999"),
     ("an unknown field",
      f"SELECT bogus_field FROM {OBJECT}"),
+    # An aggregate the metric does not declare. The guard is about what the
+    # statement means, so it cannot depend on which lane read it -- and it did:
+    # with an explicit GROUP BY the refusal fired, without one the same
+    # statement was rewritten and handed to Exasol.
+    ("SUM over a ratio metric",
+     f"SELECT SUM(GROSS_MARGIN_PCT) FROM {OBJECT}"),
+    ("MAX over an additive metric",
+     f"SELECT CUSTOMER_REGION, MAX(TOTAL_REVENUE) FROM {OBJECT}"),
+    ("COUNT over a metric",
+     f"SELECT CUSTOMER_REGION, COUNT(TOTAL_REVENUE) FROM {OBJECT}"),
+    ("an aggregate over a dimension",
+     f"SELECT SUM(CUSTOMER_REGION) FROM {OBJECT}"),
+    ("MEASURE over a dimension",
+     f"SELECT MEASURE(CUSTOMER_REGION) FROM {OBJECT}"),
+    ("the aggregate the metric does declare",
+     f"SELECT SUM(TOTAL_REVENUE) FROM {OBJECT}"),
 ]
 
 # Refusals the expansion lane is entitled to reach that the other cannot: they
@@ -152,6 +168,10 @@ AGGREGATION_OVER_A_SUBQUERY = [
 # one line, so the line Exasol names is one the author wrote. The column still
 # counts the spliced characters, which inline rewriting cannot avoid.
 # tools/verify_no_raw_parse_errors.py holds both halves of that.
+#
+# `SELECT SUM(CUSTOMER_REGION)` left this list when the aggregate guard stopped
+# being discarded by a successful rewrite: it now answers SEMANTIC_QUERY_006
+# rather than leaking a cast error carrying a data value.
 KNOWN_RAW = [
     f"SELECT CUSTOMER_REGION FROM {OBJECT} ORDER BY 7",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} ORDER BY nonexistent_col",
@@ -159,7 +179,6 @@ KNOWN_RAW = [
     f"SELECT CUSTOMER_REGION FROM {OBJECT} WHERE TOTAL_REVENUE >",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} LIMIT -1",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} FOR UPDATE",
-    f"SELECT SUM(CUSTOMER_REGION) FROM {OBJECT}",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} WHERE CUSTOMER_REGION IN ()",
     f"SELECT DISTINCT ON (CUSTOMER_REGION) CUSTOMER_REGION FROM {OBJECT}",
 ]

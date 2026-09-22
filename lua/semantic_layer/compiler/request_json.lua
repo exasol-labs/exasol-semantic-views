@@ -3698,6 +3698,45 @@ local METRIC_WRAPPERS = {
     SUM = true, COUNT = true, MIN = true, MAX = true, AVG = true,
 }
 
+-- Is this `WRAPPER(field)` one the layer refuses, and why?
+--
+-- On the module table rather than as a local because both lanes need it and the
+-- chunk is at its 200-local ceiling; the whole-statement lane calls it while
+-- resolving a select item, reference expansion while inferring a projection.
+-- One routine, because the two lanes disagreeing about which aggregates a metric
+-- accepts is precisely how the guard was lost once already.
+--
+-- Returns nil when the wrapper is acceptable.
+function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared)
+    if wrapper == nil or not METRIC_WRAPPERS[wrapper] then
+        return nil
+    end
+    if upper(tostring(field_kind or "")) ~= "METRIC" then
+        -- Literal, not built from a prefix: tests/test_conventions.py counts how
+        -- many distinct conditions each code carries by reading the sources, and
+        -- a code assembled at run time is invisible to it. Both callers are the
+        -- SQL lane anyway.
+        return error_result("SEMANTIC_QUERY_006",
+            "MEASURE()/agg() may only wrap a metric, not '" .. tostring(field_name) .. "'.")
+    end
+    if wrapper == "MEASURE" or wrapper == "AGG" then
+        return nil
+    end
+    -- A named aggregate is honoured only when it is the aggregation the metric
+    -- declares. BI tools write SUM(metric) over what they believe is a column,
+    -- and for an additive metric that reading is exactly right -- but SUM of a
+    -- ratio is not the ratio, and answering it anyway would return a number
+    -- under a label that lies about how it was computed.
+    local declared_upper = upper(tostring(declared or ""))
+    if declared_upper == wrapper then
+        return nil
+    end
+    return error_result("SEMANTIC_QUERY_007",
+        wrapper .. "(" .. tostring(field_name) .. ") is not how that metric"
+            .. " aggregates" .. (declared_upper == "" and "" or "; it declares " .. declared_upper)
+            .. ". Use MEASURE(" .. tostring(field_name) .. ") to select it as defined.")
+end
+
 local function unwrap_measure_part(part)
     if part == nil or #part < 4 then
         return part, false, nil
@@ -4301,21 +4340,11 @@ local function parse_semantic_sql(statement_text, options)
         if bind_err ~= nil then
             return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
-        if measure_wrapped and field.kind ~= "METRIC" then
-            return nil, error_result("SEMANTIC_QUERY_006", "MEASURE()/agg() may only wrap a metric, not '" .. tostring(field.name) .. "'.")
-        end
-        -- A named aggregate is honoured only when it is the aggregation the
-        -- metric declares. BI tools write SUM(metric) over what they believe is
-        -- a column, and for an additive metric that reading is exactly right --
-        -- but SUM of a ratio is not the ratio, and answering it anyway would
-        -- return a number under a label that lies about how it was computed.
-        if measure_wrapped and wrapper ~= "MEASURE" and wrapper ~= "AGG" then
-            local declared = upper(tostring(field.aggregation_function or ""))
-            if declared ~= wrapper then
-                return nil, error_result("SEMANTIC_QUERY_007",
-                    wrapper .. "(" .. tostring(field.name) .. ") is not how that metric"
-                        .. " aggregates" .. (declared == "" and "" or "; it declares " .. declared)
-                        .. ". Use MEASURE(" .. tostring(field.name) .. ") to select it as defined.")
+        if measure_wrapped then
+            local wrapper_refusal = M.aggregate_wrapper_refusal(
+                wrapper, field.name, field.kind, field.aggregation_function)
+            if wrapper_refusal ~= nil then
+                return nil, wrapper_refusal
             end
         end
         selected_output[#selected_output + 1] = field.name
@@ -4555,11 +4584,25 @@ end
 -- The refusals expansion owns. Everything else it reports is a failure to read
 -- the statement, and there the whole-statement lane's message is the better one
 -- because it got further into understanding it.
-local EXPANSION_REFUSALS = {
+-- Which lane's answer survives, in one table. Three separate locals would read
+-- the same and cost three of the chunk's 200; adding the third is what pushed
+-- this over the limit, and they are one decision anyway.
+local refusal_rules = {}
+refusal_rules.expansion_wins = {
+    SEMANTIC_QUERY_006 = true,   -- MEASURE()/agg() over something that is not a metric
+    SEMANTIC_QUERY_007 = true,   -- an aggregate the metric does not declare
     SEMANTIC_QUERY_012 = true,   -- composition the layer does not supervise
     SEMANTIC_QUERY_013 = true,   -- more references than one statement should carry
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
+
+-- There is deliberately no third set for "lane refusals expansion may not
+-- override". One was written while fixing the aggregate guard and then removed:
+-- reference expansion raises SEMANTIC_QUERY_006 and _007 itself now, through the
+-- same routine the whole-statement lane uses, so the protective set could not be
+-- made to fire. Reverting the expansion-side guard fails five checks in
+-- tools/verify_sql_lane_parity.py; reverting the protective set failed none.
+-- A rule that cannot fire is worse than no rule, because it reads like coverage.
 
 -- `SEMANTIC_QUERY_011` -- "cannot tell which columns of X this statement needs"
 -- -- is expansion's own refusal too, but it is about the statement as a whole,
@@ -4567,7 +4610,7 @@ local EXPANSION_REFUSALS = {
 -- text: `Unknown semantic field: bogus. Did you mean: customer_region?` names
 -- what the author wrote and offers the correction. So it wins only where that
 -- lane had no opinion at all.
-local EXPANSION_REFUSALS_WHEN_UNJUDGED = {
+refusal_rules.expansion_wins_when_unjudged = {
     SEMANTIC_QUERY_011 = true,
     -- Expansion names an unknown field too, for the statements the other lane
     -- never looks at -- `SELECT bogus FROM obj` inside a subquery. Where both
@@ -4635,10 +4678,12 @@ do
             return nil
         end
         local rows = query([[
-            SELECT oc.COLUMN_NAME, oc.COLUMN_KIND
+            SELECT oc.COLUMN_NAME, oc.COLUMN_KIND, mt.AGGREGATION_FUNCTION
               FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
               JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
                 ON so.OBJECT_ID = oc.OBJECT_ID
+              LEFT JOIN SEMANTIC_SOURCE.METRICS mt
+                ON oc.COLUMN_KIND = 'METRIC' AND mt.METRIC_ID = oc.OBJECT_REF_ID
              WHERE so.MODEL_ID = :model_id
                AND so.VERSION_ID = :version_id
                AND UPPER(so.OBJECT_NAME) = UPPER(:object_name)
@@ -4653,7 +4698,13 @@ do
         local columns, by_name = {}, {}
         for index, row in ipairs(rows) do
             local name = tostring(row_value(row, "COLUMN_NAME", 1))
-            columns[index] = {name = name, kind = tostring(row_value(row, "COLUMN_KIND", 2))}
+            columns[index] = {
+                name = name,
+                kind = tostring(row_value(row, "COLUMN_KIND", 2)),
+                -- Only a metric has one; a dimension's stays nil and the
+                -- wrapper check refuses on kind before it is read.
+                aggregation_function = row_value(row, "AGGREGATION_FUNCTION", 3),
+            }
             by_name[upper(name)] = columns[index]
         end
         return columns, by_name
@@ -4733,7 +4784,12 @@ do
     -- contains `w`, and a wider scan reported the wrapper's alias as an unknown
     -- field. The list between this block's `SELECT` and the `FROM` above the
     -- reference is exactly the set that has to resolve against it.
-    function bi_expansion.unresolved_field_names(tokens, reference, by_name)
+    -- The select list this reference is the FROM of: everything between its own
+    -- block's SELECT and the FROM above it. Shared by the two checks that read
+    -- it, because "which tokens belong to this reference's projection" is one
+    -- question and scanning wider is how somebody else's alias gets reported as
+    -- an unknown field of ours.
+    function bi_expansion.select_list_range(tokens, reference)
         local from_index, select_index
         for index = reference.first - 1, 1, -1 do
             local token = tokens[index]
@@ -4747,7 +4803,53 @@ do
                 end
             end
         end
-        if select_index == nil or from_index == nil then return {} end
+        if select_index == nil or from_index == nil then return nil, nil end
+        return select_index + 1, from_index - 1
+    end
+
+    -- `WRAPPER(field)` written over this reference, judged by the same routine
+    -- the whole-statement lane uses.
+    --
+    -- Without this the guard was a property of *which lane read the statement*
+    -- rather than of the statement: `SELECT SUM(gross_margin_pct) FROM obj` was
+    -- refused, and the same thing inside a subquery, a CTE or one arm of a union
+    -- returned the ratio itself -- a number under a label that lies about how it
+    -- was computed. The wrapping is exactly what stopped the other lane seeing
+    -- it, so expansion has to be able to say so on its own.
+    function bi_expansion.wrapper_refusal(tokens, reference, by_name)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return nil end
+        for index = first, last do
+            local token = tokens[index]
+            local following = tokens[index + 1]
+            if (token.kind == "word" or token.kind == "identifier")
+                and following ~= nil and following.kind == "symbol"
+                and following.text == "(" then
+                local wrapper = upper(token_identifier_value(token) or "")
+                -- `WRAPPER ( name )` -- anything else is an expression this
+                -- lane has no opinion about.
+                local argument = tokens[index + 2]
+                local closing = tokens[index + 3]
+                if METRIC_WRAPPERS[wrapper] and argument ~= nil and closing ~= nil
+                    and closing.kind == "symbol" and closing.text == ")" then
+                    local name = token_identifier_value(argument)
+                    local column = name ~= nil and by_name[upper(name)] or nil
+                    if column ~= nil then
+                        local refusal = M.aggregate_wrapper_refusal(
+                            wrapper, column.name, column.kind,
+                            column.aggregation_function)
+                        if refusal ~= nil then return refusal end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    function bi_expansion.unresolved_field_names(tokens, reference, by_name)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return {} end
+        local select_index, from_index = first - 1, last + 1
 
         local candidates = {}
         for _, column in ipairs(reference.columns or {}) do
@@ -4769,8 +4871,21 @@ do
                      or (following.text ~= "." and following.text ~= "("))
                 -- `f(` -- a function call, not a field.
             -- `x AS name` declares an output column; the name is not a field
-            -- of the object and must not be reported as an unknown one.
-            if is_bare_word and sql_text.token_upper(previous) == "AS" then
+            -- of the object and must not be reported as an unknown one. Nor is
+            -- `x name`, the same declaration with AS left out -- two operands
+            -- cannot sit side by side in a select list, so the second is always
+            -- a label. Missing that reported `SELECT z.r FROM (SELECT
+            -- t0.CUSTOMER_REGION r FROM obj t0) z` as naming an unknown field
+            -- `r`, refusing a valid statement.
+            local previous_is_operand = previous ~= nil
+                and ((previous.kind == "word"
+                      and not STATEMENT_WORDS[upper(token_identifier_value(previous) or "")])
+                     or previous.kind == "identifier"
+                     or previous.kind == "number"
+                     or previous.kind == "string"
+                     or (previous.kind == "symbol" and previous.text == ")"))
+            if is_bare_word and previous ~= nil
+                and (sql_text.token_upper(previous) == "AS" or previous_is_operand) then
                 is_bare_word = false
             end
             if is_bare_word then
@@ -5110,6 +5225,15 @@ do
                     .. " SET_MODEL_DERIVED_COMPOSITION.")
             end
 
+            -- Before anything else about this reference: an aggregate the metric
+            -- does not declare is wrong however the statement is shaped, and
+            -- wrapping is what stopped the other lane seeing it.
+            local wrapper_refusal = bi_expansion.wrapper_refusal(
+                tokens, reference, reference.by_name)
+            if wrapper_refusal ~= nil then
+                return wrapper_refusal
+            end
+
             local wanted, why, named_refusal =
                 bi_expansion.infer_columns(tokens, reference, reference.columns, reference.by_name)
             if named_refusal ~= nil then
@@ -5290,9 +5414,9 @@ function M.with_expansion_fallthrough(sql_text, result)
     -- describe the shape and lose the reason.
     if expanded ~= nil
         and (expanded.status == "OK"
-             or EXPANSION_REFUSALS[expanded.error_code or ""]
+             or refusal_rules.expansion_wins[expanded.error_code or ""]
              or (not lane_had_an_opinion
-                 and EXPANSION_REFUSALS_WHEN_UNJUDGED[expanded.error_code or ""])) then
+                 and refusal_rules.expansion_wins_when_unjudged[expanded.error_code or ""])) then
         return expanded
     end
     return result

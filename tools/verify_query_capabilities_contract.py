@@ -93,8 +93,14 @@ PROBES = {
         "request": {"model": MODEL, "object": OBJECT, "dimensions": ["bogus_field"]},
     },
     "An aggregate the metric does not declare": {
-        "sql": f"SELECT CUSTOMER_REGION, MAX(TOTAL_REVENUE) FROM {PUBLISHED}"
-               " GROUP BY CUSTOMER_REGION",
+        # Written the way docs/bi-tools.md teaches -- "there is no GROUP BY to
+        # write, it is inferred" -- and not with the explicit GROUP BY this
+        # demonstration used to carry. The two forms took different lanes, and
+        # only the one with the GROUP BY was refused; the documented form
+        # returned a raw Exasol message, or a wrong number where Exasol had
+        # nothing to object to. A contract verified against the shape the
+        # implementation happens to handle is testing the implementation.
+        "sql": f"SELECT CUSTOMER_REGION, MAX(TOTAL_REVENUE) FROM {PUBLISHED}",
     },
     "A SELECT list that names no field": {
         "sql": f"SELECT 1 FROM {PUBLISHED} t0",

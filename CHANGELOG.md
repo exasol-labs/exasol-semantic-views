@@ -399,6 +399,46 @@ another table is refused by default. Each is called out below.
   `PRECONDITION` (`SEMANTIC_MODEL_041`). That is not an error, so a caller
   counting only errors reads it as a clean run and the promotion is refused later
   by `SEMANTIC_ADMIN_048` for what looks like an unrelated reason.
+- **The declared-aggregation guard is a property of the request, not of which
+  lane read it.** `SEMANTIC_QUERY_007` was raised by the whole-statement path and
+  then discarded whenever reference expansion rewrote the statement
+  successfully — so the guard held for `SELECT region, MAX(revenue) … GROUP BY
+  region` and not for the same statement without the `GROUP BY`, which is the
+  form `docs/bi-tools.md` teaches ("there is no `GROUP BY` to write — it is
+  inferred"). Where Exasol objected to the rewritten text the caller got `not a
+  single-group group function`; where it had nothing to object to,
+  `SELECT SUM(gross_margin_pct) FROM obj` returned the ratio itself — a number
+  under a label that lies about how it was computed, which is what the guard's
+  own comment exists to prevent. `COUNT(total_revenue)` returned `1`, counting
+  the derived table's single row.
+- Wrapping reached the wrong number too: inside a subquery, a CTE or one arm of a
+  union, all four returned the ratio. So the check now runs in reference
+  expansion as well, through **one routine** both lanes call
+  (`aggregate_wrapper_refusal`) — the two lanes disagreeing about which
+  aggregates a metric accepts is precisely how the guard was lost.
+- The same fix closes two raw-error leaks found alongside it:
+  `MEASURE(customer_region)` reported `function or script MEASURE not found`, and
+  `SUM(customer_region)` leaked a **data value** into the message
+  (`invalid character value for cast; Value: 'South'`). Both are
+  `SEMANTIC_QUERY_006` now.
+- A protective set of "lane refusals expansion may not override" was written for
+  this and then removed. With expansion raising the refusal itself it could not
+  be made to fire: reverting the expansion-side guard fails five parity checks,
+  reverting the protective set failed none. A rule that cannot fire reads like
+  coverage.
+- **An implicit column alias is no longer reported as an unknown field.**
+  `SELECT z.r FROM (SELECT t0.CUSTOMER_REGION r FROM obj t0) z` — the same
+  declaration as `AS r` with the keyword left out — was refused
+  `SEMANTIC_QUERY_020`. Two operands cannot sit side by side in a select list, so
+  the second is a label; the keyword list decides which of the two is which,
+  because `SELECT` is a word too and reading it as an operand made every first
+  column look like an alias.
+- `tools/verify_query_capabilities_contract.py` demonstrates this row with the
+  form the documentation teaches rather than the one with an explicit `GROUP BY`.
+  The old probe passed throughout: a contract verified against the shape the
+  implementation happens to handle is testing the implementation. Reported by the
+  2026-09-21 evaluation, which also suggested taking shapes from `docs/`
+  verbatim — worth doing, and not done here.
 - Known boundary: a statement the layer rewrites but Exasol then rejects — a
   syntax error, `DISTINCT ON`, `LIMIT -1`, `ORDER BY` an unknown column — now
   comes back with Exasol's message instead of a `SEMANTIC_QUERY_*` code. Exasol
