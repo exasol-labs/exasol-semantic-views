@@ -1438,6 +1438,38 @@ test("F4 validator requires coherent authority identity and contributors", funct
     assert_true(unsafe.error_count >= 3)
 end)
 
+test("F4 contributor rules name the representations they counted", function()
+    -- Both of these printed only their requirement, and a steward reading
+    -- SEMANTIC_CATALOG could see rows the validator does not count -- a binding
+    -- that is not ACTIVE, or one on a representation that is not -- and
+    -- conclude the rule contradicted the catalog.
+    local thin = fusion_validation_context("RECONCILE")
+    thin.bindings_by_attribute["DIMENSION:20"] = {
+        thin.bindings_by_attribute["DIMENSION:20"][2]}   -- crm only: SUPPLEMENTAL
+    api.validate_fusion_policies(thin)
+    assert_true(has_rule(thin, "SEMANTIC_MODEL_070"))
+    assert_true(has_rule(thin, "SEMANTIC_MODEL_071"))
+    local contributors = issue_for_rule(thin, "SEMANTIC_MODEL_070").message
+    assert_true(contributors:find("found 1 (crm)", 1, true) ~= nil)
+    -- The authority is on mdm, which does not bind this attribute, so it does
+    -- not count -- which is the sentence that was missing.
+    local authority = issue_for_rule(thin, "SEMANTIC_MODEL_071").message
+    assert_true(authority:find("found 0 (none)", 1, true) ~= nil)
+    assert_true(authority:find("carries no active binding", 1, true) ~= nil)
+
+    -- Two bindings on one AUTHORITATIVE representation are one authority, not
+    -- two: counting bindings reported a conflict between a thing and itself.
+    local doubled = fusion_validation_context("RECONCILE")
+    doubled.representations[2].authority_role = "AUTHORITATIVE"
+    doubled.representations[1].authority_role = "SUPPLEMENTAL"
+    local bindings = doubled.bindings_by_attribute["DIMENSION:20"]
+    bindings[#bindings + 1] = {id = 42, entity_id = 1, attribute_type = "DIMENSION",
+        attribute_id = 20, representation_id = 11, expression = "c.other_name",
+        role = "PREFER", priority = 2}
+    api.validate_fusion_policies(doubled)
+    assert_true(not has_rule(doubled, "SEMANTIC_MODEL_071"))
+end)
+
 test("F4 validator rejects COALESCE conflicts and reports RECONCILE decisions", function()
     local function run(strategy, count)
         local ctx = fusion_validation_context(strategy)

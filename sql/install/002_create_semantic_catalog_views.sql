@@ -1133,6 +1133,7 @@ FROM (VALUES
   ('ADD_ENTITY', 8, 6, 'PRIMARY_KEY_EXPR', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(<model_name>, <entity_name>, <source_schema>, <source_object>, <source_alias>, <primary_key_expr>, <grain_description>, <description>)'),
   ('ADD_ENTITY', 8, 7, 'GRAIN_DESCRIPTION', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(<model_name>, <entity_name>, <source_schema>, <source_object>, <source_alias>, <primary_key_expr>, <grain_description>, <description>)'),
   ('ADD_ENTITY', 8, 8, 'DESCRIPTION', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY(<model_name>, <entity_name>, <source_schema>, <source_object>, <source_alias>, <primary_key_expr>, <grain_description>, <description>)'),
+  ('NEW_VALIDATION_ERRORS', 1, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(<model_name>)'),
   ('RECERTIFY_MODEL_IF_PUBLISHED', 1, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(<model_name>)'),
   ('ADD_ENTITY_REPRESENTATION', 8, 1, 'MODEL_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(<model_name>, <entity_name>, <representation_name>, <source_kind>, <source_schema>, <source_object>, <priority>, <freshness_policy>)'),
   ('ADD_ENTITY_REPRESENTATION', 8, 2, 'ENTITY_NAME', 'EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION(<model_name>, <entity_name>, <representation_name>, <source_kind>, <source_schema>, <source_object>, <priority>, <freshness_policy>)'),

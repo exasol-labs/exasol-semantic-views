@@ -478,6 +478,108 @@ query([[
 })
 /
 
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(
+  MODEL_NAME
+)
+RETURNS TABLE AS
+-- Revalidate a candidate and report only the errors it *introduced*.
+--
+-- Every published mutator reverts itself when the candidate model fails
+-- validation (SEMANTIC_ADMIN_094). Compared against zero errors, that is a trap
+-- rather than a guard: a model carrying two independent errors cannot be
+-- repaired, because each single step removes one and leaves the other, so every
+-- step is refused and reverted. The model can then be neither published nor
+-- fixed, and only DROP_MODEL escapes -- which takes the entities, relationships,
+-- published views and grants with it.
+--
+-- Errors arrive without any admin call at all: drop a column a binding reads and
+-- the published model is invalid the next time anyone validates it. So the
+-- unrepairable state is reachable by ordinary means, not only by a sequence of
+-- rolled-back documents.
+--
+-- The guard's purpose is to stop a change *introducing* a fault. That is what is
+-- measured here: the candidate's errors are compared against the ones the model
+-- already had, and only the difference is reported. A change that leaves the
+-- model exactly as broken as it was is allowed through, which is what makes a
+-- repair sequence possible; a change that breaks something new is still refused.
+--
+-- The baseline is the most recent validation run recorded for this model
+-- version, which for a published model always exists: the active version is set
+-- once at CREATE_MODEL and never advances, and publishing requires a successful
+-- run. What that run does not promise is being *current*. A steward who has not
+-- validated since the model broke has a baseline that predates the fault, so
+-- every error reads as new and the change is refused exactly as before. The
+-- remedy is VALIDATE_MODEL, and it is only ever one call: the refused mutator
+-- revalidates on its way out, so the next attempt has a current baseline.
+local function row_value(row, name, position)
+    if row == nil then return nil end
+    return row[name] or row[string.lower(name)] or row[position]
+end
+-- NULL arrives as userdata, and userdata is truthy.
+local model_name = (MODEL_NAME == nil or MODEL_NAME == null) and ""
+    or tostring(MODEL_NAME):match("^%s*(.-)%s*$")
+if model_name == "" then
+    error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
+end
+local models = query([[
+    SELECT MODEL_ID, ACTIVE_VERSION_ID FROM SYS_SEMANTIC.MODELS
+    WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if models == nil or #models == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+local model_id = models[1][1]
+local version_id = models[1][2]
+
+-- Captured before revalidating, or the new run would be its own baseline.
+local baseline = {}
+for _, row in ipairs(query([[
+    SELECT r.SEVERITY, r.OBJECT_TYPE, r.OBJECT_NAME, r.RULE_CODE
+    FROM SYS_SEMANTIC.VALIDATION_RESULTS r
+    WHERE r.VALIDATION_RUN_ID = (
+        SELECT MAX(VALIDATION_RUN_ID) FROM SYS_SEMANTIC.VALIDATION_RUNS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id)
+      AND r.SEVERITY IN ('ERROR', 'PRECONDITION')
+]], {model_id = model_id, version_id = version_id}) or {}) do
+    -- Keyed on what the finding is *about*, not on its message: several rules
+    -- print counts that move while the fault stays the same.
+    baseline[table.concat({
+        tostring(row_value(row, "SEVERITY", 1)),
+        tostring(row_value(row, "OBJECT_TYPE", 2)),
+        tostring(row_value(row, "OBJECT_NAME", 3)),
+        tostring(row_value(row, "RULE_CODE", 4)),
+    }, "\30")] = true
+end
+
+local introduced = {}
+for _, row in ipairs(query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        {model_name = model_name}) or {}) do
+    local severity = tostring(row_value(row, "SEVERITY", 1))
+    if severity == "ERROR" or severity == "PRECONDITION" then
+        local key = table.concat({
+            severity,
+            tostring(row_value(row, "OBJECT_TYPE", 2)),
+            tostring(row_value(row, "OBJECT_NAME", 3)),
+            tostring(row_value(row, "RULE_CODE", 4)),
+        }, "\30")
+        if not baseline[key] then
+            introduced[#introduced + 1] = {
+                severity,
+                tostring(row_value(row, "OBJECT_TYPE", 2)),
+                tostring(row_value(row, "OBJECT_NAME", 3)),
+                tostring(row_value(row, "RULE_CODE", 4)),
+                tostring(row_value(row, "MESSAGE", 5)),
+            }
+        end
+    end
+end
+
+exit(introduced, [[
+  SEVERITY VARCHAR(32), OBJECT_TYPE VARCHAR(64), OBJECT_NAME VARCHAR(512),
+  RULE_CODE VARCHAR(128), MESSAGE VARCHAR(2000000)
+]])
+/
+
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED(
   MODEL_NAME
 )
@@ -499,18 +601,42 @@ end
 local model_status = rows[1].STATUS or rows[1].status or rows[1][1]
 local validation_status = "NOT_REQUIRED"
 if tostring(model_status) == "PUBLISHED" then
-    local validation_rows = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    -- NEW_VALIDATION_ERRORS runs the validation and reports only what this
+    -- candidate introduced; the run it recorded carries the totals. Callers
+    -- revert on ERROR and PRECONDITION, so an error the model already had must
+    -- not be spelled either of those, or a repair sequence cannot start --
+    -- see the header of NEW_VALIDATION_ERRORS.
+    local introduced = query(
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     validation_status = "OK"
-    for _, validation_row in ipairs(validation_rows or {}) do
+    for _, validation_row in ipairs(introduced or {}) do
         local severity = validation_row.SEVERITY or validation_row.severity
             or validation_row[1]
-        if tostring(severity) == "ERROR" or tostring(severity) == "PRECONDITION" then
-            validation_status = tostring(severity)
-            break
-        elseif tostring(severity) == "WARNING" and validation_status == "OK" then
-            validation_status = "WARNING"
+        validation_status = tostring(severity)
+        break
+    end
+    if validation_status == "OK" then
+        local totals = query([[
+            SELECT ERROR_COUNT, WARNING_COUNT FROM SYS_SEMANTIC.VALIDATION_RUNS
+            WHERE VALIDATION_RUN_ID = (
+                SELECT MAX(r.VALIDATION_RUN_ID) FROM SYS_SEMANTIC.VALIDATION_RUNS r
+                JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = r.MODEL_ID
+                WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name))
+        ]], {model_name = model_name})
+        local totals_row = (totals or {})[1]
+        if totals_row ~= nil then
+            local errors = tonumber(totals_row.ERROR_COUNT or totals_row.error_count
+                or totals_row[1]) or 0
+            local warnings = tonumber(totals_row.WARNING_COUNT or totals_row.warning_count
+                or totals_row[2]) or 0
+            if errors > 0 then
+                -- Distinct from ERROR on purpose: the model is invalid, and this
+                -- change is not why. Reverting it would strand the steward.
+                validation_status = "ERROR_PRE_EXISTING"
+            elseif warnings > 0 then
+                validation_status = "WARNING"
+            end
         end
     end
 end
@@ -672,7 +798,7 @@ query([[
 -- authoring call fails. Report them here the way the F5 compound call already
 -- did, instead of leaving the modeller to find them in a later VALIDATE_MODEL.
 local candidate_validation = query(
-    "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
     {model_name = model_name})
 local validation_errors = {}
 local generated_binding_issues = {}
@@ -1087,7 +1213,7 @@ query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID =
     {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local validation_rows = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(validation_rows or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -1346,7 +1472,7 @@ query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID =
     {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -2892,7 +3018,7 @@ query("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE WHERE MODEL_VERSION_ID = :version_
 query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS IN ('OK', 'WARNING')",
     {model_id = model_id, version_id = version_id})
 local candidate_validation = query(
-    "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+    "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
     {model_name = model_name})
 local validation_errors = {}
 local generated_binding_issues = {}
@@ -4177,7 +4303,7 @@ query([[
 
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -4519,7 +4645,7 @@ query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID =
     {model_id = model.model_id, version_id = model.version_id})
 if tostring(model.status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -4745,7 +4871,7 @@ query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID =
     {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -4834,7 +4960,7 @@ query("UPDATE SYS_SEMANTIC.VALIDATION_RUNS SET STATUS = 'STALE' WHERE MODEL_ID =
     {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -6919,7 +7045,7 @@ query([[
 ]], {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         local severity = validation_row.SEVERITY or validation_row.severity or validation_row[1]
@@ -7928,7 +8054,7 @@ query([[
 
 if tostring(model.status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -8114,7 +8240,7 @@ query([[
 
 if tostring(model.status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -8309,7 +8435,7 @@ query([[
 ]], {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -8407,7 +8533,7 @@ query([[
 ]], {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -8497,7 +8623,7 @@ query([[
 ]], {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -8585,7 +8711,7 @@ query([[
 ]], {model_id = model_id, version_id = version_id})
 if tostring(model_status) == "PUBLISHED" then
     local candidate_validation = query(
-        "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     for _, validation_row in ipairs(candidate_validation or {}) do
         if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR"
@@ -15599,6 +15725,18 @@ local function validate_null_placeholder_bindings(ctx)
     end
 end
 
+-- Render a set of representations as a count plus a sorted list, so a rule can
+-- report what it counted and not only what it wanted.
+local function named_set(representations)
+    local names = {}
+    for _, representation in pairs(representations) do
+        names[#names + 1] = tostring(representation.name)
+    end
+    table.sort(names)
+    if #names == 0 then return 0, "none" end
+    return #names, table.concat(names, ", ")
+end
+
 local function validate_fusion_policies(ctx)
     local representation_by_id = {}
     local authoritative_by_entity = {}
@@ -15637,25 +15775,38 @@ local function validate_fusion_policies(ctx)
         elseif strategy ~= "PREFER" then
             local entity = ctx.entity_by_id[key(attribute.entity_id)]
             local bindings = ctx.bindings_by_attribute[attribute_key] or {}
-            local contributor_representations = {}
-            local authority_count = 0
+            -- Both counts are over *representations*, not bindings. Counting
+            -- bindings would let two bindings on one AUTHORITATIVE
+            -- representation read as two authorities, and report a conflict
+            -- between a thing and itself.
+            local contributors = {}
+            local authorities = {}
             for _, binding in ipairs(bindings) do
                 local representation = representation_by_id[key(binding.representation_id)]
                 if representation ~= nil then
-                    contributor_representations[key(representation.id)] = true
+                    contributors[key(representation.id)] = representation
                     if upper(representation.authority_role or "PREFER") == "AUTHORITATIVE" then
-                        authority_count = authority_count + 1
+                        authorities[key(representation.id)] = representation
                     end
                 end
             end
-            local contributor_count = 0
-            for _, _ in pairs(contributor_representations) do
-                contributor_count = contributor_count + 1
-            end
+            -- The counts go into the message. Both of these rules were
+            -- unactionable when they named only their requirement: a steward
+            -- reading SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS can see rows the
+            -- validator did not count -- bindings on a superseded version, or
+            -- whose STATUS is not ACTIVE, or on a representation that is not --
+            -- and conclude the rule contradicts the catalog. Naming what was
+            -- counted, and against which scope, makes the difference visible.
+            local contributor_count, contributor_names = named_set(contributors)
+            local authority_count, authority_names = named_set(authorities)
             if contributor_count < 2 then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
-                    "SEMANTIC_MODEL_044", strategy
-                        .. " requires active bindings on at least two representations.")
+                    "SEMANTIC_MODEL_070", strategy
+                        .. " requires active bindings on at least two active representations; "
+                        .. "found " .. tostring(contributor_count) .. " ("
+                        .. contributor_names .. "). Only bindings with STATUS = 'ACTIVE' on the "
+                        .. "model's active version, pointing at a representation that is itself "
+                        .. "ACTIVE, are counted.")
             end
             if grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) == nil
                 and (entity == nil or complete_semantic_identity(ctx, entity) == nil) then
@@ -15670,8 +15821,14 @@ local function validate_fusion_policies(ctx)
             end
             if strategy == "RECONCILE" and authority_count ~= 1 then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
-                    "SEMANTIC_MODEL_044",
-                    "RECONCILE requires exactly one bound representation declared AUTHORITATIVE.")
+                    "SEMANTIC_MODEL_071",
+                    "RECONCILE requires exactly one representation that both binds this "
+                        .. "attribute and is declared AUTHORITATIVE; found "
+                        .. tostring(authority_count) .. " (" .. authority_names
+                        .. ") among the " .. tostring(contributor_count)
+                        .. " representation(s) that bind it (" .. contributor_names
+                        .. "). An AUTHORITATIVE representation that carries no active binding "
+                        .. "for this attribute does not count.")
             end
         end
     end

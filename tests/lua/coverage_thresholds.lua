@@ -105,6 +105,13 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- validator.lua 94.8 -> 94.9 on 2026-09-22 (2678/2819 displays as 95.00%), when the two contributor-counting
+-- conditions of SEMANTIC_MODEL_044 became SEMANTIC_MODEL_070 and _071 and
+-- started naming what they counted. The unit test asserts the counts and the
+-- names, not that an error fired: the old messages printed only their
+-- requirement, and both were observably satisfied in the catalog when they
+-- fired, so a rule that merely fires is exactly the thing that failed here.
+--
 -- agent/runtime.lua 95.5 -> 95.5 on 2026-09-20, when the governance block got a
 -- prose rendering. The test asserts what the sentence has to *say*, not that a
 -- sentence exists: it names the principal, the mode, each relation with its
@@ -159,7 +166,7 @@ return {
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
         ["lua/semantic_layer/compiler/request_json.lua"] = 90.39,
-        ["lua/semantic_layer/admin/validator.lua"] = 94.8,
+        ["lua/semantic_layer/admin/validator.lua"] = 94.9,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,

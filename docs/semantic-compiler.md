@@ -385,6 +385,21 @@ prospective and atomic. Coverage changes return `SEMANTIC_ADMIN_059`; rejected
 representation, attribute-binding removal, and unique-key changes return
 `SEMANTIC_ADMIN_094`. Each restores the prior catalog state and revalidates it,
 so the rejected candidate does not decertify the existing surface.
+
+The guard refuses what a change *introduces*, not everything a candidate still
+carries. `SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS` revalidates and reports only the
+errors that were not in the model's previous validation run, keyed on severity,
+object type, object name and rule code; every published mutator consults it, and
+`RECERTIFY_MODEL_IF_PUBLISHED` reports `ERROR_PRE_EXISTING` rather than `ERROR`
+when the model is invalid for reasons this change did not cause. Compared
+against zero errors instead, the guard is a trap: a model holding two
+independent errors cannot be repaired, because each single step removes one and
+leaves the other, so every step is refused and reverted, and only `DROP_MODEL`
+escapes. That state needs no admin call to reach -- dropping a column a binding
+reads is enough. The baseline is the previous run, so a model that has not been
+validated since it broke has one that predates the fault, and every error reads
+as new. The remedy is `VALIDATE_MODEL`, and it is only ever one call: a refused
+mutator revalidates on its way out, so the next attempt has a current baseline.
 `SET_REPRESENTATION_COVERAGE_BATCH` makes an entire F3 coverage set one
 candidate, allowing a published model to cross intermediate states that would
 be invalid if declarations were validated individually.

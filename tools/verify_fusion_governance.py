@@ -201,7 +201,7 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY("
             f"'{MODEL}', 'DIMENSION', 'customer_name', 'COALESCE')",
             "SEMANTIC_ADMIN_094",
-            "SEMANTIC_MODEL_044",
+            "SEMANTIC_MODEL_070",
         )
         assert_equal("no policy was persisted", policies(con, MODEL), [])
         assert_equal("published model still serves",
@@ -295,8 +295,10 @@ def main() -> int:
                      Decimal(str(execute(con, fused["generated_sql"])[0][0])),
                      Decimal("60"))
 
-        # 2. An authority change that breaks the RECONCILE contract: exactly one
-        # bound representation may be AUTHORITATIVE.
+        # 2. An authority change that breaks the RECONCILE contract. The rule
+        # that catches it is the entity-level one -- at most one active
+        # representation may be AUTHORITATIVE -- not SEMANTIC_MODEL_071, which
+        # counts authorities among the representations that bind one attribute.
         before = authorities(con, MODEL)
         expect_refusal(
             con,

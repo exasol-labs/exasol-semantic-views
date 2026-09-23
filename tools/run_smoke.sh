@@ -45,6 +45,7 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_policy_columns.py
 "$PYTHON_BIN" tools/verify_field_policy_writer.py
 "$PYTHON_BIN" tools/verify_remove_semantic_object.py
+"$PYTHON_BIN" tools/verify_published_repair_path.py
 "$PYTHON_BIN" tools/verify_bi_privileges.py
 "$PYTHON_BIN" tools/verify_representation_promotion.py
 "$PYTHON_BIN" tools/verify_governance_surfacing.py

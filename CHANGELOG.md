@@ -586,6 +586,54 @@ another table is refused by default. Each is called out below.
 
 ### Fixed
 
+#### A published model with two faults could not be repaired, only dropped
+
+- Every mutator on a published model revalidates the candidate and reverts
+  itself with `SEMANTIC_ADMIN_094` if it fails. Measured against *zero* errors,
+  that is a trap rather than a guard: a model holding two independent errors
+  cannot be repaired, because each single step removes one and leaves the other,
+  so every step is refused and rolled back. `PUBLISH_MODEL` refuses too, queries
+  against the published schema return `SEMANTIC_QUERY_010`, and the only thing
+  that succeeds is `DROP_MODEL` — which takes the entities, relationships,
+  published views and grants with it. It is the same dead end
+  `REMOVE_SEMANTIC_OBJECT` was added to solve one level up.
+- No admin call is needed to reach it. `ALTER TABLE … DROP COLUMN` on a column
+  two bindings read leaves the published model holding two `SEMANTIC_MODEL_040`
+  errors the next time anyone validates it.
+- The guard now refuses what a change *introduces*. `NEW_VALIDATION_ERRORS`
+  revalidates and reports only the errors that were not in the model's previous
+  validation run — keyed on severity, object type, object name and rule code,
+  not on the message, because several rules print counts that move while the
+  fault stays the same. The 15 mutators that raised `SEMANTIC_ADMIN_094` from
+  their own `VALIDATE_MODEL` call consult it instead, and
+  `RECERTIFY_MODEL_IF_PUBLISHED`, which the rest consult, answers
+  `ERROR_PRE_EXISTING` where it used to answer `ERROR`.
+- **The protection is unchanged.** A step that breaks something new is still
+  refused and still reverted; `tools/verify_published_repair_path.py` asserts
+  both halves, because a guard that stops refusing is not a fix.
+- One documented limit, pinned by the same verifier: the baseline is the
+  model's *previous* validation run, so before anyone revalidates a model that
+  has just broken, every error still reads as new and the guard refuses as it
+  always did. `VALIDATE_MODEL` is the remedy, and it is only ever one call — a
+  refused mutator revalidates on its way out.
+
+#### Two `SEMANTIC_MODEL_044` conditions contradicted the catalog
+
+- Both printed only their requirement. A steward could read
+  `SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS` and `REPRESENTATION_AUTHORITIES`, see
+  that both conditions were satisfied, and have no way to act on the error —
+  because the validator counts only bindings whose `STATUS` is `ACTIVE`, on the
+  model's active version, naming a representation that is itself `ACTIVE`, and
+  the catalog shows more than that.
+- They are now `SEMANTIC_MODEL_070` (fewer than two contributors) and
+  `SEMANTIC_MODEL_071` (not exactly one bound `AUTHORITATIVE` representation),
+  and each names what it counted and against which scope. `_071` also says the
+  thing that was never written down: an `AUTHORITATIVE` representation carrying
+  no binding for that attribute does not count.
+- `_071` also counted *bindings* where it meant representations, so two bindings
+  on one authoritative representation read as two authorities — a conflict
+  between a thing and itself. Both counts are over representations now.
+
 #### A SQL client got the wrong data in the right-looking columns
 
 - Three defects with one cause and one fix: the planner's column *order* was

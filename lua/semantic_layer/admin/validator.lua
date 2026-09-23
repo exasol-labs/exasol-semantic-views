@@ -3137,6 +3137,18 @@ local function validate_null_placeholder_bindings(ctx)
     end
 end
 
+-- Render a set of representations as a count plus a sorted list, so a rule can
+-- report what it counted and not only what it wanted.
+local function named_set(representations)
+    local names = {}
+    for _, representation in pairs(representations) do
+        names[#names + 1] = tostring(representation.name)
+    end
+    table.sort(names)
+    if #names == 0 then return 0, "none" end
+    return #names, table.concat(names, ", ")
+end
+
 local function validate_fusion_policies(ctx)
     local representation_by_id = {}
     local authoritative_by_entity = {}
@@ -3175,25 +3187,38 @@ local function validate_fusion_policies(ctx)
         elseif strategy ~= "PREFER" then
             local entity = ctx.entity_by_id[key(attribute.entity_id)]
             local bindings = ctx.bindings_by_attribute[attribute_key] or {}
-            local contributor_representations = {}
-            local authority_count = 0
+            -- Both counts are over *representations*, not bindings. Counting
+            -- bindings would let two bindings on one AUTHORITATIVE
+            -- representation read as two authorities, and report a conflict
+            -- between a thing and itself.
+            local contributors = {}
+            local authorities = {}
             for _, binding in ipairs(bindings) do
                 local representation = representation_by_id[key(binding.representation_id)]
                 if representation ~= nil then
-                    contributor_representations[key(representation.id)] = true
+                    contributors[key(representation.id)] = representation
                     if upper(representation.authority_role or "PREFER") == "AUTHORITATIVE" then
-                        authority_count = authority_count + 1
+                        authorities[key(representation.id)] = representation
                     end
                 end
             end
-            local contributor_count = 0
-            for _, _ in pairs(contributor_representations) do
-                contributor_count = contributor_count + 1
-            end
+            -- The counts go into the message. Both of these rules were
+            -- unactionable when they named only their requirement: a steward
+            -- reading SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS can see rows the
+            -- validator did not count -- bindings on a superseded version, or
+            -- whose STATUS is not ACTIVE, or on a representation that is not --
+            -- and conclude the rule contradicts the catalog. Naming what was
+            -- counted, and against which scope, makes the difference visible.
+            local contributor_count, contributor_names = named_set(contributors)
+            local authority_count, authority_names = named_set(authorities)
             if contributor_count < 2 then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
-                    "SEMANTIC_MODEL_044", strategy
-                        .. " requires active bindings on at least two representations.")
+                    "SEMANTIC_MODEL_070", strategy
+                        .. " requires active bindings on at least two active representations; "
+                        .. "found " .. tostring(contributor_count) .. " ("
+                        .. contributor_names .. "). Only bindings with STATUS = 'ACTIVE' on the "
+                        .. "model's active version, pointing at a representation that is itself "
+                        .. "ACTIVE, are counted.")
             end
             if grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) == nil
                 and (entity == nil or complete_semantic_identity(ctx, entity) == nil) then
@@ -3208,8 +3233,14 @@ local function validate_fusion_policies(ctx)
             end
             if strategy == "RECONCILE" and authority_count ~= 1 then
                 add_issue(ctx, "ERROR", "ATTRIBUTE_FUSION_POLICY", object_name,
-                    "SEMANTIC_MODEL_044",
-                    "RECONCILE requires exactly one bound representation declared AUTHORITATIVE.")
+                    "SEMANTIC_MODEL_071",
+                    "RECONCILE requires exactly one representation that both binds this "
+                        .. "attribute and is declared AUTHORITATIVE; found "
+                        .. tostring(authority_count) .. " (" .. authority_names
+                        .. ") among the " .. tostring(contributor_count)
+                        .. " representation(s) that bind it (" .. contributor_names
+                        .. "). An AUTHORITATIVE representation that carries no active binding "
+                        .. "for this attribute does not count.")
             end
         end
     end
