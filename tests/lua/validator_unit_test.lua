@@ -876,13 +876,31 @@ test("SEMANTIC_MODEL_072 binds expressions against their source relation", funct
         return {}
     end, function() api.validate_expressions(ctx, {}) end)
 
-    -- One combined probe for the relation, then one per expression after it
-    -- failed: two dimensions and the fact's binding (a fact with an explicit
-    -- binding is probed through it). The virtual-schema source is never probed.
-    assert_equal(#probes, 4)
+    -- Relation: one combined probe, then one per expression after it failed --
+    -- two dimensions and the fact's binding (a fact with an explicit binding is
+    -- probed through it). Virtual schema: the table itself is never queried,
+    -- only a stand-in built from its column metadata -- combined, the stand-in
+    -- on its own, then the two dimensions.
+    local relation_probes, stand_in_probes = 0, 0
     for _, sql in ipairs(probes) do
-        assert_contains(sql, '"MART"."TICKETS" tk WHERE FALSE')
+        assert_true(not contains(sql, '"VS"."TICKETS"'))
+        if contains(sql, '"MART"."TICKETS" tk WHERE FALSE') then
+            relation_probes = relation_probes + 1
+        else
+            assert_contains(sql, 'CAST(NULL AS VARCHAR(200)) AS "mode"')
+            assert_contains(sql, ") tk WHERE FALSE")
+            stand_in_probes = stand_in_probes + 1
+        end
     end
+    assert_equal(relation_probes, 4)
+    assert_equal(stand_in_probes, 4)
+    local remote_issue
+    for _, issue in ipairs(ctx.issues) do
+        if contains(issue.message, '"VS"."TICKETS" tk (bound against its column metadata)') then
+            remote_issue = issue
+        end
+    end
+    assert_equal(remote_issue.object_name, "resolved_flag")
     local dimension_issue, binding_issue
     for _, issue in ipairs(ctx.issues) do
         if issue.rule_code == "SEMANTIC_MODEL_072" then
@@ -897,6 +915,35 @@ test("SEMANTIC_MODEL_072 binds expressions against their source relation", funct
     assert_true(not contains(dimension_issue.message, "Session"))
     assert_equal(binding_issue.object_name, "amount@primary")
     assert_contains(binding_issue.message, "BOGUS not found")
+end)
+
+test("SEMANTIC_MODEL_072 does not blame an expression for a stand-in that cannot bind", function()
+    local entity = {id = 1, name = "tickets", alias = "tk"}
+    local remote = {id = 3, entity_id = 1, name = "remote", alias = "tk",
+        source_kind = "VIRTUAL_SCHEMA", source_schema = "VS", source_object = "TICKETS"}
+    local bad = {id = 11, name = "resolved_flag", entity_id = 1,
+        expression = "CASE WHEN tk.flag THEN resolved ELSE open END"}
+    local ctx = validation_context({
+        entity_by_id = {["1"] = entity}, entity_name_by_id = {["1"] = "tickets"},
+        entity_alias_by_id = {["1"] = "TK"}, representations = {remote},
+        representations_by_entity = {["1"] = {remote}},
+        dimensions = {bad}, dimension_by_id = {["11"] = bad},
+        facts = {}, fact_by_id = {}, metrics = {}, bindings_by_attribute = {},
+        attribute_bindings = {},
+    })
+    local probes = 0
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
+        if contains(sql, " WHERE FALSE") then
+            probes = probes + 1
+            error("data type not supported (Session: 42)")
+        end
+        return {}
+    end, function() api.validate_expressions(ctx, {}) end)
+    -- The combined probe and the bare stand-in both fail, so nothing is split
+    -- out and nothing is reported against the dimension.
+    assert_equal(probes, 2)
+    assert_true(not has_rule(ctx, "SEMANTIC_MODEL_072"))
 end)
 
 test("SEMANTIC_MODEL_040 names the permitted function set", function()

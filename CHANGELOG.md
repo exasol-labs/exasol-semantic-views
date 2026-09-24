@@ -639,9 +639,20 @@ longer returns refused pairs. Each is called out below.
   (`SEMANTIC_ADMIN_091` / `SEMANTIC_DDL_090` carrying `SEMANTIC_MODEL_072`) and
   rolled back. A catalog that already holds such an expression fails
   `VALIDATE_MODEL`.
-- Not probed: virtual-schema sources, since a probe there would be a remote
-  pushdown, plus metric expressions, filters and identity expressions.
-  `tools/verify_expression_binding.py` covers all three authoring paths.
+- Virtual-schema tables are probed too (BUG-23b). The first version skipped
+  them, because even `WHERE FALSE` on a virtual table goes through the adapter's
+  pushdown. That left the original failure intact for federated sources: the
+  report's `CASE WHEN ri.MODE THEN foo ELSE bar END` over `LAKE.SHIPMENTS` was
+  accepted, published and compiled to `STATUS = OK`. The expression is now bound
+  against a local stand-in with the table's column names and types from
+  `EXA_ALL_COLUMNS`, `(SELECT CAST(NULL AS <type>) AS "<col>", …) <alias>`. That
+  takes about 3 ms; a pushdown probe took about 420 ms, and the stand-in works
+  while the remote is down. A stand-in that cannot be built, or does not bind on
+  its own, is never blamed on the expression. Wrapping the virtual table in a
+  view, the workaround from the report, is no longer needed.
+- Not probed: metric expressions, filters and identity expressions.
+  `tools/verify_expression_binding.py` covers all three authoring paths for a
+  relation; the unit tests cover the virtual-schema stand-in.
 
 #### The join the docs print was refused with a different code than the docs print
 

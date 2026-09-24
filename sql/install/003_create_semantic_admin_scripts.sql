@@ -15460,24 +15460,52 @@ end
 -- at execution (BUG-23). `WHERE FALSE` makes Exasol parse and bind the
 -- expression without reading a row. Probes on one relation run as one query and
 -- are split per expression only when that query fails, so a clean model pays
--- one query per representation. Virtual-schema sources are skipped: a probe
--- there is a remote pushdown, not a local bind.
+-- one query per representation.
+--
+-- A virtual-schema table is not probed directly: even `WHERE FALSE` goes
+-- through the adapter's pushdown, which costs a remote round trip and fails
+-- when the remote is down. It is bound instead against a local stand-in built
+-- from its column metadata -- `(SELECT CAST(NULL AS <type>) AS "<col>", ...)
+-- <alias>` -- which binds the same names and types without leaving the
+-- database (BUG-23b). If the stand-in cannot be built or does not bind on its
+-- own, the expression is not blamed for it.
 local function validate_expression_binding(ctx, probes)
     local groups, order = {}, {}
+    local function stand_in(representation)
+        local names = {}
+        local columns = source_relation_columns(representation.source_schema,
+            representation.source_object)
+        for name, entry in pairs(columns) do
+            if type(entry.data_type) ~= "string" then return nil end
+            names[#names + 1] = name
+        end
+        if #names == 0 then return nil end
+        table.sort(names)
+        local projection = {}
+        for _, name in ipairs(names) do
+            projection[#projection + 1] = "CAST(NULL AS " .. columns[name].data_type
+                .. ") AS " .. sql_text.quote_ident(name)
+        end
+        return "(SELECT " .. table.concat(projection, ", ") .. ") "
+            .. tostring(representation.alias)
+    end
     for _, probe in ipairs(probes) do
         local representation = probe.representation
-        if upper(representation.source_kind or "RELATION") == "RELATION"
+        local kind = upper(representation.source_kind or "RELATION")
+        if (kind == "RELATION" or kind == "VIRTUAL_SCHEMA")
             and not missing(representation.source_schema)
             and not missing(representation.source_object)
             and not missing(representation.alias)
             and not missing(probe.expression) then
-            local source = sql_text.quote_qualified(representation.source_schema,
+            local label = sql_text.quote_qualified(representation.source_schema,
                 representation.source_object) .. " " .. tostring(representation.alias)
-            if groups[source] == nil then
-                groups[source] = {}
-                order[#order + 1] = source
+            if groups[label] == nil then
+                local source = label
+                if kind == "VIRTUAL_SCHEMA" then source = stand_in(representation) end
+                groups[label] = {source = source, virtual = kind == "VIRTUAL_SCHEMA", items = {}}
+                order[#order + 1] = label
             end
-            table.insert(groups[source], probe)
+            table.insert(groups[label].items, probe)
         end
     end
     local function run(source, items)
@@ -15489,16 +15517,20 @@ local function validate_expression_binding(ctx, probes)
             .. " FROM " .. source .. " WHERE FALSE")
         return ok, tostring(err)
     end
-    for _, source in ipairs(order) do
-        local items = groups[source]
-        if not run(source, items) then
+    for _, label in ipairs(order) do
+        local group = groups[label]
+        local source, items = group.source, group.items
+        if source ~= nil and not run(source, items)
+            and not (group.virtual and not run(source, {{expression = "1"}})) then
+            local where = group.virtual
+                and label .. " (bound against its column metadata)" or label
             for _, probe in ipairs(items) do
                 local ok, err = run(source, {probe})
                 if not ok then
                     local reason = err:gsub("%s*%(Session: %d+%)%s*$", "")
                     add_issue(ctx, "ERROR", probe.object_type, probe.object_name,
                         "SEMANTIC_MODEL_072", probe.label .. " does not execute against "
-                            .. source .. ": " .. tostring(probe.expression)
+                            .. where .. ": " .. tostring(probe.expression)
                             .. " -- " .. reason .. ". Quote string literals ('open'), "
                             .. "qualify columns with the source alias, and quote "
                             .. "reserved words used as identifiers.")

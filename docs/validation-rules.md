@@ -127,7 +127,7 @@ messages — it may fall, and it may not rise.
 | `SEMANTIC_MODEL_069` | warning | `DISPLAY_POLICY` holds a value this layer does not apply. The only value with an effect is `MASK`, which withholds the field from results while still permitting filters on it. A policy nobody applies is worse than none, because the vocabulary reads like a control. For a value that is only meant to inform, use `SENSITIVITY_LABEL`, which is a hint and is documented as one. |
 | `SEMANTIC_MODEL_070` | error | A `COALESCE` or `RECONCILE` attribute is bound on fewer than two representations, so there is nothing to fuse. The message names the representations that *were* counted, because the catalog can show rows the validator does not count: a binding is counted only when its `STATUS` is `ACTIVE`, it sits on the model's active version, and the representation it names is itself `ACTIVE`. Split from `SEMANTIC_MODEL_044`. |
 | `SEMANTIC_MODEL_071` | error | A `RECONCILE` attribute does not have exactly one representation that *both* binds it and is declared `AUTHORITATIVE`. An `AUTHORITATIVE` representation carrying no active binding for that attribute does not count, which is why this can fire while `REPRESENTATION_AUTHORITIES` shows exactly one authority; the message names both sets. Split from `SEMANTIC_MODEL_044`. |
-| `SEMANTIC_MODEL_072` | error | A dimension, fact or attribute-binding expression does not parse or bind against the relation it is rendered over. The validator runs `SELECT <expression> FROM <source> <alias> WHERE FALSE`, which reads no rows, and reports the database's own error. This is what catches a bare word the static checks cannot see: a string literal missing its quotes, or a reserved word such as `OPEN`. Virtual-schema sources are not probed. Because `ADD_DIMENSION`, `ADD_FACT` and the semantic DDL validate before committing, the expression is refused there; see [Expression binding](#expression-binding). |
+| `SEMANTIC_MODEL_072` | error | A dimension, fact or attribute-binding expression does not parse or bind against the relation it is rendered over. The validator runs `SELECT <expression> FROM <source> <alias> WHERE FALSE`, which reads no rows, and reports the database's own error. This is what catches a bare word the static checks cannot see: a string literal missing its quotes, or a reserved word such as `OPEN`. A virtual-schema table is bound against a local stand-in built from its column metadata, so the adapter is never called. Because `ADD_DIMENSION`, `ADD_FACT` and the semantic DDL validate before committing, the expression is refused there; see [Expression binding](#expression-binding). |
 | `SEMANTIC_REQUEST_028` / `SEMANTIC_QUERY_028` | refusal | The model runs in `GOVERNED` mode and the SQL for this request reads a relation the model does not vouch for — `DIVERGENT`, `UNKNOWN`, or not classified since the relation set last changed. Answering would return rows the caller may not be entitled to, because the relation does not necessarily carry the row or column policy the representations carry. `RAW` is deliberately not refused: a materialization built *from* the governed views is a table, so it classifies `RAW` while carrying their policy, and refusing it would make the mode unusable with any pre-aggregate. |
 
 ## Metric Grain Versus Object Root
@@ -219,10 +219,21 @@ source (`SEMANTIC_MODEL_072`): the validator runs
 relation, and one per expression only when that query fails. So invalid syntax,
 an unquoted literal, and an unknown bare identifier are refused before
 publication, instead of compiling to `STATUS = OK` and failing when the query
-runs. Three kinds of expression are not probed: those on a virtual-schema
-source, metric expressions and filters, and identity expressions. For those,
-the static checks are the only gate, and dialect-specific syntax can still pass
-them and fail when rendered.
+runs.
+
+A virtual-schema table is not queried, not even with `WHERE FALSE`. That query
+would still go through the adapter's pushdown, which costs a remote round trip
+and fails while the remote is down. The expression is bound instead against a
+local stand-in with the same column names and types, taken from
+`EXA_ALL_COLUMNS`:
+`SELECT <expression> FROM (SELECT CAST(NULL AS <type>) AS "<column>", …) <alias> WHERE FALSE`.
+That catches the same parse and bind errors without leaving the database. If
+the stand-in cannot be built (no column metadata) or does not bind on its own,
+the expression is not reported.
+
+Two kinds of expression are not probed: metric expressions and filters, and
+identity expressions. For those, the static checks are the only gate, and
+dialect-specific syntax can still pass them and fail when rendered.
 
 Before registration, smoke test each physical expression against the exact
 source relation and alias, for example:
