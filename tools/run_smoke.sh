@@ -211,6 +211,12 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # Asserts it is refused by name, UNIT is a real metric clause, and a malformed
 # declared type fails ADD_METRIC and VALIDATE_MODEL (SEMANTIC_MODEL_073).
 "$PYTHON_BIN" tools/verify_semantic_ddl_clauses.py
+
+# BUG-26: an outer AVG over a per-group average weighted every group equally and
+# answered 47.5 % high with STATUS = OK. Asserts SEMANTIC_QUERY_016 refuses the
+# inexact shapes, the exact ones still return the metric's own value, and
+# SET_MODEL_DERIVED_COMPOSITION opts out.
+"$PYTHON_BIN" tools/verify_outer_reaggregation.py
 "$PYTHON_BIN" tools/verify_promotion_gate.py
 "$PYTHON_BIN" tools/verify_published_mutation_protection.py
 "$PYTHON_BIN" tools/verify_published_f3_batch.py

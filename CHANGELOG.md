@@ -605,6 +605,35 @@ ignore is now refused. Each is called out below.
 
 ### Fixed
 
+#### An outer `AVG` over a non-additive metric was 47.5 % wrong (BUG-26)
+
+- The docs call aggregating a semantic object in an outer block supported,
+  because the caller has named the grain. That is exact for a metric that adds
+  up, and wrong for one that does not. `SELECT AVG(t.avg_resolution_h) FROM
+  (SELECT sla_bucket, avg_resolution_h FROM …) t` averaged two bucket averages,
+  weighting 19 tickets the same as 1,181. It answered 71.59 where the truth was
+  48.52, with `STATUS = OK`. On `sales`, `SUM` over per-region
+  `gross_margin_pct` answers a 120 % margin.
+- Reference expansion now refuses an outer `SUM` or `AVG` over such a metric
+  (`SEMANTIC_QUERY_016`), in a derived table or a CTE, however deeply nested in
+  an expression. The message names the aggregate, the metric and the grain.
+- **"Adds up" is judged from what the metric computes, not from its label.** A
+  DDL metric `AS AVG(x)` is stored with `METRIC_TYPE = 'ADDITIVE'`. A single
+  `SUM`/`COUNT` adds up, and so does a linear combination of such metrics
+  (`gross_margin = total_revenue - total_cost` still sums exactly).
+- **The grain comes from what expansion compiles, not from what the subquery
+  selects.** A dimension the subquery only filters on is part of it, so
+  `… (SELECT gross_margin_pct FROM obj WHERE customer_region IN (…)) t` is
+  refused too.
+- Still accepted, and exact or self-describing:
+  - `MIN`, `MAX` and `COUNT` of the per-group values;
+  - window aggregates;
+  - an outer block that groups by the whole grain, including by ordinal or by an
+    inner alias.
+  `SET_MODEL_DERIVED_COMPOSITION` opts out, like `SEMANTIC_QUERY_015`.
+  `tools/verify_outer_reaggregation.py` checks refusals, exact values and the
+  opt-out live.
+
 #### An unknown DDL clause was absorbed into the previous clause (BUG-25)
 
 - The DDL parser finds a clause by its keyword, and the value runs to the next

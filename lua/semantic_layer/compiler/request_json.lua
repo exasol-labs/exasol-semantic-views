@@ -4593,6 +4593,7 @@ refusal_rules.expansion_wins = {
     SEMANTIC_QUERY_007 = true,   -- an aggregate the metric does not declare
     SEMANTIC_QUERY_012 = true,   -- composition the layer does not supervise
     SEMANTIC_QUERY_013 = true,   -- more references than one statement should carry
+    SEMANTIC_QUERY_016 = true,   -- an outer SUM/AVG over a metric that does not add up
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
@@ -5070,6 +5071,360 @@ do
         return false
     end
 
+    -- An outer SUM or AVG over a metric that does not add up across groups.
+    --
+    -- Aggregating a semantic object in an *outer* block is the supported form,
+    -- because the caller named the grain -- and for a metric that adds up, the
+    -- sum of its per-group values is the metric at the coarser grain, exactly.
+    -- For one that does not, it is not the metric at any grain: AVG of a
+    -- per-bucket average weights 19 tickets the same as 1,181 and answered
+    -- 71.59 where the truth was 48.52 (BUG-26), and SUM of a per-region margin
+    -- ratio answered a 120 % margin. The number looks plausible exactly when
+    -- the groups are balanced, which is what makes it dangerous.
+    --
+    -- MIN and MAX are left alone: their answer is a value the metric actually
+    -- takes at the grain the caller named -- the worst bucket's average -- not
+    -- a new number. COUNT counts groups, which is the documented outer form. A
+    -- window aggregate (`OVER`) is a statistic the author framed over the rows
+    -- explicitly. And an outer block grouped by every dimension the subquery
+    -- selects sees one inner row per group, so any aggregate there is exact.
+    bi_expansion.REAGGREGATES = {SUM = true, AVG = true}
+    bi_expansion.SET_OPERATORS = {UNION = true, INTERSECT = true, EXCEPT = true, MINUS = true}
+
+    -- Every active metric of the reference's model, by name, read once and
+    -- only when a statement actually aggregates one in an outer block.
+    function bi_expansion.model_metrics(reference)
+        if reference.metrics ~= nil then return reference.metrics end
+        reference.metrics = {}
+        local model = reference.model
+        if model == nil or missing(model.model_id) then return reference.metrics end
+        local rows = query([[
+            SELECT METRIC_NAME, METRIC_KIND, METRIC_TYPE, AGGREGATION_FUNCTION,
+                   EXPRESSION, NON_ADDITIVE_DIMENSION_ID, DISTINCT_KEY_EXPR,
+                   WINDOW_SPEC_JSON
+              FROM SEMANTIC_SOURCE.METRICS
+             WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+               AND STATUS = 'ACTIVE'
+        ]], {model_id = model.model_id, version_id = model.version_id}) or {}
+        for _, row in ipairs(rows) do
+            reference.metrics[upper(tostring(row_value(row, "METRIC_NAME", 1)))] = {
+                kind = upper(tostring(row_value(row, "METRIC_KIND", 2) or "")),
+                metric_type = upper(tostring(row_value(row, "METRIC_TYPE", 3) or "")),
+                aggregation = upper(tostring(row_value(row, "AGGREGATION_FUNCTION", 4) or "")),
+                expression = tostring(row_value(row, "EXPRESSION", 5) or ""),
+                non_additive = not missing(row_value(row, "NON_ADDITIVE_DIMENSION_ID", 6))
+                    or not missing(row_value(row, "DISTINCT_KEY_EXPR", 7))
+                    or not missing(row_value(row, "WINDOW_SPEC_JSON", 8)),
+            }
+        end
+        return reference.metrics
+    end
+
+    -- Is the sum of this metric's per-group values the metric itself?
+    --
+    -- Judged from what the metric computes, not from its METRIC_TYPE label: a
+    -- DDL metric `AS AVG(x)` with no type keyword is stored ADDITIVE. True for a
+    -- single SUM or COUNT (not DISTINCT), and for a DERIVED metric that is a
+    -- linear combination of such metrics -- `total_revenue - total_cost` sums
+    -- exactly, `gross_margin / NULLIF(total_revenue, 0)` does not.
+    function bi_expansion.summable(metrics, name, seen)
+        local key_name = upper(tostring(name))
+        local metric = metrics[key_name]
+        seen = seen or {}
+        if metric == nil or seen[key_name] or metric.non_additive then return false end
+        seen[key_name] = true
+        for _, label in ipairs({metric.kind, metric.metric_type}) do
+            if label == "RATIO" or label == "DISTINCT" or label == "SEMI_ADDITIVE"
+                or label == "WINDOW" then
+                return false
+            end
+        end
+        local expression_tokens = sql_text.tokenize(metric.expression, SEMANTIC_SQL_LEXER)
+        if upper(metric.expression):find("DISTINCT", 1, true) then return false end
+        -- One aggregate call and nothing after it.
+        local head = sql_text.token_upper(expression_tokens[1])
+        if (head == "SUM" or head == "COUNT")
+            and expression_tokens[2] ~= nil and expression_tokens[2].text == "("
+            and expression_tokens[#expression_tokens].text == ")"
+            and expression_tokens[#expression_tokens].depth == 0 then
+            local closes = 0
+            for _, token in ipairs(expression_tokens) do
+                if token.text == ")" and token.depth == 0 then closes = closes + 1 end
+            end
+            return closes == 1
+        end
+        if metric.kind ~= "DERIVED" and metric.metric_type ~= "DERIVED" then
+            return false
+        end
+        for index, token in ipairs(expression_tokens) do
+            local previous, following = expression_tokens[index - 1], expression_tokens[index + 1]
+            if token.kind == "word" or token.kind == "identifier" then
+                if following ~= nil and following.text == "(" then return false end
+                if not bi_expansion.summable(metrics, token_identifier_value(token), seen) then
+                    return false
+                end
+            elseif token.text == "*" then
+                if not ((previous and previous.kind == "number")
+                    or (following and following.kind == "number")) then
+                    return false
+                end
+            elseif token.text == "/" then
+                if not (following and following.kind == "number") then return false end
+            elseif token.kind ~= "number" and token.text ~= "+" and token.text ~= "-"
+                and token.text ~= "(" and token.text ~= ")" then
+                return false
+            end
+        end
+        return true
+    end
+
+    -- The field a select item names, and the name it is output under.
+    function bi_expansion.projected_field(item, by_name)
+        local body, output = item, nil
+        local count = #item
+        if count >= 3 and sql_text.token_upper(item[count - 1]) == "AS" then
+            body, output = {table.unpack(item, 1, count - 2)}, token_identifier_value(item[count])
+        elseif count >= 2 and (item[count].kind == "word" or item[count].kind == "identifier")
+            and item[count - 1].text ~= "." then
+            body, output = {table.unpack(item, 1, count - 1)}, token_identifier_value(item[count])
+        end
+        -- MEASURE(x) / AGG(x) select the field as defined.
+        local wrapper = sql_text.token_upper(body[1])
+        if (wrapper == "MEASURE" or wrapper == "AGG") and body[2] ~= nil
+            and body[2].text == "(" and body[#body].text == ")" then
+            body = {table.unpack(body, 3, #body - 1)}
+        end
+        local name
+        if #body == 1 then
+            name = token_identifier_value(body[1])
+        elseif #body == 3 and body[2].text == "." then
+            name = token_identifier_value(body[3])
+        end
+        local column = name ~= nil and by_name[upper(name)] or nil
+        if column == nil then return nil, nil end
+        return column, upper(output or column.name)
+    end
+
+    -- The blocks that read a derived table or CTE: each is {anchor, qualifiers}.
+    function bi_expansion.reading_blocks(tokens, open_index, close_index)
+        local before, after = tokens[open_index - 1], tokens[close_index + 1]
+        local word_before = sql_text.token_upper(before)
+        if word_before == "FROM" or word_before == "JOIN" or (before and before.text == ",")
+            and sql_text.token_upper(tokens[open_index - 2]) ~= "AS" then
+            local qualifiers = {}
+            local alias = after
+            if sql_text.token_upper(alias) == "AS" then alias = tokens[close_index + 2] end
+            if alias ~= nil and (alias.kind == "word" or alias.kind == "identifier") then
+                qualifiers[upper(token_identifier_value(alias))] = true
+            end
+            return {{anchor = open_index, qualifiers = qualifiers}}
+        end
+        -- `WITH name AS (...)` or `, name AS (...)`.
+        local name_token = tokens[open_index - 2]
+        local lead = sql_text.token_upper(tokens[open_index - 3])
+        if word_before ~= "AS" or token_identifier_value(name_token) == nil
+            or not (lead == "WITH" or (tokens[open_index - 3] and tokens[open_index - 3].text == ",")) then
+            return {}
+        end
+        local cte = upper(token_identifier_value(name_token))
+        local blocks = {}
+        for index = close_index + 1, #tokens - 1 do
+            local intro = tokens[index]
+            local word = sql_text.token_upper(intro)
+            local target = tokens[index + 1]
+            local following = tokens[index + 2]
+            if (word == "FROM" or word == "JOIN" or intro.text == ",")
+                and token_identifier_value(target) ~= nil
+                and upper(token_identifier_value(target)) == cte
+                and not (following ~= nil and (following.text == "." or following.text == "(")) then
+                local qualifiers = {[cte] = true}
+                local alias = following
+                if sql_text.token_upper(alias) == "AS" then alias = tokens[index + 3] end
+                if alias ~= nil and (alias.kind == "word" or alias.kind == "identifier")
+                    and not STATEMENT_WORDS[sql_text.token_upper(alias)] then
+                    qualifiers[upper(token_identifier_value(alias))] = true
+                end
+                blocks[#blocks + 1] = {anchor = index + 1, qualifiers = qualifiers}
+            end
+        end
+        return blocks
+    end
+
+    -- `wanted` is the projection expansion compiles, so its dimensions are the
+    -- derived table's grain -- which includes a dimension the subquery only
+    -- filters on, since the filter is applied over the grouped result.
+    function bi_expansion.outer_reaggregation_refusal(tokens, reference, wanted)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return nil end
+        local open_index = first - 2
+        local open = tokens[open_index]
+        if open == nil or open.text ~= "(" then return nil end
+        local close_index
+        for index = reference.last + 1, #tokens do
+            if tokens[index].text == ")" and tokens[index].depth == open.depth then
+                close_index = index
+                break
+            end
+        end
+        if close_index == nil then return nil end
+        for index = open_index + 1, close_index - 1 do
+            -- Columns of a set operation are named by its first arm, so a
+            -- reference in another arm cannot be mapped by name.
+            if tokens[index].depth == reference.depth
+                and bi_expansion.SET_OPERATORS[sql_text.token_upper(tokens[index])] then
+                return nil
+            end
+        end
+
+        local outputs, dimensions = {}, {}
+        for _, item in ipairs(split_top_level(tokens, first, last, ",")) do
+            local star = (#item == 1 and item[1].text == "*")
+                or (#item == 3 and item[2].text == "." and item[3].text == "*")
+            if star then
+                for _, column in ipairs(reference.columns or {}) do
+                    outputs[upper(column.name)] = column
+                end
+            else
+                local column, output = bi_expansion.projected_field(item, reference.by_name)
+                if column ~= nil then outputs[output] = column end
+            end
+        end
+        for _, column_name in ipairs(wanted or {}) do
+            local column = reference.by_name[upper(column_name)]
+            if column ~= nil and upper(column.kind) == "DIMENSION" then
+                dimensions[#dimensions + 1] = column.name
+            end
+        end
+
+        for _, block in ipairs(bi_expansion.reading_blocks(tokens, open_index, close_index)) do
+            local depth = tokens[block.anchor].depth
+            local block_start, block_end = nil, #tokens
+            for index = block.anchor - 1, 1, -1 do
+                if tokens[index].depth == depth and sql_text.token_upper(tokens[index]) == "SELECT" then
+                    block_start = index
+                    break
+                end
+            end
+            for index = block.anchor + 1, #tokens do
+                local token = tokens[index]
+                if token.depth < depth or (token.depth == depth
+                    and bi_expansion.SET_OPERATORS[sql_text.token_upper(token)]) then
+                    block_end = index - 1
+                    break
+                end
+            end
+            if block_start ~= nil then
+                -- The block's GROUP BY, as output names; an ordinal names the
+                -- block's own select item.
+                local grouped = {}
+                local block_items, from_index = nil, nil
+                for index = block_start + 1, block_end do
+                    if tokens[index].depth == depth and sql_text.token_upper(tokens[index]) == "FROM" then
+                        from_index = index
+                        break
+                    end
+                end
+                if from_index ~= nil then
+                    block_items = split_top_level(tokens, block_start + 1, from_index - 1, ",")
+                end
+                for index = block_start + 1, block_end - 1 do
+                    if tokens[index].depth == depth and sql_text.token_upper(tokens[index]) == "GROUP"
+                        and sql_text.token_upper(tokens[index + 1]) == "BY" then
+                        local stop = block_end
+                        for scan = index + 2, block_end do
+                            local word = sql_text.token_upper(tokens[scan])
+                            if tokens[scan].depth == depth and (word == "HAVING" or word == "ORDER"
+                                or word == "LIMIT" or word == "QUALIFY" or word == "WINDOW") then
+                                stop = scan - 1
+                                break
+                            end
+                        end
+                        for _, item in ipairs(split_top_level(tokens, index + 2, stop, ",")) do
+                            if #item == 1 and item[1].kind == "number" and block_items ~= nil then
+                                item = block_items[tonumber(item[1].text)] or {}
+                            end
+                            local named = item[#item]
+                            if named ~= nil and token_identifier_value(named) ~= nil then
+                                grouped[upper(token_identifier_value(named))] = true
+                            end
+                        end
+                        break
+                    end
+                end
+                -- Covered when every grain dimension is grouped under some name
+                -- the subquery outputs it as.
+                local covered = true
+                for _, dimension in ipairs(dimensions) do
+                    local grouped_here = false
+                    for output, column in pairs(outputs) do
+                        if column.name == dimension and grouped[output] then grouped_here = true end
+                    end
+                    if not grouped_here then covered = false end
+                end
+
+                local index = block_start
+                while not covered and index <= block_end do
+                    local token = tokens[index]
+                    local following = tokens[index + 1]
+                    if index == open_index then
+                        index = close_index
+                    elseif token.text == "(" and following ~= nil
+                        and (sql_text.token_upper(following) == "SELECT"
+                            or sql_text.token_upper(following) == "WITH") then
+                        -- Another query block's aggregates are its own.
+                        for scan = index + 1, #tokens do
+                            if tokens[scan].text == ")" and tokens[scan].depth == token.depth then
+                                index = scan
+                                break
+                            end
+                        end
+                    elseif bi_expansion.REAGGREGATES[sql_text.token_upper(token)]
+                        and following ~= nil and following.text == "(" then
+                        local argument = index + 2
+                        if sql_text.token_upper(tokens[argument]) == "DISTINCT"
+                            or sql_text.token_upper(tokens[argument]) == "ALL" then
+                            argument = argument + 1
+                        end
+                        local qualifier, name_token = nil, tokens[argument]
+                        if tokens[argument + 1] ~= nil and tokens[argument + 1].text == "." then
+                            qualifier, name_token = tokens[argument], tokens[argument + 2]
+                            argument = argument + 2
+                        end
+                        local closing, over = tokens[argument + 1], tokens[argument + 2]
+                        local name = token_identifier_value(name_token)
+                        local column = name ~= nil and outputs[upper(name)] or nil
+                        local qualified_here = qualifier == nil
+                            or block.qualifiers[upper(token_identifier_value(qualifier) or "")]
+                        if column ~= nil and qualified_here and upper(column.kind) == "METRIC"
+                            and closing ~= nil and closing.text == ")"
+                            and sql_text.token_upper(over) ~= "OVER"
+                            and not bi_expansion.summable(bi_expansion.model_metrics(reference), column.name) then
+                            local written = sql_text.token_upper(token) .. "("
+                                .. (qualifier ~= nil and (qualifier.text .. ".") or "")
+                                .. name_token.text .. ")"
+                            return error_result("SEMANTIC_QUERY_016",
+                                written .. " re-aggregates " .. column.name .. " across rows of "
+                                .. tostring(reference.published_schema) .. "."
+                                .. tostring(reference.object_name) .. " grouped by "
+                                .. (#dimensions > 0 and string.lower(table.concat(dimensions, ", "))
+                                    or "nothing") .. ". " .. column.name
+                                .. " does not add up across groups, so a sum or average of"
+                                .. " its per-group values is not " .. column.name
+                                .. " at any grain -- it weights every group equally,"
+                                .. " however many rows each holds. Select " .. column.name
+                                .. " at the grain you want instead, or group the outer query"
+                                .. " by every dimension the subquery selects. MIN and MAX of"
+                                .. " its per-group values are accepted. A model may accept"
+                                .. " ordinary-SQL semantics with SET_MODEL_DERIVED_COMPOSITION.")
+                        end
+                    end
+                    index = index + 1
+                end
+            end
+        end
+        return nil
+    end
+
     function bi_expansion.composed_in_from(tokens, reference)
         -- Walked outward, not just across the reference's own FROM clause.
         --
@@ -5318,6 +5673,18 @@ do
                     .. "." .. tostring(reference.object_name) .. " this statement needs: "
                     .. tostring(why) .. ". Name them, or alias the reference and qualify"
                     .. " them with it.")
+            end
+
+            -- Behind the composition opt-in, like _015: an outer aggregate is
+            -- ordinary-SQL semantics over the object's rows. After the
+            -- projection is inferred, because that -- not the subquery's own
+            -- select list -- is the grain the derived table is compiled at.
+            if not bi_expansion.allows_composition(reference.published_schema) then
+                local reaggregation = bi_expansion.outer_reaggregation_refusal(
+                    tokens, reference, wanted)
+                if reaggregation ~= nil then
+                    return reaggregation
+                end
             end
 
             local parts = {}
@@ -5726,6 +6093,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         bi_find_references = bi_expansion.find_references,
         bi_infer_columns = bi_expansion.infer_columns,
         bi_composed_in_from = bi_expansion.composed_in_from,
+        bi_outer_reaggregation_refusal = bi_expansion.outer_reaggregation_refusal,
+        bi_summable = bi_expansion.summable,
         within_trust_boundary = compile_cache.within_trust_boundary,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,

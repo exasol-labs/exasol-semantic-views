@@ -99,6 +99,13 @@ PROBES = {
         "sql": f"SELECT bogus_field FROM {PUBLISHED}",
         "request": {"model": MODEL, "object": OBJECT, "dimensions": ["bogus_field"]},
     },
+    "An outer SUM or AVG over a metric that does not add up": {
+        # BUG-26: the mean of per-region margins, weighted by region rather
+        # than by row. MIN/MAX/COUNT and a fully grouped outer block are
+        # accepted; verify_outer_reaggregation.py holds those.
+        "sql": f"SELECT AVG(t.GROSS_MARGIN_PCT) FROM (SELECT CUSTOMER_REGION,"
+               f" GROSS_MARGIN_PCT FROM {PUBLISHED}) t",
+    },
     "An aggregate the metric does not declare": {
         # Written the way docs/bi-tools.md teaches -- "there is no GROUP BY to
         # write, it is inferred" -- and not with the explicit GROUP BY this

@@ -218,6 +218,35 @@ has named the grain:
 SELECT COUNT(*) FROM (SELECT t0.CUSTOMER_REGION FROM SEMANTIC_SALES.SALES t0) z
 ```
 
+**Except where the aggregate cannot be right.** For a metric that adds up
+across groups, the sum of its per-group values is the metric at the coarser
+grain, exactly. For one that does not (an average, a ratio, a distinct count),
+an outer `SUM` or `AVG` of its per-group values is not that metric at any
+grain. It weights every group equally, however many rows each holds:
+
+```sql
+-- refused: the mean of three regional margins, not the margin (0.402 vs 0.328)
+SELECT AVG(t.gross_margin_pct)
+FROM (SELECT customer_region, gross_margin_pct FROM SEMANTIC_SALES.SALES) t
+```
+
+This is refused with `SEMANTIC_QUERY_016`, in a derived table or a CTE. The
+subquery's grain is every dimension the expansion compiles, and that includes
+a dimension it only filters on.
+
+"Adds up" is judged from what the metric computes, not from its `METRIC_TYPE`
+label. A single `SUM` or `COUNT` (not `DISTINCT`) adds up. So does a `DERIVED`
+metric that is a linear combination of such metrics, like
+`total_revenue - total_cost`.
+
+Still accepted, because each one is exact or answers what it says:
+- `MIN`, `MAX` and `COUNT` of the per-group values;
+- a window aggregate (`OVER`);
+- an outer block that groups by every dimension the subquery is compiled at.
+
+`SET_MODEL_DERIVED_COMPOSITION` opts a model out, as it does for
+`SEMANTIC_QUERY_015`.
+
 ### A view over a semantic object freezes its SQL
 
 Because the stored text is compiled, the view answers forever, for anyone, with

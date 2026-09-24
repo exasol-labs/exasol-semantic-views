@@ -772,6 +772,8 @@ SELECT * FROM (VALUES
    'DISPLAY_POLICY = ''MASK'' withholds the value from results. Filtering on it still works.', 'SEMANTIC_QUERY_024', 'SEMANTIC_REQUEST_024'),
   ('Naming a field the object does not publish', 'REFUSED',
    'The refusal names the field and, where one is close enough to suggest, what it might have meant.', 'SEMANTIC_QUERY_020', 'SEMANTIC_REQUEST_020'),
+  ('An outer SUM or AVG over a metric that does not add up', 'REFUSED',
+   'Aggregating the object in an outer block is supported. For a metric that does not add up across groups -- an average, a ratio, a distinct count -- a sum or average of its per-group values is not the metric at any grain, so it is refused unless the outer block groups by every dimension the subquery is compiled at. MIN, MAX and COUNT are accepted. Opt in with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_016', NULL),
   ('An aggregate the metric does not declare', 'REFUSED',
    'MEASURE() and agg() may only wrap a metric, and only with the aggregate that metric declares.', 'SEMANTIC_QUERY_007', NULL),
   ('A SELECT list that names no field', 'REFUSED',

@@ -1780,6 +1780,110 @@ test("compiler retries collisions and tolerates best-effort cache failures", fun
     assert_equal(touch_state.cache_touches, 1)
 end)
 
+test("an outer SUM or AVG over a metric that does not add up is refused", function()
+    -- BUG-26: AVG over per-bucket averages weighted 19 tickets like 1,181 and
+    -- answered 71.59 where the truth was 48.52, with STATUS = OK.
+    local columns = {
+        {name = "customer_region", kind = "DIMENSION"},
+        {name = "order_status", kind = "DIMENSION"},
+        {name = "total_revenue", kind = "METRIC"},
+        {name = "gross_margin", kind = "METRIC"},
+        {name = "gross_margin_pct", kind = "METRIC"},
+        {name = "avg_resolution_h", kind = "METRIC"},
+    }
+    local by_name = {}
+    for _, column in ipairs(columns) do by_name[column.name:upper()] = column end
+    local metrics = {
+        TOTAL_REVENUE = {kind = "SIMPLE", metric_type = "ADDITIVE", aggregation = "SUM",
+            expression = "SUM(net_revenue)"},
+        TOTAL_COST = {kind = "SIMPLE", metric_type = "ADDITIVE", aggregation = "SUM",
+            expression = "SUM(net_cost)"},
+        GROSS_MARGIN = {kind = "DERIVED", metric_type = "DERIVED", aggregation = "",
+            expression = "total_revenue - total_cost"},
+        GROSS_MARGIN_PCT = {kind = "RATIO", metric_type = "RATIO", aggregation = "",
+            expression = "gross_margin / NULLIF(total_revenue, 0)"},
+        -- Stored ADDITIVE, because the DDL defaults the label; what it computes
+        -- is an average.
+        AVG_RESOLUTION_H = {kind = "SIMPLE", metric_type = "ADDITIVE", aggregation = "AVG",
+            expression = "AVG(resolution_h)"},
+        TICKETS = {kind = "SIMPLE", metric_type = "ADDITIVE", aggregation = "COUNT",
+            expression = "COUNT(DISTINCT ticket_id)"},
+        SCALED = {kind = "DERIVED", metric_type = "DERIVED", aggregation = "",
+            expression = "(total_revenue - total_cost) * 2 / 100"},
+        PRODUCT = {kind = "DERIVED", metric_type = "DERIVED", aggregation = "",
+            expression = "total_revenue * total_cost"},
+        TWO_SUMS = {kind = "SIMPLE", metric_type = "ADDITIVE", aggregation = "SUM",
+            expression = "SUM(a) / SUM(b)"},
+        BALANCE = {kind = "SEMI_ADDITIVE", metric_type = "SEMI_ADDITIVE", aggregation = "SUM",
+            expression = "SUM(balance)", non_additive = true},
+    }
+    assert_true(api.bi_summable(metrics, "total_revenue"))
+    assert_true(api.bi_summable(metrics, "gross_margin"))
+    assert_true(api.bi_summable(metrics, "scaled"))
+    for _, name in ipairs({"gross_margin_pct", "avg_resolution_h", "tickets", "product",
+        "two_sums", "balance", "missing_metric"}) do
+        assert_true(not api.bi_summable(metrics, name))
+    end
+
+    local function judge(text)
+        local tokens = api.sql_tokens(text)
+        local reference = api.bi_find_references(tokens)[1]
+        reference.columns, reference.by_name, reference.metrics = columns, by_name, metrics
+        local wanted = api.bi_infer_columns(tokens, reference, columns, by_name)
+        return api.bi_outer_reaggregation_refusal(tokens, reference, wanted)
+    end
+    local O = "SEMANTIC_SALES.SALES"
+    local refused = {
+        "SELECT AVG(t.avg_resolution_h) FROM (SELECT customer_region, avg_resolution_h FROM " .. O .. ") t",
+        "SELECT SUM(gross_margin_pct) FROM (SELECT customer_region, gross_margin_pct FROM " .. O .. ") t",
+        "WITH x AS (SELECT customer_region, gross_margin_pct FROM " .. O .. ") SELECT AVG(x.gross_margin_pct) FROM x",
+        "SELECT AVG(t.gross_margin_pct) FROM (SELECT * FROM " .. O .. ") t",
+        "SELECT AVG(t.m) FROM (SELECT customer_region, gross_margin_pct AS m FROM " .. O .. ") t",
+        "SELECT ROUND(AVG(t.gross_margin_pct), 3) FROM (SELECT customer_region, gross_margin_pct FROM " .. O .. ") t",
+        -- Filtered on, so part of the grain even though it is not selected.
+        "SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM " .. O
+            .. " WHERE customer_region IN ('North', 'West')) t",
+        "SELECT customer_region, AVG(t.gross_margin_pct) FROM (SELECT customer_region, order_status,"
+            .. " gross_margin_pct FROM " .. O .. ") t GROUP BY customer_region",
+    }
+    for _, text in ipairs(refused) do
+        local refusal = judge(text)
+        assert_true(refusal ~= nil)
+        assert_equal(refusal.error_code, "SEMANTIC_QUERY_016")
+    end
+    local message = judge(refused[1]).error_message
+    assert_contains(message, "AVG(t.avg_resolution_h) re-aggregates avg_resolution_h")
+    assert_contains(message, "grouped by customer_region")
+    assert_contains(message, "MIN and MAX of its per-group values are accepted")
+
+    local accepted = {
+        "SELECT MAX(t.gross_margin_pct) FROM (SELECT customer_region, gross_margin_pct FROM " .. O .. ") t",
+        "SELECT SUM(t.total_revenue) FROM (SELECT customer_region, total_revenue FROM " .. O .. ") t",
+        "SELECT SUM(t.gross_margin) FROM (SELECT customer_region, gross_margin FROM " .. O .. ") t",
+        "SELECT AVG(t.total_revenue) FROM (SELECT customer_region, total_revenue FROM " .. O .. ") t",
+        "SELECT customer_region, AVG(t.gross_margin_pct) FROM (SELECT customer_region, gross_margin_pct FROM "
+            .. O .. ") t GROUP BY customer_region",
+        "SELECT t.customer_region, SUM(t.gross_margin_pct) FROM (SELECT customer_region, gross_margin_pct FROM "
+            .. O .. ") t GROUP BY 1",
+        "SELECT r, AVG(t.gross_margin_pct) FROM (SELECT customer_region AS r, gross_margin_pct FROM "
+            .. O .. ") t GROUP BY r",
+        "SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM " .. O .. ") t",
+        "SELECT customer_region, AVG(t.gross_margin_pct) OVER () FROM (SELECT customer_region,"
+            .. " gross_margin_pct FROM " .. O .. ") t",
+        -- A set operation names its columns by the first arm; no opinion.
+        "SELECT AVG(u.gross_margin_pct) FROM (SELECT customer_region, gross_margin_pct FROM " .. O
+            .. " UNION ALL SELECT 'x', 1 FROM DUAL) u",
+        -- A scalar subquery's aggregate belongs to its own block.
+        "SELECT (SELECT AVG(gross_margin_pct) FROM other) FROM (SELECT customer_region, gross_margin_pct FROM "
+            .. O .. ") t",
+        -- Not a derived table or CTE: nothing re-aggregates it.
+        "SELECT customer_region, gross_margin_pct FROM " .. O,
+    }
+    for _, text in ipairs(accepted) do
+        assert_equal(judge(text), nil)
+    end
+end)
+
 test("reference expansion finds what to compile, and refuses to guess", function()
     -- Projection inference is the correctness surface of expansion. An earlier
     -- prototype defaulted to "all columns" when it could not tell and returned
