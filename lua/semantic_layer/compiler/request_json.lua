@@ -5254,6 +5254,28 @@ do
         for index = #applicable, 1, -1 do
             local reference = applicable[index]
 
+            -- Asked first, because a statement can be both and the join is
+            -- the more useful thing to say about it. `_015` tells the author to
+            -- wrap the object in a subquery and aggregate that, which names the
+            -- grain explicitly -- sound advice for a statement that only
+            -- re-groups, and wrong for one that also joins: wrapping first and
+            -- joining the wrapper is the shape that inflates 30x, so the remedy
+            -- would walk the caller into the hazard. `_012` is also the code
+            -- QUERY_CAPABILITIES and docs/bi-tools.md publish for this shape,
+            -- and the only one of the two that names SET_MODEL_DERIVED_COMPOSITION
+            -- as an opt-in for joining rather than for grouping.
+            if bi_expansion.composed_in_from(tokens, reference)
+                and not bi_expansion.allows_composition(reference.published_schema) then
+                return error_result("SEMANTIC_QUERY_012",
+                    "This statement joins " .. tostring(reference.published_schema) .. "."
+                    .. tostring(reference.object_name) .. " to another relation. The"
+                    .. " semantic layer stops supervising at the edge of the derived"
+                    .. " table, so the join can repeat its rows and any re-aggregation"
+                    .. " above it will double-count. Query the object on its own, or"
+                    .. " accept ordinary-SQL semantics for this model with"
+                    .. " SET_MODEL_DERIVED_COMPOSITION.")
+            end
+
             -- Behind the same opt-in as the join guard, and for the same
             -- reason: SET_MODEL_DERIVED_COMPOSITION says this model accepts
             -- ordinary-SQL semantics over its published objects, and
@@ -5270,18 +5292,6 @@ do
                     .. " fields you want the grain to be, or wrap the object in a"
                     .. " subquery and aggregate that, which names the grain explicitly."
                     .. " A model may accept ordinary-SQL semantics instead with"
-                    .. " SET_MODEL_DERIVED_COMPOSITION.")
-            end
-
-            if bi_expansion.composed_in_from(tokens, reference)
-                and not bi_expansion.allows_composition(reference.published_schema) then
-                return error_result("SEMANTIC_QUERY_012",
-                    "This statement joins " .. tostring(reference.published_schema) .. "."
-                    .. tostring(reference.object_name) .. " to another relation. The"
-                    .. " semantic layer stops supervising at the edge of the derived"
-                    .. " table, so the join can repeat its rows and any re-aggregation"
-                    .. " above it will double-count. Query the object on its own, or"
-                    .. " accept ordinary-SQL semantics for this model with"
                     .. " SET_MODEL_DERIVED_COMPOSITION.")
             end
 

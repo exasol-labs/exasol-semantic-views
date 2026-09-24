@@ -50,6 +50,7 @@ sh tools/run_lua_tests.sh
 "$PYTHON_BIN" tools/verify_representation_promotion.py
 "$PYTHON_BIN" tools/verify_governance_surfacing.py
 "$PYTHON_BIN" tools/verify_query_capabilities_contract.py
+"$PYTHON_BIN" tools/verify_documented_examples.py
 "$PYTHON_BIN" tools/verify_database_wide_activation.py
 "$PYTHON_BIN" tools/verify_governed_mode_refuses.py
 "$PYTHON_BIN" tools/verify_catalog_scoping.py

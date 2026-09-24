@@ -586,6 +586,41 @@ another table is refused by default. Each is called out below.
 
 ### Fixed
 
+#### The join the docs print was refused with a different code than the docs print
+
+- `docs/bi-tools.md` §4 printed a statement beside `SEMANTIC_QUERY_012`, and
+  `QUERY_CAPABILITIES` published the same code for the same shape. Run verbatim
+  it returned `SEMANTIC_QUERY_003` — "FROM must reference one published semantic
+  object", which is not true of a statement that references exactly one, and
+  which names neither the double-counting hazard nor
+  `SET_MODEL_DERIVED_COMPOSITION`. `_012` is what the docs tell integrators to
+  match on.
+- The cause was guard *order*, not arbitration. A statement that joins the
+  object and also groups it reaches both guards in reference expansion, and
+  re-aggregation was asked first. Its code, `SEMANTIC_QUERY_015`, deliberately
+  only wins when the other lane had no opinion — so the other lane's
+  parse-shape complaint outranked it. The composition guard is asked first now.
+- That ordering is also the better answer on its own terms: `_015` tells the
+  author to wrap the object in a subquery and aggregate that, which is sound for
+  a statement that only re-groups and **wrong** for one that also joins —
+  wrapping first and joining the wrapper is the shape that inflates 30×.
+- The contract verifier missed it because it demonstrated the join *without* the
+  aggregation, and the aggregation is what changed the answer. It now uses the
+  documented form.
+
+#### Documented examples are now run, and one was stale
+
+- `tools/verify_documented_examples.py` extracts every fenced SQL block in
+  `docs/` that is followed by a `-- SEMANTIC_..._NNN` comment, runs it verbatim
+  in the lane its first word implies, and requires every code the comment names.
+  Nothing is transcribed into the verifier, so editing the statement in the doc
+  edits the test.
+- It immediately found a second drift: `docs/examples.md` printed the fan-out
+  refusal as `SEMANTIC_MODEL_030` with the pre-split message about a
+  metric/dimension pair. The rule has been `SEMANTIC_MODEL_059` — a metric
+  aggregating *coarser* than its object's root — since that code was split out.
+  The example now prints what the layer actually says.
+
 #### A published model with two faults could not be repaired, only dropped
 
 - Every mutator on a published model revalidates the candidate and reverts

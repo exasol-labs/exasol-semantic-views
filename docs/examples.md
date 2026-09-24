@@ -78,13 +78,15 @@ with the offending path named and the catalog restored:
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC(
   'sales','SALES','freight_in_sales','SUM(freight_amount)',NULL,'ADDITIVE',
   'order','DECIMAL(18,2)','Freight (misplaced)','',NULL,FALSE,TRUE);
--- SEMANTIC_ADMIN_090: metric rejected; validation failed: SEMANTIC_MODEL_030:
--- Visible metric freight_in_sales cannot be grouped or filtered by dimension
--- product_category: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED via order_line_to_order
--- (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED) > order_line_to_product.
--- No relationship declaration makes a fanning traversal safe. Expose this
--- metric only alongside dimensions reachable from 'order' without fan-out, in
--- this or a separate semantic object, or remove one of the two from 'SALES'.
+-- SEMANTIC_ADMIN_090: metric rejected; validation failed: SEMANTIC_MODEL_059:
+-- Visible metric freight_in_sales aggregates at entity 'order', which is coarser
+-- than the root 'order_line' of object 'SALES' via order_line_to_order
+-- (rejected: ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED). Several 'order_line' rows
+-- share one 'order' row, so the join repeats that row and the aggregate is
+-- multiplied by the fan-out -- the number is silently too high, not merely
+-- unprovable. No relationship declaration makes a fanning aggregation safe.
+-- Expose this metric in a semantic object rooted at 'order', or remove it from
+-- object 'SALES'.
 ```
 
 `SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX` carries the same verdict for every

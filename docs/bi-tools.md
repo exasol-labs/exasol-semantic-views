@@ -243,6 +243,13 @@ executes a statement for each published shape, in the lane the row names, and
 fails if the code that comes back is not the one published. A row nobody
 demonstrates fails too, so the contract cannot grow claims it does not keep.
 
+So is every statement printed in this file next to an expected code — including
+the join in §4. `tools/verify_documented_examples.py` extracts those blocks from
+the Markdown and runs them verbatim, because the statement a reader copies is
+the one that has to hold: §4's join was published as `SEMANTIC_QUERY_012` and
+returned `SEMANTIC_QUERY_003`, and the capability verifier missed it by
+demonstrating the same join without the aggregation.
+
 ---
 
 ## 6. When a query is refused or a number looks wrong

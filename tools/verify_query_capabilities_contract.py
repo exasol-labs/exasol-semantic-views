@@ -65,8 +65,15 @@ PROBES = {
                " GROUP BY CUSTOMER_REGION",
     },
     "Joining an object to another relation": {
-        "sql": f"SELECT t0.CUSTOMER_REGION FROM {PUBLISHED} t0"
-               " JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION",
+        # The aggregating form, which is what docs/bi-tools.md §4 prints beside
+        # this row's code and what a BI tool emits. Without the SUM and GROUP BY
+        # this demonstration passed while the documented statement returned
+        # SEMANTIC_QUERY_003: the re-aggregation guard was asked before the
+        # composition guard, so expansion answered with a code that only wins
+        # when the other lane had no opinion, and the other lane's parse-shape
+        # complaint outranked it.
+        "sql": f"SELECT t0.CUSTOMER_REGION, SUM(t0.TOTAL_REVENUE) FROM {PUBLISHED} t0"
+               " JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION GROUP BY 1",
     },
     "Grouping the object where the layer cannot read the statement": {
         # A CTE: the whole-statement path has no opinion on it, so the guard in
