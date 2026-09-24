@@ -99,8 +99,10 @@ Diagnostics are returned as `DIAGNOSTICS_JSON` (a list of
 Field and measure expressions are copied through after qualifying column
 references with entity aliases — they are **not** translated between Spark SQL
 and Exasol SQL. Functions that do not exist in Exasol (for example Databricks
-`QUARTER()`) are rejected by the validator's function allowlist. The validator
-does not compile complete expressions, however, so dialect-specific syntax that
+`QUARTER()`) are rejected by the validator's function allowlist. Dimension and
+fact expressions are also bound against their source relation
+(`SEMANTIC_MODEL_072`), so Spark-only syntax in them fails validation. Metric
+expressions and filters are not bound, so dialect-specific syntax there that
 uses allowed function names can still fail at execution time. Review imported
 expressions, adjust to documented Exasol functions, and smoke-test them against
 their source entities before publication.

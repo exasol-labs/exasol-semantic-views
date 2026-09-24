@@ -2865,9 +2865,75 @@ local function reachable_aliases(ctx, base_entity_id, safe_edges)
     return aliases
 end
 
+-- Bind dimension, fact and binding expressions against the relation each is
+-- rendered over. The static checks see only qualified `alias.column`
+-- references, so a bare word -- a literal missing its quotes, a reserved word
+-- such as OPEN -- passed every gate, compiled to STATUS = OK, and failed only
+-- at execution (BUG-23). `WHERE FALSE` makes Exasol parse and bind the
+-- expression without reading a row. Probes on one relation run as one query and
+-- are split per expression only when that query fails, so a clean model pays
+-- one query per representation. Virtual-schema sources are skipped: a probe
+-- there is a remote pushdown, not a local bind.
+local function validate_expression_binding(ctx, probes)
+    local groups, order = {}, {}
+    for _, probe in ipairs(probes) do
+        local representation = probe.representation
+        if upper(representation.source_kind or "RELATION") == "RELATION"
+            and not missing(representation.source_schema)
+            and not missing(representation.source_object)
+            and not missing(representation.alias)
+            and not missing(probe.expression) then
+            local source = sql_text.quote_qualified(representation.source_schema,
+                representation.source_object) .. " " .. tostring(representation.alias)
+            if groups[source] == nil then
+                groups[source] = {}
+                order[#order + 1] = source
+            end
+            table.insert(groups[source], probe)
+        end
+    end
+    local function run(source, items)
+        local columns = {}
+        for index, probe in ipairs(items) do
+            columns[#columns + 1] = tostring(probe.expression) .. " AS PROBE_" .. index
+        end
+        local ok, err = pcall(query, "SELECT " .. table.concat(columns, ", ")
+            .. " FROM " .. source .. " WHERE FALSE")
+        return ok, tostring(err)
+    end
+    for _, source in ipairs(order) do
+        local items = groups[source]
+        if not run(source, items) then
+            for _, probe in ipairs(items) do
+                local ok, err = run(source, {probe})
+                if not ok then
+                    local reason = err:gsub("%s*%(Session: %d+%)%s*$", "")
+                    add_issue(ctx, "ERROR", probe.object_type, probe.object_name,
+                        "SEMANTIC_MODEL_072", probe.label .. " does not execute against "
+                            .. source .. ": " .. tostring(probe.expression)
+                            .. " -- " .. reason .. ". Quote string literals ('open'), "
+                            .. "qualify columns with the source alias, and quote "
+                            .. "reserved words used as identifiers.")
+                end
+            end
+        end
+    end
+end
+
 local function validate_expressions(ctx, safe_edges)
     validate_partition_attribute_bindings(ctx)
+    local binding_probes = {}
+    local function add_probes(object_type, attribute, entity, errors_before)
+        if ctx.error_count ~= errors_before or entity == nil then return end
+        local label = object_type == "DIMENSION" and "Dimension expression" or "Fact expression"
+        for _, representation in ipairs(representations_for_entity(ctx, entity)) do
+            binding_probes[#binding_probes + 1] = {representation = representation,
+                object_type = object_type, object_name = attribute.name,
+                label = label, expression = attribute.expression}
+        end
+    end
     for _, dimension in ipairs(ctx.dimensions) do
+        local errors_before = ctx.error_count
         if ctx.entity_name_by_id[key(dimension.entity_id)] == nil then
             add_issue(ctx, "ERROR", "DIMENSION", dimension.name, "SEMANTIC_MODEL_004",
                 "Dimension owning entity does not exist in this model version.")
@@ -2901,10 +2967,12 @@ local function validate_expressions(ctx, safe_edges)
                             .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
+            add_probes("DIMENSION", dimension, entity, errors_before)
         end
     end
 
     for _, fact in ipairs(ctx.facts) do
+        local errors_before = ctx.error_count
         if ctx.entity_name_by_id[key(fact.entity_id)] == nil then
             add_issue(ctx, "ERROR", "FACT", fact.name, "SEMANTIC_MODEL_004",
                 "Fact owning entity does not exist in this model version.")
@@ -2938,6 +3006,7 @@ local function validate_expressions(ctx, safe_edges)
                             .. alternate_representation_remedy(ctx, missing_representations))
                 end
             end
+            add_probes("FACT", fact, entity, errors_before)
         end
     end
 
@@ -2947,6 +3016,7 @@ local function validate_expressions(ctx, safe_edges)
     end
     local seen = {}
     for _, binding in ipairs(ctx.attribute_bindings or {}) do
+        local errors_before = ctx.error_count
         local attribute_type = upper(binding.attribute_type)
         local attribute = attribute_type == "DIMENSION"
             and ctx.dimension_by_id[key(binding.attribute_id)]
@@ -3005,8 +3075,14 @@ local function validate_expressions(ctx, safe_edges)
                             .. ref.alias .. "." .. ref.column_name .. ".")
                 end
             end
+            if binding.is_default ~= true and ctx.error_count == errors_before then
+                binding_probes[#binding_probes + 1] = {representation = representation,
+                    object_type = "ATTRIBUTE_BINDING", object_name = object_name,
+                    label = "Binding expression", expression = binding.expression}
+            end
         end
     end
+    validate_expression_binding(ctx, binding_probes)
 
     for _, metric in ipairs(ctx.metrics) do
         if ctx.entity_name_by_id[key(metric.base_entity_id)] == nil then

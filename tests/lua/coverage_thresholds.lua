@@ -105,6 +105,8 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- validator.lua 94.9 -> 95.0 on 2026-09-24, when SEMANTIC_MODEL_072 began
+-- binding dimension, fact and binding expressions against their relation.
 -- validator.lua 94.8 -> 94.9 on 2026-09-22 (2678/2819 displays as 95.00%), when the two contributor-counting
 -- conditions of SEMANTIC_MODEL_044 became SEMANTIC_MODEL_070 and _071 and
 -- started naming what they counted. The unit test asserts the counts and the
@@ -166,7 +168,7 @@ return {
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
         ["lua/semantic_layer/compiler/request_json.lua"] = 90.39,
-        ["lua/semantic_layer/admin/validator.lua"] = 94.9,
+        ["lua/semantic_layer/admin/validator.lua"] = 95.0,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,

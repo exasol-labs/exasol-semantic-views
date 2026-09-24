@@ -603,6 +603,29 @@ another table is refused by default. Each is called out below.
 
 ### Fixed
 
+#### A dimension expression that cannot execute compiled to `STATUS = OK` (BUG-23)
+
+- `CASE WHEN tk.RESOLVED THEN resolved ELSE open END`, where the literals are
+  missing their quotes and `OPEN` is reserved, passed `ADD_DIMENSION`,
+  `VALIDATE_MODEL`, `PUBLISH_MODEL` and `COMPILE_SQL`. It failed only when the
+  generated SQL ran, with `syntax error, unexpected OPEN_`. The static checks see
+  only qualified `alias.column` references, so a bare word was invisible to all
+  of them.
+- New rule `SEMANTIC_MODEL_072` (error) binds each dimension, fact and
+  attribute-binding expression against the relation it is rendered over, with
+  `SELECT <expression> FROM <source> <alias> WHERE FALSE`. The probe reads no
+  rows. A clean model pays one query per representation; the probe splits into
+  one query per expression only when the combined one fails. The message quotes
+  the expression and the database's error.
+- `ADD_DIMENSION`, `ADD_FACT` and the semantic DDL already validate before
+  committing, so the expression is now refused at authoring time
+  (`SEMANTIC_ADMIN_091` / `SEMANTIC_DDL_090` carrying `SEMANTIC_MODEL_072`) and
+  rolled back. A catalog that already holds such an expression fails
+  `VALIDATE_MODEL`.
+- Not probed: virtual-schema sources, since a probe there would be a remote
+  pushdown, plus metric expressions, filters and identity expressions.
+  `tools/verify_expression_binding.py` covers all three authoring paths.
+
 #### The join the docs print was refused with a different code than the docs print
 
 - `docs/bi-tools.md` §4 printed a statement beside `SEMANTIC_QUERY_012`, and

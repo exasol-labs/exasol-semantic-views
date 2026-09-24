@@ -837,6 +837,68 @@ test("validator accepts canonical string functions in F2 bindings", function()
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_040"))
 end)
 
+test("SEMANTIC_MODEL_072 binds expressions against their source relation", function()
+    -- BUG-23: bare words are invisible to the qualified-reference checks, so
+    -- only asking Exasol to bind the expression catches them.
+    local entity = {id = 1, name = "tickets", alias = "tk"}
+    local primary = {id = 2, entity_id = 1, name = "primary", alias = "tk",
+        source_kind = "RELATION", source_schema = "MART", source_object = "TICKETS"}
+    local remote = {id = 3, entity_id = 1, name = "remote", alias = "tk",
+        source_kind = "VIRTUAL_SCHEMA", source_schema = "VS", source_object = "TICKETS"}
+    local good = {id = 10, name = "priority", entity_id = 1, expression = "tk.mode"}
+    local bad = {id = 11, name = "resolved_flag", entity_id = 1,
+        expression = "CASE WHEN tk.flag THEN resolved ELSE open END"}
+    local fact = {id = 20, name = "amount", entity_id = 1, expression = "tk.amount"}
+    local ctx = validation_context({
+        entity_by_id = {["1"] = entity}, entity_name_by_id = {["1"] = "tickets"},
+        entity_alias_by_id = {["1"] = "TK"}, representations = {primary, remote},
+        representations_by_entity = {["1"] = {primary, remote}},
+        dimensions = {good, bad}, dimension_by_id = {["10"] = good, ["11"] = bad},
+        facts = {fact}, fact_by_id = {["20"] = fact}, metrics = {},
+        bindings_by_attribute = {['FACT:20'] = {{id = 1}}},
+        attribute_bindings = {
+            {id = 1, entity_id = 1, attribute_type = "FACT", attribute_id = 20,
+                representation_id = 2, expression = "tk.amount * bogus",
+                role = "PREFER", priority = 1},
+        },
+    })
+    local probes = {}
+    with_query(function(sql)
+        if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
+        if contains(sql, " WHERE FALSE") then
+            probes[#probes + 1] = sql
+            if contains(sql, "open END") then
+                error("syntax error, unexpected OPEN_ [line 1, column 41] (Session: 42)")
+            elseif contains(sql, "bogus") then
+                error("object BOGUS not found [line 1, column 20] (Session: 42)")
+            end
+        end
+        return {}
+    end, function() api.validate_expressions(ctx, {}) end)
+
+    -- One combined probe for the relation, then one per expression after it
+    -- failed: two dimensions and the fact's binding (a fact with an explicit
+    -- binding is probed through it). The virtual-schema source is never probed.
+    assert_equal(#probes, 4)
+    for _, sql in ipairs(probes) do
+        assert_contains(sql, '"MART"."TICKETS" tk WHERE FALSE')
+    end
+    local dimension_issue, binding_issue
+    for _, issue in ipairs(ctx.issues) do
+        if issue.rule_code == "SEMANTIC_MODEL_072" then
+            if issue.object_type == "DIMENSION" then dimension_issue = issue end
+            if issue.object_type == "ATTRIBUTE_BINDING" then binding_issue = issue end
+            assert_true(issue.object_name ~= "priority")
+        end
+    end
+    assert_equal(dimension_issue.object_name, "resolved_flag")
+    assert_contains(dimension_issue.message, "unexpected OPEN_")
+    assert_contains(dimension_issue.message, "Quote string literals")
+    assert_true(not contains(dimension_issue.message, "Session"))
+    assert_equal(binding_issue.object_name, "amount@primary")
+    assert_contains(binding_issue.message, "BOGUS not found")
+end)
+
 test("SEMANTIC_MODEL_040 names the permitted function set", function()
     local entity = {id = 1, name = "orders", alias = "o"}
     local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",
@@ -2746,6 +2808,9 @@ test("validator public entry point loads and validates a coherent catalog", func
             return {{60}}
         elseif contains(sql, "AS PROBE_COUNT") then
             return {{contains(sql, " MINUS ") and 0 or 4}}
+        elseif contains(sql, " WHERE FALSE") then
+            -- Expression binding probe: every expression binds.
+            return {}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
             return {}
         elseif contains(sql, "COUNT(er.REPRESENTATION_ID)") then

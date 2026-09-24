@@ -199,6 +199,12 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # Historical bug regressions: each script isolates a specific past failure and
 # reasserts the fixed behavior. Running them here is cheap insurance.
 "$PYTHON_BIN" tools/verify_published_authoring_isolation.py
+
+# BUG-23: a dimension expression carrying a bare reserved word validated,
+# published and compiled to STATUS = OK, then failed at execution. Asserts
+# SEMANTIC_MODEL_072 refuses it at ADD_DIMENSION, in the semantic DDL, and in
+# VALIDATE_MODEL for a catalog that already holds one.
+"$PYTHON_BIN" tools/verify_expression_binding.py
 "$PYTHON_BIN" tools/verify_promotion_gate.py
 "$PYTHON_BIN" tools/verify_published_mutation_protection.py
 "$PYTHON_BIN" tools/verify_published_f3_batch.py

@@ -274,11 +274,15 @@ by `CATALOG_RELATIONSHIPS`. See `docs/semantic-catalog.md`.
 ### SQL Expression Validation: Static Policy, Not SQL Compilation
 
 Dimension, fact, binding, filter, and identity expressions are checked for alias
-scope, source columns, and unsupported functions. The validator does not parse
-or compile every complete Exasol expression. Invalid dialect syntax can pass
-static validation and fail at execution time. Smoke-test each physical
-expression against its owning source relation before registering or certifying
-it.
+scope, source columns, and unsupported functions. Those checks see only
+qualified `alias.column` references, so dimension, fact and attribute-binding
+expressions are additionally *bound* against their relation
+(`SELECT <expr> FROM <source> <alias> WHERE FALSE`, `SEMANTIC_MODEL_072`). That
+catches a bare word such as an unquoted literal or the reserved `OPEN`
+(BUG-23). Metric expressions, filters, identity expressions and virtual-schema
+sources are not probed, so invalid dialect syntax there can still pass
+validation and fail at execution time. Smoke-test those against their source
+before registering or certifying them.
 
 ### The Sales Demo Model
 
