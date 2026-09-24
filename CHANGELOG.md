@@ -35,35 +35,52 @@ another table is refused by default. Each is called out below.
 - **What expansion costs, per shape.** The single figure this entry used to
   quote — "+0.9 ms on a compile" — was measured on the shape where expansion does
   the least work, and is about 30× low for the shapes a BI tool actually emits.
-  Measured interleaved, 25 rounds, all cache-warm, median:
+  Measured interleaved, 40 rounds, all cache-warm, median:
 
-  | shape | median | vs bare |
-  |---|---|---|
-  | bare `SELECT a, b FROM obj` | 104.2 ms | — |
-  | aliased `SELECT t0.a, t0.b FROM obj t0` | 103.9 ms | −0.2 ms |
-  | TopN `… ORDER BY 2 DESC LIMIT 5` | 103.2 ms | −1.0 ms |
-  | subquery `SELECT x.a FROM (…) x` | 131.6 ms | **+27.5 ms** |
-  | CTE `WITH z AS (…) SELECT …` | 131.3 ms | **+27.1 ms** |
-  | arithmetic in the select list, **bare** | 340.8 ms | **+236.6 ms** |
-  | `ORDER BY` a non-selected field, **bare** | 357.3 ms | **+253.2 ms** |
-  | a composed statement, refused | 76.1 ms | −28.1 ms |
+  | shape | outcome | median | × bare |
+  |---|---|---|---|
+  | bare `SELECT a, b FROM obj` | OK | 162.6 ms | — |
+  | aliased `SELECT t0.a, t0.b FROM obj t0` | OK | 157.9 ms | 0.97× |
+  | TopN `… ORDER BY 2 DESC LIMIT 5` | OK | 161.8 ms | 0.99× |
+  | subquery `SELECT x.a FROM (…) x` | OK | 234.5 ms | **1.44×** |
+  | CTE `WITH z AS (…) SELECT …` | OK | 228.7 ms | **1.41×** |
+  | arithmetic in the select list, **bare** | OK | 719.3 ms | **4.42×** |
+  | the same, wrapped in a subquery | OK | 260.8 ms | 1.60× |
+  | `ORDER BY` a non-selected field, **bare** | OK | 779.0 ms | **4.79×** |
+  | the same, wrapped in a subquery | OK | 245.3 ms | 1.51× |
+  | a composed statement, refused | `SEMANTIC_QUERY_012` | 272.5 ms | **1.68×** |
+  | the same wrapped, refused | `SEMANTIC_QUERY_012` | 219.1 ms | 1.35× |
 
-  The last two working shapes are the constructs the single-lane change above
-  made compile bare, and they are the expensive ones — which nothing measured at
-  the time. The cause is not expansion. It is that the whole-statement path has
-  to *fail* first, and a late failure has already read the catalog and resolved
-  every field; the composed statement in the last row is refused before any of
-  that and comes in under the bare baseline. Nothing caches the outcome either:
-  the compile cache stores successes only, and the *expanded* statement is never
-  stored under its own text — only the inner compile it wraps — so the failed
-  attempt is repeated on every execution. Caching the expansion outcome would
-  remove both halves. It touches the cache-integrity boundary, so it is not a
-  change to make without its own verifier, and it is not in this release.
-- Measured on Exasol `2026.2.0-dev.0` (Exasol Personal, single node) on an Apple
+  The two bare/wrapped pairs are the constructs the single-lane change above made
+  compile bare, and they are the expensive ones — which nothing measured at the
+  time. The cause is not expansion. It is that the whole-statement path has to
+  *fail* first, and a late failure has already read the catalog and resolved
+  every field; wrapping the object makes that path decline immediately instead,
+  which is the whole of the 4.4×–4.8× → 1.5×–1.6× difference. Nothing caches the outcome
+  either: the compile cache stores successes only, and the *expanded* statement
+  is never stored under its own text — only the inner compile it wraps — so the
+  failed attempt is repeated on every execution. Caching the expansion outcome
+  would remove both halves. It touches the cache-integrity boundary, so it is not
+  a change to make without its own verifier, and it is not in this release.
+- **A refusal is not a shortcut**, which this table previously claimed. The
+  composed row was published at 0.73× bare on the reasoning that it is "refused
+  before any of that". It is not, and an external re-measurement of the same
+  commit put it above bare. Before expansion can refuse a statement for joining
+  the object to something else it has to resolve the model and the object's
+  columns — that is how it knows the reference is a semantic object rather than
+  an ordinary table to leave alone — so a refusal costs strictly more than a
+  cache-warm compile, and the bare form pays the whole-statement lane's late
+  failure on top. The wrapped composed row is now printed beside it, because the
+  gap between the two is the evidence.
+- Measured on Exasol `2026.2.0-nano.3` (Exasol Personal, single node) on an Apple
   M3 Pro, 11 cores, 36 GB, macOS 26.6.1. The earlier `+0.9 ms` named no hardware
-  at all, which is part of why it survived being wrong.
-  `tools/measure_expansion_cost.py` regenerates this table, so the next person to
-  doubt it does not have to write a script first.
+  at all, which is part of why it survived being wrong — and naming it was still
+  not enough, because a reader on another build found every absolute at 0.71–0.82×
+  of the published ones. The table now carries `× bare`, which is what actually
+  reproduced. `tools/measure_expansion_cost.py` regenerates it, so the next person
+  to doubt it does not have to write a script first, and it now prints the
+  *outcome* of each shape beside its median — a refused row that quietly started
+  compiling would otherwise keep printing a number meaning something else.
 - **The two SQL paths are one path, so the shape of a statement is never the
   reason it works.** Whatever the whole-statement path cannot compile is now
   handed to reference expansion, instead of only a short list of refusal codes

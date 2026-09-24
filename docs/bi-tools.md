@@ -155,29 +155,47 @@ can tell you — see [Governance](governance.md#5-frozen-views).
 ### What the shapes cost
 
 Wrapping is not free, and how much it costs depends on the shape. Measured
-interleaved, 25 rounds, all cache-warm, on Exasol `2026.2.0-dev.0` (Exasol
-Personal, single node) on an Apple M3 Pro / 36 GB / macOS 26.6.1 — so read the
-*differences*, not the absolute numbers, which do not travel between machines:
+interleaved, 40 rounds, all cache-warm, on Exasol `2026.2.0-nano.3` (Exasol
+Personal, single node) on an Apple M3 Pro / 36 GB / macOS 26.6.1. **Read the
+`× bare` column, not the milliseconds** — an independent re-measurement of this
+table found every absolute at 0.71–0.82× of what was published here while the
+ratios reproduced, so the milliseconds say more about the machine than about the
+layer:
 
-| shape | median | vs bare |
-|---|---|---|
-| bare `SELECT a, b FROM obj` | 104.2 ms | — |
-| aliased, and TopN over it | 103–104 ms | about the same |
-| subquery wrapper | 131.6 ms | +28 ms |
-| CTE | 131.3 ms | +27 ms |
-| arithmetic in the select list, or `ORDER BY` a non-selected field, **written bare** | 341–357 ms | +237 to +253 ms |
+| shape | outcome | median | × bare |
+|---|---|---|---|
+| bare `SELECT a, b FROM obj` | OK | 162.6 ms | — |
+| aliased, and TopN over it | OK | 158–162 ms | 0.97–0.99× |
+| subquery wrapper | OK | 234.5 ms | 1.44× |
+| CTE | OK | 228.7 ms | 1.41× |
+| arithmetic in the select list, **written bare** | OK | 719.3 ms | 4.42× |
+| the same wrapped in a subquery | OK | 260.8 ms | 1.60× |
+| `ORDER BY` a non-selected field, **written bare** | OK | 779.0 ms | 4.79× |
+| the same wrapped in a subquery | OK | 245.3 ms | 1.51× |
+| a composed statement, refused | `SEMANTIC_QUERY_012` | 272.5 ms | 1.68× |
+| the same wrapped, refused | `SEMANTIC_QUERY_012` | 219.1 ms | 1.35× |
 
 `tools/measure_expansion_cost.py` regenerates this table on your own hardware.
+The `outcome` column is there because a median says nothing about *what* was
+measured: a refused row that quietly started compiling would keep printing a
+number that no longer means the same thing.
 
-The last row is the one to know about. Those constructs work bare, and that is
-recent — but the layer reaches them by trying the whole-statement path first and
-falling through when it cannot compile them, and that failed attempt has already
-read the catalog. Nothing caches the outcome, so it is paid on every execution.
-**Writing the same query with the object aliased, or wrapped in a subquery, is
-several times faster**, because the whole-statement path then declines
-immediately instead of failing late. A BI tool emits the aliased and wrapped
-forms anyway; this matters to someone hand-writing the bare form in a dashboard's
-custom SQL box.
+The bare/wrapped pairs are the rows to know about. Those constructs work bare,
+and that is recent — but the layer reaches them by trying the whole-statement
+path first and falling through when it cannot compile them, and that failed
+attempt has already read the catalog. Nothing caches the outcome, so it is paid
+on every execution. **Writing the same query with the object aliased, or wrapped
+in a subquery, is about three times faster**, because the whole-statement path
+then declines immediately instead of failing late. A BI tool emits the aliased
+and wrapped forms anyway; this matters to someone hand-writing the bare form in a
+dashboard's custom SQL box.
+
+A refusal is not a shortcut. The composed rows cost *more* than the baseline, not
+less: before reference expansion can refuse a statement for joining the object to
+something else, it has to resolve the model and the object's columns — that is
+how it knows the reference is a semantic object rather than an ordinary table it
+should leave alone. The bare composed form pays the whole-statement lane's late
+failure on top, which is the whole difference between those two rows.
 
 ---
 
