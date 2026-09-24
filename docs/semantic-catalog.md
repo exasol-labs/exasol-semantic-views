@@ -750,7 +750,13 @@ Human-oriented views:
 
 - `SEMANTIC_CATALOG.METRIC_OVERVIEW` — includes dropped metrics as `STATUS = 'INACTIVE'` rows with a `NULL` `OBJECT_NAME`; filter `STATUS = 'ACTIVE'` for the live surface
 - `SEMANTIC_CATALOG.METRIC_LINEAGE`
-- `SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS`
+- `SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS` — only the metric × dimension
+  pairs that compile (`IS_VALID = TRUE`), with object, display and join-path
+  columns. `SHOW SEMANTIC DIMENSIONS FOR METRIC` reads it
+- `SEMANTIC_CATALOG.METRIC_DIMENSION_COMPATIBILITY` — the same columns for
+  every pair the validator judged, refused pairs included, each with its
+  `REASON_CODE` and `REASON_MESSAGE`. `SHOW ALL SEMANTIC DIMENSIONS FOR METRIC`
+  reads it
 - `SEMANTIC_CATALOG.METRIC_FILTER_OVERVIEW`
 - `SEMANTIC_CATALOG.MODEL_EVOLUTION_SUGGESTIONS`
 - `SEMANTIC_CATALOG.MODEL_EVOLUTION_REVIEWS`

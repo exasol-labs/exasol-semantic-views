@@ -13,10 +13,11 @@ semantic object usable from ordinary SQL, which immediately widens what a caller
 can reach; the governance work is what makes that safe to offer. Neither is
 useful alone.
 
-**Upgrading is not transparent.** Three changes alter behaviour for an existing
+**Upgrading is not transparent.** Four changes alter behaviour for an existing
 deployment — the policy columns now refuse, callers are granted a new schema
-instead of `SYS_SEMANTIC`, and a statement that joins a published object to
-another table is refused by default. Each is called out below.
+instead of `SYS_SEMANTIC`, a statement that joins a published object to
+another table is refused by default, and `METRIC_COMPATIBLE_DIMENSIONS` no
+longer returns refused pairs. Each is called out below.
 
 ### Added
 
@@ -602,6 +603,22 @@ another table is refused by default. Each is called out below.
   machines, and the original quoted none.
 
 ### Fixed
+
+#### `METRIC_COMPATIBLE_DIMENSIONS` listed incompatible dimensions (BUG-24)
+
+- The view returned every metric × dimension pair, including the fan-out and
+  no-path pairs that `COMPILE_SQL` refuses. An agent that asked it for
+  `DIMENSION_NAME … WHERE METRIC_NAME = ?`, the obvious query, got exactly the
+  combinations that are blocked everywhere else.
+- It now returns only `IS_VALID = TRUE` rows, with the same columns. The
+  unfiltered rows, with `REASON_CODE` and `REASON_MESSAGE` for each refusal, are
+  in the new `SEMANTIC_CATALOG.METRIC_DIMENSION_COMPATIBILITY`, which
+  `SHOW ALL SEMANTIC DIMENSIONS FOR METRIC` now reads.
+- **Behaviour change:** a caller that read refused pairs from
+  `METRIC_COMPATIBLE_DIMENSIONS` must switch to
+  `METRIC_DIMENSION_COMPATIBILITY`.
+- `SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT` is unchanged. Its refused rows
+  and reason codes are part of the documented agent contract.
 
 #### A dimension expression that cannot execute compiled to `STATUS = OK` (BUG-23)
 

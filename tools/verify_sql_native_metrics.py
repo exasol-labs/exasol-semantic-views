@@ -642,6 +642,25 @@ REPLACE METRICS (
             assert_contains("explain metric lineage", repr(explain), "NUMERATOR:METRIC")
             dimensions = fetchall(con, "SHOW SEMANTIC DIMENSIONS FOR METRIC sales.SALES.total_revenue")
             assert_contains("show compatible dimensions", repr(dimensions), "customer_region")
+            # BUG-24: the view named for compatible dimensions returned every
+            # pair, including the fan-out pairs COMPILE_SQL refuses. It is now
+            # filtered; the unfiltered pairs and reasons have their own view.
+            assert_equal(
+                "compatible dimensions exclude refused pairs",
+                fetchall(con, "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRIC_COMPATIBLE_DIMENSIONS "
+                              "WHERE IS_VALID = FALSE")[0][0],
+                0,
+            )
+            assert_equal(
+                "compatibility view keeps refused pairs",
+                fetchall(con, "SELECT REASON_CODE FROM SEMANTIC_CATALOG.METRIC_DIMENSION_COMPATIBILITY "
+                              "WHERE MODEL_NAME = 'sales' AND METRIC_NAME = 'total_freight' "
+                              "AND DIMENSION_NAME = 'product_category'"),
+                [("ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED",)],
+            )
+            shown_all = fetchall(con, "SHOW ALL SEMANTIC DIMENSIONS FOR METRIC sales.SALES.total_revenue")
+            assert_equal("show all includes every shown dimension",
+                         {row[0] for row in dimensions} <= {row[0] for row in shown_all}, True)
             exported = fetchall(con, "EXPORT SEMANTIC METRIC sales.SALES.total_revenue")
             assert_equal("export metric kind", exported[0][0], "METRIC")
             exported_dry_run = apply_definition(con, exported[0][2], True)
