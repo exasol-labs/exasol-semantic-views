@@ -13,11 +13,12 @@ semantic object usable from ordinary SQL, which immediately widens what a caller
 can reach; the governance work is what makes that safe to offer. Neither is
 useful alone.
 
-**Upgrading is not transparent.** Four changes alter behaviour for an existing
+**Upgrading is not transparent.** Five changes alter behaviour for an existing
 deployment — the policy columns now refuse, callers are granted a new schema
 instead of `SYS_SEMANTIC`, a statement that joins a published object to
-another table is refused by default, and `METRIC_COMPATIBLE_DIMENSIONS` no
-longer returns refused pairs. Each is called out below.
+another table is refused by default, `METRIC_COMPATIBLE_DIMENSIONS` no
+longer returns refused pairs, and a semantic DDL clause the parser used to
+ignore is now refused. Each is called out below.
 
 ### Added
 
@@ -603,6 +604,36 @@ longer returns refused pairs. Each is called out below.
   machines, and the original quoted none.
 
 ### Fixed
+
+#### An unknown DDL clause was absorbed into the previous clause (BUG-25)
+
+- The DDL parser finds a clause by its keyword, and the value runs to the next
+  keyword. So an unrecognised keyword became part of the previous value:
+  `RETURNS DECIMAL(18,2) UNIT 'kg'` stored the type `DECIMAL(18,2) UNIT 'kg'`,
+  and so did the typo `FORMATT 'currency'` and the nonsense `WOMBAT 'purple'`.
+  All three passed a dry run and validation; only `PUBLISH_MODEL` refused, with
+  `SEMANTIC_SURFACE_005: unsafe data type`. Words before the first clause were
+  dropped, and a clause another kind uses (`WINDOW` on a dimension) was parsed
+  and then ignored.
+- Each entry kind now has a fixed clause set, and each clause's value has a
+  fixed shape: a name, a literal, a list, a type, or a flag with no value. The
+  parser refuses:
+  - an unrecognised word, by name (`SEMANTIC_DDL_039`, listing the accepted
+    clauses);
+  - a clause from another kind (`SEMANTIC_DDL_043`);
+  - a repeated clause (`SEMANTIC_DDL_044`; the second one used to be absorbed
+    too).
+  Expression-valued clauses are checked for a trailing `WORD 'literal'` pair.
+- **`UNIT` is now a metric clause.** It writes `UNIT_HINT`, and export emits it.
+  `SEMANTIC_MODEL_022` had been recommending a unit that the grammar had no way
+  to set.
+- New rule `SEMANTIC_MODEL_073` (error) casts every declared data type, so a
+  malformed type written through `ADD_METRIC` or an older catalog is refused by
+  `VALIDATE_MODEL`, not by `PUBLISH_MODEL`. `SEMANTIC_SURFACE_005` now names
+  the column and the clause to correct.
+- **Behaviour change:** a definition that relied on a clause being ignored now
+  fails. That covers `FORMAT` on a `FACT`, which the grammar never stored.
+  `tools/verify_semantic_ddl_clauses.py` covers the report end-to-end.
 
 #### `METRIC_COMPATIBLE_DIMENSIONS` listed incompatible dimensions (BUG-24)
 

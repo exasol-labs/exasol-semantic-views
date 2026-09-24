@@ -205,6 +205,12 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # SEMANTIC_MODEL_072 refuses it at ADD_DIMENSION, in the semantic DDL, and in
 # VALIDATE_MODEL for a catalog that already holds one.
 "$PYTHON_BIN" tools/verify_expression_binding.py
+
+# BUG-25: an unknown DDL clause was absorbed into the previous clause's value, so
+# `RETURNS DECIMAL(18,2) UNIT 'kg'` stored that as the type and validated clean.
+# Asserts it is refused by name, UNIT is a real metric clause, and a malformed
+# declared type fails ADD_METRIC and VALIDATE_MODEL (SEMANTIC_MODEL_073).
+"$PYTHON_BIN" tools/verify_semantic_ddl_clauses.py
 "$PYTHON_BIN" tools/verify_promotion_gate.py
 "$PYTHON_BIN" tools/verify_published_mutation_protection.py
 "$PYTHON_BIN" tools/verify_published_f3_batch.py

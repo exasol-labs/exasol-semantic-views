@@ -946,6 +946,49 @@ test("SEMANTIC_MODEL_072 does not blame an expression for a stand-in that cannot
     assert_true(not has_rule(ctx, "SEMANTIC_MODEL_072"))
 end)
 
+test("SEMANTIC_MODEL_073 refuses a declared data type Exasol cannot cast to", function()
+    -- BUG-25: `RETURNS DECIMAL(18,2) UNIT 'kg'` was stored as the type and
+    -- validated clean; only PUBLISH_MODEL refused it.
+    local ctx = validation_context({
+        dimensions = {{name = "region", data_type = "VARCHAR(100) UTF8"},
+            {name = "untyped", data_type = null}},
+        facts = {{name = "amount", data_type = "DECIMAL(18,2)"}},
+        metrics = {
+            {name = "total_co2", data_type = "DECIMAL(18,2) UNIT 'kg'"},
+            {name = "smuggled", data_type = "INT) AS X, (SELECT 1"},
+            {name = "made_up", data_type = "WOMBAT(3)"},
+            {name = "total_amount", data_type = "DECIMAL(18,2)"},
+        },
+    })
+    local probes = {}
+    with_query(function(sql)
+        probes[#probes + 1] = sql
+        if contains(sql, "WOMBAT") then
+            error("syntax error, unexpected '(' [line 1, column 27] (Session: 42)")
+        end
+        return {}
+    end, function() api.validate_declared_types(ctx) end)
+
+    local refused = {}
+    for _, issue in ipairs(ctx.issues) do
+        assert_equal(issue.rule_code, "SEMANTIC_MODEL_073")
+        refused[issue.object_name] = issue.message
+    end
+    -- The two malformed shapes never reach the database.
+    for _, sql in ipairs(probes) do
+        assert_true(not contains(sql, "UNIT") and not contains(sql, "SELECT 1"))
+    end
+    assert_contains(refused.total_co2, "DECIMAL(18,2) UNIT 'kg'")
+    assert_contains(refused.total_co2, "correct the RETURNS clause")
+    assert_true(refused.smuggled ~= nil)
+    assert_contains(refused.made_up, "unexpected '('")
+    assert_true(not contains(refused.made_up, "Session"))
+    -- A type shared by two attributes is probed once; NULL is not a type to check.
+    assert_equal(#probes, 1 + 3)
+    assert_true(refused.total_amount == nil and refused.amount == nil
+        and refused.region == nil and refused.untyped == nil)
+end)
+
 test("SEMANTIC_MODEL_040 names the permitted function set", function()
     local entity = {id = 1, name = "orders", alias = "o"}
     local representation = {id = 2, entity_id = 1, name = "archive", alias = "o",

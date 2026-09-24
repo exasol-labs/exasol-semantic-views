@@ -656,6 +656,73 @@ test("semantic definition rejects incomplete authoring statements", function()
     end
 end)
 
+test("semantic definition refuses a clause it does not recognise, by name", function()
+    -- BUG-25: an unknown clause was absorbed into the previous clause's value,
+    -- so `UNIT 'kg'` became part of the return type and validated clean.
+    local metric = "ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC m AS SUM(f)"
+        .. " ON ENTITY e RETURNS DECIMAL(18,2) %s DISPLAY 'T' ADDITIVE PUBLIC"
+    local cases = {
+        {metric:format("WOMBAT 'purple'"), "SEMANTIC_DDL_039",
+            "METRIC m: unrecognised clause WOMBAT after RETURNS DECIMAL(18,2)"},
+        {metric:format("FORMATT 'currency'"), "SEMANTIC_DDL_039", "clause FORMATT"},
+        {metric:format("SIZE"), "SEMANTIC_DDL_039", "clause SIZE after RETURNS"},
+        -- Trailing after a literal, a flag, a name and a list.
+        {metric:format("COMMENT 'c' 'd'"), "SEMANTIC_DDL_039", "clause 'd' after COMMENT 'c'"},
+        {metric:format("CERTIFIED WOMBAT"), "SEMANTIC_DDL_039", "clause WOMBAT after CERTIFIED"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC m AS SUM(f) ON ENTITY e x"
+            .. " RETURNS INT", "SEMANTIC_DDL_039", "clause x after ON ENTITY e"},
+        {metric:format("SYNONYMS ('a') WOMBAT"), "SEMANTIC_DDL_039",
+            "clause WOMBAT after SYNONYMS ('a')"},
+        -- Before the first clause, and trailing an expression.
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC m WOMBAT 'p' AS SUM(f)"
+            .. " ON ENTITY e RETURNS INT", "SEMANTIC_DDL_039", "clause WOMBAT."},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC m AS SUM(f) FORMATT 'x'"
+            .. " ON ENTITY e RETURNS INT", "SEMANTIC_DDL_039", "clause FORMATT after AS"},
+        -- A clause another kind uses is refused rather than ignored.
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE DIMENSION d ON ENTITY e AS f"
+            .. " RETURNS INT WINDOW '{}'", "SEMANTIC_DDL_043", "WINDOW is not accepted on a DIMENSION"},
+        {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f"
+            .. " RETURNS INT UNIT 'kg'", "SEMANTIC_DDL_043", "UNIT is not accepted on a FACT"},
+        {metric:format("DISPLAY 'U'"), "SEMANTIC_DDL_044", "clause DISPLAY is given more than once"},
+    }
+    for _, case in ipairs(cases) do
+        local ok, err = pcall(api.parse_definition, case[1])
+        assert_true(not ok)
+        assert_contains(tostring(err), case[2])
+        assert_contains(tostring(err), case[3])
+    end
+    local ok, err = pcall(api.parse_definition, metric:format("WOMBAT 'p'"))
+    assert_contains(tostring(err), "Accepted clauses for a METRIC: AS, ON ENTITY, RETURNS")
+    assert_contains(tostring(err), "UNIT")
+    assert_contains(tostring(err), "NON ADDITIVE BY, WINDOW")
+    assert_contains(tostring(err), "DISTINCT_KEY")
+end)
+
+test("semantic definition accepts every documented clause shape, including UNIT", function()
+    local definition = api.parse_definition([[ALTER SEMANTIC VIEW sales.SALES
+        REPLACE METRICS (
+          METRIC total_co2 AS SUM(leg_co2) ON ENTITY leg
+            RETURNS DECIMAL(18,2) UNIT 'kg' FORMAT 'number'
+            DISPLAY 'Total CO2' COMMENT 'c' SYNONYMS ('co2', 'emissions')
+            ADDITIVE PUBLIC CERTIFIED,
+          METRIC late_share AS SUM(CASE WHEN status = 'LATE' THEN 1 ELSE 0 END)
+            FILTER (WHERE region LIKE 'EU%') ON ENTITY leg
+            RETURNS DOUBLE PRECISION,
+          METRIC held AS SUM(x) FILTER WHERE kind = 'A' OR kind LIKE 'B%'
+            ON ENTITY leg RETURNS INTERVAL DAY(2) TO SECOND(3),
+          METRIC stamp AS MAX(ts) ON ENTITY leg
+            RETURNS TIMESTAMP(3) WITH LOCAL TIME ZONE,
+          METRIC label AS MAX(CASE WHEN a THEN 'x' ELSE 'y' END) ON ENTITY leg
+            RETURNS VARCHAR(10) UTF8)]])
+    assert_equal(#definition.metrics, 5)
+    local co2 = definition.metrics[1]
+    assert_equal(co2.data_type, "DECIMAL(18,2)")
+    assert_equal(co2.unit_hint, "kg")
+    assert_equal(co2.format_hint, "number")
+    assert_equal(definition.metrics[3].data_type, "INTERVAL DAY(2) TO SECOND(3)")
+    assert_equal(definition.metrics[5].data_type, "VARCHAR(10) UTF8")
+end)
+
 local function read_text(path)
     local file = assert(io.open(path, "r"))
     local value = file:read("*a")

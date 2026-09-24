@@ -2952,8 +2952,74 @@ local function validate_expression_binding(ctx, probes)
     end
 end
 
+-- A declared DATA_TYPE must be a type Exasol can cast to. PUBLISH_MODEL writes
+-- it into the published view's column list, and nothing checked it before
+-- then: `RETURNS DECIMAL(18,2) UNIT 'kg'` validated clean and failed only at
+-- publish, with SEMANTIC_SURFACE_005 naming neither the metric nor the clause
+-- (BUG-25). The shape is checked first -- words, and parenthesized groups of
+-- words, digits and commas -- so the probe below can never be anything but a
+-- list of casts; then one `CAST(NULL AS <type>)` per distinct type, split per
+-- type only when the combined probe fails.
+local function validate_declared_types(ctx)
+    local owners, order = {}, {}
+    local function collect(object_type, attributes)
+        for _, attribute in ipairs(attributes or {}) do
+            local data_type = missing(attribute.data_type) and ""
+                or trim_text(attribute.data_type)
+            if data_type ~= "" then
+                if owners[data_type] == nil then
+                    owners[data_type] = {}
+                    order[#order + 1] = data_type
+                end
+                table.insert(owners[data_type], {object_type, attribute.name})
+            end
+        end
+    end
+    collect("DIMENSION", ctx.dimensions)
+    collect("FACT", ctx.facts)
+    collect("METRIC", ctx.metrics)
+    local function refuse(data_type, reason)
+        for _, owner in ipairs(owners[data_type]) do
+            add_issue(ctx, "ERROR", owner[1], owner[2], "SEMANTIC_MODEL_073",
+                "Declared data type is not an Exasol data type: " .. data_type
+                    .. " -- " .. reason .. ". A clause after RETURNS that the "
+                    .. "parser did not recognise ends up here; correct the RETURNS "
+                    .. "clause or the DATA_TYPE argument.")
+        end
+    end
+    local probed = {}
+    for _, data_type in ipairs(order) do
+        local remainder = data_type:gsub("%b()", function(group)
+            return group:match("^%([%w%s,]*%)$") and " " or nil
+        end)
+        if remainder:match("^[%a][%w_%s]*$") then
+            probed[#probed + 1] = data_type
+        else
+            refuse(data_type, "only words and parenthesized size arguments are allowed")
+        end
+    end
+    local function run(types)
+        local casts = {}
+        for index, data_type in ipairs(types) do
+            casts[#casts + 1] = "CAST(NULL AS " .. data_type .. ") AS PROBE_" .. index
+        end
+        local ok, err = pcall(query, "SELECT " .. table.concat(casts, ", ")
+            .. " FROM DUAL WHERE FALSE")
+        return ok, tostring(err)
+    end
+    if #probed > 0 and not run(probed) then
+        for _, data_type in ipairs(probed) do
+            local ok, err = run({data_type})
+            if not ok then
+                refuse(data_type, (err:gsub("%s*%(Session: %d+%)%s*$", "")))
+            end
+        end
+    end
+end
+
 local function validate_expressions(ctx, safe_edges)
     validate_partition_attribute_bindings(ctx)
+    validate_declared_types(ctx)
     local binding_probes = {}
     local function add_probes(object_type, attribute, entity, errors_before)
         if ctx.error_count ~= errors_before or entity == nil then return end
@@ -4776,6 +4842,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         relationship_edges = relationship_edges,
         find_path = find_path,
         validate_expressions = validate_expressions,
+        validate_declared_types = validate_declared_types,
         extract_metric_dependencies = extract_metric_dependencies,
         detect_metric_cycles = detect_metric_cycles,
         validate_agent_metadata = validate_agent_metadata,

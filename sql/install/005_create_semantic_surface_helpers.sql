@@ -100,10 +100,19 @@ local function semantic_comment(summary, guidance)
     return utf8_prefix(text, 2000)
 end
 
-local function safe_data_type(data_type)
+-- Refusing here names the column and the clause to correct: a type that is not
+-- a plain Exasol type reaches publication only when VALIDATE_MODEL did not run
+-- since it was written, because SEMANTIC_MODEL_073 refuses it (BUG-25).
+local function safe_data_type(data_type, column_name)
     local text = trim(data_type)
     if text == "" then
-        error("SEMANTIC_SURFACE_004: missing data type")
+        error("SEMANTIC_SURFACE_004: missing data type for column " .. tostring(column_name))
+    end
+    local function unsafe()
+        error("SEMANTIC_SURFACE_005: column " .. tostring(column_name)
+            .. " declares data type " .. text .. ", which is not a plain Exasol type."
+            .. " Correct the RETURNS clause (or DATA_TYPE argument) of that field"
+            .. " and re-run VALIDATE_MODEL, which reports it as SEMANTIC_MODEL_073.")
     end
     if string.find(text, ";", 1, true)
         or string.find(text, "--", 1, true)
@@ -111,10 +120,10 @@ local function safe_data_type(data_type)
         or string.find(text, "*/", 1, true)
         or string.find(text, "'", 1, true)
         or string.find(text, '"', 1, true) then
-        error("SEMANTIC_SURFACE_005: unsafe data type: " .. text)
+        unsafe()
     end
     if not string.match(text, "^[A-Za-z][A-Za-z0-9_ ,%(%)]+$") then
-        error("SEMANTIC_SURFACE_005: unsafe data type: " .. text)
+        unsafe()
     end
     return text
 end
@@ -275,7 +284,7 @@ for _, object_row in ipairs(object_rows or {}) do
     local select_parts = {}
     for _, column_row in ipairs(column_rows) do
         local column_name = row_value(column_row, "COLUMN_NAME", 1)
-        local data_type = safe_data_type(row_value(column_row, "DATA_TYPE", 3))
+        local data_type = safe_data_type(row_value(column_row, "DATA_TYPE", 3), column_name)
         local description = row_value(column_row, "DESCRIPTION", 5)
         local source_count = tonumber(row_value(column_row, "SOURCE_COUNT", 6) or 1) or 1
         local fusion_strategy = upper(row_value(column_row, "FUSION_STRATEGY", 7) or "NONE")

@@ -159,6 +159,7 @@ local CLAUSES = {
     {"FILTER"},
     {"RETURNS"},
     {"FORMAT"},
+    {"UNIT"},
     {"DISPLAY"},
     {"COMMENT"},
     {"SYNONYMS"},
@@ -198,6 +199,11 @@ local function clause_positions(tokens, start_index)
                     if positions[key_name] == nil then
                         positions[key_name] = {index = i, words = words}
                         ordered[#ordered + 1] = {index = i, words = words, key = key_name}
+                    elseif positions[key_name].duplicate == nil then
+                        -- Kept so check_entry_clauses can refuse it by name; the
+                        -- second occurrence used to become part of the first
+                        -- one's value.
+                        positions[key_name].duplicate = i
                     end
                     -- Longer clauses such as NON ADDITIVE BY contain tokens
                     -- that are also valid shorter clauses. Once the longest
@@ -225,6 +231,138 @@ local function clause_text(source, tokens, positions, ordered, key_name)
         end
     end
     return text_from_tokens(source, tokens, value_first, next_index - 1)
+end
+
+-- What each entry kind accepts, and what shape each clause's value takes.
+--
+-- A clause is found only by matching one of CLAUSES, and its value runs to the
+-- next match, so an unknown keyword used to become part of the previous
+-- clause's value: `RETURNS DECIMAL(18,2) UNIT 'kg'` stored the type
+-- `DECIMAL(18,2) UNIT 'kg'`, `FORMATT 'currency'` did the same, and validation
+-- passed until PUBLISH_MODEL refused the type (BUG-25). Words before the first
+-- clause were dropped outright, and a clause another kind uses -- WINDOW on a
+-- dimension -- was parsed and ignored. check_entry_clauses refuses all three by
+-- name. Only an expression-valued clause (AS, FILTER, DISTINCT_KEY,
+-- NON ADDITIVE BY) is not checked token by token, because its value is SQL; it
+-- is checked for a trailing `WORD 'literal'` pair, which no SQL expression
+-- ends with unless WORD is one of LITERAL_PREFIXES.
+local CLAUSE_RULES = {
+    kinds = {
+        FACT = {"ON_ENTITY", "AS", "RETURNS", "DISPLAY", "COMMENT", "ADDITIVE",
+            "SEMI_ADDITIVE", "NON_ADDITIVE_BY", "PUBLIC", "PRIVATE", "CERTIFIED"},
+        DIMENSION = {"ON_ENTITY", "AS", "RETURNS", "FORMAT", "DISPLAY", "COMMENT",
+            "PUBLIC", "PRIVATE", "CERTIFIED"},
+        METRIC = {"AS", "ON_ENTITY", "RETURNS", "FILTER", "FORMAT", "UNIT", "DISPLAY",
+            "COMMENT", "SYNONYMS", "DISTINCT_KEY", "NON_ADDITIVE_BY", "WINDOW",
+            "ADDITIVE", "DERIVED", "RATIO", "DISTINCT", "SEMI_ADDITIVE", "PUBLIC",
+            "PRIVATE", "CERTIFIED"},
+    },
+    values = {
+        ON_ENTITY = "name", AS = "expression", FILTER = "expression",
+        RETURNS = "type", FORMAT = "literal", UNIT = "literal", DISPLAY = "literal",
+        COMMENT = "literal", SYNONYMS = "list", DISTINCT_KEY = "expression",
+        NON_ADDITIVE_BY = "expression", WINDOW = "literal",
+    },
+    type_words = {},
+    literal_prefixes = {},
+}
+for word in string.gmatch("BOOLEAN BOOL CHAR CHARACTER VARCHAR VARCHAR2 NCHAR "
+    .. "NVARCHAR NVARCHAR2 VARYING LONG CLOB LARGE OBJECT UTF8 ASCII DATE TIMESTAMP "
+    .. "WITH WITHOUT LOCAL TIME ZONE DECIMAL DEC NUMERIC NUMBER INT INTEGER BIGINT "
+    .. "SMALLINT TINYINT SHORTINT DOUBLE PRECISION FLOAT REAL GEOMETRY HASHTYPE "
+    .. "BYTE BIT INTERVAL YEAR MONTH DAY HOUR MINUTE SECOND TO", "%S+") do
+    CLAUSE_RULES.type_words[word] = true
+end
+for word in string.gmatch("THEN ELSE WHEN CASE LIKE AND OR NOT BETWEEN IN IS "
+    .. "DATE TIMESTAMP INTERVAL ESCAPE TO WHERE HAVING BY ON ANY ALL SOME", "%S+") do
+    CLAUSE_RULES.literal_prefixes[word] = true
+end
+
+local function check_entry_clauses(kind, name, source, tokens, positions, ordered, start_index)
+    local accepted = {}
+    for _, key_name in ipairs(CLAUSE_RULES.kinds[kind]) do
+        accepted[key_name] = true
+    end
+    local function listed()
+        local words = {}
+        for _, key_name in ipairs(CLAUSE_RULES.kinds[kind]) do
+            words[#words + 1] = (key_name:gsub("_", " "))
+        end
+        -- DISTINCT_KEY and SEMI_ADDITIVE are single keywords.
+        return (table.concat(words, ", "):gsub("DISTINCT KEY", "DISTINCT_KEY")
+            :gsub("SEMI ADDITIVE", "SEMI_ADDITIVE"))
+    end
+    local label = kind .. " " .. tostring(name)
+    local function refuse(token, after)
+        error("SEMANTIC_DDL_039: " .. label .. ": unrecognised clause "
+            .. tostring(token.text) .. (after ~= nil and (" after " .. after) or "")
+            .. ". Accepted clauses for a " .. kind .. ": " .. listed() .. ".")
+    end
+    for key_name, entry in pairs(positions) do
+        if entry.duplicate ~= nil then
+            error("SEMANTIC_DDL_044: " .. label .. ": clause "
+                .. table.concat(entry.words, " ") .. " is given more than once.")
+        end
+    end
+    local last = #tokens
+    if ordered[1] == nil or ordered[1].index > start_index then
+        if tokens[start_index] ~= nil then refuse(tokens[start_index]) end
+        return
+    end
+    for position, entry in ipairs(ordered) do
+        local words = table.concat(entry.words, " ")
+        if not accepted[entry.key] then
+            error("SEMANTIC_DDL_043: " .. label .. ": clause " .. words
+                .. " is not accepted on a " .. kind .. ". Accepted clauses: "
+                .. listed() .. ".")
+        end
+        local first = entry.index + #entry.words
+        local final = ordered[position + 1] ~= nil and ordered[position + 1].index - 1 or last
+        local shape = CLAUSE_RULES.values[entry.key] or "flag"
+        local count = final - first + 1
+        if shape == "flag" then
+            if count > 0 then refuse(tokens[first], words) end
+        elseif shape == "name" or shape == "literal" then
+            if count > 1 then
+                refuse(tokens[first + 1], words .. " " .. tokens[first].text)
+            end
+        elseif shape == "list" then
+            -- One parenthesized group; anything after its close is a clause.
+            for i = first + 1, final do
+                if tokens[i].depth == tokens[first].depth then
+                    if tokens[i].text ~= ")" or i < final then
+                        refuse(tokens[i + (tokens[i].text == ")" and 1 or 0)],
+                            words .. " " .. text_from_tokens(source, tokens, first,
+                                tokens[i].text == ")" and i or i - 1))
+                    end
+                    break
+                end
+            end
+        elseif shape == "type" then
+            for i = first, final do
+                local token = tokens[i]
+                if token.kind == "literal"
+                    or (token.kind == "word" and token.depth == tokens[first].depth
+                        and not CLAUSE_RULES.type_words[token.upper]) then
+                    -- Name the keyword in front of a literal, not the literal.
+                    local culprit = i
+                    if token.kind == "literal" and i > first
+                        and tokens[i - 1].kind == "word" then
+                        culprit = i - 1
+                    end
+                    refuse(tokens[culprit], words .. " "
+                        .. (text_from_tokens(source, tokens, first, culprit - 1) or ""))
+                end
+            end
+        elseif count >= 2 then
+            local tail, before = tokens[final], tokens[final - 1]
+            if tail.kind == "literal" and before.kind == "word"
+                and tail.depth == tokens[first].depth and before.depth == tail.depth
+                and not CLAUSE_RULES.literal_prefixes[before.upper] then
+                refuse(before, words)
+            end
+        end
+    end
 end
 
 local function parse_literal_list(text)
@@ -280,6 +418,7 @@ local function parse_fact(text)
     end
     local name = normalize_name(token_identifier(tokens[2]), "FACT_NAME")
     local positions, ordered = clause_positions(tokens, 3)
+    check_entry_clauses("FACT", name, text, tokens, positions, ordered, 3)
     local entity = normalize_name(clause_text(text, tokens, positions, ordered, "ON_ENTITY"), "ENTITY_NAME")
     local expression = clause_text(text, tokens, positions, ordered, "AS")
     local data_type = clause_text(text, tokens, positions, ordered, "RETURNS")
@@ -324,6 +463,7 @@ local function parse_dimension(text)
     end
     local name = normalize_name(token_identifier(tokens[2]), "DIMENSION_NAME")
     local positions, ordered = clause_positions(tokens, 3)
+    check_entry_clauses("DIMENSION", name, text, tokens, positions, ordered, 3)
     local entity = normalize_name(clause_text(text, tokens, positions, ordered, "ON_ENTITY"), "ENTITY_NAME")
     local expression = clause_text(text, tokens, positions, ordered, "AS")
     local data_type = clause_text(text, tokens, positions, ordered, "RETURNS")
@@ -382,6 +522,7 @@ local function parse_metric(text, leading_metric_seen)
     end
     local name = normalize_name(token_identifier(tokens[name_index]), "METRIC_NAME")
     local positions, ordered = clause_positions(tokens, name_index + 1)
+    check_entry_clauses("METRIC", name, text, tokens, positions, ordered, name_index + 1)
     local expression = clause_text(text, tokens, positions, ordered, "AS")
     if missing(expression) then
         error("SEMANTIC_DDL_031: METRIC " .. name .. " requires AS")
@@ -427,6 +568,7 @@ local function parse_metric(text, leading_metric_seen)
         display_name = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "DISPLAY")),
         description = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "COMMENT")),
         format_hint = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "FORMAT")),
+        unit_hint = parse_clause_scalar(clause_text(text, tokens, positions, ordered, "UNIT")),
         synonyms = parse_literal_list(clause_text(text, tokens, positions, ordered, "SYNONYMS")),
         is_private = positions.PRIVATE ~= nil,
         is_certified = positions.CERTIFIED ~= nil,
@@ -1288,6 +1430,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
                 DISPLAY_NAME = :display_name,
                 DESCRIPTION = :description,
                 FORMAT_HINT = :format_hint,
+                UNIT_HINT = :unit_hint,
                 IS_PRIVATE = :is_private,
                 IS_CERTIFIED = :is_certified,
                 METRIC_KIND = :metric_kind,
@@ -1312,6 +1455,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             display_name = null_if_missing(metric.display_name),
             description = null_if_missing(metric.description),
             format_hint = null_if_missing(metric.format_hint),
+            unit_hint = null_if_missing(metric.unit_hint),
             is_private = metric.is_private,
             is_certified = metric.is_certified,
             metric_kind = metric.metric_kind,
@@ -1330,14 +1474,14 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             INSERT INTO SYS_SEMANTIC.METRICS (
               MODEL_ID, VERSION_ID, METRIC_NAME, EXPRESSION, FILTER_EXPR,
               METRIC_TYPE, BASE_ENTITY_ID, DATA_TYPE, DISPLAY_NAME, DESCRIPTION,
-              FORMAT_HINT, IS_PRIVATE, IS_CERTIFIED, METRIC_KIND,
+              FORMAT_HINT, UNIT_HINT, IS_PRIVATE, IS_CERTIFIED, METRIC_KIND,
               AGGREGATION_FUNCTION, MEASURE_EXPR, SEMANTIC_FILTER_EXPR,
               SQL_FILTER_EXPR, DISTINCT_KEY_EXPR, NON_ADDITIVE_DIMENSION_ID,
               WINDOW_SPEC_JSON, TYPE_PARAMS_JSON, DEFINITION_SOURCE_ID, STATUS
             ) VALUES (
               :model_id, :version_id, :metric_name, :expression, :filter_expr,
               :metric_type, :base_entity_id, :data_type, :display_name, :description,
-              :format_hint, :is_private, :is_certified, :metric_kind,
+              :format_hint, :unit_hint, :is_private, :is_certified, :metric_kind,
               :aggregation_function, :measure_expr, :semantic_filter_expr,
               :sql_filter_expr, :distinct_key_expr, :non_additive_dimension_id,
               :window_spec_json, :type_params_json, :definition_source_id, 'ACTIVE'
@@ -1354,6 +1498,7 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             display_name = null_if_missing(metric.display_name),
             description = null_if_missing(metric.description),
             format_hint = null_if_missing(metric.format_hint),
+            unit_hint = null_if_missing(metric.unit_hint),
             is_private = metric.is_private,
             is_certified = metric.is_certified,
             metric_kind = metric.metric_kind,
@@ -2465,7 +2610,7 @@ local function load_metric(model_name, object_name, metric_name)
                mo.DISPLAY_NAME, mo.METRIC_KIND, mo.METRIC_TYPE, mo.BASE_ENTITY_NAME,
                mo.FORMAT_HINT, mo.IS_CERTIFIED, mo.IS_PRIVATE, mo.OWNER_ROLE,
                mo.DESCRIPTION, mo.SYNONYMS, mt.EXPRESSION, mt.SEMANTIC_FILTER_EXPR,
-               mt.FILTER_EXPR, mt.DATA_TYPE, mt.DEFINITION_SOURCE_ID
+               mt.FILTER_EXPR, mt.DATA_TYPE, mt.DEFINITION_SOURCE_ID, mt.UNIT_HINT
         FROM SEMANTIC_CATALOG.METRIC_OVERVIEW mo
         JOIN SYS_SEMANTIC.METRICS mt
           ON mt.METRIC_ID = mo.METRIC_ID
@@ -2571,6 +2716,9 @@ local function canonical_metric_sql(model_name, object_name, metric_name)
     end
     if not missing(row_value(row, "FORMAT_HINT", 9)) then
         lines[#lines + 1] = "  FORMAT " .. sql_string(row_value(row, "FORMAT_HINT", 9))
+    end
+    if not missing(row_value(row, "UNIT_HINT", 20)) then
+        lines[#lines + 1] = "  UNIT " .. sql_string(row_value(row, "UNIT_HINT", 20))
     end
     if not missing(row_value(row, "DISPLAY_NAME", 5)) then
         lines[#lines + 1] = "  DISPLAY " .. sql_string(row_value(row, "DISPLAY_NAME", 5))

@@ -105,6 +105,9 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- validator.lua 95.0 -> 95.1 and semantic_definition.lua 78.8 -> 79.1 on
+-- 2026-09-24, when the DDL parser began refusing unrecognised clauses by name
+-- and SEMANTIC_MODEL_073 began casting every declared data type (BUG-25).
 -- validator.lua 94.9 -> 95.0 on 2026-09-24, when SEMANTIC_MODEL_072 began
 -- binding dimension, fact and binding expressions against their relation.
 -- validator.lua 94.8 -> 94.9 on 2026-09-22 (2678/2819 displays as 95.00%), when the two contributor-counting
@@ -168,9 +171,9 @@ return {
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
         ["lua/semantic_layer/compiler/request_json.lua"] = 90.39,
-        ["lua/semantic_layer/admin/validator.lua"] = 95.0,
+        ["lua/semantic_layer/admin/validator.lua"] = 95.1,
         ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
-        ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
+        ["lua/semantic_layer/admin/semantic_definition.lua"] = 79.1,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,
         ["lua/semantic_layer/agent/runtime.lua"] = 95.78,
     },

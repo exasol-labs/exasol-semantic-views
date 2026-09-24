@@ -290,8 +290,33 @@ unit. The three single forms each take the rest of the statement as one clause,
 so none can be combined with another change (`SEMANTIC_DDL_037` for a fact,
 `SEMANTIC_DDL_038` for a dimension).
 
-A dimension takes the same clauses as a fact — `ON ENTITY`, `AS`, `RETURNS`, and
-optionally `DISPLAY`, `COMMENT`, `FORMAT`, `CERTIFIED`, `PRIVATE`:
+**Each entry kind accepts a fixed set of clauses, and anything else is refused
+by name.** A clause is recognised by its keyword and its value runs to the next
+keyword, so an unrecognised word would otherwise become part of the previous
+clause's value: `RETURNS DECIMAL(18,2) UNIT 'kg'` used to store the type
+`DECIMAL(18,2) UNIT 'kg'`. The parser now refuses three things:
+- a word that is no clause at all (`SEMANTIC_DDL_039`, which names the word and
+  lists the accepted clauses);
+- a clause that belongs to another kind, such as `WINDOW` on a dimension
+  (`SEMANTIC_DDL_043`);
+- a clause given twice (`SEMANTIC_DDL_044`).
+
+| Kind | Clauses |
+|---|---|
+| `FACT` | `ON ENTITY`, `AS`, `RETURNS`, `DISPLAY`, `COMMENT`, `ADDITIVE`, `SEMI_ADDITIVE`, `NON ADDITIVE BY`, `PUBLIC`, `PRIVATE`, `CERTIFIED` |
+| `DIMENSION` | `ON ENTITY`, `AS`, `RETURNS`, `FORMAT`, `DISPLAY`, `COMMENT`, `PUBLIC`, `PRIVATE`, `CERTIFIED` |
+| `METRIC` | `AS`, `ON ENTITY`, `RETURNS`, `FILTER`, `FORMAT`, `UNIT`, `DISPLAY`, `COMMENT`, `SYNONYMS`, `DISTINCT_KEY`, `NON ADDITIVE BY`, `WINDOW`, `ADDITIVE`, `DERIVED`, `RATIO`, `DISTINCT`, `SEMI_ADDITIVE`, `PUBLIC`, `PRIVATE`, `CERTIFIED` |
+
+`UNIT 'kg'` sets the metric's `UNIT_HINT`, which is what `SEMANTIC_MODEL_022`
+asks a public numeric metric for, alongside `FORMAT`. Expression-valued clauses
+(`AS`, `FILTER`, `DISTINCT_KEY`, `NON ADDITIVE BY`) hold SQL, so they are
+checked only for a trailing `WORD 'literal'` pair. An unknown bare word after
+an expression cannot be told apart from SQL (`SUM(x) WOMBAT` is valid alias
+syntax), so it is caught later by validation, not by the parser.
+
+A dimension takes the clauses of a fact that are not about aggregation — `ON
+ENTITY`, `AS`, `RETURNS`, and optionally `DISPLAY`, `COMMENT`, `CERTIFIED`,
+`PRIVATE` — plus `FORMAT`:
 
 ```sql
 ALTER SEMANTIC VIEW sales.SALES
