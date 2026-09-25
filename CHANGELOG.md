@@ -6,6 +6,8 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.3] - 2026-09-25
+
 Two capabilities that were planned separately and shipped as one, because they
 turned out to be the same problem: **BI tools could not use this layer**, and
 **the layer could not tell you what it was protecting**. The BI work makes a
@@ -2423,7 +2425,8 @@ not select is refused. Each is called out below.
 
 ## Notes on versioning
 
-Version 0.2 is the second tagged release. Items above are tracked against the
+Version 0.3 is the third tagged release. Items above are tracked against the
 development baseline established by the user-study simulations run on
-2026-05-13. Phase 1 and Phase 2 are complete. The next planned milestone is
-Phase 3 (subqueries/CTE rewriting and CAST in SELECT — deferred pending demand).
+2026-05-13. Phases 1 and 2 are complete, and the statements Phase 3 deferred --
+subqueries, CTEs and CAST around a semantic object -- compile as of 0.3 through
+reference expansion.
