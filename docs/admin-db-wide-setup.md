@@ -119,8 +119,10 @@ Two consequences for a database-wide rollout:
 ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = NULL;
 ```
 
-See [plans/preprocessor-latency.md](../plans/preprocessor-latency.md) for the
-measurements and the remaining upstream request.
+What would remove that cost has to come from Exasol: suppressing preprocessing
+for statements a Lua script issues, as it already does inside the preprocessor
+itself, or exposing `query_no_preprocessing` to scripting scripts, which today
+only adapter scripts have.
 
 ## MCP Servers
 
