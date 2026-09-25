@@ -917,6 +917,27 @@ class InstallerResetTest(unittest.TestCase):
         absent = NoTable(columns=[])
         self.assertEqual([], INSTALL.migrate_added_columns(absent))
 
+    def test_added_columns_are_migrated_before_the_views_that_read_them(self):
+        """A view built before its column exists fails the whole upgrade.
+
+        `001b` creates `SELECT *` views, which fix their column list when they
+        are created, and `002` names columns outright. Migrating after every file
+        -- as the installer did -- meant an upgrade failed the moment a view read
+        an added column (BUG-27: MATERIALIZATIONS.LAST_REFRESHED_AT).
+        """
+        order = []
+        original_run, original_migrate = INSTALL.run_sql_files, INSTALL.migrate_added_columns
+        INSTALL.run_sql_files = lambda con, files, label: order.extend(p.name for p in files)
+        INSTALL.migrate_added_columns = lambda con: order.append("MIGRATE") or ["T.C"]
+        try:
+            self.assertEqual(["T.C"], INSTALL.install_files(object()))
+        finally:
+            INSTALL.run_sql_files, INSTALL.migrate_added_columns = original_run, original_migrate
+        self.assertEqual([p.name for p in INSTALL.INSTALL_FILES], [n for n in order if n != "MIGRATE"])
+        migrate = order.index("MIGRATE")
+        self.assertEqual("001_create_semantic_catalog.sql", order[migrate - 1])
+        self.assertEqual("001b_create_semantic_source_views.sql", order[migrate + 1])
+
     def test_the_caller_baseline_role_is_created_once(self):
         """007 grants the caller baseline to SEMANTIC_USER, so it must exist first.
 

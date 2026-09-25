@@ -1830,6 +1830,9 @@ test("an outer SUM or AVG over a metric that does not add up is refused", functi
         local reference = api.bi_find_references(tokens)[1]
         reference.columns, reference.by_name, reference.metrics = columns, by_name, metrics
         local wanted = api.bi_infer_columns(tokens, reference, columns, by_name)
+        -- As rewrite does: a grain-widening WHERE moves inside the compile.
+        local pushed = api.bi_pushdown_filter(tokens, reference, wanted, text, {reference})
+        if pushed ~= nil and pushed.wanted ~= nil then wanted = pushed.wanted end
         return api.bi_outer_reaggregation_refusal(tokens, reference, wanted)
     end
     local O = "SEMANTIC_SALES.SALES"
@@ -1840,9 +1843,6 @@ test("an outer SUM or AVG over a metric that does not add up is refused", functi
         "SELECT AVG(t.gross_margin_pct) FROM (SELECT * FROM " .. O .. ") t",
         "SELECT AVG(t.m) FROM (SELECT customer_region, gross_margin_pct AS m FROM " .. O .. ") t",
         "SELECT ROUND(AVG(t.gross_margin_pct), 3) FROM (SELECT customer_region, gross_margin_pct FROM " .. O .. ") t",
-        -- Filtered on, so part of the grain even though it is not selected.
-        "SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM " .. O
-            .. " WHERE customer_region IN ('North', 'West')) t",
         "SELECT customer_region, AVG(t.gross_margin_pct) FROM (SELECT customer_region, order_status,"
             .. " gross_margin_pct FROM " .. O .. ") t GROUP BY customer_region",
     }
@@ -1868,6 +1868,10 @@ test("an outer SUM or AVG over a metric that does not add up is refused", functi
         "SELECT r, AVG(t.gross_margin_pct) FROM (SELECT customer_region AS r, gross_margin_pct FROM "
             .. O .. ") t GROUP BY r",
         "SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM " .. O .. ") t",
+        -- Filtered on but not selected: the filter moves inside the compile, so
+        -- the subquery is one row and averaging it is exact.
+        "SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM " .. O
+            .. " WHERE customer_region IN ('North', 'West')) t",
         "SELECT customer_region, AVG(t.gross_margin_pct) OVER () FROM (SELECT customer_region,"
             .. " gross_margin_pct FROM " .. O .. ") t",
         -- A set operation names its columns by the first arm; no opinion.
@@ -1882,6 +1886,55 @@ test("an outer SUM or AVG over a metric that does not add up is refused", functi
     for _, text in ipairs(accepted) do
         assert_equal(judge(text), nil)
     end
+end)
+
+test("a filter on a dimension nobody selects runs inside the compile", function()
+    -- Applied over the grouped result, a filter-only dimension joined the grain:
+    -- `SELECT m FROM obj WHERE region IN (...)` answered one row bare and one
+    -- row per region wrapped -- or, served by expansion, bare as well.
+    local columns = {
+        {name = "customer_region", kind = "DIMENSION"},
+        {name = "order_status", kind = "DIMENSION"},
+        {name = "total_revenue", kind = "METRIC"},
+    }
+    local by_name = {}
+    for _, column in ipairs(columns) do by_name[column.name:upper()] = column end
+    local function push(text)
+        local tokens = api.sql_tokens(text)
+        local references = api.bi_find_references(tokens)
+        local reference = references[1]
+        reference.columns, reference.by_name = columns, by_name
+        local wanted = api.bi_infer_columns(tokens, reference, columns, by_name)
+        return api.bi_pushdown_filter(tokens, reference, wanted, text, references), wanted
+    end
+    local O = "SEMANTIC_SALES.SALES"
+
+    local pushed, wanted = push("SELECT * FROM (SELECT total_revenue FROM " .. O
+        .. " t0 WHERE t0.customer_region IN ('North', 'West') ORDER BY 1 LIMIT 5) z")
+    assert_equal(#wanted, 2)                   -- what used to be compiled
+    assert_equal(#pushed.wanted, 1)            -- the grain the statement asked for
+    assert_equal(pushed.wanted[1], "total_revenue")
+    assert_equal(pushed.predicate, "t0.customer_region IN ('North', 'West')")
+
+    -- Left where it is when it cannot widen anything: filtering grouped rows on
+    -- a grouping column keeps exactly the same rows.
+    assert_equal(push("SELECT * FROM (SELECT customer_region, total_revenue FROM " .. O
+        .. " WHERE customer_region = 'North') z"), nil)
+    assert_equal(push("SELECT total_revenue FROM " .. O), nil)
+    -- The outer block's WHERE belongs to the outer block.
+    assert_equal(push("SELECT * FROM (SELECT customer_region, total_revenue FROM " .. O
+        .. ") t WHERE t.customer_region = 'North'"), nil)
+
+    -- Refused where it cannot move: beside a join, or reading another object.
+    local joined = push("SELECT t0.total_revenue FROM " .. O .. " t0 JOIN MART.X x"
+        .. " ON x.id = 1 WHERE t0.customer_region = 'North'")
+    assert_equal(joined.refusal.error_code, "SEMANTIC_QUERY_017")
+    assert_contains(joined.refusal.error_message, "joined to another relation")
+    local nested = push("SELECT total_revenue FROM " .. O .. " WHERE customer_region IN"
+        .. " (SELECT t1.customer_region FROM " .. O .. " t1)")
+    assert_equal(nested.refusal.error_code, "SEMANTIC_QUERY_017")
+    assert_contains(nested.refusal.error_message, "reads another semantic object")
+    assert_contains(nested.refusal.error_message, "Filter with literal values")
 end)
 
 test("reference expansion finds what to compile, and refuses to guess", function()

@@ -595,7 +595,17 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MATERIALIZATIONS (
   PHYSICAL_OBJECT       VARCHAR(256) NOT NULL,
   MATERIALIZATION_TYPE  VARCHAR(64) NOT NULL,
   FRESHNESS_POLICY      VARCHAR(512),
-  STATUS                VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL
+  STATUS                VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL,
+  -- Freshness *state*, not policy (BUG-27). Written by
+  -- MARK_MATERIALIZATION_REFRESHED, which the refresh job calls: when the
+  -- object was rebuilt, how many rows it then held (measured, not claimed),
+  -- and an optional snapshot id the job supplies. FRESHNESS_MAX_AGE_SECONDS is
+  -- the bound a `MAX_AGE <n> <unit>` policy states, resolved at registration by
+  -- the parser the selector uses, so the catalog view need not re-parse it.
+  LAST_REFRESHED_AT          TIMESTAMP,
+  REFRESHED_ROW_COUNT        DECIMAL(18,0),
+  SOURCE_SNAPSHOT            VARCHAR(512),
+  FRESHNESS_MAX_AGE_SECONDS  DECIMAL(18,0)
 );
 
 -- One trust class for every physical relation the planner may emit into SQL.

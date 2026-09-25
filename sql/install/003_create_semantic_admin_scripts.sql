@@ -9011,6 +9011,19 @@ local physical_object = normalize_name(PHYSICAL_OBJECT, "PHYSICAL_OBJECT")
 local materialization_type = normalize_choice(MATERIALIZATION_TYPE, "MATERIALIZATION_TYPE", {"AGGREGATE"})
 local model = model_row(model_name)
 
+-- The vocabulary is the selector's, read from the runtime that applies it. Free
+-- text used to be stored verbatim and then rejected on every compile, so a
+-- materialization registered with `'dbt run --select gold (hourly)'` could never
+-- be chosen and nothing said so (BUG-27).
+if type(import) == "function" then
+    import("SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME", "materializations")
+end
+local freshness, freshness_error = materializations.freshness_policy(
+    missing(FRESHNESS_POLICY) and nil or FRESHNESS_POLICY)
+if freshness == nil then
+    error("SEMANTIC_ADMIN_003: invalid FRESHNESS_POLICY: " .. freshness_error)
+end
+
 if not source_object_exists(physical_schema, physical_object) then
     error("SEMANTIC_ADMIN_030: materialization physical object not found: " .. physical_schema .. "." .. physical_object)
 end
@@ -9033,10 +9046,12 @@ end
 query([[
     INSERT INTO SYS_SEMANTIC.MATERIALIZATIONS (
       MODEL_ID, VERSION_ID, MATERIALIZATION_NAME, PHYSICAL_SCHEMA,
-      PHYSICAL_OBJECT, MATERIALIZATION_TYPE, FRESHNESS_POLICY, STATUS
+      PHYSICAL_OBJECT, MATERIALIZATION_TYPE, FRESHNESS_POLICY, STATUS,
+      FRESHNESS_MAX_AGE_SECONDS
     ) VALUES (
       :model_id, :version_id, :materialization_name, :physical_schema,
-      :physical_object, :materialization_type, :freshness_policy, 'ACTIVE'
+      :physical_object, :materialization_type, :freshness_policy, 'ACTIVE',
+      :max_age_seconds
     )
 ]], {
     model_id = model.model_id,
@@ -9045,7 +9060,8 @@ query([[
     physical_schema = physical_schema,
     physical_object = physical_object,
     materialization_type = materialization_type,
-    freshness_policy = optional_text(FRESHNESS_POLICY)
+    freshness_policy = freshness.text or optional_text(FRESHNESS_POLICY),
+    max_age_seconds = freshness.seconds or null
 })
 -- A new materialization expands the set of candidate plans, so drop cached
 -- compile results for this model version (BUG-D-002 cache coherence).
@@ -10000,6 +10016,134 @@ query([[
     DELETE FROM SYS_SEMANTIC.SOURCE_TRUST
     WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
 ]], {model_id = model.model_id, version_id = model.version_id})
+/
+
+-- Record that a materialization was rebuilt. Called by the refresh job -- a dbt
+-- post-hook, a scheduler step -- after it writes the physical object.
+--
+-- The registry used to state only an intent (FRESHNESS_POLICY) and could not
+-- answer "is this stale right now?" (BUG-27). This writes the state that
+-- question needs. The row count is *measured* here, not passed in, so it
+-- describes the object as it is rather than as the job believed it to be.
+-- REFRESHED_AT defaults to now; a job that knows when its source snapshot was
+-- taken may pass that instead, but not a time in the future. STATUS is left
+-- alone: a manual STALE or INACTIVE is an operator's decision, and
+-- SET_MATERIALIZATION_STATUS is the one place that changes it.
+CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MARK_MATERIALIZATION_REFRESHED(
+  MODEL_NAME,
+  MATERIALIZATION_NAME,
+  REFRESHED_AT,
+  SOURCE_SNAPSHOT
+)
+RETURNS TABLE AS
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    if value == nil or value == null then return "" end
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local materialization_name = normalize_name(MATERIALIZATION_NAME, "MATERIALIZATION_NAME")
+local models = query([[
+    SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID
+    FROM SYS_SEMANTIC.MODELS m
+    WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+]], {model_name = model_name})
+if models == nil or #models == 0 then
+    error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+end
+local model_id = row_value(models[1], "MODEL_ID", 1)
+local version_id = row_value(models[1], "VERSION_ID", 2)
+
+local rows = query([[
+    SELECT MATERIALIZATION_ID, PHYSICAL_SCHEMA, PHYSICAL_OBJECT
+    FROM SYS_SEMANTIC.MATERIALIZATIONS
+    WHERE MODEL_ID = :model_id
+      AND VERSION_ID = :version_id
+      AND UPPER(MATERIALIZATION_NAME) = UPPER(:materialization_name)
+]], {model_id = model_id, version_id = version_id,
+     materialization_name = materialization_name})
+if rows == nil or #rows == 0 then
+    error("SEMANTIC_ADMIN_032: materialization not found: " .. materialization_name)
+end
+local materialization_id = row_value(rows[1], "MATERIALIZATION_ID", 1)
+local physical_schema = tostring(row_value(rows[1], "PHYSICAL_SCHEMA", 2))
+local physical_object = tostring(row_value(rows[1], "PHYSICAL_OBJECT", 3))
+
+-- Resolved by the database, so any timestamp literal it accepts is accepted.
+local refreshed_at
+if missing(REFRESHED_AT) then
+    refreshed_at = query("SELECT CURRENT_TIMESTAMP AS TS")[1][1]
+else
+    local ok, parsed = pcall(query, [[
+        SELECT CAST(:refreshed_at AS TIMESTAMP) AS TS,
+               CAST(:refreshed_at AS TIMESTAMP) > CURRENT_TIMESTAMP AS IN_FUTURE
+    ]], {refreshed_at = tostring(REFRESHED_AT)})
+    if not ok then
+        error("SEMANTIC_ADMIN_222: REFRESHED_AT is not a timestamp: " .. tostring(REFRESHED_AT))
+    end
+    if parsed[1][2] == true then
+        error("SEMANTIC_ADMIN_222: REFRESHED_AT is in the future: " .. tostring(REFRESHED_AT)
+            .. ". Pass when the refresh happened, or NULL for now.")
+    end
+    refreshed_at = parsed[1][1]
+end
+
+local quoted = '"' .. physical_schema:upper():gsub('"', '""') .. '"."'
+    .. physical_object:upper():gsub('"', '""') .. '"'
+local counted, counts = pcall(query, "SELECT COUNT(*) AS ROW_COUNT FROM " .. quoted)
+if not counted then
+    error("SEMANTIC_ADMIN_223: materialization " .. materialization_name
+        .. " cannot be read to measure it: " .. physical_schema .. "." .. physical_object
+        .. " -- " .. tostring(counts))
+end
+local row_count = counts[1][1]
+
+query([[
+    UPDATE SYS_SEMANTIC.MATERIALIZATIONS
+    SET LAST_REFRESHED_AT = :refreshed_at,
+        REFRESHED_ROW_COUNT = :row_count,
+        SOURCE_SNAPSHOT = :source_snapshot
+    WHERE MATERIALIZATION_ID = :materialization_id
+]], {refreshed_at = refreshed_at, row_count = row_count,
+     source_snapshot = missing(SOURCE_SNAPSHOT) and null or tostring(SOURCE_SNAPSHOT),
+     materialization_id = materialization_id})
+-- Freshness decides whether the selector may choose it, so cached compiles
+-- for this version no longer describe what a compile would do.
+query([[
+    DELETE FROM SYS_SEMANTIC.COMPILE_CACHE
+    WHERE MODEL_VERSION_ID = :version_id
+]], {version_id = version_id})
+
+local result = query([[
+    SELECT MATERIALIZATION_NAME, STATUS, LAST_REFRESHED_AT, REFRESHED_ROW_COUNT,
+           SOURCE_SNAPSHOT, FRESHNESS_POLICY
+    FROM SYS_SEMANTIC.MATERIALIZATIONS
+    WHERE MATERIALIZATION_ID = :materialization_id
+]], {materialization_id = materialization_id})
+local row = result[1]
+exit({{row[1], row[2], row[3], row[4], row[5], row[6]}},
+    "MATERIALIZATION_NAME VARCHAR(256), STATUS VARCHAR(32), LAST_REFRESHED_AT TIMESTAMP,"
+    .. " REFRESHED_ROW_COUNT DECIMAL(18,0), SOURCE_SNAPSHOT VARCHAR(512),"
+    .. " FRESHNESS_POLICY VARCHAR(512)")
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.GRANT_MODEL_ROLE(
@@ -17475,7 +17619,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "e4f0ff885b9396af"
+ESV_RUNTIME_BUILD = "e6f037046b2e38b2"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -17961,12 +18105,82 @@ local function add_rejection(rejections, candidate, reason_code, reason_message)
     }
 end
 
-local function supported_freshness(policy)
+-- What a FRESHNESS_POLICY says, in terms the selector can act on.
+--
+-- ALWAYS, MANUAL and SNAPSHOT are declarations the selector trusts: the
+-- registrant vouches that the object is current, is refreshed by hand, or is a
+-- deliberate point-in-time copy. MAX_AGE is the one that is *checked*: the
+-- materialization is used only while LAST_REFRESHED_AT -- written by
+-- MARK_MATERIALIZATION_REFRESHED, which the refresh job calls -- is younger
+-- than the bound. Otherwise the query reads the live sources instead, which is
+-- always correct because a materialization is only ever an accelerator.
+--
+-- Anything else used to be stored verbatim and then rejected on every compile,
+-- so `'dbt run --select gold (hourly)'` registered cleanly and could never be
+-- selected (BUG-27). REGISTER_MATERIALIZATION calls this and refuses it.
+local FRESHNESS_UNITS = {MINUTE = 60, MINUTES = 60, HOUR = 3600, HOURS = 3600,
+    DAY = 86400, DAYS = 86400}
+
+function M.freshness_policy(policy)
     if missing(policy) then
-        return true
+        return {kind = "UNDECLARED"}
     end
-    local normalized = upper(policy)
-    return normalized == "ALWAYS" or normalized == "MANUAL" or normalized == "SNAPSHOT"
+    local normalized = upper(policy):match("^%s*(.-)%s*$")
+    if normalized == "ALWAYS" or normalized == "MANUAL" or normalized == "SNAPSHOT" then
+        return {kind = normalized}
+    end
+    local amount, unit = normalized:match("^MAX_AGE%s+(%d+)%s+(%a+)$")
+    if amount ~= nil and FRESHNESS_UNITS[unit] ~= nil and tonumber(amount) > 0 then
+        return {kind = "MAX_AGE", seconds = tonumber(amount) * FRESHNESS_UNITS[unit],
+            text = "MAX_AGE " .. amount .. " " .. unit}
+    end
+    return nil, "FRESHNESS_POLICY must be ALWAYS, MANUAL, SNAPSHOT, or"
+        .. " MAX_AGE <n> MINUTES|HOURS|DAYS, not: " .. tostring(policy)
+end
+
+local function supported_freshness(policy)
+    return M.freshness_policy(policy) ~= nil
+end
+
+-- Why this candidate cannot be used on freshness grounds, or nil.
+local function freshness_rejection(candidate)
+    local policy = M.freshness_policy(candidate.freshness_policy)
+    if policy == nil then
+        return "UNSUPPORTED_FRESHNESS_POLICY",
+            "Freshness policy is not supported by the deterministic selector."
+    end
+    if policy.kind ~= "MAX_AGE" then
+        return nil
+    end
+    local age = tonumber(candidate.age_seconds)
+    if age == nil then
+        return "NEVER_REFRESHED", "Policy " .. policy.text .. " needs LAST_REFRESHED_AT,"
+            .. " and no refresh has been recorded; the refresh job records one with"
+            .. " MARK_MATERIALIZATION_REFRESHED."
+    end
+    if age > policy.seconds then
+        return "STALE", "Last refreshed " .. tostring(math.floor(age)) .. " s ago, beyond "
+            .. policy.text .. " (" .. tostring(policy.seconds) .. " s); the live sources"
+            .. " answer instead."
+    end
+    return nil
+end
+
+-- Freshness facts the plan records for the materialization it used.
+local function freshness_provenance(candidate)
+    local policy = M.freshness_policy(candidate.freshness_policy) or {}
+    return {
+        freshness_policy = missing(candidate.freshness_policy) and null
+            or tostring(candidate.freshness_policy),
+        last_refreshed_at = missing(candidate.last_refreshed_at) and null
+            or tostring(candidate.last_refreshed_at),
+        age_seconds = tonumber(candidate.age_seconds) or null,
+        refreshed_row_count = tonumber(candidate.refreshed_row_count) or null,
+        source_snapshot = missing(candidate.source_snapshot) and null
+            or tostring(candidate.source_snapshot),
+        -- A compile that chose it must not outlive the bound in the cache.
+        time_bounded = policy.kind == "MAX_AGE",
+    }
 end
 
 local function allowed_rollup_policy(policy)
@@ -17985,7 +18199,10 @@ end
 local function load_candidates(ctx)
     local rows = query([[
         SELECT MATERIALIZATION_ID, MATERIALIZATION_NAME, PHYSICAL_SCHEMA,
-               PHYSICAL_OBJECT, MATERIALIZATION_TYPE, FRESHNESS_POLICY, STATUS
+               PHYSICAL_OBJECT, MATERIALIZATION_TYPE, FRESHNESS_POLICY, STATUS,
+               LAST_REFRESHED_AT,
+               SECONDS_BETWEEN(CURRENT_TIMESTAMP, LAST_REFRESHED_AT) AS AGE_SECONDS,
+               REFRESHED_ROW_COUNT, SOURCE_SNAPSHOT
         FROM SEMANTIC_SOURCE.MATERIALIZATIONS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -18007,6 +18224,10 @@ local function load_candidates(ctx)
             materialization_type = row_value(row, "MATERIALIZATION_TYPE", 5),
             freshness_policy = row_value(row, "FRESHNESS_POLICY", 6),
             status = row_value(row, "STATUS", 7),
+            last_refreshed_at = row_value(row, "LAST_REFRESHED_AT", 8),
+            age_seconds = row_value(row, "AGE_SECONDS", 9),
+            refreshed_row_count = row_value(row, "REFRESHED_ROW_COUNT", 10),
+            source_snapshot = row_value(row, "SOURCE_SNAPSHOT", 11),
             columns = {},
             dimension_keys = {},
             metric_keys = {},
@@ -18103,9 +18324,9 @@ local function branch_candidate(candidate, physical_plan, branch,
         return nil, "UNSUPPORTED_TYPE",
             "Only AGGREGATE materializations can provide branch states."
     end
-    if not supported_freshness(candidate.freshness_policy) then
-        return nil, "UNSUPPORTED_FRESHNESS_POLICY",
-            "Freshness policy is not supported by the deterministic selector."
+    local stale_code, stale_message = freshness_rejection(candidate)
+    if stale_code ~= nil then
+        return nil, stale_code, stale_message
     end
     local dimension_columns = {}
     local dimension_keys = {}
@@ -18196,8 +18417,8 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
             reject("INACTIVE", "Materialization status is not ACTIVE.")
         elseif upper(candidate.materialization_type) ~= "AGGREGATE" then
             reject("UNSUPPORTED_TYPE", "Only AGGREGATE materializations are supported in this milestone.")
-        elseif not supported_freshness(candidate.freshness_policy) then
-            reject("UNSUPPORTED_FRESHNESS_POLICY", "Freshness policy is not supported by the deterministic selector.")
+        elseif freshness_rejection(candidate) ~= nil then
+            reject(freshness_rejection(candidate))
         else
             for dimension_key, _ in pairs(required_dimension_keys) do
                 if candidate.columns[dimension_key] == nil then
@@ -18259,6 +18480,7 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
     diagnostics.selected_materialization = selected.materialization_name
     diagnostics.selected_materialization_id = selected.materialization_id
     diagnostics.rollup_required = selected.rollup_required
+    diagnostics.freshness = freshness_provenance(selected)
     return selected, diagnostics
 end
 
@@ -18328,6 +18550,7 @@ function M.select_branch_sources(ctx, physical_plan)
                 selected.candidate.materialization_id
             branch_diagnostic.extra_dimension_count =
                 selected.extra_dimension_count
+            branch_diagnostic.freshness = freshness_provenance(selected.candidate)
             branch_diagnostic.fallback_reason = null
             diagnostics.selected_materializations[
                 #diagnostics.selected_materializations + 1] = {
@@ -18336,6 +18559,7 @@ function M.select_branch_sources(ctx, physical_plan)
                 materialization_id = selected.candidate.materialization_id,
                 materialization_name = selected.candidate.materialization_name,
                 extra_dimension_count = selected.extra_dimension_count,
+                freshness = branch_diagnostic.freshness,
             }
         end
         diagnostics.branches[#diagnostics.branches + 1] = branch_diagnostic
@@ -18345,19 +18569,24 @@ end
 
 select_materialization = M.select_materialization
 select_branch_sources = M.select_branch_sources
+-- For REGISTER_MATERIALIZATION, which imports this runtime so the vocabulary it
+-- accepts is exactly the one the selector acts on.
+freshness_policy = M.freshness_policy
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_MATERIALIZATION_TEST_API = {
         select_materialization = M.select_materialization,
         select_branch_sources = M.select_branch_sources,
         supported_freshness = supported_freshness,
+        freshness_policy = M.freshness_policy,
+        freshness_rejection = freshness_rejection,
         allowed_rollup_policy = allowed_rollup_policy,
     }
 end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "e4f0ff885b9396af"
+ESV_RUNTIME_BUILD = "e6f037046b2e38b2"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -22835,10 +23064,31 @@ do
         }
     end
 
+    -- Does the plan read a materialization whose use is bounded by time?
+    --
+    -- A MAX_AGE materialization is chosen only while it is fresh, and the
+    -- cache has no expiry, so storing that compile would keep serving the
+    -- materialization after it went stale (BUG-27). Such a result is simply
+    -- not stored; MARK_MATERIALIZATION_REFRESHED clears the version's entries,
+    -- so a plan cached while one was stale does not outlive the refresh either.
+    function compile_cache.time_bounded(value, depth)
+        if type(value) ~= "table" or (depth or 0) > 12 then return false end
+        if value.time_bounded == true then return true end
+        for _, child in pairs(value) do
+            if compile_cache.time_bounded(child, (depth or 0) + 1) then return true end
+        end
+        return false
+    end
+
     function compile_cache.cache_store(model_version_id, cache_key, result)
         if cache_key == nil or model_version_id == nil or result == nil
             or result.status ~= "OK" or missing(result.generated_sql) then
             return
+        end
+        if not missing(result.plan_json)
+            and string.find(tostring(result.plan_json), '"time_bounded"', 1, true) then
+            local decoded, plan = pcall(json.decode, result.plan_json)
+            if not decoded or compile_cache.time_bounded(plan) then return end
         end
         -- Best-effort insert. A PK collision (same model_version_id + cache_key)
         -- means another concurrent compile already wrote this entry, so nothing
@@ -26737,6 +26987,7 @@ refusal_rules.expansion_wins = {
     SEMANTIC_QUERY_012 = true,   -- composition the layer does not supervise
     SEMANTIC_QUERY_013 = true,   -- more references than one statement should carry
     SEMANTIC_QUERY_016 = true,   -- an outer SUM/AVG over a metric that does not add up
+    SEMANTIC_QUERY_017 = true,   -- a grain-widening filter that cannot run inside the compile
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
@@ -27568,6 +27819,107 @@ do
         return nil
     end
 
+    -- A filter on a dimension the statement does not otherwise use.
+    --
+    -- Expansion compiles every field the statement names into the derived
+    -- table and applies the block's WHERE over the grouped result. For a
+    -- dimension that is also selected that is exact -- filtering grouped rows on
+    -- a grouping column keeps the same rows. For one that is only filtered on it
+    -- is not: the dimension joins the grain, so
+    -- `SELECT gross_margin_pct FROM obj WHERE customer_region IN ('North','West')`
+    -- returned one row bare and two rows inside a subquery, one per region. The
+    -- wrapper changed the answer, which is the one thing it must never do.
+    --
+    -- The cure is to apply that WHERE where the bare statement applies it:
+    -- inside the semantic compile, before aggregation. Only a WHERE that would
+    -- widen the grain is moved -- every other one is already exact where it is,
+    -- and leaving it there keeps the change to statements it actually fixes.
+    -- A widening WHERE that cannot be moved is refused rather than answered at
+    -- the wrong grain.
+    bi_expansion.WHERE_ENDS = {GROUP = true, HAVING = true, ORDER = true, LIMIT = true,
+        QUALIFY = true, WINDOW = true, CONNECT = true, PREFERRING = true, UNION = true,
+        INTERSECT = true, EXCEPT = true, MINUS = true, OFFSET = true, FETCH = true}
+
+    function bi_expansion.pushdown_filter(tokens, reference, wanted, statement_text, references)
+        local where_index
+        for index = reference.last + 1, #tokens do
+            local token = tokens[index]
+            if token.depth < reference.depth then break end
+            if token.depth == reference.depth then
+                local word = sql_text.token_upper(token)
+                if word == "WHERE" then where_index = index break end
+                if bi_expansion.WHERE_ENDS[word] then break end
+            end
+        end
+        if where_index == nil then return nil end
+        local last = #tokens
+        for index = where_index + 1, #tokens do
+            local token = tokens[index]
+            if token.depth < reference.depth or (token.depth == reference.depth
+                and bi_expansion.WHERE_ENDS[sql_text.token_upper(token)]) then
+                last = index - 1
+                break
+            end
+        end
+        if last <= where_index then return nil end
+
+        -- What the statement names outside this WHERE is the grain it asked for.
+        local masked = {}
+        for index, token in ipairs(tokens) do
+            if index >= where_index and index <= last then
+                masked[index] = {kind = "symbol", text = " ", depth = token.depth,
+                    start_pos = token.start_pos, end_pos = token.end_pos}
+            else
+                masked[index] = token
+            end
+        end
+        local outside = bi_expansion.infer_columns(masked, reference,
+            reference.columns, reference.by_name)
+        if outside == nil or #outside == 0 then return nil end
+        local kept, widening = {}, {}
+        for _, name in ipairs(outside) do kept[upper(name)] = true end
+        for _, name in ipairs(wanted) do
+            local column = reference.by_name[upper(name)]
+            if not kept[upper(name)] and column ~= nil and upper(column.kind) == "DIMENSION" then
+                widening[#widening + 1] = column.name
+            end
+        end
+        if #widening == 0 then return nil end
+
+        local function refuse(reason)
+            return {refusal = error_result("SEMANTIC_QUERY_017",
+                "This statement filters " .. tostring(reference.published_schema) .. "."
+                .. tostring(reference.object_name) .. " on " .. table.concat(widening, ", ")
+                .. " without selecting it. That filter has to run before aggregation,"
+                .. " inside the semantic compile -- applied to the grouped rows it would"
+                .. " group by " .. table.concat(widening, ", ") .. " and return one row"
+                .. " per value -- and here it cannot: " .. reason .. ". Filter with"
+                .. " literal values (IN ('a', 'b')), which the compile applies before"
+                .. " aggregation, or select " .. table.concat(widening, ", ")
+                .. " as well and aggregate over it yourself.")}
+        end
+        if bi_expansion.composed_in_from(tokens, reference) then
+            return refuse("the reference is joined to another relation")
+        end
+        -- A subquery is fine -- the compile supports IN (subquery) -- unless it
+        -- reads another semantic object, whose own expansion would be lost
+        -- with the text it sits in.
+        for _, other in ipairs(references or {}) do
+            if other ~= reference and other.first > where_index and other.first <= last then
+                return refuse("the filter reads another semantic object, "
+                    .. tostring(other.published_schema) .. "." .. tostring(other.object_name))
+            end
+        end
+        return {
+            wanted = outside,
+            predicate = string.sub(statement_text, tokens[where_index + 1].start_pos,
+                tokens[last].end_pos),
+            first_pos = tokens[where_index].start_pos,
+            last_pos = tokens[last].end_pos,
+            refuse = refuse,
+        }
+    end
+
     function bi_expansion.composed_in_from(tokens, reference)
         -- Walked outward, not just across the reference's own FROM clause.
         --
@@ -27818,6 +28170,16 @@ do
                     .. " them with it.")
             end
 
+            -- A WHERE that would widen the grain is applied inside the compile.
+            local pushed = bi_expansion.pushdown_filter(tokens, reference, wanted,
+                statement_text, applicable)
+            if pushed ~= nil and pushed.refusal ~= nil then
+                return pushed.refusal
+            end
+            if pushed ~= nil then
+                wanted = pushed.wanted
+            end
+
             -- Behind the composition opt-in, like _015: an outer aggregate is
             -- ordinary-SQL semantics over the object's rows. After the
             -- projection is inferred, because that -- not the subquery's own
@@ -27836,6 +28198,11 @@ do
             end
             local inner = "SELECT " .. table.concat(parts, ", ") .. " FROM "
                 .. sql_text.quote_qualified(reference.published_schema, reference.object_name)
+            if pushed ~= nil then
+                -- The author's alias, so their qualified predicates still bind.
+                inner = inner .. (reference.alias_text and (" " .. reference.alias_text) or "")
+                    .. " WHERE " .. pushed.predicate
+            end
             local compiled = compile_sql_internal(inner, {
                 validate = false,
                 unchanged_nonsemantic = false,
@@ -27843,6 +28210,10 @@ do
                 sql_cache = true,
             })
             if compiled == nil or compiled.status ~= "OK" then
+                if pushed ~= nil then
+                    return pushed.refuse("the semantic compiler refuses it -- "
+                        .. tostring(compiled and compiled.error_message or "no result")).refusal
+                end
                 return compiled or error_result("SEMANTIC_QUERY_999",
                     "Expansion could not compile " .. inner)
             end
@@ -27897,6 +28268,14 @@ do
             -- the parser is folded.
             local replacement = "(" .. sql_text.flatten_lines(compiled.generated_sql)
                 .. ") " .. alias
+            if pushed ~= nil then
+                -- The filter now runs inside. Blanked rather than cut, newlines
+                -- kept, so the statement keeps the author's line numbering; it
+                -- sits after the reference, so it is spliced first.
+                rewritten = string.sub(rewritten, 1, pushed.first_pos - 1)
+                    .. string.sub(rewritten, pushed.first_pos, pushed.last_pos):gsub("[^\n]", " ")
+                    .. string.sub(rewritten, pushed.last_pos + 1)
+            end
             rewritten = string.sub(rewritten, 1, tokens[reference.first].start_pos - 1)
                 .. replacement
                 .. string.sub(rewritten, tokens[reference.last].end_pos + 1)
@@ -28238,6 +28617,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         bi_composed_in_from = bi_expansion.composed_in_from,
         bi_outer_reaggregation_refusal = bi_expansion.outer_reaggregation_refusal,
         bi_summable = bi_expansion.summable,
+        bi_pushdown_filter = bi_expansion.pushdown_filter,
         within_trust_boundary = compile_cache.within_trust_boundary,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,

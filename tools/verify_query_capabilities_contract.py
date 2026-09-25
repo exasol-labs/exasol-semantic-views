@@ -99,6 +99,12 @@ PROBES = {
         "sql": f"SELECT bogus_field FROM {PUBLISHED}",
         "request": {"model": MODEL, "object": OBJECT, "dimensions": ["bogus_field"]},
     },
+    "Filtering on a dimension the statement does not select": {
+        # The refusal half: a subquery the compile cannot run before
+        # aggregation. verify_filter_grain.py holds the half that answers.
+        "sql": f"SELECT TOTAL_REVENUE FROM {PUBLISHED} WHERE CUSTOMER_REGION IN"
+               " (SELECT REGION FROM MART.CUSTOMERS)",
+    },
     "An outer SUM or AVG over a metric that does not add up": {
         # BUG-26: the mean of per-region margins, weighted by region rather
         # than by row. MIN/MAX/COUNT and a fully grouped outer block are

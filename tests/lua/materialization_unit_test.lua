@@ -59,6 +59,72 @@ test("materialization policies reject unknown values", function()
     assert_branch("materialization.rollup_policy", api.allowed_rollup_policy("AVG"), false)
 end)
 
+test("a MAX_AGE materialization is used only while it is fresh", function()
+    -- BUG-27: the registry stated a refresh intent and could not say whether
+    -- the object was stale. MAX_AGE is checked against LAST_REFRESHED_AT; a
+    -- stale or never-refreshed one is skipped and the live sources answer.
+    local policy = api.freshness_policy("max_age 2 hours")
+    assert_equal(policy.kind, "MAX_AGE")
+    assert_equal(policy.seconds, 7200)
+    assert_equal(policy.text, "MAX_AGE 2 HOURS")
+    assert_equal(api.freshness_policy("MAX_AGE 30 MINUTES").seconds, 1800)
+    assert_equal(api.freshness_policy("MAX_AGE 1 DAY").seconds, 86400)
+    assert_equal(api.freshness_policy(null).kind, "UNDECLARED")
+    for _, bad in ipairs({"dbt run --select gold (hourly)", "MAX_AGE 0 HOURS",
+        "MAX_AGE 2 WEEKS", "MAX_AGE two HOURS", "HOURLY"}) do
+        local parsed, message = api.freshness_policy(bad)
+        assert_true(parsed == nil)
+        assert_contains(message, "MAX_AGE <n> MINUTES|HOURS|DAYS")
+    end
+
+    local columns = {{1, "DIMENSION", 10, "REGION", "DIRECT"}, {1, "METRIC", 20, "REVENUE", "DIRECT"}}
+    local function candidate(age, refreshed_at)
+        return {{1, "sales_by_region", "MART", "SALES_REGION", "AGGREGATE", "MAX_AGE 1 HOURS",
+            "ACTIVE", refreshed_at, age, 2400000, "lake@41"}}
+    end
+
+    install_catalog(candidate(600, "2026-09-24 10:00:00"), columns)
+    local selected, diagnostics = api.select_materialization(ctx, {region}, {revenue}, {})
+    assert_equal(selected.materialization_name, "sales_by_region")
+    assert_equal(diagnostics.freshness.age_seconds, 600)
+    assert_equal(diagnostics.freshness.refreshed_row_count, 2400000)
+    assert_equal(diagnostics.freshness.source_snapshot, "lake@41")
+    assert_true(diagnostics.freshness.time_bounded)
+
+    install_catalog(candidate(7200, "2026-09-24 08:00:00"), columns)
+    local stale, stale_diagnostics = api.select_materialization(ctx, {region}, {revenue}, {})
+    assert_true(stale == nil)
+    local rejection = stale_diagnostics.rejected_materializations[1]
+    assert_equal(rejection.reason_code, "STALE")
+    assert_contains(rejection.reason_message, "7200 s ago, beyond MAX_AGE 1 HOURS")
+
+    install_catalog(candidate(null, null), columns)
+    local never, never_diagnostics = api.select_materialization(ctx, {region}, {revenue}, {})
+    assert_true(never == nil)
+    assert_equal(never_diagnostics.rejected_materializations[1].reason_code, "NEVER_REFRESHED")
+    assert_contains(never_diagnostics.rejected_materializations[1].reason_message,
+        "MARK_MATERIALIZATION_REFRESHED")
+
+    -- A declared policy is trusted as before, and is not time-bounded.
+    install_catalog({{1, "sales_by_region", "MART", "SALES_REGION", "AGGREGATE", "ALWAYS",
+        "ACTIVE", null, null, null, null}}, columns)
+    local trusted, trusted_diagnostics = api.select_materialization(ctx, {region}, {revenue}, {})
+    assert_equal(trusted.materialization_name, "sales_by_region")
+    assert_true(not trusted_diagnostics.freshness.time_bounded)
+    assert_equal(trusted_diagnostics.freshness.last_refreshed_at, null)
+end)
+
+test("a stale MAX_AGE materialization leaves its branch on the base source", function()
+    local candidate = {materialization_id = 1, materialization_name = "m",
+        freshness_policy = "MAX_AGE 1 HOURS", age_seconds = 4000}
+    local code = api.freshness_rejection(candidate)
+    assert_equal(code, "STALE")
+    candidate.age_seconds = 10
+    assert_equal(api.freshness_rejection(candidate), nil)
+    candidate.freshness_policy = "hourly"
+    assert_equal(api.freshness_rejection(candidate), "UNSUPPORTED_FRESHNESS_POLICY")
+end)
+
 test("materialization selector remains deterministic with a large registry", function()
     local candidates = {}
     for index = 1, 1000 do

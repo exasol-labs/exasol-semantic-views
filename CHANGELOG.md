@@ -13,12 +13,13 @@ semantic object usable from ordinary SQL, which immediately widens what a caller
 can reach; the governance work is what makes that safe to offer. Neither is
 useful alone.
 
-**Upgrading is not transparent.** Five changes alter behaviour for an existing
+**Upgrading is not transparent.** Six changes alter behaviour for an existing
 deployment — the policy columns now refuse, callers are granted a new schema
 instead of `SYS_SEMANTIC`, a statement that joins a published object to
 another table is refused by default, `METRIC_COMPATIBLE_DIMENSIONS` no
-longer returns refused pairs, and a semantic DDL clause the parser used to
-ignore is now refused. Each is called out below.
+longer returns refused pairs, a semantic DDL clause the parser used to
+ignore is now refused, and a subquery filter on a dimension the statement does
+not select is refused. Each is called out below.
 
 ### Added
 
@@ -605,6 +606,60 @@ ignore is now refused. Each is called out below.
 
 ### Fixed
 
+#### Filtering on an unselected dimension changed the grain
+
+- Reference expansion compiled every field a statement names into the derived
+  table, and applied the block's `WHERE` over the grouped result. A dimension
+  that was only filtered on therefore joined the grouping.
+  `SELECT gross_margin_pct FROM obj WHERE customer_region IN ('North','West')`
+  answered one row bare (0.3223) and one row per region inside a subquery.
+- It was not only wrappers. A bare statement that expansion serves, such as
+  `SELECT total_revenue FROM obj WHERE customer_region IN (SELECT …)`, returned
+  one row per matching region (1500, 3635) where the answer is 5135.
+- A `WHERE` that would widen the grain is now moved into the semantic compile,
+  which applies it before aggregation, as the bare statement does. It works in a
+  subquery or a CTE, qualified by the author's alias, beside a metric predicate,
+  and across lines. A `WHERE` on a selected dimension is already exact and is
+  left alone.
+- Where it cannot be moved, the statement is refused with `SEMANTIC_QUERY_017`
+  rather than grouped by the filtered dimension. That covers a subquery the
+  compile does not support, another semantic object, and a join.
+- **Behaviour change:** `IN (subquery)` and correlated `EXISTS` on a dimension
+  the statement does not select are now refused. They used to answer one row
+  per matching value. On a selected dimension they are unchanged.
+  `tools/verify_filter_grain.py` holds wrapped equal to bare, row for row.
+
+#### The materialization registry recorded policy, not freshness state (BUG-27)
+
+- `SEMANTIC_CATALOG.MATERIALIZATIONS` had `FRESHNESS_POLICY` and nothing
+  else, so it could state an intent to refresh hourly but could not say
+  whether the object was stale. The policy was free text, stored verbatim.
+  Anything but `ALWAYS`/`MANUAL`/`SNAPSHOT` was then rejected on every compile.
+  So `'dbt run --select gold (hourly)'` registered cleanly, and the
+  materialization could never be chosen, with nothing to say so.
+- **Policy:** `REGISTER_MATERIALIZATION` now accepts only what the selector acts
+  on (`SEMANTIC_ADMIN_003` otherwise), read from the selector's own parser.
+  There is a new checked form, `MAX_AGE <n> MINUTES|HOURS|DAYS`.
+- **State:** new columns `LAST_REFRESHED_AT`, `REFRESHED_ROW_COUNT`,
+  `SOURCE_SNAPSHOT` and `FRESHNESS_MAX_AGE_SECONDS`. They are written by the new
+  `MARK_MATERIALIZATION_REFRESHED`, which the refresh job calls. It measures the
+  row count rather than taking it on trust, and refuses a future timestamp
+  (`SEMANTIC_ADMIN_222`). The catalog view adds `AGE_SECONDS` and `IS_STALE`.
+- **Use:** a `MAX_AGE` materialization is chosen only while fresh. Stale or never
+  refreshed, the live sources answer, and the plan says why (`STALE`,
+  `NEVER_REFRESHED`). A plan that uses one carries its freshness under
+  `materialization_decision.freshness` and is not cached, since the cache has no
+  expiry.
+- **Installer:** added columns are now migrated between `001` and the view
+  files, not after all of them. Before, an upgrade failed as soon as a view
+  read an added column, because `001b`/`002` were rebuilt before the column
+  existed.
+- A separate model published over snapshot tables is still a model like any
+  other. The layer cannot know its sources copy another model's, so register
+  those tables as materializations of the live model for the check to apply.
+  `tools/verify_materialization_freshness.py` covers registration, refresh,
+  stale fallback and the cache live.
+
 #### An outer `AVG` over a non-additive metric was 47.5 % wrong (BUG-26)
 
 - The docs call aggregating a semantic object in an outer block supported,
@@ -621,10 +676,9 @@ ignore is now refused. Each is called out below.
   DDL metric `AS AVG(x)` is stored with `METRIC_TYPE = 'ADDITIVE'`. A single
   `SUM`/`COUNT` adds up, and so does a linear combination of such metrics
   (`gross_margin = total_revenue - total_cost` still sums exactly).
-- **The grain comes from what expansion compiles, not from what the subquery
-  selects.** A dimension the subquery only filters on is part of it, so
-  `… (SELECT gross_margin_pct FROM obj WHERE customer_region IN (…)) t` is
-  refused too.
+- **The grain comes from what expansion compiles, not from the subquery's own
+  select list.** A dimension the subquery only filters on is not part of it,
+  since that filter now runs inside the compile (see the next entry).
 - Still accepted, and exact or self-describing:
   - `MIN`, `MAX` and `COUNT` of the per-group values;
   - window aggregates;

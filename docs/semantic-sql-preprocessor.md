@@ -231,8 +231,9 @@ FROM (SELECT customer_region, gross_margin_pct FROM SEMANTIC_SALES.SALES) t
 ```
 
 This is refused with `SEMANTIC_QUERY_016`, in a derived table or a CTE. The
-subquery's grain is every dimension the expansion compiles, and that includes
-a dimension it only filters on.
+subquery's grain is the set of dimensions it selects or that the rest of the
+statement names. A dimension it only filters on is not part of the grain; see
+below.
 
 "Adds up" is judged from what the metric computes, not from its `METRIC_TYPE`
 label. A single `SUM` or `COUNT` (not `DISTINCT`) adds up. So does a `DERIVED`
@@ -246,6 +247,33 @@ Still accepted, because each one is exact or answers what it says:
 
 `SET_MODEL_DERIVED_COMPOSITION` opts a model out, as it does for
 `SEMANTIC_QUERY_015`.
+
+### Filtering on a dimension you do not select
+
+Filtering never changes the grain, however the object is wrapped:
+
+```sql
+-- one row, the margin of North and West together, bare or wrapped
+SELECT * FROM (SELECT gross_margin_pct FROM SEMANTIC_SALES.SALES
+               WHERE customer_region IN ('North', 'West')) t
+```
+
+Expansion normally applies a block's `WHERE` to the grouped result. That is
+exact for a dimension the statement selects. For one it only filters on, the
+dimension would become part of the grouping, and the statement would return one
+row per region. So that `WHERE` is moved into the semantic compile, which
+applies it before aggregation, as it does for the bare statement.
+
+Some filters cannot be moved, and those statements are refused with
+`SEMANTIC_QUERY_017` rather than grouped by the filtered dimension:
+- a filter with a subquery the compile does not support (`IN (SELECT …)`,
+  correlated `EXISTS`);
+- a filter that reads another semantic object;
+- a filter beside a join.
+
+This also applies to such a statement written bare, because expansion serves
+it. Filter with literal values, or select the dimension as well. `IN
+(subquery)` and `EXISTS` on a selected dimension are unaffected.
 
 ### A view over a semantic object freezes its SQL
 

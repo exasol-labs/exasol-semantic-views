@@ -369,6 +369,10 @@ def table_exists(con: object, schema: str, table: str) -> bool:
 ADDED_COLUMNS = [
     ("MODELS", "GOVERNANCE_MODE", "VARCHAR(16) DEFAULT 'OPEN' NOT NULL"),
     ("MODELS", "ALLOW_DERIVED_COMPOSITION", "BOOLEAN DEFAULT FALSE NOT NULL"),
+    ("MATERIALIZATIONS", "LAST_REFRESHED_AT", "TIMESTAMP"),
+    ("MATERIALIZATIONS", "REFRESHED_ROW_COUNT", "DECIMAL(18,0)"),
+    ("MATERIALIZATIONS", "SOURCE_SNAPSHOT", "VARCHAR(512)"),
+    ("MATERIALIZATIONS", "FRESHNESS_MAX_AGE_SECONDS", "DECIMAL(18,0)"),
 ]
 
 
@@ -497,6 +501,23 @@ def run_package_lua(quiet: bool = False) -> None:
     if quiet and output:
         for line in output.splitlines():
             print(format_packager_line(line))
+
+
+def install_files(con: object) -> list[str]:
+    """Run the install files, migrating added columns between 001 and the rest.
+
+    After 001, because a table has to exist before a column can be added to it
+    (a fresh install creates it with the column already there). Before 001b,
+    because the views read the tables: a `SELECT *` view fixes its column list
+    when it is created, and a named column that does not exist yet fails the
+    view outright -- which is what an upgrade did as soon as a view read an
+    added column (BUG-27). Returns the columns it added.
+    """
+    catalog = INSTALL_FILES.index(ROOT / "sql/install/001_create_semantic_catalog.sql") + 1
+    run_sql_files(con, INSTALL_FILES[:catalog], "install")
+    added = migrate_added_columns(con)
+    run_sql_files(con, INSTALL_FILES[catalog:], "install")
+    return added
 
 
 def run_sql_files(con: object, files: list[Path], label: str) -> None:
@@ -643,10 +664,7 @@ def main() -> int:
     # Before the files, because 007 grants the caller baseline to this role.
     for role in ensure_baseline_roles(con):
         print(f"      {dim('created role ' + role)}")
-    run_sql_files(con, INSTALL_FILES, "install")
-    # After the files, because the table has to exist before a column can be
-    # added to it, and a fresh install creates it with the column already there.
-    for added in migrate_added_columns(con):
+    for added in install_files(con):
         print(f"      {dim('added column ' + added)}")
     install_elapsed = time.monotonic() - t_install
 

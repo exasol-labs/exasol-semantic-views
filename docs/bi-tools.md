@@ -285,6 +285,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 | `SEMANTIC_REQUEST_011` | the model does not exist, or is not granted to you |
 | `SEMANTIC_QUERY_015` | the statement groups the object in its own query block, which groups an already-grouped result; aggregate over a subquery instead |
 | `SEMANTIC_QUERY_016` | an outer `SUM`/`AVG` over a metric that does not add up across groups (an average, a ratio): the result weights every group equally; select the metric at the grain you want |
+| `SEMANTIC_QUERY_017` | a filter on a dimension the statement does not select cannot run before aggregation (a subquery, another semantic object, a join); use literal values or select the dimension |
 | `SEMANTIC_QUERY_020` | a name in the select list is not a field of the object; the message says what it might have meant |
 
 **The shape of your statement is not the reason.** A construct is accepted or

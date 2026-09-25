@@ -217,6 +217,20 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # inexact shapes, the exact ones still return the metric's own value, and
 # SET_MODEL_DERIVED_COMPOSITION opts out.
 "$PYTHON_BIN" tools/verify_outer_reaggregation.py
+
+# A dimension only filtered on joined the grain, so wrapping a statement (or
+# expansion serving it bare) returned one row per value. Asserts wrapped equals
+# bare, SEMANTIC_QUERY_017 where the filter cannot run first, and that filters
+# on selected dimensions are untouched.
+"$PYTHON_BIN" tools/verify_filter_grain.py
+
+# BUG-27: the materialization registry held a free-text refresh intent and no
+# state, so it could not say whether a materialization was stale. Asserts the
+# policy is validated, MARK_MATERIALIZATION_REFRESHED records measured state,
+# a stale MAX_AGE materialization falls back to live sources, and a compile
+# that chose a time-bounded one is not cached. Order-dependent: needs the
+# example's sales_revenue_by_region, loaded earlier.
+"$PYTHON_BIN" tools/verify_materialization_freshness.py
 "$PYTHON_BIN" tools/verify_promotion_gate.py
 "$PYTHON_BIN" tools/verify_published_mutation_protection.py
 "$PYTHON_BIN" tools/verify_published_f3_batch.py

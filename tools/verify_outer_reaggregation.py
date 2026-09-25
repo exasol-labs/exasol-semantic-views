@@ -8,8 +8,7 @@ where the truth was 48.52 (BUG-26), and on the sales model SUM over per-region
 margin ratios answers a 120 % margin -- both with STATUS = OK. This asserts
 against the live sales model that:
 
-- those shapes are refused with SEMANTIC_QUERY_016, including when the grain
-  dimension is only filtered on inside the subquery;
+- those shapes are refused with SEMANTIC_QUERY_016;
 - every exact shape still compiles and returns the metric's own value;
 - SET_MODEL_DERIVED_COMPOSITION opts out, like SEMANTIC_QUERY_015.
 """
@@ -37,9 +36,6 @@ REFUSED = {
     "through a CTE": (f"WITH x AS (SELECT customer_region, gross_margin_pct FROM {OBJECT}) "
                       "SELECT AVG(x.gross_margin_pct) FROM x"),
     "inside an expression": f"SELECT ROUND(AVG(t.gross_margin_pct), 4) FROM {PER_REGION}",
-    "grain only filtered on": (
-        f"SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM {OBJECT} "
-        "WHERE customer_region IN ('North', 'West')) t"),
 }
 
 
@@ -84,6 +80,8 @@ def main() -> int:
         revenue = value(con, f"SELECT total_revenue FROM {OBJECT}")
         margin = value(con, f"SELECT gross_margin FROM {OBJECT}")
         by_region = value(con, f"SELECT customer_region, gross_margin_pct FROM {OBJECT}")
+        filtered = value(con, f"SELECT gross_margin_pct FROM {OBJECT}"
+                              " WHERE customer_region IN ('North', 'West')")
         exact = [
             ("SUM of an additive metric", revenue,
              f"SELECT SUM(t.total_revenue) FROM (SELECT customer_region, total_revenue FROM {OBJECT}) t"),
@@ -91,6 +89,10 @@ def main() -> int:
              f"SELECT SUM(t.gross_margin) FROM (SELECT customer_region, gross_margin FROM {OBJECT}) t"),
             ("no dimensions in the subquery", truth,
              f"SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM {OBJECT}) t"),
+            # The filter runs inside the compile, so the subquery is one row.
+            ("a dimension only filtered on", filtered,
+             f"SELECT AVG(t.gross_margin_pct) FROM (SELECT gross_margin_pct FROM {OBJECT}"
+             " WHERE customer_region IN ('North', 'West')) t"),
             ("outer grouped by the whole grain", by_region,
              f"SELECT customer_region, AVG(t.gross_margin_pct) FROM {PER_REGION} GROUP BY customer_region"),
             ("grain grouped by ordinal", by_region,

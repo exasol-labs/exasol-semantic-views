@@ -24,7 +24,7 @@ from __future__ import annotations
 
 LINE_THRESHOLDS: dict[str, float] = {
     "tools/semantic_client.py": 44.7,
-    "tools/install.py":         57.0,
+    "tools/install.py":         57.9,
     "tools/osi.py":             59.8,
     "tools/run_sql_files.py":   62.3,
     "tools/release_notes.py":   72.0,

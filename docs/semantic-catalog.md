@@ -806,7 +806,55 @@ DML:
 SEMANTIC_ADMIN.REGISTER_MATERIALIZATION
 SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN
 SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS
+SEMANTIC_ADMIN.MARK_MATERIALIZATION_REFRESHED
 ```
+
+### Freshness: policy and state
+
+`FRESHNESS_POLICY` says how far the selector may trust a materialization. It
+takes one of four values, and anything else is refused at registration with
+`SEMANTIC_ADMIN_003`:
+
+| Policy | Meaning |
+|---|---|
+| `ALWAYS`, `MANUAL`, `SNAPSHOT`, or omitted | The registrant vouches for it. The selector does not check its age. |
+| `MAX_AGE <n> MINUTES\|HOURS\|DAYS` | Checked on every compile. Used only while `LAST_REFRESHED_AT` is within the bound. |
+
+A `MAX_AGE` materialization that is stale, or has never been refreshed, is
+skipped, and the query reads the live sources. A materialization is only an
+accelerator, so falling back is always correct. The plan records why in
+`materialization_decision.rejected_materializations`, with reason code `STALE`
+or `NEVER_REFRESHED`. A compile that did choose one is not cached, because the
+cache has no expiry.
+
+The refresh job records state after it writes the object:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.MARK_MATERIALIZATION_REFRESHED(
+  'sales', 'sales_revenue_by_region',
+  NULL,            -- REFRESHED_AT: NULL for now, or when the source snapshot was taken
+  'lake@41');      -- SOURCE_SNAPSHOT: any id the job wants to record, or NULL
+```
+
+The script:
+- sets `LAST_REFRESHED_AT` (refusing a future or unreadable time with
+  `SEMANTIC_ADMIN_222`);
+- measures `REFRESHED_ROW_COUNT` itself rather than taking it on trust
+  (`SEMANTIC_ADMIN_223` if the object cannot be read);
+- clears the version's compile cache;
+- leaves `STATUS` alone.
+
+`SEMANTIC_CATALOG.MATERIALIZATIONS` then answers "is this stale right now?"
+through `AGE_SECONDS` and `IS_STALE`. `IS_STALE` is set only for a `MAX_AGE`
+policy, the one kind the selector checks; it is `NULL` for the vouched-for kinds.
+When the plan uses a materialization, it carries the same facts under
+`materialization_decision.freshness`.
+
+**This covers a materialization of a model, not a second model.** A separate
+semantic model published over snapshot tables, such as a dbt gold layer, is a
+model like any other. The layer cannot know that its sources copy another
+model's. For its answers to fall back to the live sources when stale, register
+those tables as materializations of the live model, with a `MAX_AGE` policy.
 
 The compiler treats this registry as an optimizer input. It never uses a
 materialization to make an invalid metric/dimension request valid.

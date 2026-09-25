@@ -105,6 +105,10 @@
 -- terms, neither was compared with the other. The tests drive the derivation
 -- directly rather than through a full validate_model mock, so the classification
 -- and both governance modes are exercised without a 200-line SQL fixture.
+-- materializations.lua 92.2 -> 94.2 on 2026-09-24, when a MAX_AGE policy began
+-- to be checked against LAST_REFRESHED_AT (BUG-27).
+-- request_json.lua 90.7 -> 90.9 on 2026-09-24, when a grain-widening WHERE
+-- began to be moved inside the compile (SEMANTIC_QUERY_017).
 -- request_json.lua 90.39 -> 90.7 on 2026-09-24, when reference expansion began
 -- refusing an outer SUM/AVG over a metric that does not add up (BUG-26).
 -- validator.lua 95.0 -> 95.1 and semantic_definition.lua 78.8 -> 79.1 on
@@ -172,9 +176,9 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 90.7,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 90.9,
         ["lua/semantic_layer/admin/validator.lua"] = 95.1,
-        ["lua/semantic_layer/compiler/materializations.lua"] = 92.2,
+        ["lua/semantic_layer/compiler/materializations.lua"] = 94.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 79.1,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,
         ["lua/semantic_layer/agent/runtime.lua"] = 95.78,

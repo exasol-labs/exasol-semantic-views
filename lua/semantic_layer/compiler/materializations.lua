@@ -24,12 +24,82 @@ local function add_rejection(rejections, candidate, reason_code, reason_message)
     }
 end
 
-local function supported_freshness(policy)
+-- What a FRESHNESS_POLICY says, in terms the selector can act on.
+--
+-- ALWAYS, MANUAL and SNAPSHOT are declarations the selector trusts: the
+-- registrant vouches that the object is current, is refreshed by hand, or is a
+-- deliberate point-in-time copy. MAX_AGE is the one that is *checked*: the
+-- materialization is used only while LAST_REFRESHED_AT -- written by
+-- MARK_MATERIALIZATION_REFRESHED, which the refresh job calls -- is younger
+-- than the bound. Otherwise the query reads the live sources instead, which is
+-- always correct because a materialization is only ever an accelerator.
+--
+-- Anything else used to be stored verbatim and then rejected on every compile,
+-- so `'dbt run --select gold (hourly)'` registered cleanly and could never be
+-- selected (BUG-27). REGISTER_MATERIALIZATION calls this and refuses it.
+local FRESHNESS_UNITS = {MINUTE = 60, MINUTES = 60, HOUR = 3600, HOURS = 3600,
+    DAY = 86400, DAYS = 86400}
+
+function M.freshness_policy(policy)
     if missing(policy) then
-        return true
+        return {kind = "UNDECLARED"}
     end
-    local normalized = upper(policy)
-    return normalized == "ALWAYS" or normalized == "MANUAL" or normalized == "SNAPSHOT"
+    local normalized = upper(policy):match("^%s*(.-)%s*$")
+    if normalized == "ALWAYS" or normalized == "MANUAL" or normalized == "SNAPSHOT" then
+        return {kind = normalized}
+    end
+    local amount, unit = normalized:match("^MAX_AGE%s+(%d+)%s+(%a+)$")
+    if amount ~= nil and FRESHNESS_UNITS[unit] ~= nil and tonumber(amount) > 0 then
+        return {kind = "MAX_AGE", seconds = tonumber(amount) * FRESHNESS_UNITS[unit],
+            text = "MAX_AGE " .. amount .. " " .. unit}
+    end
+    return nil, "FRESHNESS_POLICY must be ALWAYS, MANUAL, SNAPSHOT, or"
+        .. " MAX_AGE <n> MINUTES|HOURS|DAYS, not: " .. tostring(policy)
+end
+
+local function supported_freshness(policy)
+    return M.freshness_policy(policy) ~= nil
+end
+
+-- Why this candidate cannot be used on freshness grounds, or nil.
+local function freshness_rejection(candidate)
+    local policy = M.freshness_policy(candidate.freshness_policy)
+    if policy == nil then
+        return "UNSUPPORTED_FRESHNESS_POLICY",
+            "Freshness policy is not supported by the deterministic selector."
+    end
+    if policy.kind ~= "MAX_AGE" then
+        return nil
+    end
+    local age = tonumber(candidate.age_seconds)
+    if age == nil then
+        return "NEVER_REFRESHED", "Policy " .. policy.text .. " needs LAST_REFRESHED_AT,"
+            .. " and no refresh has been recorded; the refresh job records one with"
+            .. " MARK_MATERIALIZATION_REFRESHED."
+    end
+    if age > policy.seconds then
+        return "STALE", "Last refreshed " .. tostring(math.floor(age)) .. " s ago, beyond "
+            .. policy.text .. " (" .. tostring(policy.seconds) .. " s); the live sources"
+            .. " answer instead."
+    end
+    return nil
+end
+
+-- Freshness facts the plan records for the materialization it used.
+local function freshness_provenance(candidate)
+    local policy = M.freshness_policy(candidate.freshness_policy) or {}
+    return {
+        freshness_policy = missing(candidate.freshness_policy) and null
+            or tostring(candidate.freshness_policy),
+        last_refreshed_at = missing(candidate.last_refreshed_at) and null
+            or tostring(candidate.last_refreshed_at),
+        age_seconds = tonumber(candidate.age_seconds) or null,
+        refreshed_row_count = tonumber(candidate.refreshed_row_count) or null,
+        source_snapshot = missing(candidate.source_snapshot) and null
+            or tostring(candidate.source_snapshot),
+        -- A compile that chose it must not outlive the bound in the cache.
+        time_bounded = policy.kind == "MAX_AGE",
+    }
 end
 
 local function allowed_rollup_policy(policy)
@@ -48,7 +118,10 @@ end
 local function load_candidates(ctx)
     local rows = query([[
         SELECT MATERIALIZATION_ID, MATERIALIZATION_NAME, PHYSICAL_SCHEMA,
-               PHYSICAL_OBJECT, MATERIALIZATION_TYPE, FRESHNESS_POLICY, STATUS
+               PHYSICAL_OBJECT, MATERIALIZATION_TYPE, FRESHNESS_POLICY, STATUS,
+               LAST_REFRESHED_AT,
+               SECONDS_BETWEEN(CURRENT_TIMESTAMP, LAST_REFRESHED_AT) AS AGE_SECONDS,
+               REFRESHED_ROW_COUNT, SOURCE_SNAPSHOT
         FROM SEMANTIC_SOURCE.MATERIALIZATIONS
         WHERE MODEL_ID = :model_id
           AND VERSION_ID = :version_id
@@ -70,6 +143,10 @@ local function load_candidates(ctx)
             materialization_type = row_value(row, "MATERIALIZATION_TYPE", 5),
             freshness_policy = row_value(row, "FRESHNESS_POLICY", 6),
             status = row_value(row, "STATUS", 7),
+            last_refreshed_at = row_value(row, "LAST_REFRESHED_AT", 8),
+            age_seconds = row_value(row, "AGE_SECONDS", 9),
+            refreshed_row_count = row_value(row, "REFRESHED_ROW_COUNT", 10),
+            source_snapshot = row_value(row, "SOURCE_SNAPSHOT", 11),
             columns = {},
             dimension_keys = {},
             metric_keys = {},
@@ -166,9 +243,9 @@ local function branch_candidate(candidate, physical_plan, branch,
         return nil, "UNSUPPORTED_TYPE",
             "Only AGGREGATE materializations can provide branch states."
     end
-    if not supported_freshness(candidate.freshness_policy) then
-        return nil, "UNSUPPORTED_FRESHNESS_POLICY",
-            "Freshness policy is not supported by the deterministic selector."
+    local stale_code, stale_message = freshness_rejection(candidate)
+    if stale_code ~= nil then
+        return nil, stale_code, stale_message
     end
     local dimension_columns = {}
     local dimension_keys = {}
@@ -259,8 +336,8 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
             reject("INACTIVE", "Materialization status is not ACTIVE.")
         elseif upper(candidate.materialization_type) ~= "AGGREGATE" then
             reject("UNSUPPORTED_TYPE", "Only AGGREGATE materializations are supported in this milestone.")
-        elseif not supported_freshness(candidate.freshness_policy) then
-            reject("UNSUPPORTED_FRESHNESS_POLICY", "Freshness policy is not supported by the deterministic selector.")
+        elseif freshness_rejection(candidate) ~= nil then
+            reject(freshness_rejection(candidate))
         else
             for dimension_key, _ in pairs(required_dimension_keys) do
                 if candidate.columns[dimension_key] == nil then
@@ -322,6 +399,7 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
     diagnostics.selected_materialization = selected.materialization_name
     diagnostics.selected_materialization_id = selected.materialization_id
     diagnostics.rollup_required = selected.rollup_required
+    diagnostics.freshness = freshness_provenance(selected)
     return selected, diagnostics
 end
 
@@ -391,6 +469,7 @@ function M.select_branch_sources(ctx, physical_plan)
                 selected.candidate.materialization_id
             branch_diagnostic.extra_dimension_count =
                 selected.extra_dimension_count
+            branch_diagnostic.freshness = freshness_provenance(selected.candidate)
             branch_diagnostic.fallback_reason = null
             diagnostics.selected_materializations[
                 #diagnostics.selected_materializations + 1] = {
@@ -399,6 +478,7 @@ function M.select_branch_sources(ctx, physical_plan)
                 materialization_id = selected.candidate.materialization_id,
                 materialization_name = selected.candidate.materialization_name,
                 extra_dimension_count = selected.extra_dimension_count,
+                freshness = branch_diagnostic.freshness,
             }
         end
         diagnostics.branches[#diagnostics.branches + 1] = branch_diagnostic
@@ -408,12 +488,17 @@ end
 
 select_materialization = M.select_materialization
 select_branch_sources = M.select_branch_sources
+-- For REGISTER_MATERIALIZATION, which imports this runtime so the vocabulary it
+-- accepts is exactly the one the selector acts on.
+freshness_policy = M.freshness_policy
 
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_MATERIALIZATION_TEST_API = {
         select_materialization = M.select_materialization,
         select_branch_sources = M.select_branch_sources,
         supported_freshness = supported_freshness,
+        freshness_policy = M.freshness_policy,
+        freshness_rejection = freshness_rejection,
         allowed_rollup_policy = allowed_rollup_policy,
     }
 end
