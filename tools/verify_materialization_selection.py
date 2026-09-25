@@ -205,6 +205,21 @@ def main() -> int:
                 "client": "verify_materialization_selection",
             },
         )
+        # BUG-28: a request the selector is not consulted for says why, rather
+        # than reporting candidate_count 0 as if nothing were registered.
+        for label, request, reason in (
+            ("dimension-only request", {"dimensions": ["customer_region"]}, "NO_METRICS"),
+            ("HAVING request", {"dimensions": ["customer_region"], "metrics": ["total_revenue"],
+                                "having": [{"field": "total_revenue", "op": ">", "value": 0}]},
+             "HAVING_UNSUPPORTED"),
+        ):
+            bypassed = compile_request(con, {"model": "sales", "object": "SALES",
+                                             "client": "verify_materialization_selection", **request})
+            assert_status_ok(label, bypassed)
+            decision = json.loads(bypassed["plan_json"]).get("materialization_decision") or {}
+            assert_equal(f"{label} names its bypass", decision.get("selector_bypassed"), reason)
+            assert_equal(f"{label} materialization", selected_materialization(bypassed), None)
+
         assert_status_ok("missing dimension fallback", product)
         assert_equal("missing dimension materialization", selected_materialization(product), None)
         assert_contains("fallback SQL relation", product["generated_sql"], '"MART"."ORDER_LINES"')

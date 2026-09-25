@@ -606,6 +606,28 @@ not select is refused. Each is called out below.
 
 ### Fixed
 
+#### A bypassed materialization looked like no materialization (BUG-28)
+
+- A report concluded that serving a model from an accelerated layer needs a
+  second, hand-maintained model restating the first. It does not. A registered
+  materialization of the same model is substituted whenever it can answer
+  exactly; `verify_materialization_selection.py` has always held that.
+- That report's mart was never chosen because of BUG-27: its free-text
+  freshness policy got it rejected on every compile, which registration now
+  refuses. But the only trace was `UNSUPPORTED_FRESHNESS_POLICY` in `PLAN_JSON`,
+  and `docs/semantic-catalog.md`'s F3-only sentence ("materialization
+  substitution [is] not supported") read as a general rule.
+- **The real defect:** three request shapes skipped the selector without
+  recording it. Those were dimension-only requests, requests with a `HAVING`
+  predicate, and attribute fusion. The plan then showed `candidate_count: 0`
+  and no rejection, indistinguishable from nothing being registered. It now
+  records `selector_bypassed` (`NO_METRICS`, `HAVING_UNSUPPORTED`,
+  `ATTRIBUTE_FUSION`) and a message.
+- The docs now explain acceleration without a second model, and how to read
+  why a materialization was or was not used. The F3 sentence is scoped. Not
+  built: a derived-model or model-equivalence feature, which the registry makes
+  unnecessary for this case.
+
 #### Filtering on an unselected dimension changed the grain
 
 - Reference expansion compiled every field a statement names into the derived

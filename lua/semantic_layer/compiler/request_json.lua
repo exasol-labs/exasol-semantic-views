@@ -3616,11 +3616,27 @@ local function compile_request_table(request, options)
     -- dimension-only discovery request (#selected_metrics == 0) bypasses
     -- the selector and falls through to base-source SQL so distinct
     -- dimension values come from the authoritative source.
-    if materialization_runtime ~= nil
-        and type(materialization_runtime.select_materialization) == "function"
-        and #having_predicates == 0
-        and #selected_metrics > 0
-        and not ctx.has_attribute_fusion then
+    --
+    -- A bypass says so. It used to leave candidate_count = 0 and no rejection,
+    -- which reads exactly like "nothing is registered": a user with a
+    -- registered mart saw the query keep reading the sources, with nothing to
+    -- say why, and concluded substitution did not exist (BUG-28).
+    local bypass_reason, bypass_message
+    if #selected_metrics == 0 then
+        bypass_reason, bypass_message = "NO_METRICS", "A request with no metric reads"
+            .. " dimension values from the authoritative source, not from an aggregate."
+    elseif #having_predicates > 0 then
+        bypass_reason, bypass_message = "HAVING_UNSUPPORTED", "A request with a HAVING"
+            .. " predicate is not served from a materialization; the sources answer."
+    elseif ctx.has_attribute_fusion then
+        bypass_reason, bypass_message = "ATTRIBUTE_FUSION", "Attribute reconciliation resolves"
+            .. " values across representations, which one aggregate relation cannot."
+    end
+    if bypass_reason ~= nil then
+        materialization_decision.selector_bypassed = bypass_reason
+        materialization_decision.bypass_message = bypass_message
+    elseif materialization_runtime ~= nil
+        and type(materialization_runtime.select_materialization) == "function" then
         selected_materialization, materialization_decision = materialization_runtime.select_materialization(
             ctx,
             selected_dimensions,

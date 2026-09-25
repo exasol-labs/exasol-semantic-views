@@ -372,7 +372,8 @@ reports every missing pair as `SEMANTIC_MODEL_052`. It supports
 mergeable `SUM` and `COUNT` aggregate states and records all partitions under
 `selected_representations[].partitions` and `physical_plan.fusion_plan`.
 Partitioned joined dimensions and materialization substitution are not supported
-in F3; both remain explicit, fail-closed boundaries.
+in F3; both remain explicit, fail-closed boundaries. Outside F3 and F4,
+substitution is supported; see [Materialization Registry](#materialization-registry).
 
 ### F4 Authority And Reconciliation
 
@@ -858,6 +859,36 @@ those tables as materializations of the live model, with a `MAX_AGE` policy.
 
 The compiler treats this registry as an optimizer input. It never uses a
 materialization to make an invalid metric/dimension request valid.
+
+### Accelerating a model without a second model
+
+A registered materialization is how one model serves the same metrics from a
+pre-aggregated layer, such as a dbt gold table. No second model is involved.
+Consumers keep querying the one published schema. The compiler reads the
+aggregate whenever it can answer the request exactly, and the sources otherwise.
+So there is no second set of metrics to keep in step, and no choice of schema
+for live versus accelerated data.
+
+Opting in is a governed decision:
+- the registration names the physical object;
+- each column maps to a dimension or metric, with its rollup policy;
+- a `MAX_AGE` freshness policy bounds how stale it may be before the sources
+  answer instead (see [Freshness](#freshness-policy-and-state)).
+
+A second model restating the first against the aggregate's schema is the
+pattern to avoid. Nothing keeps the two equivalent.
+
+**Why was my materialization not used?** Every plan says, in
+`PLAN_JSON.materialization_decision`:
+
+| Field | Meaning |
+|---|---|
+| `selected_materialization` | the one the plan reads, if any |
+| `rejected_materializations[].reason_code` | why each candidate was declined: `MISSING_DIMENSION`, `MISSING_METRIC`, `ROLLUP_POLICY_UNSAFE`, `NON_ADDITIVE_ROLLUP`, `UNSUPPORTED_FRESHNESS_POLICY`, `STALE`, `NEVER_REFRESHED`, `INACTIVE` |
+| `selector_bypassed` | why no candidate was considered at all: `NO_METRICS`, `HAVING_UNSUPPORTED`, `ATTRIBUTE_FUSION` |
+
+For a multi-fact plan, the per-branch decisions are under `branches[]`, where
+`fallback_reason` names a partitioned (F3) branch.
 For a multi-fact plan, one registry entry may replace one complete leaf branch
 when it maps every required dimension and aggregate-state producer with the
 state's merge policy. Producer metrics may be private. A partial or unsafe
