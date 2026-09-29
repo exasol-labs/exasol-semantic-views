@@ -104,8 +104,13 @@ PAIRS = [
     # statement was rewritten and handed to Exasol.
     ("SUM over a ratio metric",
      f"SELECT SUM(GROSS_MARGIN_PCT) FROM {OBJECT}"),
-    ("MAX over an additive metric",
-     f"SELECT CUSTOMER_REGION, MAX(TOTAL_REVENUE) FROM {OBJECT}"),
+    # AVG, not MAX: since GitHub #8 a MAX over a metric is honoured where each
+    # group is one row, which the bare form is. Its wrapped form then meets a
+    # separate gap -- a wrapped block with an aggregate and no GROUP BY is plain
+    # SQL, not semantic SQL with an inferred GROUP BY -- that holds for SUM too.
+    # AVG is still refused in both lanes, which is what this pair is about.
+    ("AVG over an additive metric",
+     f"SELECT CUSTOMER_REGION, AVG(TOTAL_REVENUE) FROM {OBJECT}"),
     ("COUNT over a metric",
      f"SELECT CUSTOMER_REGION, COUNT(TOTAL_REVENUE) FROM {OBJECT}"),
     ("an aggregate over a dimension",

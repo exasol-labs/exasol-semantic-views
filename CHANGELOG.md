@@ -6,6 +6,32 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Added
+
+#### Tableau's ATTR-style `MIN`/`MAX` over a governed metric (#8)
+
+- Tableau emits `MAX(metric)` and `MIN(metric)` for attribute calculations,
+  and cannot be configured not to. Over a `SUM` metric they were refused with
+  `SEMANTIC_QUERY_007`, so the query failed.
+- Policy: `MIN` and `MAX` around a metric that declares a different
+  aggregation are accepted where each group of the statement holds exactly one
+  row of the object. There they select the metric's own value, which is what
+  ATTR means.
+  - When a statement is compiled directly, that holds by construction: an
+    explicit `GROUP BY` covers exactly the selected dimensions, and filters
+    apply before aggregation.
+  - Inside a wrapped statement, it holds when the block groups by every
+    dimension the object is compiled at. Otherwise the query is refused with the
+    new `SEMANTIC_QUERY_018` rather than answered with the extreme of several
+    values.
+- Every lowering is recorded in `PLAN_JSON.wrapper_lowerings` (wrapper, metric,
+  declared aggregation, equivalence), and both of Tableau's projections keep
+  their aliases. `SUM`, `AVG` and `COUNT` mismatches combine values rather than
+  select one, so they are still `SEMANTIC_QUERY_007`.
+- Reference expansion now also judges a qualified argument. `SUM(t0.ratio)`
+  inside a subquery used to skip the aggregate guard that its bare form hits.
+  `tools/verify_attr_wrappers.py` holds the exact Tableau statement.
+
 ### Fixed
 
 #### Power BI's catalog-qualified names fell through to the view guard (#9)

@@ -230,6 +230,12 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # DirectQuery statement runs, and any other catalog is left to Exasol.
 "$PYTHON_BIN" tools/verify_catalog_qualified_references.py
 
+# GitHub #8: Tableau's ATTR emits MIN/MAX around a SUM metric. Asserts they are
+# lowered to the governed value where each group is one row (and the plan says
+# so), SUM/AVG/COUNT mismatches stay SEMANTIC_QUERY_007, and a group of several
+# rows is SEMANTIC_QUERY_018.
+"$PYTHON_BIN" tools/verify_attr_wrappers.py
+
 # BUG-27: the materialization registry held a free-text refresh intent and no
 # state, so it could not say whether a materialization was stale. Asserts the
 # policy is validated, MARK_MATERIALIZATION_REFRESHED records measured state,

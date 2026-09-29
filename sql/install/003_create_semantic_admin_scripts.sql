@@ -17647,7 +17647,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "2286ef0b07874993"
+ESV_RUNTIME_BUILD = "24f14a2a745837a8"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18614,7 +18614,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "2286ef0b07874993"
+ESV_RUNTIME_BUILD = "24f14a2a745837a8"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -26171,8 +26171,30 @@ local METRIC_WRAPPERS = {
 -- One routine, because the two lanes disagreeing about which aggregates a metric
 -- accepts is precisely how the guard was lost once already.
 --
+-- Record accepted MIN/MAX lowerings in a plan. On the module table, like the
+-- routine above, because both lanes call it and the chunk has no locals to spare.
+function M.with_wrapper_lowerings(plan_json, lowerings)
+    if missing(plan_json) or lowerings == nil or #lowerings == 0 then
+        return plan_json
+    end
+    local ok, plan = pcall(json.decode, plan_json)
+    if not ok or type(plan) ~= "table" then
+        return plan_json
+    end
+    plan.wrapper_lowerings = lowerings
+    return json.encode(plan)
+end
+
 -- Returns nil when the wrapper is acceptable.
-function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared)
+--
+-- `one_row_per_group` is the caller's certificate that every group of the
+-- statement holds exactly one row of the object -- the grouping covers the grain
+-- the object is compiled at. There MIN(metric) and MAX(metric) select the metric's
+-- own value whatever it declares, which is what Tableau's ATTR means and why it
+-- emits them (GitHub #8). They are then accepted and returned as a lowering, so
+-- the caller can record it; SUM, AVG and COUNT still are not, because they combine
+-- values and would put a different calculation under the metric's name.
+function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared, one_row_per_group)
     if wrapper == nil or not METRIC_WRAPPERS[wrapper] then
         return nil
     end
@@ -26195,6 +26217,11 @@ function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared)
     local declared_upper = upper(tostring(declared or ""))
     if declared_upper == wrapper then
         return nil
+    end
+    if one_row_per_group and (wrapper == "MIN" or wrapper == "MAX") then
+        return nil, {wrapper = wrapper, metric = field_name,
+            declared = declared_upper == "" and JSON_NULL or declared_upper,
+            equivalence = "ONE_ROW_PER_GROUP"}
     end
     return error_result("SEMANTIC_QUERY_007",
         wrapper .. "(" .. tostring(field_name) .. ") is not how that metric"
@@ -26810,15 +26837,24 @@ local function parse_semantic_sql(statement_text, options)
         if bind_err ~= nil then
             return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
+        local output_alias = alias_from_select_part(part)
         if measure_wrapped then
-            local wrapper_refusal = M.aggregate_wrapper_refusal(
-                wrapper, field.name, field.kind, field.aggregation_function)
+            -- This lane compiles the statement at exactly its selected
+            -- dimensions -- an explicit GROUP BY must cover them and nothing
+            -- else, and filters apply before aggregation -- so every group is
+            -- one row and a MIN/MAX lowering is exact by construction.
+            local wrapper_refusal, lowering = M.aggregate_wrapper_refusal(
+                wrapper, field.name, field.kind, field.aggregation_function, true)
             if wrapper_refusal ~= nil then
                 return nil, wrapper_refusal
             end
+            if lowering ~= nil then
+                lowering.output = output_alias or upper(field.name)
+                meta.wrapper_lowerings = meta.wrapper_lowerings or {}
+                meta.wrapper_lowerings[#meta.wrapper_lowerings + 1] = lowering
+            end
         end
         selected_output[#selected_output + 1] = field.name
-        local output_alias = alias_from_select_part(part)
         request_output(field, output_alias)
         if output_alias ~= nil then
             select_aliases[upper(output_alias)] = field.name
@@ -26972,6 +27008,11 @@ local function compile_sql_internal(sql_text, options)
         -- parameter is named sql_text and shadows it.
         result.generated_sql = ESV_SQL_TEXT.output_projection(result.generated_sql,
                                                               meta.output_columns)
+        -- A MIN/MAX accepted because each group is one row is recorded, so the
+        -- plan says the wrapper was lowered rather than applied (GitHub #8).
+        if meta.wrapper_lowerings ~= nil then
+            result.plan_json = M.with_wrapper_lowerings(result.plan_json, meta.wrapper_lowerings)
+        end
     end
     if meta ~= nil and meta.cache_key ~= nil then
         -- Cache the projected form: the SQL-text key already covers the select
@@ -27065,6 +27106,7 @@ refusal_rules.expansion_wins = {
     SEMANTIC_QUERY_013 = true,   -- more references than one statement should carry
     SEMANTIC_QUERY_016 = true,   -- an outer SUM/AVG over a metric that does not add up
     SEMANTIC_QUERY_017 = true,   -- a grain-widening filter that cannot run inside the compile
+    SEMANTIC_QUERY_018 = true,   -- a MIN/MAX lowering where groups are not one row each
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
@@ -27294,9 +27336,14 @@ do
     -- returned the ratio itself -- a number under a label that lies about how it
     -- was computed. The wrapping is exactly what stopped the other lane seeing
     -- it, so expansion has to be able to say so on its own.
+    --
+    -- Returns the refusal, or nil and the MIN/MAX lowerings it deferred: whether
+    -- those are exact depends on the grain the object is compiled at, which is
+    -- only known once the projection is inferred (see own_block_covers_grain).
     function bi_expansion.wrapper_refusal(tokens, reference, by_name)
         local first, last = bi_expansion.select_list_range(tokens, reference)
         if first == nil then return nil end
+        local lowerings = {}
         for index = first, last do
             local token = tokens[index]
             local following = tokens[index + 1]
@@ -27304,24 +27351,81 @@ do
                 and following ~= nil and following.kind == "symbol"
                 and following.text == "(" then
                 local wrapper = upper(token_identifier_value(token) or "")
-                -- `WRAPPER ( name )` -- anything else is an expression this
-                -- lane has no opinion about.
+                -- `WRAPPER ( name )` or `WRAPPER ( alias . name )` -- anything
+                -- else is an expression this lane has no opinion about. The
+                -- qualified form used to be skipped, so `SUM(t0.ratio)` inside a
+                -- subquery bypassed the guard its bare form hits.
                 local argument = tokens[index + 2]
                 local closing = tokens[index + 3]
-                if METRIC_WRAPPERS[wrapper] and argument ~= nil and closing ~= nil
+                local qualifier
+                if argument ~= nil and closing ~= nil and closing.text == "."
+                    and tokens[index + 5] ~= nil and tokens[index + 5].text == ")" then
+                    qualifier, argument, closing = argument, tokens[index + 4], tokens[index + 5]
+                end
+                local ours = qualifier == nil or (reference.alias ~= nil
+                    and upper(token_identifier_value(qualifier) or "") == upper(reference.alias))
+                if METRIC_WRAPPERS[wrapper] and ours and argument ~= nil and closing ~= nil
                     and closing.kind == "symbol" and closing.text == ")" then
                     local name = token_identifier_value(argument)
                     local column = name ~= nil and by_name[upper(name)] or nil
                     if column ~= nil then
-                        local refusal = M.aggregate_wrapper_refusal(
+                        local refusal, lowering = M.aggregate_wrapper_refusal(
                             wrapper, column.name, column.kind,
-                            column.aggregation_function)
+                            column.aggregation_function, true)
                         if refusal ~= nil then return refusal end
+                        if lowering ~= nil then lowerings[#lowerings + 1] = lowering end
                     end
                 end
             end
         end
-        return nil
+        return nil, lowerings
+    end
+
+    -- Does the reference's own block group by every dimension the object is
+    -- compiled at? Then each group is one row of it, and a MIN/MAX over a metric
+    -- is that metric's value. With no GROUP BY it holds only if the object is
+    -- compiled at no dimension at all -- one row in total.
+    function bi_expansion.own_block_covers_grain(tokens, reference, wanted)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return false end
+        local dimensions = {}
+        for _, name in ipairs(wanted or {}) do
+            local column = reference.by_name[upper(name)]
+            if column ~= nil and upper(column.kind) == "DIMENSION" then
+                dimensions[#dimensions + 1] = upper(column.name)
+            end
+        end
+        local group_first, group_last
+        for index = reference.last + 1, #tokens do
+            local token = tokens[index]
+            if token.depth < reference.depth then break end
+            if token.depth == reference.depth then
+                local word = sql_text.token_upper(token)
+                if bi_expansion.SET_OPERATORS[word] then break end
+                if group_first ~= nil and bi_expansion.WHERE_ENDS[word] then
+                    group_last = index - 1
+                    break
+                end
+                if word == "GROUP" and sql_text.token_upper(tokens[index + 1]) == "BY" then
+                    group_first = index + 2
+                end
+            end
+            group_last = index
+        end
+        if group_first == nil then return #dimensions == 0 end
+        local items = split_top_level(tokens, first, last, ",")
+        local grouped = {}
+        for _, item in ipairs(split_top_level(tokens, group_first, group_last, ",")) do
+            if #item == 1 and item[1].kind == "number" then
+                item = items[tonumber(item[1].text)] or {}
+            end
+            local column = bi_expansion.projected_field(item, reference.by_name)
+            if column ~= nil then grouped[upper(column.name)] = true end
+        end
+        for _, dimension in ipairs(dimensions) do
+            if not grouped[dimension] then return false end
+        end
+        return true
     end
 
     function bi_expansion.unresolved_field_names(tokens, reference, by_name)
@@ -28231,7 +28335,7 @@ do
             -- Before anything else about this reference: an aggregate the metric
             -- does not declare is wrong however the statement is shaped, and
             -- wrapping is what stopped the other lane seeing it.
-            local wrapper_refusal = bi_expansion.wrapper_refusal(
+            local wrapper_refusal, lowerings = bi_expansion.wrapper_refusal(
                 tokens, reference, reference.by_name)
             if wrapper_refusal ~= nil then
                 return wrapper_refusal
@@ -28261,6 +28365,22 @@ do
             end
             if pushed ~= nil then
                 wanted = pushed.wanted
+            end
+
+            -- A deferred MIN/MAX is exact only where each group is one row.
+            if lowerings ~= nil and #lowerings > 0
+                and not bi_expansion.own_block_covers_grain(tokens, reference, wanted) then
+                local lowering = lowerings[1]
+                return error_result("SEMANTIC_QUERY_018",
+                    lowering.wrapper .. "(" .. tostring(lowering.metric) .. ") is accepted"
+                    .. " around a metric that declares " .. tostring(lowering.declared)
+                    .. " only where each group holds one row of "
+                    .. tostring(reference.published_schema) .. "."
+                    .. tostring(reference.object_name) .. ", so that it selects the"
+                    .. " metric's value. This block does not group by every dimension the"
+                    .. " object is compiled at, so it would return the " .. string.lower(lowering.wrapper)
+                    .. " of several values. GROUP BY the dimensions you select, or use MEASURE("
+                    .. tostring(lowering.metric) .. ").")
             end
 
             -- Behind the composition opt-in, like _015: an outer aggregate is
@@ -28309,7 +28429,7 @@ do
             -- carries one: with two, there are two plans and no honest way to
             -- present them as the plan for the statement.
             if #applicable == 1 then
-                inner_plan_json = compiled.plan_json
+                inner_plan_json = M.with_wrapper_lowerings(compiled.plan_json, lowerings)
                 inner_model = reference.model
             end
 
@@ -28701,6 +28821,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         bi_outer_reaggregation_refusal = bi_expansion.outer_reaggregation_refusal,
         bi_summable = bi_expansion.summable,
         bi_pushdown_filter = bi_expansion.pushdown_filter,
+        bi_wrapper_refusal = bi_expansion.wrapper_refusal,
+        bi_own_block_covers_grain = bi_expansion.own_block_covers_grain,
         within_trust_boundary = compile_cache.within_trust_boundary,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,

@@ -2307,6 +2307,79 @@ test("an aggregate wrapper is honoured only when the metric declares it", functi
     assert_branch("compiler.select.wrapper", mismatched.status == "OK", false)
 end)
 
+test("a MIN/MAX wrapper is lowered where each group is one row (Tableau ATTR)", function()
+    -- GitHub #8: Tableau emits MAX(metric) and MIN(metric) for attribute
+    -- calculations over a SUM metric and cannot be told not to. This lane
+    -- compiles at exactly the selected dimensions, so each group is one row and
+    -- the wrapper selects the metric's value: lowered, and recorded as such.
+    local mock = compiler_query_fixture()
+    local function sql(text) return with_query(mock, function() return compile_sql(text) end) end
+    local attr = sql('SELECT "SALES"."ORDER_STATUS" AS "ORDER_STATUS",'
+        .. ' MAX("SALES"."TOTAL_REVENUE") AS "TEMP_attr:rev:qk", MIN("SALES"."TOTAL_REVENUE")'
+        .. ' AS "TEMP_attr:rev:qk1" FROM "SEMANTIC_SALES"."SALES" "SALES" GROUP BY 1')
+    assert_equal(attr.status, "OK")
+    -- Two projections of one metric, each under its own alias.
+    assert_contains(attr.generated_sql, '"total_revenue" AS "TEMP_attr:rev:qk"')
+    assert_contains(attr.generated_sql, '"total_revenue" AS "TEMP_attr:rev:qk1"')
+    local plan = api.json_decode(attr.plan_json)
+    assert_equal(#plan.wrapper_lowerings, 2)
+    assert_equal(plan.wrapper_lowerings[1].wrapper, "MAX")
+    assert_equal(plan.wrapper_lowerings[1].declared, "SUM")
+    assert_equal(plan.wrapper_lowerings[1].equivalence, "ONE_ROW_PER_GROUP")
+    assert_equal(plan.wrapper_lowerings[2].output, "TEMP_attr:rev:qk1")
+
+    -- SUM, AVG and COUNT combine values, so a mismatch is still refused; and an
+    -- ordinary statement carries no lowering record.
+    assert_equal(sql("SELECT order_status, AVG(total_revenue) FROM SEMANTIC_SALES.SALES"
+        .. " GROUP BY 1").error_code, "SEMANTIC_QUERY_007")
+    assert_equal(sql("SELECT order_status, COUNT(total_revenue) FROM SEMANTIC_SALES.SALES"
+        .. " GROUP BY 1").error_code, "SEMANTIC_QUERY_007")
+    local plain = sql("SELECT order_status, total_revenue FROM SEMANTIC_SALES.SALES")
+    assert_equal(api.json_decode(plain.plan_json).wrapper_lowerings, nil)
+end)
+
+test("reference expansion lowers MIN/MAX only when the block covers the grain", function()
+    local columns = {
+        {name = "customer_region", kind = "DIMENSION"},
+        {name = "order_status", kind = "DIMENSION"},
+        {name = "total_revenue", kind = "METRIC", aggregation_function = "SUM"},
+        {name = "gross_margin_pct", kind = "METRIC"},
+    }
+    local by_name = {}
+    for _, column in ipairs(columns) do by_name[column.name:upper()] = column end
+    local function judge(text)
+        local tokens = api.sql_tokens(text)
+        local reference = api.bi_find_references(tokens)[1]
+        reference.columns, reference.by_name = columns, by_name
+        local refusal, lowerings = api.bi_wrapper_refusal(tokens, reference, by_name)
+        local wanted = api.bi_infer_columns(tokens, reference, columns, by_name)
+        return refusal, lowerings, api.bi_own_block_covers_grain(tokens, reference, wanted)
+    end
+    local O = "SEMANTIC_SALES.SALES t0"
+
+    -- Grouped by every compiled dimension, by name or ordinal: one row per group.
+    local refusal, lowerings, covered = judge("SELECT t0.customer_region, MAX(t0.total_revenue)"
+        .. " FROM " .. O .. " GROUP BY t0.customer_region")
+    assert_equal(refusal, nil)
+    assert_equal(#lowerings, 1)
+    assert_true(covered)
+    assert_true(select(3, judge("SELECT t0.customer_region, MIN(t0.total_revenue) FROM " .. O
+        .. " GROUP BY 1")))
+    -- No dimension at all: one row in total.
+    assert_true(select(3, judge("SELECT MAX(t0.total_revenue) FROM " .. O)))
+    -- A dimension compiled but not grouped: groups hold several rows.
+    assert_true(not select(3, judge("SELECT MAX(t0.total_revenue) FROM " .. O
+        .. " JOIN MART.X x ON x.r = t0.customer_region")))
+    assert_true(not select(3, judge("SELECT t0.customer_region, MAX(t0.total_revenue) FROM " .. O
+        .. " GROUP BY t0.customer_region, x.y ORDER BY t0.order_status")))
+
+    -- A qualified argument is judged too: SUM(t0.ratio) used to bypass the guard.
+    local ratio = judge("SELECT SUM(t0.gross_margin_pct) FROM " .. O)
+    assert_equal(ratio.error_code, "SEMANTIC_QUERY_007")
+    -- Another relation's column is not ours to judge.
+    assert_equal(judge("SELECT SUM(x.gross_margin_pct) FROM " .. O .. " JOIN MART.X x ON 1 = 1"), nil)
+end)
+
 test("COUNT(*) over a semantic object is refused, not guessed", function()
     -- The row count depends on the grain the layer selects, not on anything the
     -- caller named, so any number would be an answer to a question they did not
