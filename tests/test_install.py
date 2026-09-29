@@ -149,6 +149,12 @@ class ExampleInstallSummaryTest(unittest.TestCase):
         self.assertIn("SEMANTIC_SALES.SALES", published)
         self.assertNotIn("DRAFT", published)
 
+    def test_the_example_query_says_what_happens_without_the_preprocessor(self):
+        """Exasol refuses it before the view guard can name the fix (GitHub #5)."""
+        lines = "\n".join(INSTALL.example_query_lines())
+        self.assertLess(lines.index("ENABLE_SEMANTIC_SQL()"), lines.index("GROUP BY customer_region"))
+        self.assertIn("not a valid GROUP BY expression", lines)
+
 
 class _Completed:
     def __init__(self, returncode, stdout):

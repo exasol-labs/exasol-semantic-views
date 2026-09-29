@@ -310,6 +310,14 @@ column**: the line is one of yours, but the column counts the compiled SQL that
 was spliced into your statement. A *valid* statement never fails this way — if
 the layer cannot compile it, you get a code.
 
+Two messages mean the preprocessor is not active in the session that ran the
+statement, usually because the tool opened a new connection:
+`SEMANTIC_SURFACE_001`, and Exasol's own `not a valid GROUP BY expression` for
+a metric grouped by a dimension. Exasol raises the second before the view's
+guard can run, so it cannot carry the hint. Run
+`EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()` in that session, or have
+an administrator [set it database-wide](admin-db-wide-setup.md).
+
 For "why is my number different from my colleague's", start from your own log:
 
 ```sql

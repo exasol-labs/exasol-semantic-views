@@ -60,6 +60,14 @@ Those views are metadata surfaces only. Every column is a cast of
 `SEMANTIC_ADMIN.SEMANTIC_GUARD()`, so direct execution without the preprocessor
 raises `SEMANTIC_SURFACE_001`.
 
+One shape never reaches the guard. A metric selected beside `GROUP BY` on a
+dimension, the most common Semantic SQL statement, is not valid ordinary SQL,
+and Exasol refuses it while analysing the statement, before any view column is
+evaluated: `not a valid GROUP BY expression`. No view definition can change
+that, because a view whose columns are plain literals is refused the same way.
+Against a published semantic view, read that message as "the preprocessor is
+not active in this session" (GitHub #5).
+
 Published views include comments that point users and tools to
 `ENABLE_SEMANTIC_SQL` and `COMPILE_REQUEST_JSON`.
 

@@ -245,6 +245,18 @@ def main() -> int:
             "SELECT customer_region FROM SEMANTIC_SALES.SALES",
             "SEMANTIC_SURFACE_001",
         )
+        # A metric beside GROUP BY <dimension> is Semantic SQL but not valid
+        # ordinary SQL, so Exasol refuses it while analysing the statement --
+        # before any view column, and so the guard, is evaluated. The docs name
+        # this message as the symptom of a missing preprocessor (GitHub #5); if
+        # Exasol ever lets the guard run first, this fails and they can drop it.
+        assert_fails_with(
+            con,
+            "grouped metric without preprocessor",
+            "SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES "
+            "GROUP BY customer_region",
+            "not a valid GROUP BY expression",
+        )
 
         semantic_sql = (
             "SELECT customer_region, total_revenue "

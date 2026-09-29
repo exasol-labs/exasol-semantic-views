@@ -97,6 +97,22 @@ All notable changes to Exasol Semantic Views are documented here.
   LIMIT 1000001` now runs, with `C1` as the first column.
   `tools/verify_catalog_qualified_references.py` holds it.
 
+#### The installer's example query failed without naming the preprocessor (#5)
+
+- Run without the preprocessor, `SELECT customer_region, total_revenue FROM
+  SEMANTIC_SALES.SALES GROUP BY customer_region` failed with Exasol's `not a
+  valid GROUP BY expression`, not the view guard's `SEMANTIC_SURFACE_001`. The
+  README, the preprocessor guide and the compiler guide all promised the guard's
+  message.
+- It cannot be made to reach the guard. A metric beside `GROUP BY <dimension>`
+  is not valid ordinary SQL, and Exasol refuses it while analysing the
+  statement, before any view column is evaluated. A view of plain literals is
+  refused the same way.
+- So the message is now documented as the same symptom: in those three guides,
+  in the BI troubleshooting section, and in the installer's hint below its
+  example. `tools/verify_sql_compiler_and_surfaces.py` pins Exasol's behaviour,
+  so the docs learn if it changes.
+
 ## [0.3] - 2026-09-25
 
 Two capabilities that were planned separately and shipped as one, because they

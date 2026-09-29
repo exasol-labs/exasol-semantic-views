@@ -189,6 +189,26 @@ def example_summary_lines(published: bool) -> list[str]:
     ]
 
 
+def example_query_lines() -> list[str]:
+    """The query to try first, and what it does when the first line is skipped.
+
+    Without the preprocessor this query never reaches the view guard: Exasol
+    refuses a metric beside GROUP BY <dimension> while analysing it, with a
+    message that does not mention the preprocessor (GitHub #5).
+    """
+    return [
+        "  Try it:",
+        dim("    EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL();"),
+        dim("    SELECT customer_region, total_revenue"),
+        dim("    FROM SEMANTIC_SALES.SALES"),
+        dim("    GROUP BY customer_region"),
+        dim("    ORDER BY total_revenue DESC LIMIT 5;"),
+        "",
+        dim("  Enable it once per session. Without it, this query fails in Exasol"),
+        dim("  with 'not a valid GROUP BY expression'."),
+    ]
+
+
 def display_version(version: str, state: str) -> str:
     return version + "+dev" if state == "DEVELOPMENT" else version
 
@@ -717,12 +737,8 @@ def main() -> int:
         for line in example_summary_lines(args.publish):
             print(line)
         print()
-        print("  Try it:")
-        print(dim("    EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL();"))
-        print(dim("    SELECT customer_region, total_revenue"))
-        print(dim("    FROM SEMANTIC_SALES.SALES"))
-        print(dim("    GROUP BY customer_region"))
-        print(dim("    ORDER BY total_revenue DESC LIMIT 5;"))
+        for line in example_query_lines():
+            print(line)
     else:
         print(green("✓") + f" Installation complete  {dim(f'({install_elapsed:.1f}s)')}")
         print()

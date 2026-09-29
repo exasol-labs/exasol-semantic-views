@@ -227,13 +227,25 @@ North            3635
 West             1500
 ```
 
-Without the preprocessor, the published view fails loudly with an actionable
-guard error instead of returning misleading placeholder data:
+Without the preprocessor, the published view fails loudly instead of returning
+misleading placeholder data. Most statements reach its guard, which names the
+fix:
 
 ```text
 SEMANTIC_SURFACE_001: semantic query requires the Lua SQL preprocessor.
 Run EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL() for this session.
 ```
+
+The query above does not. A metric beside `GROUP BY customer_region` is
+Semantic SQL but not valid ordinary SQL, so Exasol rejects it before the view
+is read, with its own message:
+
+```text
+not a valid GROUP BY expression
+```
+
+On a published semantic view that message means the same thing: the
+preprocessor is not active in this session.
 
 ### What BI Tools See
 

@@ -20,7 +20,10 @@ Three things are worth knowing before choosing:
 
 - **`SELECT` from a published view without the preprocessor is refused, not
   wrong.** `SEMANTIC_SURFACE_001` names the command to run. The views exist so BI
-  tools can read column metadata; they are not queryable on their own.
+  tools can read column metadata; they are not queryable on their own. A metric
+  beside `GROUP BY <dimension>` is refused by Exasol before the guard runs, as
+  `not a valid GROUP BY expression`; on a semantic view that means the same
+  thing.
 - **`COMPILE_SQL` and `COMPILE_REQUEST_JSON` return the identical nine columns**,
   so a caller can switch lanes without changing its result handling. Read them by
   name — `COMPILE_SQL_DEBUG`'s ninth column differs.
