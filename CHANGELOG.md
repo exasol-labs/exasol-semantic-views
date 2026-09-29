@@ -6,6 +6,27 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+#### Power BI's catalog-qualified names fell through to the view guard (#9)
+
+- Power BI qualifies every relation with the catalog:
+  `SELECT … FROM "EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER"`. Both SQL lanes read
+  the first two parts as schema.object, so the published schema came out as
+  `EXA_DB` and the object as `SEMANTIC_SALES`. The statement matched no model,
+  and the view guard answered `SEMANTIC_SURFACE_001` ("requires the Lua SQL
+  preprocessor") in a session where the preprocessor was on.
+- `EXA_DB.<schema>.<object>` is now the same reference as `<schema>.<object>`,
+  quoted or not, in both lanes and wherever expansion finds a reference. It
+  answers row for row what the two-part form answers. `EXA_DB` is the only
+  catalog Exasol has, so any other name is left for Exasol to report as not
+  found.
+- That unblocks Power BI DirectQuery end to end. Its `1 AS "C1"` constant (#10)
+  and its `LIMIT 1000001` fetch (#11) already compiled with a two-part name. The
+  full statement `SELECT 1 AS "C1", … FROM "EXA_DB"."SEMANTIC_SALES"."SALES"
+  LIMIT 1000001` now runs, with `C1` as the first column.
+  `tools/verify_catalog_qualified_references.py` holds it.
+
 ## [0.3] - 2026-09-25
 
 Two capabilities that were planned separately and shipped as one, because they

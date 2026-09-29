@@ -756,6 +756,8 @@ SELECT * FROM (VALUES
    'Selected output fields, output aliases, or ordinals. LIMIT 0 returns the shape with no rows.', NULL, NULL),
   ('ORDER BY a field that is not selected', 'SUPPORTED',
    'Also OFFSET, SELECT DISTINCT, arithmetic and CASE in the select list, IN (subquery) and correlated EXISTS on a selected dimension.', NULL, NULL),
+  ('Catalog-qualified names', 'SUPPORTED',
+   'EXA_DB.<schema>.<object>, as Power BI writes every relation, is the same reference as <schema>.<object>. EXA_DB is the only catalog Exasol has; any other is left for Exasol to report as not found.', NULL, NULL),
   ('Statements that wrap the object', 'SUPPORTED',
    'Subquery, CTE, union, window, TopN wrapper, CAST, arithmetic and COUNT(*) around a reference, by expanding the reference into a derived table.', NULL, NULL),
   ('The shape of the statement around the object', 'DOES NOT MATTER',

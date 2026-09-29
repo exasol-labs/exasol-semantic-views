@@ -11013,6 +11013,34 @@ function M.decode_quoted_identifier(token_text)
     return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
 end
 
+-- Is `tokens[index]` the catalog qualifier of a three-part name -- the `EXA_DB`
+-- in `"EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER"`?
+--
+-- Exasol has one catalog and spells it EXA_DB: `EXA_DB.MART.ORDERS` resolves,
+-- `OTHERDB.MART.ORDERS` is "not found". Power BI writes every relation that way,
+-- and both SQL lanes read `a.b` as schema.object, so the published schema came
+-- out as EXA_DB and the object as the schema name -- the statement matched no
+-- model and fell through to the view guard (GitHub #9). Only EXA_DB counts: any
+-- other qualifier is left for Exasol to report. An unquoted name folds to upper
+-- case as Exasol folds it; a quoted one must match exactly.
+function M.is_catalog_qualifier(tokens, index)
+    local catalog, dot, schema, dot2, object = tokens[index], tokens[index + 1],
+        tokens[index + 2], tokens[index + 3], tokens[index + 4]
+    if catalog == nil or dot == nil or dot2 == nil or schema == nil or object == nil
+        or dot.text ~= "." or dot2.text ~= "." then
+        return false
+    end
+    local name
+    if catalog.kind == "word" then
+        name = upper(catalog.text)
+    elseif catalog.kind == "identifier" then
+        name = M.decode_quoted_identifier(catalog.text)
+    end
+    return name == "EXA_DB"
+        and (schema.kind == "word" or schema.kind == "identifier")
+        and (object.kind == "word" or object.kind == "identifier")
+end
+
 -- The uppercase form of a token for keyword comparison.
 --
 -- Falls back to the token's raw `text`, which for a quoted identifier still
@@ -17619,7 +17647,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "c0e0f9d623fcf5dd"
+ESV_RUNTIME_BUILD = "2286ef0b07874993"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18586,7 +18614,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "c0e0f9d623fcf5dd"
+ESV_RUNTIME_BUILD = "2286ef0b07874993"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -19296,6 +19324,34 @@ end
 
 function M.decode_quoted_identifier(token_text)
     return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
+end
+
+-- Is `tokens[index]` the catalog qualifier of a three-part name -- the `EXA_DB`
+-- in `"EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER"`?
+--
+-- Exasol has one catalog and spells it EXA_DB: `EXA_DB.MART.ORDERS` resolves,
+-- `OTHERDB.MART.ORDERS` is "not found". Power BI writes every relation that way,
+-- and both SQL lanes read `a.b` as schema.object, so the published schema came
+-- out as EXA_DB and the object as the schema name -- the statement matched no
+-- model and fell through to the view guard (GitHub #9). Only EXA_DB counts: any
+-- other qualifier is left for Exasol to report. An unquoted name folds to upper
+-- case as Exasol folds it; a quoted one must match exactly.
+function M.is_catalog_qualifier(tokens, index)
+    local catalog, dot, schema, dot2, object = tokens[index], tokens[index + 1],
+        tokens[index + 2], tokens[index + 3], tokens[index + 4]
+    if catalog == nil or dot == nil or dot2 == nil or schema == nil or object == nil
+        or dot.text ~= "." or dot2.text ~= "." then
+        return false
+    end
+    local name
+    if catalog.kind == "word" then
+        name = upper(catalog.text)
+    elseif catalog.kind == "identifier" then
+        name = M.decode_quoted_identifier(catalog.text)
+    end
+    return name == "EXA_DB"
+        and (schema.kind == "word" or schema.kind == "identifier")
+        and (object.kind == "word" or object.kind == "identifier")
 end
 
 -- The uppercase form of a token for keyword comparison.
@@ -26615,7 +26671,12 @@ local function parse_semantic_sql(statement_text, options)
     end
     local select_end = clauses.FROM - 1
     local from_end = clause_end(tokens, clauses, "FROM")
-    local from_tokens = token_slice(tokens, clauses.FROM + 1, from_end)
+    -- `EXA_DB.schema.object` is `schema.object` (GitHub #9).
+    local from_first = clauses.FROM + 1
+    if sql_text.is_catalog_qualifier(tokens, from_first) then
+        from_first = from_first + 2
+    end
+    local from_tokens = token_slice(tokens, from_first, from_end)
     if #from_tokens < 3 or from_tokens[2].text ~= "." then
         if options.unchanged_unknown_schema then
             return envelope.unchanged_result(statement_text), nil, nil
@@ -27126,36 +27187,42 @@ do
         local found = {}
         for index = 1, #tokens - 3 do
             local intro = tokens[index]
+            -- `EXA_DB.schema.object` names the same relation as
+            -- `schema.object`; the reference spans the catalog too, so the
+            -- splice replaces all three parts (GitHub #9).
+            local skip = (intro.kind == "word" and RELATION_INTRO[sql_text.token_upper(intro)]
+                and sql_text.is_catalog_qualifier(tokens, index + 1)) and 2 or 0
             if intro.kind == "word" and RELATION_INTRO[sql_text.token_upper(intro)] then
-                local head, dot, tail = tokens[index + 1], tokens[index + 2], tokens[index + 3]
+                local head, dot, tail = tokens[index + 1 + skip], tokens[index + 2 + skip],
+                    tokens[index + 3 + skip]
                 local head_name = token_identifier_value(head)
                 local tail_name = token_identifier_value(tail)
                 if head_name ~= nil and tail_name ~= nil
                     and dot.kind == "symbol" and dot.text == "." then
                     local reference = {
-                        first = index + 1, last = index + 3,
+                        first = index + 1, last = index + 3 + skip,
                         published_schema = head_name, object_name = tail_name,
                         depth = intro.depth,
                     }
                     -- `X.Y alias` and `X.Y AS alias`; anything else has none.
-                    local after = tokens[index + 4]
+                    local after = tokens[index + 4 + skip]
                     -- The alias is carried as the author spelled it, not
                     -- re-quoted. `t0` unquoted is folded to T0 by Exasol and
                     -- matches `t0.CUSTOMER_REGION` elsewhere in the statement;
                     -- re-emitting it as "t0" makes a lower-case alias that the
                     -- same reference no longer resolves against.
                     if after ~= nil and sql_text.token_upper(after) == "AS" then
-                        after = tokens[index + 5]
+                        after = tokens[index + 5 + skip]
                         if after ~= nil and token_identifier_value(after) ~= nil then
                             reference.alias = token_identifier_value(after)
                             reference.alias_text = after.text
-                            reference.last = index + 5
+                            reference.last = index + 5 + skip
                         end
                     elseif after ~= nil and (after.kind == "word" or after.kind == "identifier")
                         and not NOT_AN_ALIAS[sql_text.token_upper(after)] then
                         reference.alias = token_identifier_value(after)
                         reference.alias_text = after.text
-                        reference.last = index + 4
+                        reference.last = index + 4 + skip
                     end
                     found[#found + 1] = reference
                 end
@@ -29498,6 +29565,34 @@ end
 
 function M.decode_quoted_identifier(token_text)
     return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
+end
+
+-- Is `tokens[index]` the catalog qualifier of a three-part name -- the `EXA_DB`
+-- in `"EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER"`?
+--
+-- Exasol has one catalog and spells it EXA_DB: `EXA_DB.MART.ORDERS` resolves,
+-- `OTHERDB.MART.ORDERS` is "not found". Power BI writes every relation that way,
+-- and both SQL lanes read `a.b` as schema.object, so the published schema came
+-- out as EXA_DB and the object as the schema name -- the statement matched no
+-- model and fell through to the view guard (GitHub #9). Only EXA_DB counts: any
+-- other qualifier is left for Exasol to report. An unquoted name folds to upper
+-- case as Exasol folds it; a quoted one must match exactly.
+function M.is_catalog_qualifier(tokens, index)
+    local catalog, dot, schema, dot2, object = tokens[index], tokens[index + 1],
+        tokens[index + 2], tokens[index + 3], tokens[index + 4]
+    if catalog == nil or dot == nil or dot2 == nil or schema == nil or object == nil
+        or dot.text ~= "." or dot2.text ~= "." then
+        return false
+    end
+    local name
+    if catalog.kind == "word" then
+        name = upper(catalog.text)
+    elseif catalog.kind == "identifier" then
+        name = M.decode_quoted_identifier(catalog.text)
+    end
+    return name == "EXA_DB"
+        and (schema.kind == "word" or schema.kind == "identifier")
+        and (object.kind == "word" or object.kind == "identifier")
 end
 
 -- The uppercase form of a token for keyword comparison.

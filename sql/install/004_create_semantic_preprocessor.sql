@@ -37,8 +37,9 @@ local looks_like_query = string.find(head, "SELECT", 1, true) ~= nil
 -- catalog read; guessing wrong in the permissive direction only costs an import
 -- the compiler would then decline, so every uncertain case answers "yes".
 local function references_semantic_schema()
-    -- parse_semantic_sql accepts only schema.object, so a statement naming no
-    -- qualified relation can never be rewritten. Collect every qualifier rather
+    -- parse_semantic_sql accepts schema.object (and EXA_DB.schema.object, whose
+    -- EXA_DB qualifier is collected here too and simply matches no model), so a
+    -- statement naming no qualified relation can never be rewritten. Collect every qualifier rather
     -- than only the one after FROM: over-collecting costs at worst one import,
     -- while missing one would silently stop rewriting a valid semantic query.
     local candidates, seen = {}, {}

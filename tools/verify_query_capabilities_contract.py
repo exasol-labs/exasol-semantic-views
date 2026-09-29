@@ -158,6 +158,7 @@ SUPPORTED_SHAPES = {
     "ORDER BY and LIMIT",
     "ORDER BY a field that is not selected",
     "Statements that wrap the object",
+    "Catalog-qualified names",
     "The shape of the statement around the object",
     "CREATE VIEW over an object",
     "Malformed or non-Exasol SQL around the object",

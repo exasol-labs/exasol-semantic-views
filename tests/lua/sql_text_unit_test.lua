@@ -276,3 +276,24 @@ test("output projection returns the caller's select list, named and ordered", fu
     assert_branch("sql_text.output_projection",
         sql_text.output_projection(inner, {{source = "a", output = "b"}}) == inner, false)
 end)
+
+test("shared sql text recognises only EXA_DB as a catalog qualifier", function()
+    -- GitHub #9: Power BI writes "EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER", and
+    -- both SQL lanes read the first two parts as schema.object.
+    local function at(text)
+        return sql_text.is_catalog_qualifier(sql_text.tokenize(text), 1)
+    end
+    assert_true(at('"EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER"'))
+    assert_true(at("exa_db.semantic_sales.order_header"))
+    assert_true(at('EXA_DB."SEMANTIC_SALES".ORDER_HEADER'))
+    -- A quoted name is exact, as Exasol resolves it; any other catalog is left
+    -- for Exasol to report as not found.
+    assert_true(not at('"exa_db"."SEMANTIC_SALES"."ORDER_HEADER"'))
+    assert_true(not at("OTHERDB.SEMANTIC_SALES.ORDER_HEADER"))
+    -- Two parts, or three that are not all names, are not a catalog reference.
+    assert_true(not at("EXA_DB.ORDER_HEADER"))
+    assert_true(not at("EXA_DB.SEMANTIC_SALES.*"))
+    assert_true(not at("EXA_DB.SEMANTIC_SALES"))
+    assert_true(not at("EXA_DB + SEMANTIC_SALES.ORDER_HEADER"))
+    assert_true(not at("1.2.3"))
+end)

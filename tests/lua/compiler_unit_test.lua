@@ -1971,6 +1971,18 @@ test("reference expansion finds what to compile, and refuses to guess", function
     assert_equal(wanted[1], "customer_region")   -- published order, not written order
     assert_equal(wanted[2], "total_revenue")
 
+    -- A catalog-qualified reference is the same one, and spans all three parts
+    -- so the splice replaces the catalog too (GitHub #9).
+    local cat_tokens, catalog = only_reference(
+        'SELECT "SHIP_MODE" FROM "EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER" "OH" LIMIT 100')
+    assert_equal(catalog.published_schema, "SEMANTIC_SALES")
+    assert_equal(catalog.object_name, "ORDER_HEADER")
+    assert_equal(catalog.alias, "OH")
+    assert_equal(cat_tokens[catalog.first].text, '"EXA_DB"')
+    assert_equal(cat_tokens[catalog.last].text, '"OH"')
+    local _, other = only_reference('SELECT x FROM OTHERDB.SEMANTIC_SALES.ORDER_HEADER')
+    assert_equal(other.published_schema, "OTHERDB")
+
     -- `AS alias` is the same reference.
     local _, as_reference = only_reference(
         "SELECT x.ORDER_STATUS FROM SEMANTIC_SALES.SALES AS x")
