@@ -3,19 +3,96 @@
 This page is for connecting Tableau, Power BI, a JDBC/ODBC client, a notebook, or
 anything else that speaks ordinary SQL to a published semantic model.
 
-The short version: **turn the preprocessor on database-wide, point the tool at
-the published schema, and query it like a table.** Everything below is the detail
-behind that sentence — what the tool may write, what it may not, and how to find
-out which without guessing.
+The short version: **make every connection the tool opens run the preprocessor,
+point the tool at the published schema, and query it like a table.** Everything
+below is the detail behind that sentence — what the tool may write, what it may
+not, and how to find out which without guessing.
 
 ---
 
 ## 1. One-time setup
 
-A BI tool opens its own connections and pools them. It gives you nowhere to run a
-per-session statement, so `ENABLE_SEMANTIC_SQL()` — the right default for a
-person exploring — is not something a Tableau or Power BI deployment can use at
-all. Set the preprocessor at the system level instead:
+The preprocessor is a session setting, and a BI tool opens, pools and reopens
+its own sessions. Running `ENABLE_SEMANTIC_SQL()` once in a SQL window does not
+reach them. Either give the tool's connection a statement to run every time it
+connects (below, per tool), or turn the preprocessor on for the whole database
+([Database-wide](#database-wide)).
+
+The statement to run on connect is:
+
+```sql
+ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR
+```
+
+It is what `ENABLE_SEMANTIC_SQL()` runs, without the status row, so a hook that
+does not expect a result set gets none. It needs no grant beyond the one the
+installer gives `PUBLIC`. Both tools run it on every new connection, so a
+reconnect or a pooled connection is covered with nothing to repeat.
+
+**Before you start:** the model is published (`SEMANTIC_SALES` exists), and the
+tool's user has the model and its sources granted
+([Who needs what](#who-needs-what)).
+
+### Tableau Desktop
+
+1. **Connect → To a Server → Exasol** (or the *Exasol JDBC* / *Exasol ODBC*
+   connector from Tableau Exchange). Enter server, port and credentials.
+2. Open **Initial SQL** in the same dialog and paste the statement above.
+3. Sign in, pick schema `SEMANTIC_SALES`, and drag `SALES` to the canvas.
+
+Tableau runs Initial SQL at the start of every connection: opening the
+workbook, refreshing an extract, and publishing to or signing in on Tableau
+Server.
+
+### Power BI Desktop
+
+Power BI's Exasol connector takes only a host or a DSN, so the statement goes
+into an ODBC data source, whose driver runs it on connect (`ONCONNECT`).
+
+1. Open **ODBC Data Sources (64-bit)** → **Add** → the Exasol driver. On
+   **Connection**, give it a name (say `exa-semantic`), the host and port, and
+   the credentials; tick **Encryption** if your server uses it.
+2. On **Advanced**, put this in **Additional connection string parameters**:
+
+   ```text
+   ONCONNECT={ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR}
+   ```
+
+3. In Power BI: **Get data → Exasol**, connection string `DSN=exa-semantic`,
+   **DirectQuery**. Pick `SEMANTIC_SALES` → `SALES`.
+
+If the statement fails, for example because of a typo, the driver refuses the
+connection with the database's error rather than connecting without it. To
+publish the report, create the same DSN on the on-premises data gateway, which
+opens its own connections.
+
+### Check that it took
+
+Run this through the tool (Tableau: **New Custom SQL**; Power BI: the
+connector's **SQL statement** box):
+
+```sql
+SELECT customer_region, total_revenue
+FROM SEMANTIC_SALES.SALES
+GROUP BY customer_region
+ORDER BY total_revenue DESC
+```
+
+On the demo model it returns North 3635, West 1500, South 135. Two answers
+mean the session that ran it has no preprocessor:
+
+| you see | cause |
+|---|---|
+| `SEMANTIC_SURFACE_001: semantic query requires the Lua SQL preprocessor` | the hook is missing, or was set on a different connection than the one the visual uses |
+| `not a valid GROUP BY expression` | the same. Exasol rejects a grouped metric before the view's guard can run, so this message cannot carry the hint (GitHub #5) |
+
+If neither appears but a query fails, it is past setup: see
+[§6](#6-when-a-query-is-refused-or-a-number-looks-wrong).
+
+### Database-wide
+
+For a server deployment where you would rather not configure every client,
+set it once for the database:
 
 ```sql
 ALTER SYSTEM SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR;
@@ -31,7 +108,9 @@ rollback procedure and what the preprocessor costs on unrelated statements (a fe
 milliseconds; it decides what a statement could possibly be before importing
 anything).
 
-Then grant the tool's role the model:
+### Granting the model
+
+Grant the tool's role the model:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.GRANT_MODEL_ROLE('sales', 'BI_READERS');
@@ -310,13 +389,9 @@ column**: the line is one of yours, but the column counts the compiled SQL that
 was spliced into your statement. A *valid* statement never fails this way — if
 the layer cannot compile it, you get a code.
 
-Two messages mean the preprocessor is not active in the session that ran the
-statement, usually because the tool opened a new connection:
-`SEMANTIC_SURFACE_001`, and Exasol's own `not a valid GROUP BY expression` for
-a metric grouped by a dimension. Exasol raises the second before the view's
-guard can run, so it cannot carry the hint. Run
-`EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()` in that session, or have
-an administrator [set it database-wide](admin-db-wide-setup.md).
+`SEMANTIC_SURFACE_001`, or Exasol's own `not a valid GROUP BY expression` on a
+grouped metric, is not a refusal of your query: the session that ran it has no
+preprocessor. See [Check that it took](#check-that-it-took).
 
 For "why is my number different from my colleague's", start from your own log:
 

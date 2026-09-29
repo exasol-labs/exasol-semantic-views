@@ -25,6 +25,21 @@ All notable changes to Exasol Semantic Views are documented here.
   in the outer SQL for Exasol to fail on.
   `tools/verify_order_by_ordinals.py` holds the Tableau statement.
 
+#### Setting up Tableau Desktop and Power BI Desktop without a database-wide change (#12)
+
+- The BI guide said a BI tool gives you nowhere to run a per-session
+  statement, so it offered only `ALTER SYSTEM`. Both tools have a hook that runs
+  on every connection they open. Tableau has Initial SQL. Power BI's Exasol
+  connector takes a DSN, whose `ONCONNECT` parameter the ODBC driver runs after
+  connecting.
+- `docs/bi-tools.md` §1 now walks through each tool, a verification query, and
+  the two messages a session without the preprocessor gives. Database-wide
+  activation remains the other option.
+- The hook was measured with ODBC driver 25.2.5 and JDBC driver 25.2.3, as `sys`
+  and as a reader holding only the model role and the sources. Each new
+  connection was its own session with the preprocessor set. A failing hook
+  refuses the connection.
+
 #### Power BI's aggregation over a semantic view (#15)
 
 - Power BI DirectQuery aggregates inside a derived table and shapes the result

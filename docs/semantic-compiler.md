@@ -10,7 +10,7 @@ of them lower to the same planner.
 | You are | Use | Because |
 |---|---|---|
 | an **agent** composing a request from field names it discovered | `COMPILE_REQUEST_JSON` | the request is a closed JSON contract you can validate before sending, and refusals come back as structured `CLARIFICATION_JSON` rather than prose |
-| a **SQL user or BI tool** with a session you control | `ENABLE_SEMANTIC_SQL()` once, then plain `SELECT` from `SEMANTIC_<MODEL>.<OBJECT>` | the preprocessor rewrites your statement in place, so the model looks like a table and every existing SQL client works unchanged |
+| a **SQL user or BI tool** | `ENABLE_SEMANTIC_SQL()` once in your session, or a connect hook in the tool ([BI tools §1](bi-tools.md#1-one-time-setup)), then plain `SELECT` from `SEMANTIC_<MODEL>.<OBJECT>` | the preprocessor rewrites your statement in place, so the model looks like a table and every existing SQL client works unchanged |
 | a **tool that cannot set a session preprocessor** | `COMPILE_SQL` | same Semantic SQL text, but you get the generated SQL back as a string to execute yourself |
 | **debugging a compile** | `COMPILE_SQL_DEBUG` | identical to `COMPILE_SQL` except it writes the compile to `SYS_SEMANTIC.QUERY_LOG` and returns the `QUERY_LOG_ID` instead of `AGENT_REQUEST_ID` |
 | **migrating from Databricks** | `MEASURE(...)` and `GROUP BY ALL` inside Semantic SQL | the UCMV query shapes compile unchanged; see [databricks-metric-views.md](databricks-metric-views.md) |

@@ -4,11 +4,13 @@ This page is for admins and data engineers who want published semantic views to
 behave like a normal database feature for BI and SQL users, without asking every
 user to run `ENABLE_SEMANTIC_SQL()` manually.
 
-**For BI tools, database-wide activation is the supported deployment mode, not
-an advanced option.** A BI tool opens its own connections, pools them, and gives
-you nowhere to run a per-session setup statement — so session activation is not
-something a Tableau or Power BI deployment can use at all. Set it at the system
-level and published semantic views behave like ordinary views to every client.
+**For BI tools there are two supported modes.** A BI tool opens its own
+connections and pools them, so a statement run once in a SQL window never
+reaches them. Either configure the tool's connection to run the setup statement
+every time it connects (Tableau's Initial SQL, or `ONCONNECT` in the ODBC data
+source Power BI uses; see [BI tools §1](bi-tools.md#1-one-time-setup)), or set it
+at the system level, as this page describes, and published semantic views
+behave like ordinary views to every client with nothing configured on it.
 
 Session activation remains the right default for *development*: it is reversible
 in one statement and scoped to the person trying it.
