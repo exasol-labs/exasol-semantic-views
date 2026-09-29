@@ -107,6 +107,8 @@
 -- and both governance modes are exercised without a 200-line SQL fixture.
 -- materializations.lua 92.2 -> 94.2 on 2026-09-24, when a MAX_AGE policy began
 -- to be checked against LAST_REFRESHED_AT (BUG-27).
+-- request_json.lua 90.9 -> 91.5 on 2026-09-29, when MIN/MAX over a metric began
+-- to be lowered where each group is one row (GitHub #8).
 -- request_json.lua 90.7 -> 90.9 on 2026-09-24, when a grain-widening WHERE
 -- began to be moved inside the compile (SEMANTIC_QUERY_017).
 -- request_json.lua 90.39 -> 90.7 on 2026-09-24, when reference expansion began
@@ -176,7 +178,7 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 90.9,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 91.5,
         ["lua/semantic_layer/admin/validator.lua"] = 95.1,
         ["lua/semantic_layer/compiler/materializations.lua"] = 94.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 79.1,

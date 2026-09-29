@@ -112,6 +112,13 @@ PROBES = {
         "sql": f"SELECT AVG(t.GROSS_MARGIN_PCT) FROM (SELECT CUSTOMER_REGION,"
                f" GROSS_MARGIN_PCT FROM {PUBLISHED}) t",
     },
+    "MIN or MAX of a metric where a group holds several rows": {
+        # The ORDER BY names a dimension, so the object is compiled at it, and
+        # nothing groups by it: MAX would span every ship mode.
+        # verify_attr_wrappers.py holds the accepted half.
+        "sql": f"SELECT MAX(t0.TOTAL_FREIGHT) FROM SEMANTIC_SALES.ORDER_HEADER t0"
+               " ORDER BY t0.SHIP_MODE",
+    },
     "An aggregate the metric does not declare": {
         # Written the way docs/bi-tools.md teaches -- "there is no GROUP BY to
         # write, it is inferred" -- and not with the explicit GROUP BY this
@@ -120,7 +127,12 @@ PROBES = {
         # returned a raw Exasol message, or a wrong number where Exasol had
         # nothing to object to. A contract verified against the shape the
         # implementation happens to handle is testing the implementation.
-        "sql": f"SELECT CUSTOMER_REGION, MAX(TOTAL_REVENUE) FROM {PUBLISHED}",
+        #
+        # AVG, not MAX: since GitHub #8 a MAX here is honoured -- the grouping is
+        # inferred from the selected dimension, so each region is one row and
+        # MAX(total_revenue) is that region's revenue. AVG combines values, so a
+        # mismatch there is still the refusal this row publishes.
+        "sql": f"SELECT CUSTOMER_REGION, AVG(TOTAL_REVENUE) FROM {PUBLISHED}",
     },
     "A SELECT list that names no field": {
         "sql": f"SELECT 1 FROM {PUBLISHED} t0",

@@ -80,6 +80,33 @@ LIMIT 10;
 metric wrappers `MEASURE(metric)` and `agg(metric)`. `MEASURE()` / `agg()` may
 only wrap metrics; wrapping a dimension returns `SEMANTIC_QUERY_006`.
 
+A named aggregate around a metric (`SUM(total_revenue)`) is honoured when it is
+the aggregation the metric declares. Otherwise it would put a different
+calculation under the metric's name, so it is refused with `SEMANTIC_QUERY_007`.
+There is one exception, for BI tools. `MIN` and `MAX` are accepted around any
+metric where each group of the statement holds exactly one row of the object.
+There they select the metric's own value, which is what Tableau's ATTR means:
+
+```sql
+-- Tableau: both columns are total_freight per ship mode, exactly
+SELECT "ORDER_HEADER"."SHIP_MODE",
+       MAX("ORDER_HEADER"."TOTAL_FREIGHT") AS "TEMP_attr:TOTAL_FREIGHT:qk",
+       MIN("ORDER_HEADER"."TOTAL_FREIGHT") AS "TEMP_attr:TOTAL_FREIGHT:qk1"
+FROM "SEMANTIC_SALES"."ORDER_HEADER" "ORDER_HEADER" GROUP BY 1
+```
+
+When a statement is compiled directly, every group is one row by construction:
+an explicit `GROUP BY` must cover exactly the selected dimensions, and filters
+apply before aggregation. Inside a wrapped statement the same holds when the
+block groups by every dimension the object is compiled at. Where it does not,
+the `MIN`/`MAX` would return the extreme of several values, so it is refused
+with `SEMANTIC_QUERY_018`.
+
+Each accepted lowering is recorded in `PLAN_JSON.wrapper_lowerings`, with the
+wrapper, the metric, what the metric declares, and the equivalence
+(`ONE_ROW_PER_GROUP`). `SUM`, `AVG` and `COUNT` combine values rather than
+select one, so a mismatch there is still `SEMANTIC_QUERY_007`.
+
 Supported `WHERE` predicates are dimension predicates with `=`, `!=`, `<>`,
 `<`, `<=`, `>`, `>=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`, and `IS NOT NULL`.
 Text equality, inequality, `LIKE`, and `IN` predicates compile
