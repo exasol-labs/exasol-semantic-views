@@ -224,6 +224,12 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # on selected dimensions are untouched.
 "$PYTHON_BIN" tools/verify_filter_grain.py
 
+# GitHub #9: Power BI writes "EXA_DB"."<schema>"."<object>", which both SQL lanes
+# read as schema.object, so its queries fell through to the view guard. Asserts
+# every catalog-qualified shape answers as its two-part form, Power BI's full
+# DirectQuery statement runs, and any other catalog is left to Exasol.
+"$PYTHON_BIN" tools/verify_catalog_qualified_references.py
+
 # BUG-27: the materialization registry held a free-text refresh intent and no
 # state, so it could not say whether a materialization was stale. Asserts the
 # policy is validated, MARK_MATERIALIZATION_REFRESHED records measured state,

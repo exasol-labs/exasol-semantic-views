@@ -117,6 +117,12 @@ of these work:
 | `SELECT CAST(t0.B AS VARCHAR(50)), t0.B / 1000 FROM … t0` | casts and arithmetic |
 | `SELECT COUNT(*) FROM (SELECT t0.A FROM … t0) z` | count over the result |
 | `SELECT … WHERE 1 = 0` and `LIMIT 0` | the driver's metadata probes |
+| `SELECT 1 AS "C1", "A", "B" FROM "EXA_DB"."SEMANTIC_SALES"."SALES" LIMIT 1000001` | Power BI DirectQuery: a catalog-qualified name, a constant column and its fetch limit |
+
+A three-part name `EXA_DB.<schema>.<object>` is the same reference as
+`<schema>.<object>`. Exasol's only catalog is `EXA_DB`, and Power BI qualifies
+every relation with it. Any other catalog name is left for Exasol to report as
+not found.
 
 They work because the preprocessor replaces the **reference** — the
 `SEMANTIC_SALES.SALES t0` part — with the compiled SQL as a derived table, and

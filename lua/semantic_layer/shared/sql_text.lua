@@ -250,6 +250,34 @@ function M.decode_quoted_identifier(token_text)
     return string.gsub(string.sub(tostring(token_text), 2, -2), '""', '"')
 end
 
+-- Is `tokens[index]` the catalog qualifier of a three-part name -- the `EXA_DB`
+-- in `"EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER"`?
+--
+-- Exasol has one catalog and spells it EXA_DB: `EXA_DB.MART.ORDERS` resolves,
+-- `OTHERDB.MART.ORDERS` is "not found". Power BI writes every relation that way,
+-- and both SQL lanes read `a.b` as schema.object, so the published schema came
+-- out as EXA_DB and the object as the schema name -- the statement matched no
+-- model and fell through to the view guard (GitHub #9). Only EXA_DB counts: any
+-- other qualifier is left for Exasol to report. An unquoted name folds to upper
+-- case as Exasol folds it; a quoted one must match exactly.
+function M.is_catalog_qualifier(tokens, index)
+    local catalog, dot, schema, dot2, object = tokens[index], tokens[index + 1],
+        tokens[index + 2], tokens[index + 3], tokens[index + 4]
+    if catalog == nil or dot == nil or dot2 == nil or schema == nil or object == nil
+        or dot.text ~= "." or dot2.text ~= "." then
+        return false
+    end
+    local name
+    if catalog.kind == "word" then
+        name = upper(catalog.text)
+    elseif catalog.kind == "identifier" then
+        name = M.decode_quoted_identifier(catalog.text)
+    end
+    return name == "EXA_DB"
+        and (schema.kind == "word" or schema.kind == "identifier")
+        and (object.kind == "word" or object.kind == "identifier")
+end
+
 -- The uppercase form of a token for keyword comparison.
 --
 -- Falls back to the token's raw `text`, which for a quoted identifier still
