@@ -242,6 +242,11 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # aggregate checks and the outer re-aggregation guard still apply.
 "$PYTHON_BIN" tools/verify_wrapped_semantic_blocks.py
 
+# GitHub #14: Tableau sorts filter domains with ORDER BY 1 ASC NULLS FIRST.
+# Asserts ordinals keep their direction and null placement, an ordinal outside
+# the select list is SEMANTIC_QUERY_064, and structured requests carry nulls.
+"$PYTHON_BIN" tools/verify_order_by_ordinals.py
+
 # BUG-27: the materialization registry held a free-text refresh intent and no
 # state, so it could not say whether a materialization was stale. Asserts the
 # policy is validated, MARK_MATERIALIZATION_REFRESHED records measured state,

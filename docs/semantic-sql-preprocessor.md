@@ -135,7 +135,12 @@ with `SEMANTIC_QUERY_008`. Explicit `GROUP BY` lists may use selected
 dimension names or ordinals.
 
 `ORDER BY` is limited to selected semantic output fields, output aliases, or
-ordinals. Databricks-style `ORDER BY MEASURE(metric)` is accepted for selected
+ordinals, each with an optional `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST`.
+Tableau sorts filter domains with `ORDER BY 1 ASC NULLS FIRST`.
+
+An ordinal must name a position in the `SELECT` list: `0`, a negative number,
+a fraction, or a number past the end is refused with `SEMANTIC_QUERY_064`,
+which says how many items there are. Databricks-style `ORDER BY MEASURE(metric)` is accepted for selected
 metrics. `SELECT *` expands to the visible semantic dimensions and metrics for
 the published object.
 

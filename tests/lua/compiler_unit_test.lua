@@ -255,6 +255,34 @@ test("ORDER BY parser resolves aliases ordinals and directions", function()
     assert_equal(invalid_err.error_code, "SEMANTIC_QUERY_060")
 end)
 
+test("ORDER BY parser keeps null placement and bounds ordinals (Tableau)", function()
+    -- GitHub #14: Tableau sorts filter domains with `ORDER BY 1 ASC NULLS FIRST`,
+    -- and the null placement stopped the ordinal being recognised at all.
+    local selected = {"order_status", "total_revenue"}
+    local function parse(text)
+        local tokens = api.sql_tokens(text)
+        return api.parse_order_by(tokens, 1, #tokens, {}, selected)
+    end
+    local order_by = parse("1 ASC NULLS FIRST, 2 DESC NULLS LAST, order_status NULLS LAST")
+    assert_equal(order_by[1].field, "order_status")
+    assert_equal(order_by[1].direction, "ASC")
+    assert_equal(order_by[1].nulls, "FIRST")
+    assert_equal(order_by[2].field, "total_revenue")
+    assert_equal(order_by[2].direction, "DESC")
+    assert_equal(order_by[2].nulls, "LAST")
+    assert_equal(order_by[3].nulls, "LAST")
+    assert_equal(parse("1").nulls, nil)
+
+    for _, bad in ipairs({"0", "3", "-1", "1.5"}) do
+        local result, err = parse(bad .. " ASC NULLS FIRST")
+        assert_equal(result, nil)
+        assert_equal(err.error_code, "SEMANTIC_QUERY_064")
+        assert_contains(err.error_message, "which has 2 items")
+    end
+    local _, placement = parse("1 NULLS SOMEWHERE")
+    assert_equal(placement.error_code, "SEMANTIC_QUERY_060")
+end)
+
 test("SQL literal parser covers scalar and temporal forms", function()
     local cases = {
         {"'O''Reilly'", "O'Reilly"},
@@ -2362,6 +2390,23 @@ test("an aggregate wrapper is honoured only when the metric declares it", functi
 
     assert_branch("compiler.select.wrapper", declared.status == "OK", true)
     assert_branch("compiler.select.wrapper", mismatched.status == "OK", false)
+end)
+
+test("a request's ORDER BY null placement is rendered and validated", function()
+    local mock = compiler_query_fixture()
+    local ordered = with_query(mock, function()
+        return compile_request_json(api.json_encode({model = "sales", object = "SALES",
+            dimensions = {"order_status"}, metrics = {"total_revenue"},
+            order_by = {{field = "order_status", direction = "ASC", nulls = "first"}}}))
+    end)
+    assert_equal(ordered.status, "OK")
+    assert_contains(ordered.generated_sql, '"order_status" ASC NULLS FIRST')
+    local bad = with_query(mock, function()
+        return compile_request_json(api.json_encode({model = "sales", object = "SALES",
+            dimensions = {"order_status"}, metrics = {"total_revenue"},
+            order_by = {{field = "order_status", nulls = "MIDDLE"}}}))
+    end)
+    assert_equal(bad.error_code, "SEMANTIC_REQUEST_063")
 end)
 
 test("a MIN/MAX wrapper is lowered where each group is one row (Tableau ATTR)", function()

@@ -202,8 +202,10 @@ AGGREGATION_OVER_A_SUBQUERY = [
 # `SELECT SUM(CUSTOMER_REGION)` left this list when the aggregate guard stopped
 # being discarded by a successful rewrite: it now answers SEMANTIC_QUERY_006
 # rather than leaking a cast error carrying a data value.
+#
+# `ORDER BY 7` left it when an ordinal outside the select list got its own
+# refusal, SEMANTIC_QUERY_064, which expansion may not override (GitHub #14).
 KNOWN_RAW = [
-    f"SELECT CUSTOMER_REGION FROM {OBJECT} ORDER BY 7",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} ORDER BY nonexistent_col",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} WHERE nonexistent_col = 1",
     f"SELECT CUSTOMER_REGION FROM {OBJECT} WHERE TOTAL_REVENUE >",
@@ -251,6 +253,16 @@ def main() -> int:
     else:
         fail("an unknown field keeps the naming refusal",
              f"got {unknown!r}, so fallthrough shadowed the precise message")
+
+    # An ordinal past the end is refused before Exasol sees it. Expansion would
+    # compile it and leave `ORDER BY 7` in the outer SQL, so the lane's refusal
+    # is final (refusal_rules.lane_final).
+    ordinal = outcome(con, f"SELECT CUSTOMER_REGION FROM {OBJECT} ORDER BY 7")
+    if ordinal == ("refused", "SEMANTIC_QUERY_064"):
+        ok("an ordinal outside the select list is refused by the layer", "SEMANTIC_QUERY_064")
+    else:
+        fail("an ordinal outside the select list is refused by the layer",
+             f"got {str(ordinal)[:90]}, so expansion let Exasol report it")
 
     # Composition stays refused through both lanes -- the point of the guard is
     # that it cannot be dodged by choosing a form.

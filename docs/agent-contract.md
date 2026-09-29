@@ -189,12 +189,15 @@ Autonomous agents should prefer this JSON form:
     {"field": "order_status", "op": "=", "value": "COMPLETE"}
   ],
   "order_by": [
-    {"field": "total_revenue", "direction": "desc"}
+    {"field": "total_revenue", "direction": "desc", "nulls": "last"}
   ],
   "limit": 100,
   "client": "agent-name"
 }
 ```
+
+An `order_by` item may carry `nulls` (`"first"` or `"last"`) to place NULLs.
+Any other value is refused with `SEMANTIC_REQUEST_063`.
 
 The top-level request object is a closed contract. Accepted keys are `model`,
 `object`, `metrics`, `dimensions`, `filters`, `having`, `order_by`, `limit`,

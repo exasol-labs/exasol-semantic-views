@@ -17647,7 +17647,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "21d8df7e87c15ddb"
+ESV_RUNTIME_BUILD = "43407d7f2e3c331c"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18614,7 +18614,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "21d8df7e87c15ddb"
+ESV_RUNTIME_BUILD = "43407d7f2e3c331c"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -25130,7 +25130,19 @@ local function build_order_by(ctx, request_order_by, output_fields)
         if direction ~= "ASC" and direction ~= "DESC" then
             return nil, error_result("SEMANTIC_REQUEST_062", "Unsupported ORDER BY direction: " .. tostring(item.direction) .. ".")
         end
-        clauses[#clauses + 1] = quote_alias(field.name) .. " " .. direction
+        -- Null placement, as SQL writes it after the direction. Tableau sorts
+        -- filter domains with NULLS FIRST (GitHub #14).
+        local nulls = ""
+        if not missing(item.nulls) then
+            local placement = upper(item.nulls)
+            if placement ~= "FIRST" and placement ~= "LAST" then
+                return nil, error_result("SEMANTIC_REQUEST_063",
+                    "Unsupported ORDER BY null placement: " .. tostring(item.nulls)
+                        .. ". Use FIRST or LAST.")
+            end
+            nulls = " NULLS " .. placement
+        end
+        clauses[#clauses + 1] = quote_alias(field.name) .. " " .. direction .. nulls
     end
     return clauses, nil
 end
@@ -26660,6 +26672,20 @@ end
 local function parse_order_by(tokens, start_index, end_index, select_aliases, selected_output)
     local order_by = {}
     for _, part in ipairs(split_top_level(tokens, start_index, end_index, ",")) do
+        -- `<item> [ASC|DESC] [NULLS FIRST|LAST]`, read from the end. The null
+        -- placement used to stop an ordinal being recognised at all, so
+        -- Tableau's `ORDER BY 1 ASC NULLS FIRST` was refused (GitHub #14).
+        local nulls
+        if #part > 2 and sql_text.token_upper(part[#part - 1]) == "NULLS" then
+            local placement = sql_text.token_upper(part[#part])
+            if placement ~= "FIRST" and placement ~= "LAST" then
+                return nil, error_result("SEMANTIC_QUERY_060",
+                    "ORDER BY supports selected semantic fields only.")
+            end
+            nulls = placement
+            table.remove(part, #part)
+            table.remove(part, #part)
+        end
         local direction = "ASC"
         if #part > 1 then
             local last = sql_text.token_upper(part[#part])
@@ -26669,11 +26695,19 @@ local function parse_order_by(tokens, start_index, end_index, select_aliases, se
             end
         end
         local field = identifier_from_part(part)
-        if field == nil and #part == 1 and part[1].kind == "number" then
-            local ordinal = tonumber(part[1].text)
-            if selected_output ~= nil then
-                field = selected_output[ordinal]
+        -- An ordinal names a select item: positive, whole, and within the list.
+        local negative = #part == 2 and part[1].text == "-" and part[2].kind == "number"
+        if field == nil and ((#part == 1 and part[1].kind == "number") or negative) then
+            local ordinal = tonumber(part[#part].text)
+            local count = selected_output ~= nil and #selected_output or 0
+            if negative or ordinal == nil or ordinal < 1 or ordinal % 1 ~= 0 or ordinal > count then
+                return nil, error_result("SEMANTIC_QUERY_064",
+                    "ORDER BY " .. (negative and "-" or "") .. tostring(part[#part].text)
+                        .. " is not a position in the SELECT list, which has " .. tostring(count)
+                        .. " item" .. (count == 1 and "" or "s") .. ". Use 1 to "
+                        .. tostring(count) .. ", or name the field.")
             end
+            field = selected_output[ordinal]
         end
         if field == nil then
             return nil, error_result("SEMANTIC_QUERY_060", "ORDER BY supports selected semantic fields only.")
@@ -26681,7 +26715,7 @@ local function parse_order_by(tokens, start_index, end_index, select_aliases, se
         if select_aliases ~= nil and select_aliases[upper(field)] ~= nil then
             field = select_aliases[upper(field)]
         end
-        order_by[#order_by + 1] = {field = field, direction = direction}
+        order_by[#order_by + 1] = {field = field, direction = direction, nulls = nulls}
     end
     return order_by, nil
 end
@@ -27119,13 +27153,19 @@ refusal_rules.expansion_wins = {
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
--- There is deliberately no third set for "lane refusals expansion may not
--- override". One was written while fixing the aggregate guard and then removed:
--- reference expansion raises SEMANTIC_QUERY_006 and _007 itself now, through the
--- same routine the whole-statement lane uses, so the protective set could not be
--- made to fire. Reverting the expansion-side guard fails five checks in
--- tools/verify_sql_lane_parity.py; reverting the protective set failed none.
--- A rule that cannot fire is worse than no rule, because it reads like coverage.
+-- Lane refusals expansion may not override. A first version of this set was
+-- written while fixing the aggregate guard and removed, because reference
+-- expansion raises SEMANTIC_QUERY_006 and _007 itself, so it could not fire. A
+-- rule that cannot fire is worse than no rule, because it reads like coverage.
+--
+-- SEMANTIC_QUERY_064 can: an ORDER BY ordinal outside the select list is wrong
+-- whichever lane reads it, but expansion leaves the ORDER BY outside the derived
+-- table, compiles successfully, and Exasol then fails on `ORDER BY 0` with a
+-- message about positions in SQL the author never wrote (GitHub #14).
+-- verify_order_by_ordinals.py fails if this entry is removed.
+refusal_rules.lane_final = {
+    SEMANTIC_QUERY_064 = true,
+}
 
 -- `SEMANTIC_QUERY_011` -- "cannot tell which columns of X this statement needs"
 -- -- is expansion's own refusal too, but it is about the statement as a whole,
@@ -28675,6 +28715,9 @@ function M.with_expansion_fallthrough(sql_text, result)
         return result
     end
     local lane_had_an_opinion = result ~= nil and result.status ~= "UNCHANGED"
+    if result ~= nil and refusal_rules.lane_final[result.error_code or ""] then
+        return result
+    end
     local expanded_ok, expanded = pcall(bi_expansion.rewrite, sql_text)
     if not expanded_ok then
         -- Expansion broke rather than refused. If the other lane read the

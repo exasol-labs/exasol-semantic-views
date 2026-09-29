@@ -125,6 +125,13 @@ OVERLOADED_RULE_CODES = {
 # The one string-match this rule was written to delete.
 RETIRED_MESSAGE_MATCH = "no binding for active representation"
 
+# Numbers used by both SEMANTIC_REQUEST_* and SEMANTIC_QUERY_* for different
+# conditions, which the SQL lane reports under one code. See
+# test_no_request_code_collides_with_a_query_code.
+SHARED_REQUEST_QUERY_NUMBERS = {
+    "001", "004", "012", "015", "020", "032", "033", "040", "050", "060",
+}
+
 # A code carrying a severity letter -- SEMANTIC_ADMIN_W060 for an advisory --
 # puts two numbering conventions in one namespace. Severity belongs to the
 # channel: a refusal is raised, an advisory arrives in a column
@@ -240,6 +247,28 @@ class OneConditionOneRuleCode(unittest.TestCase):
             RETIRED_MESSAGE_MATCH, body,
             "the ordering recognises the cause by its wording again; that is "
             "the coupling splitting the code removed")
+
+    def test_no_request_code_collides_with_a_query_code(self):
+        """The SQL lane reports SEMANTIC_REQUEST_NNN as SEMANTIC_QUERY_NNN.
+
+        envelope.recode_error_prefix renames every request-lane refusal a SQL
+        statement reaches, so the two prefixes share one set of numbers. The
+        ORDER BY ordinal refusal was first written as SEMANTIC_QUERY_061, which
+        the SQL lane already reported for an unselected ORDER BY field, and a
+        per-code count could not see it. The numbers below already carried two
+        meanings when this was measured; the set may shrink, not grow.
+        """
+        folded: dict[str, set[str]] = collections.defaultdict(set)
+        for code in self.messages:
+            family, number = code.rsplit("_", 1)
+            if family in ("SEMANTIC_REQUEST", "SEMANTIC_QUERY"):
+                folded[number].add(family)
+        shared = {number for number, families in folded.items() if len(families) > 1}
+        self.assertEqual(
+            SHARED_REQUEST_QUERY_NUMBERS, shared,
+            "SEMANTIC_REQUEST_NNN and SEMANTIC_QUERY_NNN reach a SQL caller as "
+            "one code. Take a number neither family uses; if you split a pinned "
+            "pair, remove it here")
 
 
 # ---------------------------------------------------------------------------

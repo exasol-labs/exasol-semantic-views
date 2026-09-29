@@ -206,25 +206,29 @@ def test_order_by_ordinal_three_fields(con) -> None:
 
 
 def test_order_by_ordinal_out_of_range(con) -> None:
-    """Ordinal that exceeds the SELECT list length returns SEMANTIC_QUERY_060."""
+    """Ordinal that exceeds the SELECT list length returns SEMANTIC_QUERY_064.
+
+    Out-of-range ordinals have their own code since GitHub #14; they were
+    SEMANTIC_QUERY_060, the generic ORDER BY refusal.
+    """
     result = compile_sql(con,
         "SELECT customer_region, total_revenue "
         "FROM SEMANTIC_SALES.SALES "
         "GROUP BY customer_region "
         "ORDER BY 5 DESC"
     )
-    assert_error("order_by_ordinal/out_of_range", result, "SEMANTIC_QUERY_060")
+    assert_error("order_by_ordinal/out_of_range", result, "SEMANTIC_QUERY_064")
 
 
 def test_order_by_ordinal_zero(con) -> None:
-    """Ordinal 0 is out of range (1-based) and returns SEMANTIC_QUERY_060."""
+    """Ordinal 0 is out of range (1-based) and returns SEMANTIC_QUERY_064."""
     result = compile_sql(con,
         "SELECT customer_region, total_revenue "
         "FROM SEMANTIC_SALES.SALES "
         "GROUP BY customer_region "
         "ORDER BY 0"
     )
-    assert_error("order_by_ordinal/zero", result, "SEMANTIC_QUERY_060")
+    assert_error("order_by_ordinal/zero", result, "SEMANTIC_QUERY_064")
 
 
 def test_order_by_ordinal_with_limit(con) -> None:

@@ -8,6 +8,23 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### `ORDER BY` null placement, and ordinals with it (#14)
+
+- Tableau fills a filter card with `SELECT "SALES"."ORDER_STATUS" … GROUP BY 1
+  ORDER BY 1 ASC NULLS FIRST`. The parser did not know `NULLS FIRST`/`LAST`,
+  and the extra words stopped the ordinal being recognised, so the statement
+  was refused with `SEMANTIC_QUERY_060` and the card stayed empty.
+- `ORDER BY` items now take `NULLS FIRST` or `NULLS LAST` after an optional
+  direction, and the generated SQL keeps them. A structured request's
+  `order_by` item takes the same placement as `nulls` (`"first"` or `"last"`);
+  any other value is `SEMANTIC_REQUEST_063`.
+- An ordinal must name a position in the `SELECT` list. `0`, a negative
+  number, a fraction or a number past the end is refused with the new
+  `SEMANTIC_QUERY_064`, which says how many items there are. Reference
+  expansion may not override that refusal: it would leave the invalid ordinal
+  in the outer SQL for Exasol to fail on.
+  `tools/verify_order_by_ordinals.py` holds the Tableau statement.
+
 #### Power BI's aggregation over a semantic view (#15)
 
 - Power BI DirectQuery aggregates inside a derived table and shapes the result

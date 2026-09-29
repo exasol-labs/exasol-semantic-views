@@ -753,7 +753,7 @@ SELECT * FROM (VALUES
   ('GROUP BY', 'SUPPORTED',
    'Optional. Inferred from the selected dimensions when omitted; an explicit list must cover them exactly.', 'SEMANTIC_QUERY_008', NULL),
   ('ORDER BY and LIMIT', 'SUPPORTED',
-   'Selected output fields, output aliases, or ordinals. LIMIT 0 returns the shape with no rows.', NULL, NULL),
+   'Selected output fields, output aliases, or ordinals, each with ASC/DESC and NULLS FIRST/LAST. An ordinal outside the select list is refused with SEMANTIC_QUERY_064. LIMIT 0 returns the shape with no rows.', NULL, NULL),
   ('ORDER BY a field that is not selected', 'SUPPORTED',
    'Also OFFSET, SELECT DISTINCT, arithmetic and CASE in the select list, IN (subquery) and correlated EXISTS on a selected dimension.', NULL, NULL),
   ('Catalog-qualified names', 'SUPPORTED',
