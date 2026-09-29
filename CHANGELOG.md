@@ -8,6 +8,33 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+#### Power BI's aggregation over a semantic view (#15)
+
+- Power BI DirectQuery aggregates inside a derived table and shapes the result
+  outside it: `SELECT r, C1 FROM (SELECT r, SUM(m) AS C1 FROM obj GROUP BY r)
+  ITBL WHERE NOT C1 IS NULL LIMIT 1000001`. That is its basic table visual, and
+  its wide, Top N and filter shapes work the same way. Reference expansion
+  replaced only the reference, which left the inner `GROUP BY` running over an
+  already-grouped result, so every such query was refused with
+  `SEMANTIC_QUERY_015`.
+- A parenthesised block that is itself a semantic query over one object, one
+  that groups it or aggregates its fields, is now compiled exactly as if it
+  were written on its own, at the grain it names. The compiled SQL replaces the
+  block, and the outer `WHERE`, `ORDER BY` and `LIMIT` stay ordinary SQL.
+  - A mismatched aggregate inside is still `SEMANTIC_QUERY_007`.
+  - An outer aggregate over the block's results is still judged by
+    `SEMANTIC_QUERY_016`.
+  - `SEMANTIC_QUERY_015` remains for a grouped block that cannot be compiled on
+    its own.
+- This also fixes a wrapped aggregating block without `GROUP BY`, which used to
+  run as plain SQL and fail in Exasol with `not a single-group group function`.
+- An unquoted output alias is now named as Exasol names it (`AS r` gives column
+  `R`); a quoted alias keeps its spelling. The lower-case `"r"` it used to emit
+  could not be found by a statement wrapping the compiled SQL.
+- Not yet supported: the slicer shape with `COUNT(1)` per group, which is still
+  refused. Counting rows of a semantic result needs its own policy.
+  `tools/verify_wrapped_semantic_blocks.py` holds the Power BI shapes.
+
 #### Tableau's ATTR-style `MIN`/`MAX` over a governed metric (#8)
 
 - Tableau emits `MAX(metric)` and `MIN(metric)` for attribute calculations,

@@ -1937,6 +1937,63 @@ test("a filter on a dimension nobody selects runs inside the compile", function(
     assert_contains(nested.refusal.error_message, "Filter with literal values")
 end)
 
+test("a wrapped block that aggregates the object is compiled as a semantic query", function()
+    -- GitHub #15: Power BI DirectQuery aggregates inside a derived table and
+    -- shapes the result outside it. The inner block is the statement the
+    -- whole-statement lane compiles bare, so it is compiled as one and spliced.
+    local function block(text)
+        local tokens = api.sql_tokens(text)
+        local references = api.bi_find_references(tokens)
+        return api.bi_semantic_block(tokens, references[#references], references), text
+    end
+    local S = '"EXA_DB"."SEMANTIC_SALES"."SALES"'
+
+    local found, text = block('SELECT "CUSTOMER_REGION", "C1" FROM (SELECT "CUSTOMER_REGION",'
+        .. ' SUM("TOTAL_REVENUE") AS "C1" FROM ' .. S .. ' GROUP BY "CUSTOMER_REGION") AS "ITBL"'
+        .. ' WHERE NOT "C1" IS NULL LIMIT 1000001')
+    assert_true(found.grouped)
+    -- The span is the inner SELECT exactly: the outer WHERE and LIMIT stay outside.
+    assert_equal(string.sub(text, found.first_pos, found.last_pos), 'SELECT "CUSTOMER_REGION",'
+        .. ' SUM("TOTAL_REVENUE") AS "C1" FROM ' .. S .. ' GROUP BY "CUSTOMER_REGION"')
+
+    -- An aggregate without GROUP BY is a semantic query too, but ungrouped.
+    local ungrouped = block("SELECT * FROM (SELECT CUSTOMER_REGION, SUM(TOTAL_REVENUE)"
+        .. " FROM SEMANTIC_SALES.SALES) w")
+    assert_true(ungrouped ~= nil and not ungrouped.grouped)
+    -- One arm of a parenthesized union is its own block.
+    local arm, arm_text = block("SELECT * FROM (SELECT t0.CUSTOMER_REGION, SUM(t0.TOTAL_REVENUE)"
+        .. " FROM SEMANTIC_SALES.SALES t0 GROUP BY 1 UNION ALL SELECT 'x', 1 FROM DUAL) u")
+    assert_contains(string.sub(arm_text, arm.first_pos, arm.last_pos), "GROUP BY 1")
+    assert_true(not string.find(string.sub(arm_text, arm.first_pos, arm.last_pos), "UNION", 1, true))
+
+    -- Not a semantic block: nothing aggregated, top level, a join, or another
+    -- semantic reference inside it.
+    assert_equal(block("SELECT * FROM (SELECT CUSTOMER_REGION FROM SEMANTIC_SALES.SALES) w"), nil)
+    assert_equal(block("SELECT CUSTOMER_REGION, SUM(TOTAL_REVENUE) FROM SEMANTIC_SALES.SALES"
+        .. " GROUP BY 1"), nil)
+    assert_equal(block("SELECT * FROM (SELECT t0.CUSTOMER_REGION, SUM(t0.TOTAL_REVENUE)"
+        .. " FROM SEMANTIC_SALES.SALES t0 JOIN MART.X x ON x.r = t0.CUSTOMER_REGION GROUP BY 1) w"), nil)
+    local tokens = api.sql_tokens("SELECT * FROM (SELECT t0.CUSTOMER_REGION, SUM(t0.TOTAL_REVENUE)"
+        .. " FROM SEMANTIC_SALES.SALES t0 WHERE t0.CUSTOMER_REGION IN (SELECT t1.CUSTOMER_REGION"
+        .. " FROM SEMANTIC_SALES.SALES t1) GROUP BY 1) w")
+    local references = api.bi_find_references(tokens)
+    assert_equal(api.bi_semantic_block(tokens, references[1], references), nil)
+end)
+
+test("an unquoted SELECT alias is output as Exasol names it", function()
+    -- `AS r` used to emit "r"; a statement wrapping the compiled SQL then could
+    -- not find the column as r, which Exasol folds to R. A quoted alias is kept.
+    local mock = compiler_query_fixture()
+    local unquoted = with_query(mock, function()
+        return compile_sql("SELECT order_status AS status_code FROM SEMANTIC_SALES.SALES")
+    end)
+    assert_contains(unquoted.generated_sql, 'AS "STATUS_CODE"')
+    local quoted = with_query(mock, function()
+        return compile_sql('SELECT order_status AS "statusCode" FROM SEMANTIC_SALES.SALES')
+    end)
+    assert_contains(quoted.generated_sql, 'AS "statusCode"')
+end)
+
 test("reference expansion finds what to compile, and refuses to guess", function()
     -- Projection inference is the correctness surface of expansion. An earlier
     -- prototype defaulted to "all columns" when it could not tell and returned

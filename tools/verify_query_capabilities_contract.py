@@ -80,8 +80,14 @@ PROBES = {
         # reference expansion is the one that answers. Where that path *can*
         # read the statement it says something sharper, which is why the bare
         # forms appear under GROUP BY and COUNT(*) instead.
-        "sql": f"WITH x AS (SELECT CUSTOMER_REGION, COUNT(*) c FROM {PUBLISHED}"
-               " GROUP BY CUSTOMER_REGION) SELECT * FROM x",
+        #
+        # Since GitHub #15 a grouped block that is a semantic query on its own
+        # is compiled as one, so this block also reads a second reference to
+        # the object -- the case that still cannot be compiled by itself.
+        "sql": f"WITH x AS (SELECT t0.CUSTOMER_REGION, SUM(t0.TOTAL_REVENUE) AS R"
+               f" FROM {PUBLISHED} t0 WHERE t0.CUSTOMER_REGION IN"
+               f" (SELECT t1.CUSTOMER_REGION FROM {PUBLISHED} t1)"
+               " GROUP BY t0.CUSTOMER_REGION) SELECT * FROM x",
     },
     "Selecting a field the model withholds": {
         "setup": ("metric", {"IS_PRIVATE": "TRUE"}),
@@ -171,6 +177,7 @@ SUPPORTED_SHAPES = {
     "ORDER BY a field that is not selected",
     "Statements that wrap the object",
     "Catalog-qualified names",
+    "A wrapped block that aggregates the object",
     "The shape of the statement around the object",
     "CREATE VIEW over an object",
     "Malformed or non-Exasol SQL around the object",

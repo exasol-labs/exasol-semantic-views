@@ -236,6 +236,12 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 # rows is SEMANTIC_QUERY_018.
 "$PYTHON_BIN" tools/verify_attr_wrappers.py
 
+# GitHub #15: Power BI aggregates inside a derived table and shapes the result
+# outside. Asserts the inner block is compiled as a semantic query -- table,
+# wide, filtered and Top N shapes equal their bare statements -- while the
+# aggregate checks and the outer re-aggregation guard still apply.
+"$PYTHON_BIN" tools/verify_wrapped_semantic_blocks.py
+
 # BUG-27: the materialization registry held a free-text refresh intent and no
 # state, so it could not say whether a materialization was stale. Asserts the
 # policy is validated, MARK_MATERIALIZATION_REFRESHED records measured state,

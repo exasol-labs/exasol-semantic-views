@@ -238,8 +238,44 @@ has more to say about the particular statement — unless the model has opted in
 ordinary-SQL semantics with `SET_MODEL_DERIVED_COMPOSITION`, which covers this
 hazard and the join hazard together.
 
-Aggregating in an *outer* block is the supported form, because there the caller
-has named the grain:
+### A wrapped block that is itself a semantic query
+
+BI tools often put the aggregation in a derived table and shape the result
+outside it. Power BI DirectQuery sends this for its basic table visual:
+
+```sql
+SELECT "CUSTOMER_REGION", "C1"
+FROM (SELECT "CUSTOMER_REGION", SUM("TOTAL_REVENUE") AS "C1"
+      FROM "EXA_DB"."SEMANTIC_SALES"."SALES" GROUP BY "CUSTOMER_REGION") AS "ITBL"
+WHERE NOT "C1" IS NULL
+LIMIT 1000001
+```
+
+The inner block is a complete semantic query over one object: it groups the
+object, or aggregates its fields. So it is compiled as that query, exactly as
+if it were written on its own, at the grain it names. The compiled SQL replaces
+the block, and everything outside it (the outer `WHERE`, `ORDER BY`, `LIMIT`,
+Top N) stays ordinary SQL for Exasol. The checks are the ones the bare statement
+gets:
+- a mismatched aggregate is still `SEMANTIC_QUERY_007`;
+- an explicit `GROUP BY` must still cover the selected dimensions;
+- an outer aggregate over the block's results is still judged by
+  `SEMANTIC_QUERY_016`.
+
+A block qualifies when it is parenthesised (a derived table, a CTE, one arm of
+a parenthesised `UNION`), reads only that object, and contains no other
+semantic reference. A grouped block that does not qualify, such as one that
+also reads another semantic object, keeps the `SEMANTIC_QUERY_015` refusal
+above. Models that opted into ordinary-SQL semantics keep them.
+
+An unquoted output alias is named as Exasol names it (`AS r` gives column `R`),
+so the statement around a compiled block finds it. A quoted alias keeps its
+exact spelling.
+
+Aggregating in an outer block over a block that does not itself aggregate is
+the other supported form:
+
+Because there the caller has named the grain:
 
 ```sql
 SELECT COUNT(*) FROM (SELECT t0.CUSTOMER_REGION FROM SEMANTIC_SALES.SALES t0) z

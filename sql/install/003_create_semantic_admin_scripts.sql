@@ -17647,7 +17647,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "24f14a2a745837a8"
+ESV_RUNTIME_BUILD = "21d8df7e87c15ddb"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18614,7 +18614,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "24f14a2a745837a8"
+ESV_RUNTIME_BUILD = "21d8df7e87c15ddb"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -26291,16 +26291,25 @@ local function identifier_from_part(part)
     return nil
 end
 
+-- The output name a select item asks for, as Exasol would name the column: an
+-- unquoted alias folds to upper case, a quoted one is kept exactly. Emitting
+-- `AS r` as "r" named the column in lower case, which a statement wrapping the
+-- compiled SQL then could not find as r (GitHub #15).
 local function alias_from_select_part(part)
+    local alias
     for i, token in ipairs(part) do
         if sql_text.token_upper(token) == "AS" and part[i + 1] ~= nil then
-            return token_identifier_value(part[i + 1])
+            alias = part[i + 1]
+            break
         end
     end
-    if #part == 2 and (part[1].kind == "word" or part[1].kind == "identifier") and (part[2].kind == "word" or part[2].kind == "identifier") then
-        return token_identifier_value(part[2])
+    if alias == nil and #part == 2 and (part[1].kind == "word" or part[1].kind == "identifier")
+        and (part[2].kind == "word" or part[2].kind == "identifier") then
+        alias = part[2]
     end
-    return nil
+    if alias == nil or token_identifier_value(alias) == nil then return nil end
+    return alias.kind == "word" and upper(token_identifier_value(alias))
+        or token_identifier_value(alias)
 end
 
 local function literal_from_tokens(tokens)
@@ -27769,9 +27778,10 @@ do
             and item[count - 1].text ~= "." then
             body, output = {table.unpack(item, 1, count - 1)}, token_identifier_value(item[count])
         end
-        -- MEASURE(x) / AGG(x) select the field as defined.
+        -- MEASURE(x) / AGG(x) select the field as defined; SUM(x) AS "C1" and
+        -- the other wrappers a compiled block accepts expose x under that name.
         local wrapper = sql_text.token_upper(body[1])
-        if (wrapper == "MEASURE" or wrapper == "AGG") and body[2] ~= nil
+        if METRIC_WRAPPERS[wrapper or ""] and body[2] ~= nil
             and body[2].text == "(" and body[#body].text == ")" then
             body = {table.unpack(body, 3, #body - 1)}
         end
@@ -28107,6 +28117,63 @@ do
         }
     end
 
+    -- A wrapped block that is itself a semantic query over this one object.
+    --
+    -- BI tools put the aggregation in a derived table and shape the result
+    -- outside it -- Power BI DirectQuery sends
+    -- `SELECT r, C1 FROM (SELECT r, SUM(m) AS C1 FROM obj GROUP BY r) ITBL
+    -- WHERE NOT C1 IS NULL LIMIT 1000001` for its most basic table visual
+    -- (GitHub #15). Replacing only the reference left that inner GROUP BY to run
+    -- over an already-grouped result, which is why it was refused with _015; and
+    -- an inner aggregate without GROUP BY ran as plain SQL and failed in Exasol.
+    -- The inner block is exactly the statement the whole-statement lane compiles
+    -- bare, at the grain it names, with the same aggregate and grouping checks.
+    -- So it is compiled by that lane, and the compiled SQL replaces the block;
+    -- everything outside it stays ordinary SQL for Exasol.
+    --
+    -- Returns the block's span, or nil: the block must be parenthesized (a
+    -- top-level statement is the whole-statement lane's already), read only this
+    -- object (a join is _012's), contain no other semantic reference, and
+    -- aggregate -- GROUP BY / HAVING, or an aggregate wrapper in its select list.
+    function bi_expansion.semantic_block(tokens, reference, references)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return nil end
+        local select_index = first - 1
+        local open = tokens[select_index - 1]
+        if open == nil or open.text ~= "(" then return nil end
+        if bi_expansion.composed_in_from(tokens, reference) then return nil end
+        local block_last = #tokens
+        for index = reference.last + 1, #tokens do
+            local token = tokens[index]
+            if token.depth < reference.depth or (token.depth == reference.depth
+                and bi_expansion.SET_OPERATORS[sql_text.token_upper(token)]) then
+                block_last = index - 1
+                break
+            end
+        end
+        for _, other in ipairs(references or {}) do
+            if other ~= reference and other.first >= select_index and other.first <= block_last then
+                return nil
+            end
+        end
+        local grouped = bi_expansion.reaggregated_in_block(tokens, reference)
+        local aggregating = grouped
+        for index = first, last do
+            local following = tokens[index + 1]
+            if not aggregating and tokens[index].depth == reference.depth
+                and METRIC_WRAPPERS[sql_text.token_upper(tokens[index]) or ""]
+                and following ~= nil and following.text == "(" then
+                aggregating = true
+            end
+        end
+        if not aggregating then return nil end
+        return {
+            grouped = grouped,
+            first_pos = tokens[select_index].start_pos,
+            last_pos = tokens[block_last].end_pos,
+        }
+    end
+
     function bi_expansion.composed_in_from(tokens, reference)
         -- Walked outward, not just across the reference's own FROM clause.
         --
@@ -28319,6 +28386,63 @@ do
             -- re-aggregation is ordinary-SQL semantics. Refusing it anyway would
             -- make the opt-in mean two different things depending on which
             -- hazard the statement happened to reach.
+            -- A wrapped block that is a whole semantic query is compiled as one.
+            -- Grouped, the compile's answer is final: its refusal is the precise
+            -- one (a mismatched aggregate, an uncovered GROUP BY). Ungrouped, a
+            -- refusal falls back to reference expansion, which already answers
+            -- aggregate-over-object shapes such as arithmetic around a SUM.
+            local block = not bi_expansion.allows_composition(reference.published_schema)
+                and bi_expansion.semantic_block(tokens, reference, applicable) or nil
+            if block then
+                local block_wanted = bi_expansion.infer_columns(tokens, reference,
+                    reference.columns, reference.by_name)
+                local reaggregation = block_wanted ~= nil
+                    and bi_expansion.outer_reaggregation_refusal(tokens, reference, block_wanted) or nil
+                if reaggregation ~= nil then
+                    return reaggregation
+                end
+                local compiled_block = compile_sql_internal(
+                    string.sub(statement_text, block.first_pos, block.last_pos), {
+                        validate = false,
+                        unchanged_nonsemantic = false,
+                        unchanged_unknown_schema = false,
+                        sql_cache = true,
+                    })
+                if compiled_block ~= nil and compiled_block.status == "OK" then
+                    if #applicable == 1 then
+                        inner_plan_json = compiled_block.plan_json
+                        inner_model = reference.model
+                    end
+                    if view_schema ~= nil and reference.model ~= nil then
+                        frozen[#frozen + 1] = {
+                            model = reference.model, reference = reference,
+                            columns = table.concat(block_wanted or {}, ","),
+                            sql = compiled_block.generated_sql,
+                            relations = compile_cache.qualified_relations(compiled_block.generated_sql),
+                        }
+                    end
+                    rewritten = string.sub(rewritten, 1, block.first_pos - 1)
+                        .. sql_text.flatten_lines(compiled_block.generated_sql)
+                        .. string.sub(rewritten, block.last_pos + 1)
+                    expanded = expanded + 1
+                    goto next_reference
+                end
+                if block.grouped then
+                    -- The compile read this block and said why it will not
+                    -- answer it; that is the answer the statement gets, not the
+                    -- other lane's view of the wrapper around it.
+                    if compiled_block ~= nil then
+                        compiled_block.block_refusal = true
+                        return compiled_block
+                    end
+                    -- The same condition as the projection compile's below: the
+                    -- compile returned nothing at all.
+                    return error_result("SEMANTIC_QUERY_999",
+                        "Expansion could not compile " .. string.sub(statement_text,
+                            block.first_pos, block.last_pos))
+                end
+            end
+
             if bi_expansion.reaggregated_in_block(tokens, reference)
                 and not bi_expansion.allows_composition(reference.published_schema) then
                 return error_result("SEMANTIC_QUERY_015",
@@ -28483,6 +28607,7 @@ do
                 .. replacement
                 .. string.sub(rewritten, tokens[reference.last].end_pos + 1)
             expanded = expanded + 1
+            ::next_reference::
         end
 
         -- Recorded after every reference compiled, so a statement that refuses
@@ -28577,6 +28702,7 @@ function M.with_expansion_fallthrough(sql_text, result)
     if expanded ~= nil
         and (expanded.status == "OK"
              or refusal_rules.expansion_wins[expanded.error_code or ""]
+             or expanded.block_refusal
              or (not lane_had_an_opinion
                  and refusal_rules.expansion_wins_when_unjudged[expanded.error_code or ""])) then
         return expanded
@@ -28823,6 +28949,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         bi_pushdown_filter = bi_expansion.pushdown_filter,
         bi_wrapper_refusal = bi_expansion.wrapper_refusal,
         bi_own_block_covers_grain = bi_expansion.own_block_covers_grain,
+        bi_semantic_block = bi_expansion.semantic_block,
         within_trust_boundary = compile_cache.within_trust_boundary,
         quote_ident = sql_text.quote_ident,
         quote_qualified = sql_text.quote_qualified,
