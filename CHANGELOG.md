@@ -6,6 +6,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-29
+
+A BI compatibility release. Power BI and Tableau emit statement shapes that 0.3
+refused or passed to Exasol unrecognised: catalog-qualified names, aggregation
+inside a derived table, ATTR-style `MIN`/`MAX`, and `ORDER BY 1 ASC NULLS
+FIRST`. Each now compiles. Both tools can also enable the preprocessor on every
+connection they open, so neither needs a database-wide setting.
+
 ### Added
 
 #### `ORDER BY` null placement, and ordinals with it (#14)
@@ -2547,8 +2555,8 @@ not select is refused. Each is called out below.
 
 ## Notes on versioning
 
-Version 0.3 is the third tagged release. Items above are tracked against the
-development baseline established by the user-study simulations run on
-2026-05-13. Phases 1 and 2 are complete, and the statements Phase 3 deferred --
-subqueries, CTEs and CAST around a semantic object -- compile as of 0.3 through
-reference expansion.
+Version 0.3.1 is a patch release on 0.3, the third tagged release. Items above
+are tracked against the development baseline established by the user-study
+simulations run on 2026-05-13. Phases 1 and 2 are complete, and the statements
+Phase 3 deferred -- subqueries, CTEs and CAST around a semantic object -- compile
+as of 0.3 through reference expansion.
