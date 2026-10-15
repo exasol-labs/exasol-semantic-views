@@ -50,7 +50,7 @@ SOURCE_VIEWS_END = "-- END GENERATED SEMANTIC_SOURCE_VIEWS"
 # generated, so a reference to anything not in this set must resolve to a
 # catalog table or the build fails.
 SOURCE_VIEWS_HANDWRITTEN = {"EFFECTIVE_PRINCIPAL", "AUTHORIZED_MODELS", "MODEL_RELATIONS",
-                            "MY_AGENT_REQUESTS", "MY_QUERY_LOG"}
+                            "MY_AGENT_REQUESTS", "MY_QUERY_LOG", "MY_SETTINGS"}
 
 # The compiler modules whose catalog reads define the scoped surface. The admin
 # modules are deliberately absent: VALIDATE_MODEL and the authoring scripts are

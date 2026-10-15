@@ -701,6 +701,25 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.QUERY_LOG (
   RUNTIME_MS            DECIMAL(18,0)
 );
 
+-- Run-time switches an administrator changes without editing runtime source or
+-- reinstalling. A row without SESSION_ID applies to the deployment; one with a
+-- SESSION_ID overrides it for that session. Written by SET_QUERY_LOGGING, and
+-- not granted to SEMANTIC_USER: a caller cannot switch off its own logging.
+CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.SETTINGS (
+  SETTING_NAME   VARCHAR(128) NOT NULL,
+  SESSION_ID     DECIMAL(20,0),
+  SETTING_VALUE  VARCHAR(2000) NOT NULL,
+  SET_BY         VARCHAR(256) DEFAULT CURRENT_USER,
+  SET_AT         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- The shipped default, inserted only where none is set, so an administrator's
+-- choice survives a re-install.
+INSERT INTO SYS_SEMANTIC.SETTINGS (SETTING_NAME, SETTING_VALUE)
+SELECT 'PREPROCESSOR_QUERY_LOG', 'ON' FROM DUAL
+ WHERE NOT EXISTS (SELECT 1 FROM SYS_SEMANTIC.SETTINGS
+                    WHERE SETTING_NAME = 'PREPROCESSOR_QUERY_LOG' AND SESSION_ID IS NULL);
+
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.VALIDATION_RUNS (
   VALIDATION_RUN_ID DECIMAL(18,0) IDENTITY PRIMARY KEY,
   MODEL_ID          DECIMAL(18,0),

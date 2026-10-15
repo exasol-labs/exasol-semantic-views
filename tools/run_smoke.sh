@@ -232,9 +232,15 @@ export PERF_MIN_CARDINALITY="${PERF_MIN_CARDINALITY:-3}"
 
 # GitHub #8: Tableau's ATTR emits MIN/MAX around a SUM metric. Asserts they are
 # lowered to the governed value where each group is one row (and the plan says
-# so), SUM/AVG/COUNT mismatches stay SEMANTIC_QUERY_007, and a group of several
-# rows is SEMANTIC_QUERY_018.
+# so), a COUNT mismatch stays SEMANTIC_QUERY_007, and a group of several rows is
+# SEMANTIC_QUERY_018.
 "$PYTHON_BIN" tools/verify_attr_wrappers.py
+
+# GitHub #18: preprocessor query logging is a setting. Asserts OFF writes no row
+# for a rewrite or a refusal, ON writes both with the refusal's ERROR_CODE, a
+# session override wins, ordinary SQL is never logged, and a SEMANTIC_USER
+# principal cannot change it.
+"$PYTHON_BIN" tools/verify_preprocessor_query_logging.py
 
 # GitHub #15: Power BI aggregates inside a derived table and shapes the result
 # outside. Asserts the inner block is compiled as a semantic query -- table,
