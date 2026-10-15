@@ -615,7 +615,6 @@ def test_materialization_bypassed_with_having(con) -> None:
     if not assert_ok("mat_bypass/having/compiles", result):
         return
     sql = result["generated_sql"]
-    plan_str = result["plan_json"] or ""
     assert_contains("mat_bypass/having/having_in_sql", sql, "HAVING")
     # Materialization SQL references 'MART' schema; full physical SQL uses table aliases
     if "MART" in sql and "SALES_REVENUE_BY_REGION" in sql:

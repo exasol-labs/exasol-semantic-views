@@ -4,7 +4,6 @@ Simulated user test for the Exasol Semantic Views project.
 """
 import sys
 import json
-import traceback
 
 sys.path.insert(0, '/Users/alexander.stigsen/Dev/exasol-semantic-views/tools')
 from persona_test_helper import sql, execute_script, run_statement, get_conn, TestLog
@@ -105,7 +104,7 @@ else:
 rows9, cols9, err9 = sql("SELECT MODEL_NAME, VERSION_NUMBER, STATUS, ISSUE_COUNT, ERROR_COUNT, WARNING_COUNT, STARTED_AT FROM SEMANTIC_CATALOG.VALIDATION_RUNS ORDER BY STARTED_AT DESC LIMIT 5")
 log.step("2.2 Check SEMANTIC_CATALOG.VALIDATION_RUNS", "SELECT * FROM SEMANTIC_CATALOG.VALIDATION_RUNS ORDER BY STARTED_AT DESC LIMIT 5", rows9, err9)
 if rows9:
-    print(f"  Recent validation runs:")
+    print("  Recent validation runs:")
     for r in rows9:
         print(f"    {r}")
 elif err9:
@@ -119,7 +118,7 @@ else:
 rows10, cols10, err10 = sql("SELECT MODEL_NAME, SEVERITY, OBJECT_TYPE, OBJECT_NAME, RULE_CODE, MESSAGE FROM SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES ORDER BY SEVERITY, RULE_CODE")
 log.step("2.3 Check SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES", "SELECT * FROM SEMANTIC_CATALOG.CURRENT_VALIDATION_ISSUES", rows10, err10)
 if rows10:
-    print(f"  Current validation issues:")
+    print("  Current validation issues:")
     for r in rows10:
         print(f"    {r}")
 elif err10:
@@ -171,7 +170,7 @@ rows12b, cols12b, err12b = execute_script("EXECUTE SCRIPT SEMANTIC_ADMIN.GET_BUS
 log.step("3.3 GET_BUSINESS_GLOSSARY with SEMANTIC_SQL mode",
          "EXECUTE SCRIPT SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY('sales', 'SALES', 'SEMANTIC_SQL')", rows12b, err12b)
 if rows12b:
-    print(f"  OK - SEMANTIC_SQL mode works")
+    print("  OK - SEMANTIC_SQL mode works")
 elif err12b:
     print(f"  Error: {err12b}")
 
@@ -431,7 +430,7 @@ elif err27:
                      "PUBLISH_MODEL fails with transaction collision when model is already published",
                      "EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales') -- called when model already published",
                      "PUBLISH_MODEL succeeds and re-publishes idempotently",
-                     f"Error: GlobalTransactionRollback / transaction collision in VALIDATOR_RUNTIME")
+                     "Error: GlobalTransactionRollback / transaction collision in VALIDATOR_RUNTIME")
 else:
     print("  No views in SEMANTIC_SALES (not published or no objects)")
 
@@ -479,7 +478,7 @@ rows30, cols30, err30 = sql("SELECT MODEL_NAME, VERSION_NUMBER, VERSION_LABEL, S
 log.step("9.1 Check SEMANTIC_CATALOG.MODEL_VERSIONS",
          "SELECT * FROM SEMANTIC_CATALOG.MODEL_VERSIONS", rows30, err30)
 if rows30:
-    print(f"  Model versions:")
+    print("  Model versions:")
     for r in rows30:
         print(f"    {r}")
 elif err30:
@@ -676,7 +675,7 @@ if rows40:
         else:
             print(f"  Validator caught QUARTER() issue: {quarter_issues}")
     else:
-        print(f"  Validation returned 0 issues after adding QUARTER() dimension")
+        print("  Validation returned 0 issues after adding QUARTER() dimension")
         note_bug("J-014", "P2",
                  "Validator does not catch invalid SQL functions in dimension expressions (e.g. QUARTER())",
                  "ADD_DIMENSION with QUARTER(o.order_date) then VALIDATE_MODEL",
@@ -724,7 +723,7 @@ if ok41b:
                      "Validation ERROR for gross_margin (depends on total_revenue) and gross_margin_pct",
                      "VALIDATE_MODEL returns no dependency errors after inactivating a base metric")
     else:
-        print(f"  Validation returned 0 issues after removing total_revenue")
+        print("  Validation returned 0 issues after removing total_revenue")
         note_bug("J-015", "P1",
                  "Validator does not detect broken metric dependencies when base metric is inactivated",
                  "UPDATE METRICS SET STATUS='INACTIVE' WHERE METRIC_NAME='total_revenue'; EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')",
@@ -777,7 +776,7 @@ if rows43:
     error43 = rows43[0][2] if len(rows43[0]) > 2 else None
     print(f"  Status: {status43}, Error: {error43}")
     if status43 == 'OK':
-        print(f"  NOTE: Compiled without model name - may have guessed a model")
+        print("  NOTE: Compiled without model name - may have guessed a model")
     else:
         print(f"  Error returned in result row (expected): {error43}")
 elif err43:
@@ -870,7 +869,7 @@ elif pub_idempotent_err:
                  "PUBLISH_MODEL fails with transaction collision on second call — not idempotent",
                  "EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales') -- called twice",
                  "PUBLISH_MODEL succeeds both times (idempotent)",
-                 f"Second call fails: GlobalTransactionRollback/transaction collision in VALIDATOR_RUNTIME")
+                 "Second call fails: GlobalTransactionRollback/transaction collision in VALIDATOR_RUNTIME")
 
 # ===========================================================================
 # WRITE REPORT

@@ -143,7 +143,7 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
             "'f3_verify', 'orders', 'cold')")
         names = [column.lower() for column in statement.columns().keys()]
-        promotion = dict(zip(names, statement.fetchone()))
+        promotion = dict(zip(names, statement.fetchone(), strict=True))
         if "warnings" not in promotion:
             raise AssertionError(f"SET_PRIMARY_REPRESENTATION has no WARNINGS column: {names}")
         warnings = str(promotion["warnings"] or "")
@@ -182,7 +182,7 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION("
             "'f3_verify', 'orders', 'primary')")
         names = [column.lower() for column in statement.columns().keys()]
-        restored = dict(zip(names, statement.fetchone()))
+        restored = dict(zip(names, statement.fetchone(), strict=True))
         if restored["warnings"] is not None:
             raise AssertionError(
                 "restoring the open-ended partition warned: "

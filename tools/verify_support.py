@@ -94,7 +94,7 @@ def named_rows(statement: Any) -> list[dict[str, Any]]:
     column layout into consumers silently reading NULL.
     """
     names = [name.lower() for name in statement.columns().keys()]
-    return [dict(zip(names, row)) for row in statement.fetchall()]
+    return [dict(zip(names, row, strict=True)) for row in statement.fetchall()]
 
 
 def named_row(statement: Any) -> dict[str, Any] | None:

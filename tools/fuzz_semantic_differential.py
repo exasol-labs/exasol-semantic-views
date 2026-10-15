@@ -295,7 +295,7 @@ def compare_rows(a: list[tuple], b: list[tuple]) -> str | None:
         return None
     if len(na) != len(nb):
         return f"row count differs: json={len(na)} sql={len(nb)}"
-    for i, (ra, rb) in enumerate(zip(na, nb)):
+    for i, (ra, rb) in enumerate(zip(na, nb, strict=True)):
         if ra != rb:
             return f"first diff at sorted-row {i}: json={ra!r} sql={rb!r}"
     return "unknown diff"

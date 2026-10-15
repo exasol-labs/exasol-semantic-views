@@ -97,7 +97,7 @@ def named(con: Any, script: str, args: dict[str, Any]) -> dict[str, Any]:
         "EXECUTE SCRIPT SEMANTIC_ADMIN.CALL_ADMIN_JSON("
         f"{literal(script)}, {literal(json.dumps(args))})")
     names = [name.lower() for name in statement.columns().keys()]
-    return dict(zip(names, statement.fetchone()))
+    return dict(zip(names, statement.fetchone(), strict=True))
 
 
 def main() -> int:
@@ -228,7 +228,7 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON("
             f"{literal(json.dumps(request))})")
         names = [name.lower() for name in statement.columns().keys()]
-        result = dict(zip(names, statement.fetchone()))
+        result = dict(zip(names, statement.fetchone(), strict=True))
         if result["status"] != "OK":
             raise AssertionError(
                 f"model built by name does not compile: {result.get('error_code')}"

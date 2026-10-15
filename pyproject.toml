@@ -1,0 +1,30 @@
+# Tool configuration only: this repository is not a Python package.
+# Run every static check with tools/run_static_checks.sh.
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Rules that find defects, not style: pyflakes (F), statement errors (E7, E9),
+# bugbear (B) and pylint errors (PLE). Formatting and line length are left
+# alone; reformatting 110 of 115 files would bury `git blame` for no defect.
+select = ["F", "E7", "E9", "B", "PLE"]
+# `raise ... from` inside `except` changes the traceback, not the behaviour.
+ignore = ["B904"]
+
+[tool.mypy]
+# Gradual: the reusable host modules first. Add a file once it is clean;
+# tests/ and the verify_* scripts are the next candidates.
+files = [
+    "tools/install.py",
+    "tools/import_databricks.py",
+    "tools/lint_embedded_lua.py",
+    "tools/osi.py",
+    "tools/package_lua_scripts.py",
+    "tools/release_notes.py",
+    "tools/run_sql_files.py",
+    "tools/semantic_client.py",
+    "tools/verify_support.py",
+]
+check_untyped_defs = true
+ignore_missing_imports = true

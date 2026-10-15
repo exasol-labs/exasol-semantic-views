@@ -3248,7 +3248,6 @@ test("source trust walks views to their base tables and stops honestly", functio
     -- resolves to the tables underneath it; a base table is its own base; a view
     -- Exasol records no dependencies for is UNKNOWN, because answering "no
     -- bases" would read as "reads nothing" rather than "we could not tell".
-    local api = ESV_VALIDATOR_TEST_API
     assert_equal(api.relation_key("mart", "orders"), "MART.ORDERS")
     assert_equal(api.relation_key(nil, nil), ".")
 
@@ -3276,7 +3275,7 @@ test("source trust walks views to their base tables and stops honestly", functio
     assert_equal(table.concat(bases, ","), "MART.ORDERS")
 
     -- a view with no recorded dependencies cannot be classified
-    bases, complete = api.resolve_base_relations(graph, "GOV.ORPHAN")
+    complete = select(2, api.resolve_base_relations(graph, "GOV.ORPHAN"))
     assert_equal(complete, false)
 
     -- a cycle terminates rather than hanging the validator
@@ -3299,7 +3298,6 @@ test("a frozen view is judged against the model it froze", function()
     -- call for different actions: a superseded view is merely old, while one
     -- reading a relation the model no longer vouches for is a policy hole that
     -- has already opened.
-    local api = ESV_VALIDATOR_TEST_API
 
     local function run(options)
         local ctx = {
@@ -3400,7 +3398,6 @@ test("source trust classifies every relation the planner may emit", function()
     -- reads something the representations do not is DIVERGENT: substituting it
     -- drops whatever policy they carry, which is how a rollup over the raw mart
     -- returned every region to a principal entitled to one.
-    local api = ESV_VALIDATOR_TEST_API
 
     local function run(mode, representations, materializations, views, edges)
         local written = {}
@@ -3464,6 +3461,7 @@ test("source trust classifies every relation the planner may emit", function()
     assert_equal(classes["primary"], "RAW")
     assert_equal(codes["SEMANTIC_MODEL_064"], nil)
     classes, codes = run("GOVERNED", RAW_REP, {}, {}, {})
+    assert_equal(classes["primary"], "RAW")
     assert_equal(codes["SEMANTIC_MODEL_064"], "ERROR")
 
     -- a materialization over the same relations carries the same policy
@@ -3476,6 +3474,7 @@ test("source trust classifies every relation the planner may emit", function()
     assert_equal(classes["rollup"], "DIVERGENT")
     assert_equal(codes["SEMANTIC_MODEL_065"], "WARNING")
     classes, codes = run("GOVERNED", GOVERNED_REP, DIVERGENT_MAT, VIEWS, EDGES)
+    assert_equal(classes["rollup"], "DIVERGENT")
     assert_equal(codes["SEMANTIC_MODEL_065"], "ERROR")
 
     -- with nothing to lose there is nothing to warn about: raw representations
@@ -3490,6 +3489,7 @@ test("source trust classifies every relation the planner may emit", function()
     assert_equal(classes["primary"], "UNKNOWN")
     assert_equal(codes["SEMANTIC_MODEL_066"], "WARNING")
     classes, codes = run("GOVERNED", GOVERNED_REP, {}, VIEWS, {})
+    assert_equal(classes["primary"], "UNKNOWN")
     assert_equal(codes["SEMANTIC_MODEL_066"], "ERROR")
 
     assert_branch("validator.trust.mode", run("GOVERNED", RAW_REP, {}, {}, {}) ~= nil, true)

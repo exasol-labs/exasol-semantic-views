@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from typing import Any
 import importlib.util
-import re
 from pathlib import Path
 
 # Connection defaults, SQL escaping and named result reads live in

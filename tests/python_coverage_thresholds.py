@@ -43,6 +43,7 @@ OMIT_PATTERNS: list[str] = [
     "tools/fuzz_semantic_differential.py",
     "tools/import_databricks.py",
     "tools/package_lua_scripts.py",
+    "tools/lint_embedded_lua.py",       # build-time lint, run by run_static_checks.sh
     "tools/persona_*.py",
     "tools/run_compile_golden.sh",       # not python; belt-and-suspenders
     "tools/run_simulated_user_tests.py",

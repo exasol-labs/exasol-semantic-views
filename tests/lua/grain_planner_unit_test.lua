@@ -788,35 +788,42 @@ test("C2 physical planner validates boundaries and safeguards", function()
     assert_equal(missing, nil)
     assert_equal(reason.reason_code, "PHYSICAL_MULTI_BRANCH_PLAN_REQUIRED")
 
+    -- Every refusal below returns no plan, whatever its reason.
+    local function refused(...)
+        local plan, why = physical_planner.build(...)
+        assert_equal(plan, nil)
+        return why
+    end
+
     local failed_logical = snapshots.copy(logical)
     failed_logical.failure = {reason_code = "DIMENSION_NOT_CONFORMED"}
-    missing, reason = physical_planner.build(failed_logical, snapshot)
+    reason = refused(failed_logical, snapshot)
     assert_equal(reason.reason_code, "LOGICAL_PLAN_NOT_VALID")
 
-    missing, reason = physical_planner.build(logical, snapshot, {max_branches = 1})
+    reason = refused(logical, snapshot, {max_branches = 1})
     assert_equal(reason.reason_code, "PLANNER_BRANCH_LIMIT_EXCEEDED")
     assert_equal(reason.branch_count, 2)
 
     local missing_source = snapshots.copy(snapshot)
     missing_source.entity_by_id["1"].source_schema = nil
-    missing, reason = physical_planner.build(logical, missing_source)
+    reason = refused(logical, missing_source)
     assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
     assert_equal(reason.binding_kind, "SOURCE")
 
     local missing_dimension = snapshots.copy(snapshot)
     missing_dimension.dimension_by_id["30"].expression = nil
-    missing, reason = physical_planner.build(logical, missing_dimension)
+    reason = refused(logical, missing_dimension)
     assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
     assert_equal(reason.binding_kind, "DIMENSION_EXPRESSION")
 
     local missing_type = snapshots.copy(logical)
     missing_type.metric_stages[2].state_spec.data_type = nil
-    missing, reason = physical_planner.build(missing_type, snapshot)
+    reason = refused(missing_type, snapshot)
     assert_equal(reason.reason_code, "METRIC_STATE_TYPE_INCOMPATIBLE")
 
     local missing_fact = snapshots.copy(snapshot)
     missing_fact.fact_by_id["21"].expression = nil
-    missing, reason = physical_planner.build(logical, missing_fact)
+    reason = refused(logical, missing_fact)
     assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
     assert_equal(reason.binding_kind, "FACT_EXPRESSION")
 
@@ -828,12 +835,12 @@ test("C2 physical planner validates boundaries and safeguards", function()
     aggregate.inputs[#aggregate.inputs + 1] = {
         kind = "FACT", id = 22, entity_id = 2,
     }
-    missing, reason = physical_planner.build(ambiguous_input, snapshot)
+    reason = refused(ambiguous_input, snapshot)
     assert_equal(reason.reason_code, "METRIC_INPUT_GRAIN_AMBIGUOUS")
 
     local missing_owner = snapshots.copy(logical)
     table.remove(missing_owner.branches, 2)
-    missing, reason = physical_planner.build(missing_owner, snapshot)
+    reason = refused(missing_owner, snapshot)
     assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
     assert_equal(reason.binding_kind, "STATE_OWNER")
 end)
@@ -924,24 +931,28 @@ test("C2 physical planner binds filter variants and rejects broken proofs", func
     local invalid_filter = snapshots.copy(logical)
     invalid_filter.bound_query.global_filters[1].operator = "REGEXP"
     local missing, reason = physical_planner.build(invalid_filter, snapshot)
+    assert_equal(missing, nil)
     assert_equal(reason.reason_code, "PHYSICAL_FILTER_INVALID")
     assert_equal(reason.issue, "FILTER_OPERATOR_UNSUPPORTED")
 
     local missing_relationship = snapshots.copy(snapshot)
     missing_relationship.relationship_by_id["40"] = nil
     missing, reason = physical_planner.build(logical, missing_relationship)
+    assert_equal(missing, nil)
     assert_equal(reason.reason_code, "PHYSICAL_PROOF_INVALID")
     assert_equal(reason.issue, "REFERENCE_MISSING")
 
     local disconnected = snapshots.copy(logical)
     disconnected.branches[1].proofs[1].edges[1].from_entity_id = 999
     missing, reason = physical_planner.build(disconnected, snapshot)
+    assert_equal(missing, nil)
     assert_equal(reason.reason_code, "PHYSICAL_PROOF_INVALID")
     assert_equal(reason.issue, "PATH_DISCONNECTED")
 
     local missing_join = snapshots.copy(snapshot)
     missing_join.relationship_by_id["40"].join_condition = nil
     missing, reason = physical_planner.build(logical, missing_join)
+    assert_equal(missing, nil)
     assert_equal(reason.reason_code, "PHYSICAL_BINDING_INCOMPLETE")
     assert_equal(reason.binding_kind, "RELATIONSHIP_JOIN")
 end)

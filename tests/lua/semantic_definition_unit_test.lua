@@ -692,6 +692,7 @@ test("semantic definition refuses a clause it does not recognise, by name", func
         assert_contains(tostring(err), case[3])
     end
     local ok, err = pcall(api.parse_definition, metric:format("WOMBAT 'p'"))
+    assert_equal(ok, false)
     assert_contains(tostring(err), "Accepted clauses for a METRIC: AS, ON ENTITY, RETURNS")
     assert_contains(tostring(err), "UNIT")
     assert_contains(tostring(err), "NON ADDITIVE BY, WINDOW")

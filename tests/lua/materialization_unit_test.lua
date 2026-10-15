@@ -10,7 +10,6 @@ end
 
 local ctx = {model = {model_id = 1, version_id = 2}}
 local region = {kind = "DIMENSION", id = 10, name = "region"}
-local month = {kind = "DIMENSION", id = 11, name = "month"}
 local revenue = {kind = "METRIC", id = 20, name = "revenue", metric_type = "ADDITIVE"}
 local ratio = {kind = "METRIC", id = 21, name = "ratio", metric_type = "RATIO"}
 

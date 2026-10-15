@@ -22,7 +22,6 @@ _SUPPORT.loader.exec_module(support)
 
 connect = support.connect
 sql_string = support.sql_string
-compile_request = support.compile_request
 
 
 def fetchall(con, sql: str) -> list[tuple[Any, ...]]:

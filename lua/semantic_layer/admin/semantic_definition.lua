@@ -21,7 +21,6 @@ local SEMANTIC_DDL_LEXER = {upper_identifiers = true}
 
 -- Identity, not a copy: a decoded null is only recognisable to code holding the
 -- same sentinel table (see shared/json.lua).
-local JSON_NULL = json.NULL
 
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
@@ -29,10 +28,6 @@ end
 
 local function upper(value)
     return string.upper(tostring(value))
-end
-
-local function key(value)
-    return tostring(value)
 end
 
 local function sql_string(value)
@@ -298,7 +293,7 @@ local function check_entry_clauses(kind, name, source, tokens, positions, ordere
             .. tostring(token.text) .. (after ~= nil and (" after " .. after) or "")
             .. ". Accepted clauses for a " .. kind .. ": " .. listed() .. ".")
     end
-    for key_name, entry in pairs(positions) do
+    for _, entry in pairs(positions) do
         if entry.duplicate ~= nil then
             error("SEMANTIC_DDL_044: " .. label .. ": clause "
                 .. table.concat(entry.words, " ") .. " is given more than once.")
@@ -2182,8 +2177,8 @@ local function patch_operation_object_columns(operation)
         return
     end
     local args = operation.arguments or {}
-    local kind_name = nil
-    local ref_name = nil
+    local kind_name
+    local ref_name
     if operation.operation == "add_dimension" then
         kind_name = "DIMENSION"
         ref_name = args.dimension_name
@@ -2580,17 +2575,6 @@ function M.apply_semantic_definition(definition_sql, dry_run)
     local message = tostring(result)
     local error_code = string.match(message, "(SEMANTIC_DDL_%d+)")
     return {{"ERROR", error_code or "SEMANTIC_DDL_999", message, nil, nil, nil}}
-end
-
-local function parse_metric_ref(ref)
-    local parts = {}
-    for part in string.gmatch(tostring(ref or ""), "[^.]+") do
-        parts[#parts + 1] = part
-    end
-    if #parts ~= 3 then
-        error("SEMANTIC_DDL_050: metric reference must be model.object.metric")
-    end
-    return normalize_name(parts[1], "MODEL_NAME"), normalize_name(parts[2], "OBJECT_NAME"), normalize_name(parts[3], "METRIC_NAME")
 end
 
 -- Returns the row *and* the three normalized names.
@@ -3000,16 +2984,16 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
     return rows
 end
 
-local function parse_show_metrics(sql_text)
-    local certified = string.match(upper(sql_text), "^%s*SHOW%s+CERTIFIED%s+SEMANTIC%s+METRICS")
-    local private = string.match(upper(sql_text), "^%s*SHOW%s+PRIVATE%s+SEMANTIC%s+METRICS")
-    local ref = string.match(sql_text, "[Ii][Nn]%s+([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
+local function parse_show_metrics(statement_sql)
+    local certified = string.match(upper(statement_sql), "^%s*SHOW%s+CERTIFIED%s+SEMANTIC%s+METRICS")
+    local private = string.match(upper(statement_sql), "^%s*SHOW%s+PRIVATE%s+SEMANTIC%s+METRICS")
+    local ref = string.match(statement_sql, "[Ii][Nn]%s+([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
     if ref == nil then
         return nil
     end
     ref = string.gsub(ref, "%s+", "")
     local model_name, object_name = string.match(ref, "^([^.]+)%.([^.]+)$")
-    local like_value = string.match(sql_text, "[Ll][Ii][Kk][Ee]%s+'([^']*)'")
+    local like_value = string.match(statement_sql, "[Ll][Ii][Kk][Ee]%s+'([^']*)'")
     local where_parts = {
         "UPPER(mo.MODEL_NAME) = UPPER(" .. sql_string(model_name) .. ")",
         "UPPER(mo.OBJECT_NAME) = UPPER(" .. sql_string(object_name) .. ")",
@@ -3041,8 +3025,8 @@ FROM SEMANTIC_CATALOG.METRIC_OVERVIEW mo
 WHERE ]] .. table.concat(where_parts, "\n  AND ") .. "\nORDER BY METRIC_NAME"
 end
 
-local function parse_metric_ref_from_command(sql_text)
-    local ref = string.match(sql_text, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
+local function parse_metric_ref_from_command(statement_sql)
+    local ref = string.match(statement_sql, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
     if ref == nil then
         return nil
     end
@@ -3051,8 +3035,8 @@ local function parse_metric_ref_from_command(sql_text)
     return model_name, object_name, metric_name
 end
 
-local function parse_object_ref_from_command(sql_text)
-    local ref = string.match(sql_text, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
+local function parse_object_ref_from_command(statement_sql)
+    local ref = string.match(statement_sql, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
     if ref == nil then
         return nil
     end
@@ -3061,12 +3045,12 @@ local function parse_object_ref_from_command(sql_text)
     return model_name, object_name
 end
 
-local function parse_model_ref_from_command(sql_text)
-    return string.match(sql_text, "[Mm][Oo][Dd][Ee][Ll]%s+([A-Za-z_][A-Za-z0-9_]*)")
+local function parse_model_ref_from_command(statement_sql)
+    return string.match(statement_sql, "[Mm][Oo][Dd][Ee][Ll]%s+([A-Za-z_][A-Za-z0-9_]*)")
 end
 
-function M.preprocess_sql(sql_text)
-    local text = tostring(sql_text or "")
+function M.preprocess_sql(statement_sql)
+    local text = tostring(statement_sql or "")
     local u = upper(trim(text))
     if string.match(u, "^ALTER%s+SEMANTIC%s+VIEW") then
         local ok, parse_result = pcall(function()
@@ -3139,7 +3123,7 @@ function M.preprocess_sql(sql_text)
         local query_text = trim(string.sub(text, string.find(u, "QUERY") + 5))
         return {status = "OK", generated_sql = "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL_DEBUG(" .. sql_string(query_text) .. ", 'EXPLAIN_SEMANTIC_QUERY')"}
     end
-    return {status = "UNCHANGED", generated_sql = sql_text}
+    return {status = "UNCHANGED", generated_sql = statement_sql}
 end
 
 -- =====================================================================
@@ -3737,7 +3721,7 @@ local function dbx_translate(doc, model_name, published_schema, diags)
             grain = "Imported join: " .. tostring(join.name), description = join.comment,
         }
         local parent_alias = entity_alias[parent_entity] or root_alias
-        local join_condition = nil
+        local join_condition
         if not missing(join["on"]) then
             join_condition = dbx_rewrite_expr(join["on"], alias_paths, parent_alias, nil, diags, "joins." .. tostring(join.name))
         elseif not missing(join.using) then
@@ -4073,7 +4057,7 @@ local function dbx_apply_plan(plan)
              description = null_if_missing(d.description), format_hint = null_if_missing(d.format_hint),
              is_certified = d.is_certified})
     end
-    local validation_run_id = nil
+    local validation_run_id
     local alter = dbx_alter_semantic_view(plan)
     if alter ~= nil then
         local rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(:ddl, FALSE)", {ddl = alter})

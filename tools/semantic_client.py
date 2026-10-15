@@ -48,7 +48,7 @@ def _named_row(statement: Any) -> dict | None:
     if row is None:
         return None
     names = [name.lower() for name in statement.columns().keys()]
-    return dict(zip(names, row))
+    return dict(zip(names, row, strict=True))
 
 
 def _client_error(message: str) -> dict:
@@ -99,7 +99,7 @@ def execute_semantic_sql(conn: Any, semantic_sql: str) -> list[dict]:
     conn.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()")
     stmt = conn.execute(semantic_sql)
     cols = [col[0] for col in stmt.description()]
-    return [dict(zip(cols, row)) for row in stmt.fetchall()]
+    return [dict(zip(cols, row, strict=True)) for row in stmt.fetchall()]
 
 
 def compile_and_run(conn: Any, request: dict) -> list[dict]:
@@ -116,4 +116,4 @@ def compile_and_run(conn: Any, request: dict) -> list[dict]:
     generated = result["generated_sql"]
     stmt = conn.execute(generated)
     cols = [col[0] for col in stmt.description()]
-    return [dict(zip(cols, row)) for row in stmt.fetchall()]
+    return [dict(zip(cols, row, strict=True)) for row in stmt.fetchall()]

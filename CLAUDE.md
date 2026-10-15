@@ -68,6 +68,17 @@ runs the property-based tests in `tests/test_property.py`. Same ratcheting
 discipline as the Lua coverage gate: raise a threshold whenever coverage
 grows; do not lower one to merge.
 
+**Run the static checks** (Ruff, mypy, Luacheck, ShellCheck; CI runs the same):
+```sh
+sh tools/run_static_checks.sh
+```
+Luacheck covers `lua/`, `tests/lua/`, and — through `tools/lint_embedded_lua.py`
+— every script body embedded in `sql/install/`, which is where most of the admin
+Lua lives. Exasol's globals and the `ESV_*` namespaces are declared in
+`.luacheckrc`; Python rules and the gradually-typed module list are in
+`pyproject.toml`. Add a module to mypy's `files` once it is clean. The tools are
+pinned in `tools/requirements-static.txt` (plus `luarocks install luacheck 1.2.0`).
+
 **Run the live cold/warm and scale probe** (requires an installed model):
 ```sh
 python3 tools/verify_runtime_performance.py

@@ -123,12 +123,12 @@ end
 local envelope = {}
 local compile_cache = {}
 do
-    function envelope.unchanged_result(sql_text)
+    function envelope.unchanged_result(statement_sql)
         return {
             status = "UNCHANGED",
             error_code = nil,
             error_message = nil,
-            generated_sql = sql_text,
+            generated_sql = statement_sql,
             plan_json = nil,
             clarification_json = nil,
             validation_run_id = nil,
@@ -306,12 +306,12 @@ do
             .. " SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL has the derivation.")
     end
 
-    function envelope.ok_result(sql_text, plan, validation_run_id)
+    function envelope.ok_result(statement_sql, plan, validation_run_id)
         return {
             status = "OK",
             error_code = nil,
             error_message = nil,
-            generated_sql = sql_text,
+            generated_sql = statement_sql,
             plan_json = json.encode(plan),
             clarification_json = nil,
             validation_run_id = validation_run_id,
@@ -1524,12 +1524,12 @@ end
 local function near_field_names(normalized, candidates)
     local near, seen = {}, {}
     for _, candidate in ipairs(candidates) do
-        local key, display = candidate.key, candidate.display
+        local name, display = candidate.key, candidate.display
         if not seen[display]
-            and (string.find(key, normalized, 1, true)
-                or string.find(normalized, key, 1, true)
+            and (string.find(name, normalized, 1, true)
+                or string.find(normalized, name, 1, true)
                 or (#normalized >= 3
-                    and string.sub(key, 1, 3) == string.sub(normalized, 1, 3))) then
+                    and string.sub(name, 1, 3) == string.sub(normalized, 1, 3))) then
             seen[display] = true
             near[#near + 1] = display
         end
@@ -1958,7 +1958,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
     for _, binding in ipairs(bindings) do
         local representation = representation_by_id(ctx, binding.representation_id)
         if representation ~= nil then
-            local expression = nil
+            local expression
             if key(representation.id) == key(base_representation.id) then
                 expression = binding.expression
             else
@@ -3179,7 +3179,7 @@ local function compile_request_table(request, options)
         collect_metric_entities(ctx, metric, needed_entities, {})
     end
 
-    local filters, filter_dimensions, filter_err = build_filters(ctx, request.filters, selected_dimensions, needed_entities)
+    local _, filter_dimensions, filter_err = build_filters(ctx, request.filters, selected_dimensions, needed_entities)
     if filter_err ~= nil then
         return filter_err
     end
@@ -3195,7 +3195,7 @@ local function compile_request_table(request, options)
         add_unique(all_dimensions, all_dimension_seen, dimension)
     end
 
-    local validation_run_id = nil
+    local validation_run_id
     if options.validate == false then
         local validation_message
         validation_run_id, validation_message = latest_successful_validation(model)
@@ -3244,7 +3244,6 @@ local function compile_request_table(request, options)
         return order_err
     end
 
-    local having_predicates = {}
     local bound_having_filters = {}
     local planning_metrics = {}
     local planning_metric_seen = {}
@@ -3280,11 +3279,10 @@ local function compile_request_table(request, options)
                 .. "' requires a value or value_sql key.")
         end
         local expr = expand_metric(ctx, metric_field)
-        local predicate, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
+        local _, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
         if predicate_err ~= nil then
             return predicate_err
         end
-        having_predicates[#having_predicates + 1] = predicate
         bound_having_filters[#bound_having_filters + 1] = {
             metric_id = metric_field.id,
             metric = metric_field.name,
@@ -3340,10 +3338,11 @@ local function compile_request_table(request, options)
     -- Filters and HAVING expressions were resolved while discovering required
     -- attributes. Rebuild them after representation selection so fallback
     -- expressions are used consistently in WHERE and HAVING.
+    local filters
     filters, _, filter_err = build_filters(
         ctx, request.filters, selected_dimensions, needed_entities)
     if filter_err ~= nil then return filter_err end
-    having_predicates = {}
+    local having_predicates = {}
     for index, bound in ipairs(bound_having_filters) do
         local metric_field = ctx.all_metric_by_id[key(bound.metric_id)]
         local source = having_list[index]
@@ -3386,7 +3385,7 @@ local function compile_request_table(request, options)
     end
 
     local function plan_envelope(materialization_decision, selected_materialization,
-        relationship_paths)
+        envelope_paths)
         materialization_decision = materialization_decision or {
             candidate_count = 0,
             rejected_materializations = typed_plan.plan_kind == "MULTI_BRANCH"
@@ -3404,7 +3403,7 @@ local function compile_request_table(request, options)
             metric_details = {},
             dimensions = {},
             filters = filters,
-            relationship_paths = relationship_paths or {},
+            relationship_paths = envelope_paths or {},
             selected_materialization = JSON_NULL,
             selected_materializations = materialization_decision.selected_materializations
                 or {},
@@ -3672,16 +3671,16 @@ local function compile_request_table(request, options)
         )
     end
 
-    local sql_text
+    local statement_sql
     if selected_materialization ~= nil then
-        sql_text = build_materialized_sql(ctx, selected_dimensions, selected_metrics, filters, order_by, limit, selected_materialization)
+        statement_sql = build_materialized_sql(ctx, selected_dimensions, selected_metrics, filters, order_by, limit, selected_materialization)
     else
-        sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
+        statement_sql = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
     end
 
     local plan = envelope.with_governance(
         plan_envelope(materialization_decision, selected_materialization, relationship_paths),
-        model, sql_text)
+        model, statement_sql)
     -- Refused before the result is cached, so a refusal is never stored and a
     -- model returning to OPEN does not have to outlive one.
     local governance_refusal = envelope.governance_refusal(model, plan, error_prefix)
@@ -3689,7 +3688,7 @@ local function compile_request_table(request, options)
         return governance_refusal, request, model
     end
     local result = envelope.attach_planning_runtime(
-        envelope.ok_result(sql_text, plan, validation_run_id), planning_started_ms)
+        envelope.ok_result(statement_sql, plan, validation_run_id), planning_started_ms)
     if cache_key ~= nil then
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
@@ -4622,9 +4621,9 @@ local function parse_semantic_sql(statement_text, options)
     return request, nil, model, meta
 end
 
-local function compile_sql_internal(sql_text, options)
+local function compile_sql_internal(statement_sql, options)
     options = options or {}
-    local request, parse_err, model, meta = parse_semantic_sql(sql_text, {
+    local request, parse_err, model, meta = parse_semantic_sql(statement_sql, {
         unchanged_nonsemantic = options.unchanged_nonsemantic,
         unchanged_unknown_schema = options.unchanged_unknown_schema,
         sql_cache = options.sql_cache,
@@ -4646,10 +4645,8 @@ local function compile_sql_internal(sql_text, options)
         source = "SEMANTIC_SQL",
     })
     if result ~= nil and result.status == "OK" and meta ~= nil then
-        -- ESV_SQL_TEXT, not the `sql_text` alias: this function's first
-        -- parameter is named sql_text and shadows it.
-        result.generated_sql = ESV_SQL_TEXT.output_projection(result.generated_sql,
-                                                              meta.output_columns)
+        result.generated_sql = sql_text.output_projection(result.generated_sql,
+                                                          meta.output_columns)
         -- A wrapper accepted because each group is one row is recorded, so the
         -- plan says the wrapper was lowered rather than applied (GitHub #8).
         if meta.wrapper_lowerings ~= nil then
@@ -4689,12 +4686,12 @@ local function busy_backoff()
     return budget
 end
 
-function M.compile_sql(sql_text)
+function M.compile_sql(statement_sql)
     -- See compile_internal: reuse the latest successful validation run instead of
     -- re-running the validator on every compile (BUG-001).
     local ok, result, request, model
     for attempt = 0, COLLISION_RETRIES do
-        ok, result, request, model = pcall(compile_sql_internal, sql_text, {validate = false})
+        ok, result, request, model = pcall(compile_sql_internal, statement_sql, {validate = false})
         if ok then break end
         if not collision_error(tostring(result)) then break end
         if attempt < COLLISION_RETRIES then busy_backoff() end
@@ -4707,16 +4704,16 @@ function M.compile_sql(sql_text)
     -- Expansion's result describes a statement the whole-statement planner never
     -- built, so the request and model from its failed attempt would misdescribe
     -- it. Nil is the honest answer until the expanded lane reports its own.
-    local answer = M.with_expansion_fallthrough(sql_text, result)
+    local answer = M.with_expansion_fallthrough(statement_sql, result)
     if answer ~= result then
         return answer, nil, nil
     end
     return result, request, model
 end
 
-function M.compile_sql_debug(sql_text, client_name)
-    local result, request, model = M.compile_sql(sql_text)
-    log_query_result(result, sql_text, request, model, client_name)
+function M.compile_sql_debug(statement_sql, client_name)
+    local result, request, model = M.compile_sql(statement_sql)
+    log_query_result(result, statement_sql, request, model, client_name)
     return result, request, model
 end
 
@@ -6308,7 +6305,7 @@ end
 -- into a *success*, never into a different refusal. `SELECT bogus FROM obj`
 -- keeps "Unknown semantic field: bogus. Did you mean: ...?" rather than being
 -- re-described as a statement whose columns could not be inferred.
-function M.with_expansion_fallthrough(sql_text, result)
+function M.with_expansion_fallthrough(statement_sql, result)
     if result ~= nil and result.status == "OK" then
         return result
     end
@@ -6316,7 +6313,7 @@ function M.with_expansion_fallthrough(sql_text, result)
     if result ~= nil and refusal_rules.lane_final[result.error_code or ""] then
         return result
     end
-    local expanded_ok, expanded = pcall(bi_expansion.rewrite, sql_text)
+    local expanded_ok, expanded = pcall(bi_expansion.rewrite, statement_sql)
     if not expanded_ok then
         -- Expansion broke rather than refused. If the other lane read the
         -- statement and said why it would not compile it, that answer is still
@@ -6351,10 +6348,10 @@ function M.with_expansion_fallthrough(sql_text, result)
     return result
 end
 
-function M.compile_sql_for_preprocessor(sql_text)
-    local upper_sql = upper(sql_text or "")
+function M.compile_sql_for_preprocessor(statement_sql)
+    local upper_sql = upper(statement_sql or "")
     if string.find(upper_sql, "SELECT", 1, true) == nil or string.find(upper_sql, "FROM", 1, true) == nil then
-        return {status = "UNCHANGED", generated_sql = sql_text}
+        return {status = "UNCHANGED", generated_sql = statement_sql}
     end
     local options = {
         validate = false,
@@ -6370,7 +6367,7 @@ function M.compile_sql_for_preprocessor(sql_text)
     }
     local ok, result, request, model
     for attempt = 0, COLLISION_RETRIES do
-        ok, result, request, model = pcall(compile_sql_internal, sql_text, options)
+        ok, result, request, model = pcall(compile_sql_internal, statement_sql, options)
         if ok then break end
         if not collision_error(tostring(result)) then break end
         if attempt < COLLISION_RETRIES then busy_backoff() end
@@ -6395,7 +6392,7 @@ function M.compile_sql_for_preprocessor(sql_text)
     -- bare form is the one the documentation teaches, so the two lanes are now
     -- one path -- whatever the first cannot compile, the second is asked about.
     --
-    local answer = M.with_expansion_fallthrough(sql_text, result)
+    local answer = M.with_expansion_fallthrough(statement_sql, result)
 
     -- The lane most queries take is the one that recorded nothing. QUERY_LOG was
     -- written only by COMPILE_SQL_DEBUG, so `MY_QUERY_LOG` stayed empty,
@@ -6431,7 +6428,7 @@ function M.compile_sql_for_preprocessor(sql_text)
             logging = read and value or nil
         end
         if missing(logging) or upper(tostring(logging)) ~= "OFF" then
-            pcall(log_query_result, answer, sql_text, request, logged_model,
+            pcall(log_query_result, answer, statement_sql, request, logged_model,
                 answer.expanded_references ~= nil and "PREPROCESSOR:EXPANSION"
                     or "PREPROCESSOR",
                 false)

@@ -478,7 +478,7 @@ def main() -> int:
             "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON("
             f"{literal(json.dumps(request))})")
         names = [name.lower() for name in statement.columns().keys()]
-        result = dict(zip(names, statement.fetchone()))
+        result = dict(zip(names, statement.fetchone(), strict=True))
         assert_equal("the fused model still compiles", result["status"], "OK")
         rows = {str(row[0]) for row in execute(con, result["generated_sql"])}
         assert_equal("the fused model returns the resolved names", rows, {"Alice", "Bob"})

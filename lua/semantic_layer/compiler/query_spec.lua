@@ -5,8 +5,6 @@ local json = assert(ESV_JSON, "shared JSON runtime is required")
 local M = {VERSION = 1}
 
 local ARRAY_FIELDS = {"metrics", "dimensions", "filters", "having", "order_by"}
-local ARRAY_FIELD_SET = {}
-for _, name in ipairs(ARRAY_FIELDS) do ARRAY_FIELD_SET[name] = true end
 
 local function copy(value, seen)
     if type(value) ~= "table" then return value end
