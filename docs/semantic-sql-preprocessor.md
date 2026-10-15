@@ -91,9 +91,11 @@ only wrap metrics; wrapping a dimension returns `SEMANTIC_QUERY_006`.
 A named aggregate around a metric (`SUM(total_revenue)`) is honoured when it is
 the aggregation the metric declares. Otherwise it would put a different
 calculation under the metric's name, so it is refused with `SEMANTIC_QUERY_007`.
-There is one exception, for BI tools. `MIN` and `MAX` are accepted around any
-metric where each group of the statement holds exactly one row of the object.
-There they select the metric's own value, which is what Tableau's ATTR means:
+There is one exception, for BI tools. `MIN`, `MAX`, `SUM` and `AVG` are
+accepted around any metric where each group of the statement holds exactly one
+row of the object. The aggregate of one value is that value, so there they
+select the metric as defined. Tableau's ATTR emits `MIN`/`MAX`, and Power BI's
+table visual wraps every metric, ratios included, in `SUM`:
 
 ```sql
 -- Tableau: both columns are total_freight per ship mode, exactly
@@ -107,13 +109,13 @@ When a statement is compiled directly, every group is one row by construction:
 an explicit `GROUP BY` must cover exactly the selected dimensions, and filters
 apply before aggregation. Inside a wrapped statement the same holds when the
 block groups by every dimension the object is compiled at. Where it does not,
-the `MIN`/`MAX` would return the extreme of several values, so it is refused
-with `SEMANTIC_QUERY_018`.
+the wrapper would combine several values, so it is refused with
+`SEMANTIC_QUERY_018`.
 
 Each accepted lowering is recorded in `PLAN_JSON.wrapper_lowerings`, with the
 wrapper, the metric, what the metric declares, and the equivalence
-(`ONE_ROW_PER_GROUP`). `SUM`, `AVG` and `COUNT` combine values rather than
-select one, so a mismatch there is still `SEMANTIC_QUERY_007`.
+(`ONE_ROW_PER_GROUP`). `COUNT` counts the value rather than selecting it, so a
+mismatch there is still `SEMANTIC_QUERY_007`.
 
 Supported `WHERE` predicates are dimension predicates with `=`, `!=`, `<>`,
 `<`, `<=`, `>`, `>=`, `LIKE`, `IN`, `BETWEEN`, `IS NULL`, and `IS NOT NULL`.

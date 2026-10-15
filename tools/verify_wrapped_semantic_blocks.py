@@ -13,7 +13,9 @@ This asserts, in a preprocessor-enabled session against the sales model:
 
 - Power BI's table, wide, filtered and Top N shapes answer what their bare
   inner statements answer, with Power BI's aliases;
-- the block's aggregate checks still apply (a mismatched AVG is
+- Power BI's table visual, which sums every metric, selects a ratio as
+  defined rather than refusing it (GitHub #16);
+- the block's aggregate checks still apply (a mismatched COUNT is
   SEMANTIC_QUERY_007), and so does the outer re-aggregation guard
   (SEMANTIC_QUERY_016);
 - an ungrouped aggregating block, which failed in Exasol, now answers;
@@ -36,6 +38,16 @@ support = importlib.util.module_from_spec(_SUPPORT)
 _SUPPORT.loader.exec_module(support)
 
 SALES = '"EXA_DB"."SEMANTIC_SALES"."SALES"'
+# Power BI's table visual over every metric of SALES, as sent (GitHub #16).
+TABLE_VISUAL = (
+    'select "CUSTOMER_REGION", "ORDER_MONTH", "ORDER_STATUS", "PRODUCT_CATEGORY",'
+    ' "C1", "C2", "C3", "C4", "C5" from (select "CUSTOMER_REGION", "ORDER_MONTH",'
+    ' "ORDER_STATUS", "PRODUCT_CATEGORY", sum("COMPLETED_REVENUE") as "C1",'
+    ' sum("TOTAL_REVENUE") as "C2", sum("TOTAL_COST") as "C3",'
+    ' sum("GROSS_MARGIN_PCT") as "C4", sum("GROSS_MARGIN") as "C5"'
+    f' from {SALES} group by "CUSTOMER_REGION", "ORDER_MONTH", "ORDER_STATUS",'
+    ' "PRODUCT_CATEGORY") as "ITBL" where ((not "C1" is null or not "C2" is null)'
+    ' or (not "C3" is null or not "C4" is null)) or not "C5" is null limit 1000001')
 
 
 def outcome(con: Any, sql: str) -> tuple[str, Any]:
@@ -88,6 +100,12 @@ def main() -> int:
             raise AssertionError(f"Top N is not the two largest regions: {top} vs {largest}")
         print("ok Top N over the compiled block keeps Power BI's ORDER BY and LIMIT")
 
+        summed = outcome(con, TABLE_VISUAL)
+        measured = outcome(con, TABLE_VISUAL.replace("sum(", "MEASURE("))
+        if summed[0] != "rows" or summed != measured:
+            raise AssertionError(f"table visual SUM is not the metric: {summed} vs {measured}")
+        print("ok Power BI's table visual selects every metric, ratios included, as defined")
+
         ungrouped = outcome(con, "SELECT * FROM (SELECT CUSTOMER_REGION, SUM(TOTAL_REVENUE)"
                                  " FROM SEMANTIC_SALES.SALES) esv_wrapper")
         if ungrouped[0] != "rows" or ungrouped[1][1] != by_region[1][1]:
@@ -96,7 +114,7 @@ def main() -> int:
 
         for label, sql, code in (
             ("mismatched aggregate", f'SELECT * FROM (SELECT "CUSTOMER_REGION",'
-             f' AVG("TOTAL_REVENUE") AS "C1" FROM {SALES} GROUP BY "CUSTOMER_REGION") t',
+             f' COUNT("TOTAL_REVENUE") AS "C1" FROM {SALES} GROUP BY "CUSTOMER_REGION") t',
              "SEMANTIC_QUERY_007"),
             ("outer average of a ratio", "SELECT AVG(x.m) FROM (SELECT CUSTOMER_REGION,"
              " MEASURE(GROSS_MARGIN_PCT) AS m FROM SEMANTIC_SALES.SALES GROUP BY CUSTOMER_REGION) x",

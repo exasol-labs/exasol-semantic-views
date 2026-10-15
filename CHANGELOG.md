@@ -6,6 +6,25 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+#### Power BI's table visual refused ratio metrics (#16)
+
+- Power BI's table visual wraps every metric in `SUM(...)`. Around a metric that
+  declares no aggregation, such as the ratio `gross_margin_pct`, that was
+  refused with `SEMANTIC_QUERY_007`, so the visual failed.
+- Policy: the one-row-per-group exception that accepts `MIN`/`MAX` (#8) now
+  covers `SUM` and `AVG` too. Where each group holds one row of the object, the
+  aggregate of one value is that value, so the metric is selected as defined —
+  a ratio is not summed. The lowering is recorded in
+  `PLAN_JSON.wrapper_lowerings`; where groups hold several rows it is still
+  `SEMANTIC_QUERY_018`. `COUNT` counts the value rather than selecting it, so a
+  mismatch there is still `SEMANTIC_QUERY_007`.
+- `SEMANTIC_QUERY_007` printed a metric with no declared aggregation as
+  `it declares USERDATA: 0X…` — SQL NULL, stringified. It now says `it declares
+  no aggregation`. `SEMANTIC_QUERY_018` no longer names the declared aggregation,
+  which had the same flaw.
+
 ## [0.3.1] - 2026-09-29
 
 A BI compatibility release. Power BI and Tableau emit statement shapes that 0.3

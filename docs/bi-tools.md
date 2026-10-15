@@ -187,7 +187,7 @@ of these work:
 | the tool emits | notes |
 |---|---|
 | `SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE FROM SEMANTIC_SALES.SALES t0` | aliased and qualified |
-| `SELECT SUM(t0.TOTAL_REVENUE) FROM … t0` | aggregate over the object; honoured when it is the aggregation the metric declares |
+| `SELECT SUM(t0.TOTAL_REVENUE) FROM … t0` | aggregate over the object; honoured when it is the aggregation the metric declares, or where each group is one row (`COUNT` excepted) |
 | `SELECT t0.A, MAX(t0.B) AS "TEMP_attr:…", MIN(t0.B) AS "TEMP_attr:…1" … GROUP BY 1` | Tableau ATTR: selects the metric's value where each group is one row; see the preprocessor docs |
 | `SELECT … FROM (SELECT t0.A, t0.B FROM … t0) x` | subquery wrapper |
 | `WITH q AS (SELECT t0.A FROM … t0) SELECT … FROM q` | CTE |
