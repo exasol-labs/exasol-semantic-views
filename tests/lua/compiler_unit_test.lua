@@ -2453,6 +2453,24 @@ test("a wrapper is lowered where each group is one row (Tableau ATTR, Power BI S
     assert_equal(api.json_decode(plain.plan_json).wrapper_lowerings, nil)
 end)
 
+test("COUNT(1) per selected dimension is one row per group (Power BI filter domain)", function()
+    -- GitHub #17: Power BI lists a filter's values with COUNT(1) per value. This
+    -- lane compiles at exactly the selected dimensions, so each group is one row.
+    local mock = compiler_query_fixture()
+    local function sql(text) return with_query(mock, function() return compile_sql(text) end) end
+    local domain = sql('SELECT "ORDER_STATUS", COUNT(1) AS "C1" FROM "SEMANTIC_SALES"."SALES"'
+        .. ' GROUP BY "ORDER_STATUS" LIMIT 1000001')
+    assert_equal(domain.status, "OK")
+    assert_contains(domain.generated_sql, 'CAST(1 AS DECIMAL(18,0)) AS "C1"')
+    assert_contains(domain.generated_sql, "LIMIT 1000001")
+    assert_contains(sql("SELECT order_status, COUNT(*) FROM SEMANTIC_SALES.SALES GROUP BY 1")
+        .generated_sql, 'AS "COUNT(*)"')
+
+    -- No dimension names no grain: still refused, aliased or not.
+    assert_equal(sql("SELECT COUNT(1) FROM SEMANTIC_SALES.SALES").error_code, "SEMANTIC_QUERY_010")
+    assert_equal(sql("SELECT COUNT(*) AS n FROM SEMANTIC_SALES.SALES").error_code, "SEMANTIC_QUERY_010")
+end)
+
 test("reference expansion lowers MIN/MAX only when the block covers the grain", function()
     local columns = {
         {name = "customer_region", kind = "DIMENSION"},

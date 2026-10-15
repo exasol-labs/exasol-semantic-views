@@ -3212,7 +3212,10 @@ local function compile_request_table(request, options)
         if limit == nil or limit < 0 or limit % 1 ~= 0 then
             return error_result("SEMANTIC_REQUEST_050", "LIMIT must be a non-negative integer.")
         end
-        if limit > MAX_LIMIT then
+        -- The cap keeps a structured request from pulling a whole table. A SQL
+        -- statement without LIMIT is unbounded already, so capping one with a
+        -- LIMIT refuses only a BI tool's fetch limit (Power BI: LIMIT 1000001).
+        if limit > MAX_LIMIT and options.source ~= "SEMANTIC_SQL" then
             return error_result("SEMANTIC_REQUEST_051", "LIMIT exceeds maximum " .. tostring(MAX_LIMIT) .. ".")
         end
     end
@@ -4434,16 +4437,20 @@ local function parse_semantic_sql(statement_text, options)
             selected_metric_seen[upper(field.name)] = true
         end
     end
+    local row_counted = false
     for _, part in ipairs(wildcard_select and {} or select_parts) do
-        local inner, measure_wrapped, wrapper = unwrap_measure_part(part)
-        -- COUNT(*) counts rows of a result whose grain the layer chose, not
-        -- anything the caller named. Refuse rather than answer a question the
-        -- number would not actually be an answer to.
-        if wrapper == "COUNT" and #inner == 1 and inner[1].text == "*" then
-            return nil, error_result("SEMANTIC_QUERY_010",
-                "COUNT(*) over a semantic object is not supported: the row count"
-                    .. " depends on the grain the layer selects. Count a metric,"
-                    .. " or select the dimensions the count should be over.")
+        local _, measure_wrapped, wrapper = unwrap_measure_part(part)
+        -- COUNT(*) or COUNT(<number>) counts rows of the result, and this lane
+        -- compiles at exactly the selected dimensions, so each group is one row:
+        -- the count is 1. Power BI sends this to list a filter's values
+        -- (GitHub #17). Without a dimension the caller has named no grain, so
+        -- the refusal after the loop applies.
+        if wrapper == "COUNT" and part[4] ~= nil and part[4].text == ")"
+            and (part[3].text == "*" or part[3].kind == "number") then
+            row_counted = true
+            output_columns[#output_columns + 1] = {value = "CAST(1 AS DECIMAL(18,0))",
+                output = alias_from_select_part(part) or "COUNT(" .. part[3].text .. ")"}
+            goto next_select_part
         end
         local field_name = identifier_from_part(part)
         if field_name == nil then
@@ -4488,6 +4495,13 @@ local function parse_semantic_sql(statement_text, options)
         else
             return nil, error_result("SEMANTIC_QUERY_006", "Unsupported semantic field kind in SELECT.")
         end
+        ::next_select_part::
+    end
+    if row_counted and #request.dimensions == 0 then
+        return nil, error_result("SEMANTIC_QUERY_010",
+            "COUNT(*) over a semantic object is not supported: the row count"
+                .. " depends on the grain the layer selects. Count a metric,"
+                .. " or select the dimensions the count should be over.")
     end
 
     if clauses.WHERE ~= nil then

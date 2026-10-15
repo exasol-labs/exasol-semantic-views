@@ -148,6 +148,22 @@ dimension names or ordinals.
 ordinals, each with an optional `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST`.
 Tableau sorts filter domains with `ORDER BY 1 ASC NULLS FIRST`.
 
+`COUNT(*)` or `COUNT(<number>)` beside at least one dimension counts rows of the
+result, and each group is one row, so it returns `1`. Power BI lists a filter's
+values this way:
+
+```sql
+SELECT "ORDER_STATUS", COUNT(1) AS "C1"
+FROM "EXA_DB"."SEMANTIC_SALES"."SALES" GROUP BY "ORDER_STATUS" LIMIT 1000001
+```
+
+The values are the governed domain: joins, filters and row-level security apply
+as for any other statement. With no dimension the count names no grain, so it is
+refused with `SEMANTIC_QUERY_010`; count a metric instead.
+
+A `LIMIT` above 10000 is accepted here. That cap applies to structured requests
+only; a statement without `LIMIT` is not capped either.
+
 An ordinal must name a position in the `SELECT` list: `0`, a negative number,
 a fraction, or a number past the end is refused with `SEMANTIC_QUERY_064`,
 which says how many items there are. Databricks-style `ORDER BY MEASURE(metric)` is accepted for selected
@@ -242,13 +258,12 @@ grouped result:
 
 ```sql
 -- refused: counts rows that are themselves groups
-SELECT CUSTOMER_REGION, COUNT(*) FROM SEMANTIC_SALES.SALES GROUP BY CUSTOMER_REGION
+SELECT COUNT(*) FROM SEMANTIC_SALES.SALES GROUP BY CUSTOMER_REGION
 ```
 
-Left to expansion that becomes `SELECT CUSTOMER_REGION, COUNT(*) FROM (<compiled>)
-GROUP BY CUSTOMER_REGION` — valid SQL returning `1` per region, which is the
-count of groups rather than of anything anyone asked about. It is refused with
-`SEMANTIC_QUERY_015`, or with whichever of `SEMANTIC_QUERY_008`, `_010` or `_026`
+Left to expansion that becomes `SELECT COUNT(*) FROM (<compiled>) GROUP BY
+CUSTOMER_REGION` — valid SQL returning a count of groups rather than of anything
+anyone asked about. It is refused with `SEMANTIC_QUERY_015`, or with whichever of `SEMANTIC_QUERY_008`, `_010` or `_026`
 has more to say about the particular statement — unless the model has opted into
 ordinary-SQL semantics with `SET_MODEL_DERIVED_COMPOSITION`, which covers this
 hazard and the join hazard together.

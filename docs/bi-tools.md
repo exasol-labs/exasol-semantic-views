@@ -197,6 +197,7 @@ of these work:
 | `SELECT CAST(t0.B AS VARCHAR(50)), t0.B / 1000 FROM … t0` | casts and arithmetic |
 | `SELECT COUNT(*) FROM (SELECT t0.A FROM … t0) z` | count over the result |
 | `SELECT … WHERE 1 = 0` and `LIMIT 0` | the driver's metadata probes |
+| `SELECT "A", COUNT(1) AS "C1" FROM … GROUP BY "A" LIMIT 1000001` | Power BI filter domain: the governed values of `A`, each counted as its one row |
 | `SELECT 1 AS "C1", "A", "B" FROM "EXA_DB"."SEMANTIC_SALES"."SALES" LIMIT 1000001` | Power BI DirectQuery: a catalog-qualified name, a constant column and its fetch limit |
 | `SELECT "A", "C1" FROM (SELECT "A", SUM("B") AS "C1" FROM … GROUP BY "A") AS "ITBL" WHERE NOT "C1" IS NULL` | Power BI table visual: the inner block is compiled as a semantic query; the outer filter, order and limit stay ordinary SQL |
 
@@ -366,7 +367,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 |---|---|
 | `SEMANTIC_QUERY_011` | no column of the object is referenced, so which to compile cannot be inferred |
 | `SEMANTIC_QUERY_012` | the object is joined to another relation; see §4 |
-| `SEMANTIC_QUERY_010` | `COUNT(*)` directly over the object — its answer depends on a grain you did not name; wrap it in a subquery |
+| `SEMANTIC_QUERY_010` | `COUNT(*)` directly over the object with no dimension selected — its answer depends on a grain you did not name; wrap it in a subquery |
 | `SEMANTIC_REQUEST_027` | the field is withheld by the model (`IS_PRIVATE` / `IS_HIDDEN`) |
 | `SEMANTIC_REQUEST_024` | the field carries `DISPLAY_POLICY = 'MASK'`; you can still filter on it |
 | `SEMANTIC_REQUEST_011` | the model does not exist, or is not granted to you |

@@ -157,8 +157,10 @@ REAGGREGATION = [
      f"SELECT CUSTOMER_REGION, PRODUCT_CATEGORY FROM {OBJECT} GROUP BY CUSTOMER_REGION"),
     ("GROUP BY a field that is not selected",
      f"SELECT CUSTOMER_REGION FROM {OBJECT} GROUP BY ORDER_STATUS"),
-    ("COUNT(*) beside a grouped field",
-     f"SELECT CUSTOMER_REGION, COUNT(*) FROM {OBJECT} GROUP BY CUSTOMER_REGION"),
+    # Beside a selected dimension COUNT(*) is 1 per group and accepted (GitHub
+    # #17); grouped by a dimension it does not select, it counts groups.
+    ("COUNT(*) grouped by a field it does not select",
+     f"SELECT COUNT(*) FROM {OBJECT} GROUP BY CUSTOMER_REGION"),
     ("HAVING without GROUP BY",
      f"SELECT CUSTOMER_REGION FROM {OBJECT} HAVING TOTAL_REVENUE > 0"),
 ]
