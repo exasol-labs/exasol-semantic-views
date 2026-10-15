@@ -409,6 +409,48 @@ whether the existing preprocessor should be replaced.
 
 ## Operational Notes
 
+### Query logging
+
+The preprocessor records every statement it rewrites or refuses in
+`SYS_SEMANTIC.QUERY_LOG`, which is what lets a user read their own BI queries
+back through `SEMANTIC_SOURCE.MY_QUERY_LOG` and `EXPLAIN_COMPILED_SQL`. A refusal
+row carries its `ERROR_CODE` (`SEMANTIC_QUERY_007`, say) beside the message.
+Ordinary SQL the preprocessor leaves unchanged is never logged.
+
+That is one insert on the interactive path of every semantic query: about 2 ms
+measured locally, but also a write that contends with every other session's, and
+a table that grows without limit. Where a deployment does not need the history,
+switch it off:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_QUERY_LOGGING('DEPLOYMENT', 'OFF');
+```
+
+Logging is on by default. With it off, diagnose a BI tool's failure by turning
+it on for the deployment, reproducing in the tool, and turning it off again; the
+tool's user then reads the rows in `SEMANTIC_SOURCE.MY_QUERY_LOG`. To reproduce
+in your own session instead, override just that session and clear it after:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_QUERY_LOGGING('SESSION', 'ON');
+-- reproduce, then read SEMANTIC_SOURCE.MY_QUERY_LOG
+EXECUTE SCRIPT SEMANTIC_ADMIN.SET_QUERY_LOGGING('SESSION', NULL);
+```
+
+A session override wins over the deployment value and applies only to the
+session that set it. Both scopes return, and `SEMANTIC_CATALOG.SETTINGS`
+reports, the deployment, session and effective values. Changing either needs
+write access to `SYS_SEMANTIC.SETTINGS`, which `SEMANTIC_USER` does not carry,
+so a caller cannot switch off the logging of its own queries.
+`COMPILE_SQL_DEBUG` logs whatever the setting.
+
+Nothing expires `QUERY_LOG` rows. Delete old ones on a schedule if the table
+grows:
+
+```sql
+DELETE FROM SYS_SEMANTIC.QUERY_LOG WHERE STARTED_AT < ADD_DAYS(CURRENT_TIMESTAMP, -30);
+```
+
 ### Schedule `CHECK_FROZEN_VIEWS`
 
 A view created over a semantic object stores **compiled physical SQL**. That is

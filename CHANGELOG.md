@@ -23,6 +23,25 @@ All notable changes to Exasol Semantic Views are documented here.
   remains for structured requests). A statement without `LIMIT` was never capped,
   so the cap only refused Power BI's fetch limit.
 
+#### Preprocessor query logging is a setting (#18)
+
+- The preprocessor wrote a `SYS_SEMANTIC.QUERY_LOG` row for every statement it
+  rewrote, unconditionally: an insert on the interactive path of every BI query,
+  contending with every other session's, into a table that only grows.
+- `SEMANTIC_ADMIN.SET_QUERY_LOGGING(SCOPE, LOGGING)` switches it `ON` or `OFF`
+  for the `DEPLOYMENT` or the calling `SESSION`; a session override wins, and
+  `NULL` clears it. The values are stored in the new `SYS_SEMANTIC.SETTINGS`,
+  which `SEMANTIC_USER` cannot write, so a caller cannot switch off the logging
+  of its own queries. `SEMANTIC_CATALOG.SETTINGS` shows the deployment, session
+  and effective values.
+- Logging stays on by default. Anything but an explicit `OFF` logs, including a
+  setting that cannot be read.
+- Refusals are now logged too, with `ERROR_CODE` beside the message. Ordinary
+  SQL the preprocessor leaves unchanged is still never logged, and
+  `COMPILE_SQL_DEBUG` logs whatever the setting.
+- `docs/admin-db-wide-setup.md` documents the cost, the
+  enable-reproduce-disable workflow, and retention.
+
 ### Fixed
 
 #### Power BI's table visual refused ratio metrics (#16)

@@ -33,6 +33,11 @@ preprocessor-related scripts. `CREATE SCRIPT` statements are themselves parsed
 while a session preprocessor is active, so extension installs should avoid
 leaving an old preprocessor in the session.
 
+Statements the preprocessor rewrites or refuses are recorded in
+`SYS_SEMANTIC.QUERY_LOG` unless an administrator has switched that off with
+`SET_QUERY_LOGGING`; see
+[Query logging](admin-db-wide-setup.md#query-logging).
+
 Activation is session-scoped. BI sessions and SQL clients that want to run
 semantic SQL directly must enable it on each connection. Agents and MCP
 adapters should prefer `COMPILE_REQUEST_JSON` or `COMPILE_SQL` when they cannot

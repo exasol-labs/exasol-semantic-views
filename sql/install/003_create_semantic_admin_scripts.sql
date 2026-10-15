@@ -17648,7 +17648,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "33af8cb40d331d6b"
+ESV_RUNTIME_BUILD = "4641e30653cfca98"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18615,7 +18615,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "33af8cb40d331d6b"
+ESV_RUNTIME_BUILD = "4641e30653cfca98"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -25420,13 +25420,24 @@ end
 -- Picking arbitrarily was survivable only while nothing else depended on the
 -- choice: a model without the object resolves, and the caller is told their
 -- object does not exist while it sits in the model next to it.
+-- Both SQL lanes resolve their model here on every statement, cache hits
+-- included, so the preprocessor's logging setting rides along rather than
+-- costing a statement of its own (GitHub #18): a session override, else the
+-- deployment value.
 local function load_model_by_published_schema(schema_name, object_name)
     local rows = query([[
         SELECT m.MODEL_ID, m.MODEL_NAME, m.ACTIVE_VERSION_ID AS VERSION_ID,
-               mv.VERSION_NUMBER, m.GOVERNANCE_MODE
+               mv.VERSION_NUMBER, m.GOVERNANCE_MODE,
+               COALESCE(ql_session.SETTING_VALUE, ql_deployment.SETTING_VALUE) AS QUERY_LOG
         FROM SEMANTIC_SOURCE.MODELS m
         LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
+        LEFT JOIN SEMANTIC_SOURCE.MY_SETTINGS ql_session
+          ON ql_session.SETTING_NAME = 'PREPROCESSOR_QUERY_LOG'
+         AND ql_session.SESSION_ID = CURRENT_SESSION
+        LEFT JOIN SEMANTIC_SOURCE.MY_SETTINGS ql_deployment
+          ON ql_deployment.SETTING_NAME = 'PREPROCESSOR_QUERY_LOG'
+         AND ql_deployment.SESSION_ID IS NULL
         LEFT JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so
           ON so.MODEL_ID = m.MODEL_ID
          AND so.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -25446,6 +25457,7 @@ local function load_model_by_published_schema(schema_name, object_name)
         version_id = row_value(rows[1], "VERSION_ID", 3),
         version_number = row_value(rows[1], "VERSION_NUMBER", 4),
         governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 5),
+        query_log = row_value(rows[1], "QUERY_LOG", 6),
     }
 end
 
@@ -28822,19 +28834,38 @@ function M.compile_sql_for_preprocessor(sql_text)
     -- from every lane except the one BI tools use. SEMANTIC_USER was even
     -- granted INSERT on the table, for a writer that never ran.
     --
-    -- Only statements this lane actually rewrote are recorded. UNCHANGED means
-    -- the text was somebody else's ordinary SQL, and logging those would fill
-    -- the table with rows the semantic layer had no part in -- with the
-    -- preprocessor set database-wide, that is every statement in every session.
+    -- Only statements this lane rewrote or refused are recorded, a refusal with
+    -- its ERROR_CODE. UNCHANGED means the text was somebody else's ordinary SQL,
+    -- and logging those would fill the table with rows the semantic layer had no
+    -- part in -- with the preprocessor set database-wide, that is every statement
+    -- in every session.
+    --
+    -- The insert is a write on the interactive path, contending with every other
+    -- session's, so an administrator can switch it off (SET_QUERY_LOGGING,
+    -- GitHub #18). Anything but an explicit OFF logs, including a setting that
+    -- cannot be read: losing the trail silently is the worse failure.
     --
     -- Best effort, and deliberately so: a query that answered correctly must not
     -- fail because the layer could not describe it afterwards.
-    if answer ~= nil and answer.status == "OK" then
+    --
+    -- The setting arrives with the model (load_model_by_published_schema). Only
+    -- a refusal issued before any model was resolved reads it on its own.
+    if answer ~= nil and answer.status ~= "UNCHANGED" then
         local logged_model = answer.model or model
-        pcall(log_query_result, answer, sql_text, request, logged_model,
-            answer.expanded_references ~= nil and "PREPROCESSOR:EXPANSION"
-                or "PREPROCESSOR",
-            false)
+        local logging = logged_model and logged_model.query_log
+        if logging == nil then
+            local read, value = pcall(scalar, [[
+                SELECT SETTING_VALUE FROM SEMANTIC_SOURCE.MY_SETTINGS
+                WHERE SETTING_NAME = 'PREPROCESSOR_QUERY_LOG'
+                ORDER BY SESSION_ID NULLS LAST LIMIT 1]])
+            logging = read and value or nil
+        end
+        if missing(logging) or upper(tostring(logging)) ~= "OFF" then
+            pcall(log_query_result, answer, sql_text, request, logged_model,
+                answer.expanded_references ~= nil and "PREPROCESSOR:EXPANSION"
+                    or "PREPROCESSOR",
+                false)
+        end
     end
     return answer
 end

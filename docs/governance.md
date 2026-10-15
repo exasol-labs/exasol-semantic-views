@@ -263,7 +263,8 @@ and every relation it read with its trust class. `PLAN_JSON` carries the same as
 a `governance` block for anything that wants to read it programmatically.
 
 This works for statements from every lane, including the preprocessor, whose
-rows land in `SEMANTIC_SOURCE.MY_QUERY_LOG`. Where a compile was served from the
+rows land in `SEMANTIC_SOURCE.MY_QUERY_LOG` unless an administrator has switched
+preprocessor logging off (`SET_QUERY_LOGGING`). Where a compile was served from the
 cache the prose names the principal who *ran* the statement as well as the one
 who compiled the plan: the generated SQL is identical, and what decided the rows
 returned is the runner's own rights.
