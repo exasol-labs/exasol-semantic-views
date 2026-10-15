@@ -789,7 +789,7 @@ SELECT * FROM (VALUES
   ('A wrapper naming no column of the object', 'REFUSED',
    'Which columns to compile cannot be inferred, and defaulting to all of them would change the grain silently.', 'SEMANTIC_QUERY_011', NULL),
   ('COUNT(*) over a semantic object', 'REFUSED',
-   'Its answer depends on a grain the caller never named. Wrap the object in a subquery and count that.', 'SEMANTIC_QUERY_010', NULL),
+   'With no dimension selected its answer depends on a grain the caller never named. Wrap the object in a subquery and count that. Beside a selected dimension each group is one row, so COUNT(*) or COUNT(1) returns 1 (Power BI''s filter domain).', 'SEMANTIC_QUERY_010', NULL),
   ('Reading a relation the model does not vouch for', 'REFUSED',
    'In GOVERNED mode every representation must resolve through a relation that can carry row and column policy.', 'SEMANTIC_QUERY_028', 'SEMANTIC_REQUEST_028'),
   ('Malformed or non-Exasol SQL around the object', 'REPORTED BY THE DATABASE',

@@ -6,6 +6,23 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Added
+
+#### Power BI filter-domain queries with `COUNT(1)` (#17)
+
+- Power BI lists a basic filter's values with `SELECT "ORDER_STATUS", COUNT(1)
+  AS "C1" … GROUP BY "ORDER_STATUS" LIMIT 1000001`. It was refused with
+  `SEMANTIC_QUERY_005`, so the filter showed `Unable to obtain the list of items`.
+- Policy: `COUNT(*)` or `COUNT(<number>)` beside at least one selected dimension
+  counts rows of the result, and each group is one row, so it returns `1`. The
+  values are the governed domain — joins, filters and row-level security apply
+  as for any statement, wrapped or not. With no dimension it is still
+  `SEMANTIC_QUERY_010`, which an alias (`COUNT(*) AS n`) used to turn into the
+  misleading `_005`.
+- A SQL statement's `LIMIT` is no longer capped at 10000 (`SEMANTIC_REQUEST_051`
+  remains for structured requests). A statement without `LIMIT` was never capped,
+  so the cap only refused Power BI's fetch limit.
+
 ### Fixed
 
 #### Power BI's table visual refused ratio metrics (#16)

@@ -15,6 +15,8 @@ This asserts, in a preprocessor-enabled session against the sales model:
   inner statements answer, with Power BI's aliases;
 - Power BI's table visual, which sums every metric, selects a ratio as
   defined rather than refusing it (GitHub #16);
+- Power BI's filter-domain query, COUNT(1) per value, lists the governed values
+  with a count of 1 each, bare or wrapped (GitHub #17);
 - the block's aggregate checks still apply (a mismatched COUNT is
   SEMANTIC_QUERY_007), and so does the outer re-aggregation guard
   (SEMANTIC_QUERY_016);
@@ -106,6 +108,15 @@ def main() -> int:
             raise AssertionError(f"table visual SUM is not the metric: {summed} vs {measured}")
         print("ok Power BI's table visual selects every metric, ratios included, as defined")
 
+        domain = (f'SELECT "ORDER_STATUS", COUNT(1) AS "C1" FROM {SALES}'
+                  ' GROUP BY "ORDER_STATUS" LIMIT 1000001')
+        values = outcome(con, f'SELECT "ORDER_STATUS" FROM {SALES} GROUP BY "ORDER_STATUS"')
+        expected = ("rows", (["ORDER_STATUS", "C1"], sorted(row + ("1",) for row in values[1][1])))
+        for sql in (domain, f"SELECT * FROM ({domain}) t"):
+            if outcome(con, sql) != expected:
+                raise AssertionError(f"filter domain is not the values: {outcome(con, sql)} vs {expected}")
+        print("ok Power BI's COUNT(1) filter domain lists the governed values, bare and wrapped")
+
         ungrouped = outcome(con, "SELECT * FROM (SELECT CUSTOMER_REGION, SUM(TOTAL_REVENUE)"
                                  " FROM SEMANTIC_SALES.SALES) esv_wrapper")
         if ungrouped[0] != "rows" or ungrouped[1][1] != by_region[1][1]:
@@ -116,6 +127,7 @@ def main() -> int:
             ("mismatched aggregate", f'SELECT * FROM (SELECT "CUSTOMER_REGION",'
              f' COUNT("TOTAL_REVENUE") AS "C1" FROM {SALES} GROUP BY "CUSTOMER_REGION") t',
              "SEMANTIC_QUERY_007"),
+            ("COUNT(1) naming no grain", f"SELECT COUNT(1) AS n FROM {SALES}", "SEMANTIC_QUERY_010"),
             ("outer average of a ratio", "SELECT AVG(x.m) FROM (SELECT CUSTOMER_REGION,"
              " MEASURE(GROSS_MARGIN_PCT) AS m FROM SEMANTIC_SALES.SALES GROUP BY CUSTOMER_REGION) x",
              "SEMANTIC_QUERY_016"),

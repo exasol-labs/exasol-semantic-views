@@ -444,8 +444,9 @@ end
 -- the wrong data silently; one that binds by name gets nothing.
 --
 -- `columns` is an ordered list of {source = <name in the compiled SQL>,
--- output = <name to present>}. Returns the SQL unchanged when the projection
--- would be the identity, so the structured lane and `SELECT *` pay nothing.
+-- output = <name to present>}, or {value = <SQL constant>, output = <name>}.
+-- Returns the SQL unchanged when the projection would be the identity, so the
+-- structured lane and `SELECT *` pay nothing.
 function M.output_projection(sql, columns)
     if type(sql) ~= "string" or type(columns) ~= "table" or #columns == 0 then
         return sql
@@ -454,10 +455,10 @@ function M.output_projection(sql, columns)
     for index, column in ipairs(columns) do
         local source = tostring(column.source or "")
         local output = tostring(column.output or source)
-        if source == "" then
+        if column.value == nil and source == "" then
             return sql
         end
-        parts[index] = M.quote_ident(source) .. " AS " .. M.quote_ident(output)
+        parts[index] = (column.value or M.quote_ident(source)) .. " AS " .. M.quote_ident(output)
     end
     return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)"
 end
