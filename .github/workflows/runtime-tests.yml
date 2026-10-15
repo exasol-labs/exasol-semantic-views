@@ -10,6 +10,28 @@ permissions:
   contents: read
 
 jobs:
+  static-checks:
+    # Ruff, mypy, Luacheck (lua/, tests/lua/ and the Lua embedded in
+    # sql/install/) and ShellCheck; see tools/run_static_checks.sh.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-static.txt
+      - name: Install Luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 liblua5.4-dev luarocks
+          sudo luarocks install luacheck 1.2.0
+      - name: Install Python checkers
+        run: python -m pip install -r tools/requirements-static.txt
+      - name: Run static checks
+        # ShellCheck is preinstalled on GitHub's Ubuntu runners.
+        run: PYTHON_BIN=python sh tools/run_static_checks.sh
+
   database-free:
     runs-on: ubuntu-latest
     steps:

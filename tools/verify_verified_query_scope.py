@@ -121,7 +121,7 @@ def main() -> int:
         statement = con.execute(
             f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({literal(stored)})")
         names = [column.lower() for column in statement.columns().keys()]
-        replay = dict(zip(names, statement.fetchone()))
+        replay = dict(zip(names, statement.fetchone(), strict=True))
         if replay["status"] != "OK":
             raise AssertionError(
                 f"stored request does not replay: {replay.get('error_code')}"

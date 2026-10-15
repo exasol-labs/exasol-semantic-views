@@ -190,7 +190,7 @@ def compile_value(con: Any, model: str, object_name: str, metric: str) -> Decima
     statement = con.execute(
         f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({literal(request)})")
     names = [name.lower() for name in statement.columns().keys()]
-    result = dict(zip(names, statement.fetchone()))
+    result = dict(zip(names, statement.fetchone(), strict=True))
     if result["status"] != "OK":
         raise AssertionError(
             f"compile of {metric} failed: {result.get('error_code')}"

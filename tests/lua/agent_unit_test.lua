@@ -56,7 +56,6 @@ end)
 
 test("agent instruction creation is idempotent and resolves metric scope", function()
     local inserted = nil
-    local target_insert = nil
     local duplicate = true
     local function mock(sql, params)
         if contains(sql, "FROM SYS_SEMANTIC.MODELS") then

@@ -468,7 +468,7 @@ query([[
       :model_id, :version_id, :entity_id, 'primary', :source_kind,
       :source_schema, :source_object, :source_alias, 'PRIMARY', 1, 'ACTIVE'
     )
-]], {source_kind = primary_source_kind, 
+]], {source_kind = primary_source_kind,
     model_id = model.model_id,
     version_id = model.version_id,
     entity_id = entity_id,
@@ -610,11 +610,10 @@ if tostring(model_status) == "PUBLISHED" then
         "EXECUTE SCRIPT SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS(:model_name)",
         {model_name = model_name})
     validation_status = "OK"
-    for _, validation_row in ipairs(introduced or {}) do
-        local severity = validation_row.SEVERITY or validation_row.severity
-            or validation_row[1]
+    local first = (introduced or {})[1]
+    if first ~= nil then
+        local severity = first.SEVERITY or first.severity or first[1]
         validation_status = tostring(severity)
-        break
     end
     if validation_status == "OK" then
         local totals = query([[
@@ -3224,7 +3223,7 @@ end
 -- document's entity-level bindings arrive after the representation has already
 -- been validated and rolled back.
 local declared = {}
-local added_row = nil
+local added_row
 local staged_representation_id = nil
 local staged_status = nil
 if has_bindings then
@@ -3346,7 +3345,7 @@ if has_bindings then
         local role = upper(binding.binding_role)
         if role ~= "PREFER" and role ~= "FALLBACK" then role = "PREFER" end
         local binding_priority = tonumber(tostring(binding.binding_priority or 1)) or 1
-        local updated = query([[
+        query([[
             UPDATE SYS_SEMANTIC.ATTRIBUTE_BINDINGS
             SET SOURCE_EXPRESSION = :expression, BINDING_ROLE = :role,
                 BINDING_PRIORITY = :binding_priority,
@@ -4141,7 +4140,6 @@ local rows = query([[
 if rows == nil or #rows == 0 then
     error("SEMANTIC_ADMIN_045: active representation not found: " .. representation_name)
 end
-local model_id = row_value(rows[1], "MODEL_ID", 1)
 local version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2)
 local entity_id = row_value(rows[1], "ENTITY_ID", 3)
 local representation_id = row_value(rows[1], "REPRESENTATION_ID", 4)
@@ -4519,13 +4517,6 @@ local function normalize_choice(value, label, allowed)
         end
     end
     error("SEMANTIC_ADMIN_003: invalid " .. label .. ": " .. tostring(value))
-end
-
-local function optional_text(value)
-    if missing(value) then
-        return null
-    end
-    return tostring(value)
 end
 
 local function row_value(row, name, position)
@@ -5282,18 +5273,6 @@ local function add_object_column(object_id_value, kind, ref_id, column_name)
         column_name = column_name,
         ordinal = ordinal
     })
-end
-
-local function ensure_object_column_available(object_id_value, column_name)
-    local duplicate = scalar([[
-        SELECT COUNT(*)
-        FROM SYS_SEMANTIC.OBJECT_COLUMNS
-        WHERE OBJECT_ID = :object_id
-          AND UPPER(COLUMN_NAME) = UPPER(:column_name)
-    ]], {object_id = object_id_value, column_name = column_name})
-    if tonumber(duplicate or 0) > 0 then
-        error("SEMANTIC_ADMIN_018: duplicate object column: " .. column_name)
-    end
 end
 
 local function validation_error_summary(validation_rows)
@@ -6994,11 +6973,6 @@ CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING(
   REPRESENTATION_NAME
 )
 RETURNS TABLE AS
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then return nil end
-    return rows[1][1]
-end
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would
 -- render an address and report it back in the "not found" errors below.
 local function trim(value)
@@ -8781,13 +8755,6 @@ local function normalize_choice(value, label, allowed)
         end
     end
     error("SEMANTIC_ADMIN_003: invalid " .. label .. ": " .. tostring(value))
-end
-
-local function optional_text(value)
-    if missing(value) then
-        return null
-    end
-    return tostring(value)
 end
 
 local function row_value(row, name, position)
@@ -12974,8 +12941,8 @@ local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
 
-local function count_query(sql_text, params)
-    return tonumber(scalar(sql_text, params) or 0) or 0
+local function count_query(statement_sql, params)
+    return tonumber(scalar(statement_sql, params) or 0) or 0
 end
 
 local function upper(value)
@@ -12984,13 +12951,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function nil_if_missing(value)
-    if missing(value) then
-        return nil
-    end
-    return value
 end
 
 -- Well-formedness of a user-supplied JSON payload -- extension `data_json`,
@@ -14882,8 +14842,8 @@ local function representation_key_query(representation, unique_key)
         .. " GROUP BY " .. table.concat(expressions, ", "), nil
 end
 
-local function probe_count(sql_text)
-    local ok, rows = pcall(query, sql_text)
+local function probe_count(statement_sql)
+    local ok, rows = pcall(query, statement_sql)
     if not ok then return nil, tostring(rows) end
     if rows == nil or #rows == 0 then return nil, "probe returned no rows" end
     return tonumber(row_value(rows[1], "PROBE_COUNT", 1) or 0), nil
@@ -16269,13 +16229,13 @@ local function validate_fusion_conflicts(ctx)
                     local right_representation = representation_by_id[key(right_binding.representation_id)]
                     if left_representation ~= nil and right_representation ~= nil
                         and key(left_representation.id) ~= key(right_representation.id) then
-                        local sql_text, build_error = fusion_conflict_query(
+                        local statement_sql, build_error = fusion_conflict_query(
                             left_representation, left_binding, right_representation,
                             right_binding, unique_key, semantic_identity)
-                        if sql_text == nil then
+                        if statement_sql == nil then
                             probe_error = build_error
                         else
-                            local count, count_error = probe_count(sql_text)
+                            local count, count_error = probe_count(statement_sql)
                             if count_error ~= nil then probe_error = count_error
                             else conflict_count = conflict_count + count end
                         end
@@ -16455,7 +16415,6 @@ local function check_frozen_views(ctx)
         if tonumber(row_value(row, "STILL_EXISTS", 5) or 0) == 1 then
             local view_name = tostring(row_value(row, "VIEW_SCHEMA", 1)) .. "."
                 .. tostring(row_value(row, "VIEW_NAME", 2))
-            local frozen_version = row_value(row, "VERSION_ID", 3)
 
             -- No version comparison here, deliberately. ESV creates exactly one
             -- model version -- CREATE_MODEL makes version 1 and nothing ever
@@ -17154,7 +17113,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             ctx, metric, safe_edges, all_edges)
         for _, dimension in ipairs(ctx.dimensions) do
             local is_valid = false
-            local reason_code = "OK"
+            local reason_code
             local path = nil
             local alternates = nil
             local partition_hop_name = nil
@@ -17648,7 +17607,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "4641e30653cfca98"
+ESV_RUNTIME_BUILD = "08eda3cbe6fd3320"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18615,7 +18574,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "4641e30653cfca98"
+ESV_RUNTIME_BUILD = "08eda3cbe6fd3320"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -20216,8 +20175,6 @@ local json = assert(ESV_JSON, "shared JSON runtime is required")
 local M = {VERSION = 1}
 
 local ARRAY_FIELDS = {"metrics", "dimensions", "filters", "having", "order_by"}
-local ARRAY_FIELD_SET = {}
-for _, name in ipairs(ARRAY_FIELDS) do ARRAY_FIELD_SET[name] = true end
 
 local function copy(value, seen)
     if type(value) ~= "table" then return value end
@@ -22242,8 +22199,8 @@ function M.apply_branch_sources(physical_plan, selections)
     return physical_plan, nil
 end
 
-function M.check_sql_size(physical_plan, sql_text)
-    local actual = #tostring(sql_text or "")
+function M.check_sql_size(physical_plan, statement_sql)
+    local actual = #tostring(statement_sql or "")
     physical_plan.safeguards.sql_size_bytes = actual
     if actual > physical_plan.safeguards.sql_size_limit then
         return false, {
@@ -22553,12 +22510,12 @@ end
 local envelope = {}
 local compile_cache = {}
 do
-    function envelope.unchanged_result(sql_text)
+    function envelope.unchanged_result(statement_sql)
         return {
             status = "UNCHANGED",
             error_code = nil,
             error_message = nil,
-            generated_sql = sql_text,
+            generated_sql = statement_sql,
             plan_json = nil,
             clarification_json = nil,
             validation_run_id = nil,
@@ -22736,12 +22693,12 @@ do
             .. " SEMANTIC_CATALOG.SOURCE_TRUST_FOR_MODEL has the derivation.")
     end
 
-    function envelope.ok_result(sql_text, plan, validation_run_id)
+    function envelope.ok_result(statement_sql, plan, validation_run_id)
         return {
             status = "OK",
             error_code = nil,
             error_message = nil,
-            generated_sql = sql_text,
+            generated_sql = statement_sql,
             plan_json = json.encode(plan),
             clarification_json = nil,
             validation_run_id = validation_run_id,
@@ -23954,12 +23911,12 @@ end
 local function near_field_names(normalized, candidates)
     local near, seen = {}, {}
     for _, candidate in ipairs(candidates) do
-        local key, display = candidate.key, candidate.display
+        local name, display = candidate.key, candidate.display
         if not seen[display]
-            and (string.find(key, normalized, 1, true)
-                or string.find(normalized, key, 1, true)
+            and (string.find(name, normalized, 1, true)
+                or string.find(normalized, name, 1, true)
                 or (#normalized >= 3
-                    and string.sub(key, 1, 3) == string.sub(normalized, 1, 3))) then
+                    and string.sub(name, 1, 3) == string.sub(normalized, 1, 3))) then
             seen[display] = true
             near[#near + 1] = display
         end
@@ -24388,7 +24345,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
     for _, binding in ipairs(bindings) do
         local representation = representation_by_id(ctx, binding.representation_id)
         if representation ~= nil then
-            local expression = nil
+            local expression
             if key(representation.id) == key(base_representation.id) then
                 expression = binding.expression
             else
@@ -25609,7 +25566,7 @@ local function compile_request_table(request, options)
         collect_metric_entities(ctx, metric, needed_entities, {})
     end
 
-    local filters, filter_dimensions, filter_err = build_filters(ctx, request.filters, selected_dimensions, needed_entities)
+    local _, filter_dimensions, filter_err = build_filters(ctx, request.filters, selected_dimensions, needed_entities)
     if filter_err ~= nil then
         return filter_err
     end
@@ -25625,7 +25582,7 @@ local function compile_request_table(request, options)
         add_unique(all_dimensions, all_dimension_seen, dimension)
     end
 
-    local validation_run_id = nil
+    local validation_run_id
     if options.validate == false then
         local validation_message
         validation_run_id, validation_message = latest_successful_validation(model)
@@ -25674,7 +25631,6 @@ local function compile_request_table(request, options)
         return order_err
     end
 
-    local having_predicates = {}
     local bound_having_filters = {}
     local planning_metrics = {}
     local planning_metric_seen = {}
@@ -25710,11 +25666,10 @@ local function compile_request_table(request, options)
                 .. "' requires a value or value_sql key.")
         end
         local expr = expand_metric(ctx, metric_field)
-        local predicate, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
+        local _, predicate_err = build_dimension_predicate(expr, op, having_filter.value, metric_field.data_type, having_filter.value_sql)
         if predicate_err ~= nil then
             return predicate_err
         end
-        having_predicates[#having_predicates + 1] = predicate
         bound_having_filters[#bound_having_filters + 1] = {
             metric_id = metric_field.id,
             metric = metric_field.name,
@@ -25770,10 +25725,11 @@ local function compile_request_table(request, options)
     -- Filters and HAVING expressions were resolved while discovering required
     -- attributes. Rebuild them after representation selection so fallback
     -- expressions are used consistently in WHERE and HAVING.
+    local filters
     filters, _, filter_err = build_filters(
         ctx, request.filters, selected_dimensions, needed_entities)
     if filter_err ~= nil then return filter_err end
-    having_predicates = {}
+    local having_predicates = {}
     for index, bound in ipairs(bound_having_filters) do
         local metric_field = ctx.all_metric_by_id[key(bound.metric_id)]
         local source = having_list[index]
@@ -25816,7 +25772,7 @@ local function compile_request_table(request, options)
     end
 
     local function plan_envelope(materialization_decision, selected_materialization,
-        relationship_paths)
+        envelope_paths)
         materialization_decision = materialization_decision or {
             candidate_count = 0,
             rejected_materializations = typed_plan.plan_kind == "MULTI_BRANCH"
@@ -25834,7 +25790,7 @@ local function compile_request_table(request, options)
             metric_details = {},
             dimensions = {},
             filters = filters,
-            relationship_paths = relationship_paths or {},
+            relationship_paths = envelope_paths or {},
             selected_materialization = JSON_NULL,
             selected_materializations = materialization_decision.selected_materializations
                 or {},
@@ -26102,16 +26058,16 @@ local function compile_request_table(request, options)
         )
     end
 
-    local sql_text
+    local statement_sql
     if selected_materialization ~= nil then
-        sql_text = build_materialized_sql(ctx, selected_dimensions, selected_metrics, filters, order_by, limit, selected_materialization)
+        statement_sql = build_materialized_sql(ctx, selected_dimensions, selected_metrics, filters, order_by, limit, selected_materialization)
     else
-        sql_text = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
+        statement_sql = build_sql(ctx, selected_dimensions, selected_metrics, filters, joins, order_by, limit, having_predicates)
     end
 
     local plan = envelope.with_governance(
         plan_envelope(materialization_decision, selected_materialization, relationship_paths),
-        model, sql_text)
+        model, statement_sql)
     -- Refused before the result is cached, so a refusal is never stored and a
     -- model returning to OPEN does not have to outlive one.
     local governance_refusal = envelope.governance_refusal(model, plan, error_prefix)
@@ -26119,7 +26075,7 @@ local function compile_request_table(request, options)
         return governance_refusal, request, model
     end
     local result = envelope.attach_planning_runtime(
-        envelope.ok_result(sql_text, plan, validation_run_id), planning_started_ms)
+        envelope.ok_result(statement_sql, plan, validation_run_id), planning_started_ms)
     if cache_key ~= nil then
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
@@ -27052,9 +27008,9 @@ local function parse_semantic_sql(statement_text, options)
     return request, nil, model, meta
 end
 
-local function compile_sql_internal(sql_text, options)
+local function compile_sql_internal(statement_sql, options)
     options = options or {}
-    local request, parse_err, model, meta = parse_semantic_sql(sql_text, {
+    local request, parse_err, model, meta = parse_semantic_sql(statement_sql, {
         unchanged_nonsemantic = options.unchanged_nonsemantic,
         unchanged_unknown_schema = options.unchanged_unknown_schema,
         sql_cache = options.sql_cache,
@@ -27076,10 +27032,8 @@ local function compile_sql_internal(sql_text, options)
         source = "SEMANTIC_SQL",
     })
     if result ~= nil and result.status == "OK" and meta ~= nil then
-        -- ESV_SQL_TEXT, not the `sql_text` alias: this function's first
-        -- parameter is named sql_text and shadows it.
-        result.generated_sql = ESV_SQL_TEXT.output_projection(result.generated_sql,
-                                                              meta.output_columns)
+        result.generated_sql = sql_text.output_projection(result.generated_sql,
+                                                          meta.output_columns)
         -- A wrapper accepted because each group is one row is recorded, so the
         -- plan says the wrapper was lowered rather than applied (GitHub #8).
         if meta.wrapper_lowerings ~= nil then
@@ -27119,12 +27073,12 @@ local function busy_backoff()
     return budget
 end
 
-function M.compile_sql(sql_text)
+function M.compile_sql(statement_sql)
     -- See compile_internal: reuse the latest successful validation run instead of
     -- re-running the validator on every compile (BUG-001).
     local ok, result, request, model
     for attempt = 0, COLLISION_RETRIES do
-        ok, result, request, model = pcall(compile_sql_internal, sql_text, {validate = false})
+        ok, result, request, model = pcall(compile_sql_internal, statement_sql, {validate = false})
         if ok then break end
         if not collision_error(tostring(result)) then break end
         if attempt < COLLISION_RETRIES then busy_backoff() end
@@ -27137,16 +27091,16 @@ function M.compile_sql(sql_text)
     -- Expansion's result describes a statement the whole-statement planner never
     -- built, so the request and model from its failed attempt would misdescribe
     -- it. Nil is the honest answer until the expanded lane reports its own.
-    local answer = M.with_expansion_fallthrough(sql_text, result)
+    local answer = M.with_expansion_fallthrough(statement_sql, result)
     if answer ~= result then
         return answer, nil, nil
     end
     return result, request, model
 end
 
-function M.compile_sql_debug(sql_text, client_name)
-    local result, request, model = M.compile_sql(sql_text)
-    log_query_result(result, sql_text, request, model, client_name)
+function M.compile_sql_debug(statement_sql, client_name)
+    local result, request, model = M.compile_sql(statement_sql)
+    log_query_result(result, statement_sql, request, model, client_name)
     return result, request, model
 end
 
@@ -28738,7 +28692,7 @@ end
 -- into a *success*, never into a different refusal. `SELECT bogus FROM obj`
 -- keeps "Unknown semantic field: bogus. Did you mean: ...?" rather than being
 -- re-described as a statement whose columns could not be inferred.
-function M.with_expansion_fallthrough(sql_text, result)
+function M.with_expansion_fallthrough(statement_sql, result)
     if result ~= nil and result.status == "OK" then
         return result
     end
@@ -28746,7 +28700,7 @@ function M.with_expansion_fallthrough(sql_text, result)
     if result ~= nil and refusal_rules.lane_final[result.error_code or ""] then
         return result
     end
-    local expanded_ok, expanded = pcall(bi_expansion.rewrite, sql_text)
+    local expanded_ok, expanded = pcall(bi_expansion.rewrite, statement_sql)
     if not expanded_ok then
         -- Expansion broke rather than refused. If the other lane read the
         -- statement and said why it would not compile it, that answer is still
@@ -28781,10 +28735,10 @@ function M.with_expansion_fallthrough(sql_text, result)
     return result
 end
 
-function M.compile_sql_for_preprocessor(sql_text)
-    local upper_sql = upper(sql_text or "")
+function M.compile_sql_for_preprocessor(statement_sql)
+    local upper_sql = upper(statement_sql or "")
     if string.find(upper_sql, "SELECT", 1, true) == nil or string.find(upper_sql, "FROM", 1, true) == nil then
-        return {status = "UNCHANGED", generated_sql = sql_text}
+        return {status = "UNCHANGED", generated_sql = statement_sql}
     end
     local options = {
         validate = false,
@@ -28800,7 +28754,7 @@ function M.compile_sql_for_preprocessor(sql_text)
     }
     local ok, result, request, model
     for attempt = 0, COLLISION_RETRIES do
-        ok, result, request, model = pcall(compile_sql_internal, sql_text, options)
+        ok, result, request, model = pcall(compile_sql_internal, statement_sql, options)
         if ok then break end
         if not collision_error(tostring(result)) then break end
         if attempt < COLLISION_RETRIES then busy_backoff() end
@@ -28825,7 +28779,7 @@ function M.compile_sql_for_preprocessor(sql_text)
     -- bare form is the one the documentation teaches, so the two lanes are now
     -- one path -- whatever the first cannot compile, the second is asked about.
     --
-    local answer = M.with_expansion_fallthrough(sql_text, result)
+    local answer = M.with_expansion_fallthrough(statement_sql, result)
 
     -- The lane most queries take is the one that recorded nothing. QUERY_LOG was
     -- written only by COMPILE_SQL_DEBUG, so `MY_QUERY_LOG` stayed empty,
@@ -28861,7 +28815,7 @@ function M.compile_sql_for_preprocessor(sql_text)
             logging = read and value or nil
         end
         if missing(logging) or upper(tostring(logging)) ~= "OFF" then
-            pcall(log_query_result, answer, sql_text, request, logged_model,
+            pcall(log_query_result, answer, statement_sql, request, logged_model,
                 answer.expanded_references ~= nil and "PREPROCESSOR:EXPANSION"
                     or "PREPROCESSOR",
                 false)
@@ -30262,7 +30216,6 @@ local SEMANTIC_DDL_LEXER = {upper_identifiers = true}
 
 -- Identity, not a copy: a decoded null is only recognisable to code holding the
 -- same sentinel table (see shared/json.lua).
-local JSON_NULL = json.NULL
 
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
@@ -30270,10 +30223,6 @@ end
 
 local function upper(value)
     return string.upper(tostring(value))
-end
-
-local function key(value)
-    return tostring(value)
 end
 
 local function sql_string(value)
@@ -30539,7 +30488,7 @@ local function check_entry_clauses(kind, name, source, tokens, positions, ordere
             .. tostring(token.text) .. (after ~= nil and (" after " .. after) or "")
             .. ". Accepted clauses for a " .. kind .. ": " .. listed() .. ".")
     end
-    for key_name, entry in pairs(positions) do
+    for _, entry in pairs(positions) do
         if entry.duplicate ~= nil then
             error("SEMANTIC_DDL_044: " .. label .. ": clause "
                 .. table.concat(entry.words, " ") .. " is given more than once.")
@@ -32423,8 +32372,8 @@ local function patch_operation_object_columns(operation)
         return
     end
     local args = operation.arguments or {}
-    local kind_name = nil
-    local ref_name = nil
+    local kind_name
+    local ref_name
     if operation.operation == "add_dimension" then
         kind_name = "DIMENSION"
         ref_name = args.dimension_name
@@ -32821,17 +32770,6 @@ function M.apply_semantic_definition(definition_sql, dry_run)
     local message = tostring(result)
     local error_code = string.match(message, "(SEMANTIC_DDL_%d+)")
     return {{"ERROR", error_code or "SEMANTIC_DDL_999", message, nil, nil, nil}}
-end
-
-local function parse_metric_ref(ref)
-    local parts = {}
-    for part in string.gmatch(tostring(ref or ""), "[^.]+") do
-        parts[#parts + 1] = part
-    end
-    if #parts ~= 3 then
-        error("SEMANTIC_DDL_050: metric reference must be model.object.metric")
-    end
-    return normalize_name(parts[1], "MODEL_NAME"), normalize_name(parts[2], "OBJECT_NAME"), normalize_name(parts[3], "METRIC_NAME")
 end
 
 -- Returns the row *and* the three normalized names.
@@ -33241,16 +33179,16 @@ function M.export_semantic_definition(model_name, object_name, metric_name)
     return rows
 end
 
-local function parse_show_metrics(sql_text)
-    local certified = string.match(upper(sql_text), "^%s*SHOW%s+CERTIFIED%s+SEMANTIC%s+METRICS")
-    local private = string.match(upper(sql_text), "^%s*SHOW%s+PRIVATE%s+SEMANTIC%s+METRICS")
-    local ref = string.match(sql_text, "[Ii][Nn]%s+([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
+local function parse_show_metrics(statement_sql)
+    local certified = string.match(upper(statement_sql), "^%s*SHOW%s+CERTIFIED%s+SEMANTIC%s+METRICS")
+    local private = string.match(upper(statement_sql), "^%s*SHOW%s+PRIVATE%s+SEMANTIC%s+METRICS")
+    local ref = string.match(statement_sql, "[Ii][Nn]%s+([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
     if ref == nil then
         return nil
     end
     ref = string.gsub(ref, "%s+", "")
     local model_name, object_name = string.match(ref, "^([^.]+)%.([^.]+)$")
-    local like_value = string.match(sql_text, "[Ll][Ii][Kk][Ee]%s+'([^']*)'")
+    local like_value = string.match(statement_sql, "[Ll][Ii][Kk][Ee]%s+'([^']*)'")
     local where_parts = {
         "UPPER(mo.MODEL_NAME) = UPPER(" .. sql_string(model_name) .. ")",
         "UPPER(mo.OBJECT_NAME) = UPPER(" .. sql_string(object_name) .. ")",
@@ -33282,8 +33220,8 @@ FROM SEMANTIC_CATALOG.METRIC_OVERVIEW mo
 WHERE ]] .. table.concat(where_parts, "\n  AND ") .. "\nORDER BY METRIC_NAME"
 end
 
-local function parse_metric_ref_from_command(sql_text)
-    local ref = string.match(sql_text, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
+local function parse_metric_ref_from_command(statement_sql)
+    local ref = string.match(statement_sql, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
     if ref == nil then
         return nil
     end
@@ -33292,8 +33230,8 @@ local function parse_metric_ref_from_command(sql_text)
     return model_name, object_name, metric_name
 end
 
-local function parse_object_ref_from_command(sql_text)
-    local ref = string.match(sql_text, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
+local function parse_object_ref_from_command(statement_sql)
+    local ref = string.match(statement_sql, "([A-Za-z_][A-Za-z0-9_]*%s*%.%s*[A-Za-z_][A-Za-z0-9_]*)")
     if ref == nil then
         return nil
     end
@@ -33302,12 +33240,12 @@ local function parse_object_ref_from_command(sql_text)
     return model_name, object_name
 end
 
-local function parse_model_ref_from_command(sql_text)
-    return string.match(sql_text, "[Mm][Oo][Dd][Ee][Ll]%s+([A-Za-z_][A-Za-z0-9_]*)")
+local function parse_model_ref_from_command(statement_sql)
+    return string.match(statement_sql, "[Mm][Oo][Dd][Ee][Ll]%s+([A-Za-z_][A-Za-z0-9_]*)")
 end
 
-function M.preprocess_sql(sql_text)
-    local text = tostring(sql_text or "")
+function M.preprocess_sql(statement_sql)
+    local text = tostring(statement_sql or "")
     local u = upper(trim(text))
     if string.match(u, "^ALTER%s+SEMANTIC%s+VIEW") then
         local ok, parse_result = pcall(function()
@@ -33380,7 +33318,7 @@ function M.preprocess_sql(sql_text)
         local query_text = trim(string.sub(text, string.find(u, "QUERY") + 5))
         return {status = "OK", generated_sql = "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL_DEBUG(" .. sql_string(query_text) .. ", 'EXPLAIN_SEMANTIC_QUERY')"}
     end
-    return {status = "UNCHANGED", generated_sql = sql_text}
+    return {status = "UNCHANGED", generated_sql = statement_sql}
 end
 
 -- =====================================================================
@@ -33978,7 +33916,7 @@ local function dbx_translate(doc, model_name, published_schema, diags)
             grain = "Imported join: " .. tostring(join.name), description = join.comment,
         }
         local parent_alias = entity_alias[parent_entity] or root_alias
-        local join_condition = nil
+        local join_condition
         if not missing(join["on"]) then
             join_condition = dbx_rewrite_expr(join["on"], alias_paths, parent_alias, nil, diags, "joins." .. tostring(join.name))
         elseif not missing(join.using) then
@@ -34314,7 +34252,7 @@ local function dbx_apply_plan(plan)
              description = null_if_missing(d.description), format_hint = null_if_missing(d.format_hint),
              is_certified = d.is_certified})
     end
-    local validation_run_id = nil
+    local validation_run_id
     local alter = dbx_alter_semantic_view(plan)
     if alter ~= nil then
         local rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(:ddl, FALSE)", {ddl = alter})

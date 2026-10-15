@@ -83,7 +83,7 @@ def compile_as(con, request: dict) -> dict:
     statement = con.execute(
         f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({sql_string(json.dumps(request))})")
     names = [n.lower() for n in statement.columns().keys()]
-    return dict(zip(names, statement.fetchone()))
+    return dict(zip(names, statement.fetchone(), strict=True))
 
 
 def main() -> None:

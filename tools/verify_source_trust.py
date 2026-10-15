@@ -83,7 +83,9 @@ def setup(con) -> None:
     # a pre-aggregate over the RAW source: the shape that voided the policy
     con.execute(f"CREATE TABLE {SRC}.REGION_ROLLUP AS SELECT REGION, SUM(AMOUNT) AS AMOUNT FROM {SRC}.ORDERS GROUP BY 1")
 
-    A = lambda script, **kw: call_admin(con, script, **kw)
+    def A(script, **kw):
+        return call_admin(con, script, **kw)
+
     A("CREATE_MODEL", MODEL_NAME=MODEL, PUBLISHED_SCHEMA=f"SEMANTIC_{MODEL.upper()}",
       DESCRIPTION="source trust demo")
     A("ADD_ENTITY", MODEL_NAME=MODEL, ENTITY_NAME="order", SOURCE_SCHEMA=GOV,

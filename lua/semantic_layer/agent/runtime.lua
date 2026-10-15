@@ -10,7 +10,6 @@ local missing, row_value, null_if_missing, scalar =
     ESV_ROWS.missing, ESV_ROWS.row_value, ESV_ROWS.null_if_missing, ESV_ROWS.scalar
 
 -- Identity, not a copy: see shared/json.lua.
-local JSON_NULL = json.NULL
 
 local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")

@@ -29,6 +29,13 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from typing import Any, Protocol
+
+
+class Connection(Protocol):
+    """The part of a pyexasol connection the installer uses."""
+
+    def execute(self, query: str, query_params: Any = None) -> Any: ...
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -151,9 +158,9 @@ def sql_literal(value: str | None) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def record_installation(con: object, version: str, state: str,
+def record_installation(con: Connection, version: str, state: str,
                         commit: str | None, git_state: str, checksum: str) -> None:
-    con.execute(  # type: ignore[attr-defined]
+    con.execute(
         "INSERT INTO SYS_SEMANTIC.PRODUCT_INSTALLATIONS ("
         "PRODUCT_VERSION, RELEASE_STATE, GIT_COMMIT, GIT_STATE, RUNTIME_CHECKSUM"
         f") VALUES ({sql_literal(version)}, {sql_literal(state)}, "
@@ -161,13 +168,13 @@ def record_installation(con: object, version: str, state: str,
     )
 
 
-def publish_example(con: object) -> None:
+def publish_example(con: Connection) -> None:
     """Validate and publish the demo model.
 
     Loading a model does not create its published schema; PUBLISH_MODEL does.
     """
-    con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")  # type: ignore[attr-defined]
-    con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")  # type: ignore[attr-defined]
+    con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+    con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")
 
 
 def example_summary_lines(published: bool) -> list[str]:
@@ -223,7 +230,7 @@ RESET = "\033[0m"
 
 
 def _no_color() -> bool:
-    return not sys.stdout.isatty() or os.environ.get("NO_COLOR")
+    return not sys.stdout.isatty() or bool(os.environ.get("NO_COLOR"))
 
 
 def bold(s: str) -> str:
@@ -303,7 +310,7 @@ def quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def discover_published_schemas(con: object) -> list[str]:
+def discover_published_schemas(con: Connection) -> list[str]:
     """Every schema a PUBLISH_MODEL created, from the catalog and from the database.
 
     The catalog is the primary source, but it cannot describe a schema whose
@@ -322,12 +329,12 @@ def discover_published_schemas(con: object) -> list[str]:
 
     catalog_readable = False
     try:
-        rows = con.execute(  # type: ignore[union-attr]
+        rows = con.execute(
             "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS "
             "WHERE VIEW_SCHEMA = 'SEMANTIC_CATALOG' AND VIEW_NAME = 'MODELS'"
         ).fetchall()
         if rows and int(rows[0][0]) > 0:
-            for row in con.execute(  # type: ignore[union-attr]
+            for row in con.execute(
                 "SELECT DISTINCT PUBLISHED_SCHEMA FROM SEMANTIC_CATALOG.MODELS "
                 "WHERE PUBLISHED_SCHEMA IS NOT NULL ORDER BY PUBLISHED_SCHEMA"
             ).fetchall():
@@ -340,7 +347,7 @@ def discover_published_schemas(con: object) -> list[str]:
         print(f"  ! catalog unreadable while discovering published schemas: {exc}")
 
     try:
-        for row in con.execute(  # type: ignore[union-attr]
+        for row in con.execute(
             "SELECT DISTINCT TABLE_SCHEMA FROM SYS.EXA_ALL_TABLES "
             "WHERE TABLE_NAME = 'SEMANTIC_DISCOVERY' ORDER BY TABLE_SCHEMA"
         ).fetchall():
@@ -376,7 +383,7 @@ RENAMED_TABLES = [
 ]
 
 
-def table_exists(con: object, schema: str, table: str) -> bool:
+def table_exists(con: Connection, schema: str, table: str) -> bool:
     rows = con.execute(
         "SELECT 1 FROM SYS.EXA_ALL_TABLES "
         f"WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table}'"
@@ -396,7 +403,7 @@ ADDED_COLUMNS = [
 ]
 
 
-def column_exists(con: object, schema: str, table: str, column: str) -> bool:
+def column_exists(con: Connection, schema: str, table: str, column: str) -> bool:
     rows = con.execute(
         "SELECT 1 FROM SYS.EXA_ALL_COLUMNS "
         f"WHERE COLUMN_SCHEMA = '{schema}' AND COLUMN_TABLE = '{table}' "
@@ -411,7 +418,7 @@ def column_exists(con: object, schema: str, table: str, column: str) -> bool:
 BASELINE_ROLES = ["SEMANTIC_USER"]
 
 
-def ensure_baseline_roles(con: object) -> list[str]:
+def ensure_baseline_roles(con: Connection) -> list[str]:
     """Create the roles 007 grants the caller baseline to. Returns what it made."""
     created = []
     for role in BASELINE_ROLES:
@@ -425,7 +432,7 @@ def ensure_baseline_roles(con: object) -> list[str]:
     return created
 
 
-def migrate_added_columns(con: object) -> list[str]:
+def migrate_added_columns(con: Connection) -> list[str]:
     """Add columns an existing catalog predates. Returns what it added.
 
     `001` creates tables with `CREATE TABLE IF NOT EXISTS`, so a table that is
@@ -444,7 +451,7 @@ def migrate_added_columns(con: object) -> list[str]:
     return added
 
 
-def migrate_renamed_tables(con: object) -> list[str]:
+def migrate_renamed_tables(con: Connection) -> list[str]:
     """Carry an existing catalog across a table rename. Returns what it moved."""
     moved = []
     for old, new in RENAMED_TABLES:
@@ -462,7 +469,7 @@ def migrate_renamed_tables(con: object) -> list[str]:
     return moved
 
 
-def reset_statements(con: object) -> list[str]:
+def reset_statements(con: Connection) -> list[str]:
     dynamic = []
     seen = set(RESET_SCHEMA_NAMES)
     for schema_name in discover_published_schemas(con):
@@ -523,7 +530,7 @@ def run_package_lua(quiet: bool = False) -> None:
             print(format_packager_line(line))
 
 
-def install_files(con: object) -> list[str]:
+def install_files(con: Connection) -> list[str]:
     """Run the install files, migrating added columns between 001 and the rest.
 
     After 001, because a table has to exist before a column can be added to it
@@ -540,9 +547,7 @@ def install_files(con: object) -> list[str]:
     return added
 
 
-def run_sql_files(con: object, files: list[Path], label: str) -> None:
-    import pyexasol  # type: ignore
-
+def run_sql_files(con: Connection, files: list[Path], label: str) -> None:
     name_width = max(len(p.name) for p in files)
 
     for path in files:
@@ -551,8 +556,8 @@ def run_sql_files(con: object, files: list[Path], label: str) -> None:
         count_str = f"{len(statements)} statement{'s' if len(statements) != 1 else ''}"
         t0 = time.monotonic()
         try:
-            for i, stmt in enumerate(statements, 1):
-                con.execute(stmt)  # type: ignore[union-attr]
+            for stmt in statements:
+                con.execute(stmt)
         except Exception as exc:
             elapsed = time.monotonic() - t0
             print(f"      {path.name:<{name_width}}  {red('FAILED')}")

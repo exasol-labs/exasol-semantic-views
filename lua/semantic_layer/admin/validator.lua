@@ -213,8 +213,8 @@ local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
 
-local function count_query(sql_text, params)
-    return tonumber(scalar(sql_text, params) or 0) or 0
+local function count_query(statement_sql, params)
+    return tonumber(scalar(statement_sql, params) or 0) or 0
 end
 
 local function upper(value)
@@ -223,13 +223,6 @@ end
 
 local function key(value)
     return tostring(value)
-end
-
-local function nil_if_missing(value)
-    if missing(value) then
-        return nil
-    end
-    return value
 end
 
 -- Well-formedness of a user-supplied JSON payload -- extension `data_json`,
@@ -2121,8 +2114,8 @@ local function representation_key_query(representation, unique_key)
         .. " GROUP BY " .. table.concat(expressions, ", "), nil
 end
 
-local function probe_count(sql_text)
-    local ok, rows = pcall(query, sql_text)
+local function probe_count(statement_sql)
+    local ok, rows = pcall(query, statement_sql)
     if not ok then return nil, tostring(rows) end
     if rows == nil or #rows == 0 then return nil, "probe returned no rows" end
     return tonumber(row_value(rows[1], "PROBE_COUNT", 1) or 0), nil
@@ -3508,13 +3501,13 @@ local function validate_fusion_conflicts(ctx)
                     local right_representation = representation_by_id[key(right_binding.representation_id)]
                     if left_representation ~= nil and right_representation ~= nil
                         and key(left_representation.id) ~= key(right_representation.id) then
-                        local sql_text, build_error = fusion_conflict_query(
+                        local statement_sql, build_error = fusion_conflict_query(
                             left_representation, left_binding, right_representation,
                             right_binding, unique_key, semantic_identity)
-                        if sql_text == nil then
+                        if statement_sql == nil then
                             probe_error = build_error
                         else
-                            local count, count_error = probe_count(sql_text)
+                            local count, count_error = probe_count(statement_sql)
                             if count_error ~= nil then probe_error = count_error
                             else conflict_count = conflict_count + count end
                         end
@@ -3694,7 +3687,6 @@ local function check_frozen_views(ctx)
         if tonumber(row_value(row, "STILL_EXISTS", 5) or 0) == 1 then
             local view_name = tostring(row_value(row, "VIEW_SCHEMA", 1)) .. "."
                 .. tostring(row_value(row, "VIEW_NAME", 2))
-            local frozen_version = row_value(row, "VERSION_ID", 3)
 
             -- No version comparison here, deliberately. ESV creates exactly one
             -- model version -- CREATE_MODEL makes version 1 and nothing ever
@@ -4393,7 +4385,7 @@ local function compute_metric_dimension_matrix(ctx, safe_edges, all_edges)
             ctx, metric, safe_edges, all_edges)
         for _, dimension in ipairs(ctx.dimensions) do
             local is_valid = false
-            local reason_code = "OK"
+            local reason_code
             local path = nil
             local alternates = nil
             local partition_hop_name = nil

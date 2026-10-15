@@ -116,11 +116,11 @@ def main() -> None:
     statement = con.execute(
         "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON(%s)" % sql_string(json.dumps(request)))
     names = [n.lower() for n in statement.columns().keys()]
-    handle = dict(zip(names, statement.fetchone()))["agent_request_id"]
+    handle = dict(zip(names, statement.fetchone(), strict=True))["agent_request_id"]
     explained = con.execute(
         f"EXECUTE SCRIPT SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL('AGENT_REQUEST', {handle})")
     columns = [n for n in explained.columns().keys()]
-    row = dict(zip(columns, explained.fetchone()))
+    row = dict(zip(columns, explained.fetchone(), strict=True))
     check("EXPLAIN publishes a governance column", "GOVERNANCE" in columns, True)
     narrative = row.get("GOVERNANCE") or ""
     check("and it names the principal", "SYS" in narrative, True)

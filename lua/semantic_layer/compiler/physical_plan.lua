@@ -962,8 +962,8 @@ function M.apply_branch_sources(physical_plan, selections)
     return physical_plan, nil
 end
 
-function M.check_sql_size(physical_plan, sql_text)
-    local actual = #tostring(sql_text or "")
+function M.check_sql_size(physical_plan, statement_sql)
+    local actual = #tostring(statement_sql or "")
     physical_plan.safeguards.sql_size_bytes = actual
     if actual > physical_plan.safeguards.sql_size_limit then
         return false, {

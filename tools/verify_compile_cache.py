@@ -155,7 +155,7 @@ def main() -> None:
     # Warm once, then time hits
     compile_request(con, base_request)
     hit_times: list[float] = []
-    for i in range(5):
+    for _ in range(5):
         hit_times.append(compile_request(con, base_request)["elapsed_ms"])
     hit_avg = sum(hit_times) / len(hit_times)
 

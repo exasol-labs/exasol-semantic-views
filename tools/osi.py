@@ -30,6 +30,11 @@ DEFAULT_OSI_DIALECTS = frozenset(
 _ALLOWED_OSI_DIALECTS: set[str] | None = None
 
 
+def dict_or_empty(value: Any) -> dict[str, Any]:
+    """The value if it is a dict, else an empty one -- narrowed for mypy."""
+    return value if isinstance(value, dict) else {}
+
+
 def allowed_osi_dialects() -> set[str]:
     """Return dialects from the vendored Ossie schema, with a conservative fallback."""
     global _ALLOWED_OSI_DIALECTS
@@ -344,8 +349,8 @@ def parse_relationship_columns(
     key_mappings: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], list[str]] | None:
     if key_mappings:
-        from_columns = []
-        to_columns = []
+        from_columns: list[str] = []
+        to_columns: list[str] = []
         for mapping in key_mappings:
             from_column = mapping.get("FROM_COLUMN_NAME")
             to_column = mapping.get("TO_COLUMN_NAME")
@@ -361,8 +366,8 @@ def parse_relationship_columns(
         return None
     from_alias = from_entity["SOURCE_ALIAS"].upper()
     to_alias = to_entity["SOURCE_ALIAS"].upper()
-    from_columns: list[str] = []
-    to_columns: list[str] = []
+    from_columns = []
+    to_columns = []
     pieces = re.split(r"\s+AND\s+", relationship.get("JOIN_CONDITION") or "", flags=re.IGNORECASE)
     for piece in pieces:
         match = re.match(
@@ -2034,7 +2039,7 @@ def build_relationship_join(
         add_diagnostic(diagnostics, "OSI_IMPORT_060", "ERROR", path, "Relationship from_columns and to_columns must have the same length.")
         return None
     pieces = []
-    for from_column, to_column in zip(from_columns, to_columns):
+    for from_column, to_column in zip(from_columns, to_columns, strict=True):
         pieces.append(f"{aliases_by_entity[from_entity]}.{from_column} = {aliases_by_entity[to_entity]}.{to_column}")
     return " AND ".join(pieces)
 
@@ -2106,7 +2111,6 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
         dataset_by_entity: dict[str, dict[str, Any]] = {}
         used_aliases: set[str] = set()
         field_specs: list[dict[str, Any]] = []
-        metric_specs: list[dict[str, Any]] = []
 
         for dataset_index, dataset in enumerate(datasets):
             dataset_path = f"{model_path}.datasets[{dataset_index}]"
@@ -2248,7 +2252,7 @@ def plan_import(document: dict[str, Any], options: ImportOptions) -> dict[str, A
             to_columns = relationship.get("to_columns")
             if isinstance(from_columns, list) and isinstance(to_columns, list):
                 for ordinal, (from_column, to_column) in enumerate(
-                    zip(from_columns, to_columns), start=1
+                    zip(from_columns, to_columns, strict=True), start=1
                 ):
                     add_operation(
                         operations,
@@ -2614,7 +2618,7 @@ def operation_metadata_diagnostics(plan: dict[str, Any]) -> list[dict[str, str]]
             continue
         path = str(operation.get("source_path") or f"$.operations[{index}]")
         operation_name = operation.get("operation")
-        native = metadata.get("native") if isinstance(metadata.get("native"), dict) else {}
+        native = dict_or_empty(metadata.get("native"))
         object_columns = metadata.get("object_columns") or metadata.get("columns")
         if operation_name == "add_semantic_object" and object_columns:
             add_diagnostic(
@@ -2873,7 +2877,7 @@ def preflight_apply_plan(
     for index, operation in enumerate(plan.get("operations") or []):
         if not isinstance(operation, dict) or operation.get("operation") != "add_entity":
             continue
-        args = operation.get("arguments") if isinstance(operation.get("arguments"), dict) else {}
+        args = dict_or_empty(operation.get("arguments"))
         source_schema = args.get("source_schema")
         source_object = args.get("source_object")
         if not isinstance(source_schema, str) or not isinstance(source_object, str):
@@ -3121,7 +3125,7 @@ def apply_import_plan(con: Any, plan: dict[str, Any], options: ImportApplyOption
             if not isinstance(operation, dict):
                 continue
             sql = render_operation_sql(operation)
-            args = operation.get("arguments") if isinstance(operation.get("arguments"), dict) else {}
+            args = dict_or_empty(operation.get("arguments"))
             if operation.get("operation") == "create_model" and isinstance(args.get("model_name"), str):
                 created_models.append(args["model_name"])
             rows = execute_rows_or_empty(con, sql)
@@ -3304,7 +3308,7 @@ def diff_json_values(expected: Any, actual: Any, path: str = "$", limit: int = 5
         if isinstance(left, list):
             if len(left) != len(right):
                 add(current_path, f"Length mismatch: expected {len(left)}, got {len(right)}.")
-            for index, (left_item, right_item) in enumerate(zip(left, right)):
+            for index, (left_item, right_item) in enumerate(zip(left, right, strict=False)):
                 walk(left_item, right_item, f"{current_path}[{index}]")
             return
         if left != right:

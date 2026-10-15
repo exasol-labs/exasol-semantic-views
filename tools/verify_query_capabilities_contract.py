@@ -122,7 +122,7 @@ PROBES = {
         # The ORDER BY names a dimension, so the object is compiled at it, and
         # nothing groups by it: MAX would span every ship mode.
         # verify_attr_wrappers.py holds the accepted half.
-        "sql": f"SELECT MAX(t0.TOTAL_FREIGHT) FROM SEMANTIC_SALES.ORDER_HEADER t0"
+        "sql": "SELECT MAX(t0.TOTAL_FREIGHT) FROM SEMANTIC_SALES.ORDER_HEADER t0"
                " ORDER BY t0.SHIP_MODE",
     },
     "An aggregate the metric does not declare": {
@@ -267,7 +267,7 @@ def main() -> int:
             return found.group(0) if found else "RAW"
 
     try:
-        for shape, support, sql_expected, request_expected in published:
+        for shape, _support, sql_expected, request_expected in published:
             probe = PROBES.get(shape)
             if probe is None:
                 continue

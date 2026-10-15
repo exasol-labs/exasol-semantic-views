@@ -101,7 +101,7 @@ def main() -> None:
             '{"model":"sales","object":"SALES","dimensions":["customer_region"],'
             '"metrics":["total_revenue"]}'))
     names = [name.lower() for name in statement.columns().keys()]
-    generated = dict(zip(names, statement.fetchone()))["generated_sql"]
+    generated = dict(zip(names, statement.fetchone(), strict=True))["generated_sql"]
     structured = columns_of(con, generated)
     if structured == ["customer_region", "total_revenue"]:
         ok("structured lane keeps semantic field names", str(structured))

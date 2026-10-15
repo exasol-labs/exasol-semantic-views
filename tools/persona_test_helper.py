@@ -3,7 +3,6 @@ import json
 import subprocess
 import sys
 import time
-import traceback
 import pyexasol
 
 PYTHON = sys.executable
@@ -127,7 +126,7 @@ def mcp_call(tool_name, params=None, req_id=None):
         if line.startswith('data: '):
             try:
                 return json.loads(line[6:])
-            except:
+            except json.JSONDecodeError:
                 pass
     return {"error": f"Could not parse: {raw[:200]}"}
 

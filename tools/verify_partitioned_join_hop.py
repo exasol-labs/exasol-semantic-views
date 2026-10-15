@@ -210,7 +210,7 @@ def compile_request(con: Any, request: dict[str, Any]) -> dict[str, Any]:
         "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON("
         f"{literal(json.dumps(request))})")
     names = [name.lower() for name in statement.columns().keys()]
-    return dict(zip(names, statement.fetchone()))
+    return dict(zip(names, statement.fetchone(), strict=True))
 
 
 def main() -> int:
