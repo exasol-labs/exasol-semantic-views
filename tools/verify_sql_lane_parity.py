@@ -101,14 +101,11 @@ PAIRS = [
     # An aggregate the metric does not declare. The guard is about what the
     # statement means, so it cannot depend on which lane read it -- and it did:
     # with an explicit GROUP BY the refusal fired, without one the same
-    # statement was rewritten and handed to Exasol.
+    # statement was rewritten and handed to Exasol. Since GitHub #8 and #16 a
+    # MIN, MAX, SUM or AVG is honoured where each group is one row, which the
+    # bare form is; both lanes must then answer the metric alike.
     ("SUM over a ratio metric",
      f"SELECT SUM(GROSS_MARGIN_PCT) FROM {OBJECT}"),
-    # AVG, not MAX: since GitHub #8 a MAX over a metric is honoured where each
-    # group is one row, which the bare form is. Its wrapped form then meets a
-    # separate gap -- a wrapped block with an aggregate and no GROUP BY is plain
-    # SQL, not semantic SQL with an inferred GROUP BY -- that holds for SUM too.
-    # AVG is still refused in both lanes, which is what this pair is about.
     ("AVG over an additive metric",
      f"SELECT CUSTOMER_REGION, AVG(TOTAL_REVENUE) FROM {OBJECT}"),
     ("COUNT over a metric",

@@ -7,15 +7,16 @@ SEMANTIC_QUERY_007 (GitHub #8). The policy now accepted: MIN and MAX around a
 metric that declares a different aggregation are honoured where each group of
 the statement holds exactly one row of the object -- there they select the
 metric's own value, which is what ATTR means -- and every such lowering is
-recorded in PLAN_JSON. SUM, AVG and COUNT combine values, so a mismatch there is
-still refused. Where a group would hold several rows the MIN/MAX is refused with
+recorded in PLAN_JSON. SUM and AVG are accepted on the same ground (GitHub #16);
+COUNT counts the value rather than selecting it, so a mismatch there is still
+refused. Where a group would hold several rows the wrapper is refused with
 SEMANTIC_QUERY_018 rather than answered as something else.
 
 This asserts, in a preprocessor-enabled session against the sales model:
 
 - Tableau's exact statement returns the governed value under both aliases;
 - the plan records both lowerings;
-- mismatched SUM/AVG/COUNT stay SEMANTIC_QUERY_007;
+- a mismatched COUNT stays SEMANTIC_QUERY_007;
 - a group holding several rows is SEMANTIC_QUERY_018;
 - a qualified wrapper inside a subquery is judged as the bare one is.
 """
@@ -75,12 +76,11 @@ def main() -> int:
             raise AssertionError(f"lowerings not recorded in the plan: {lowered}")
         print("ok the plan records both lowerings and why they are exact")
 
-        for wrapper in ("AVG", "COUNT"):
-            refused = outcome(con, f'SELECT "ORDER_HEADER"."SHIP_MODE",'
-                                   f' {wrapper}("ORDER_HEADER"."TOTAL_FREIGHT") FROM {SOURCE} GROUP BY 1')
-            if refused != ("refused", "SEMANTIC_QUERY_007"):
-                raise AssertionError(f"{wrapper} mismatch was not refused: {refused}")
-        print("ok AVG and COUNT around a SUM metric are still SEMANTIC_QUERY_007")
+        refused = outcome(con, f'SELECT "ORDER_HEADER"."SHIP_MODE",'
+                               f' COUNT("ORDER_HEADER"."TOTAL_FREIGHT") FROM {SOURCE} GROUP BY 1')
+        if refused != ("refused", "SEMANTIC_QUERY_007"):
+            raise AssertionError(f"COUNT mismatch was not refused: {refused}")
+        print("ok COUNT around a SUM metric is still SEMANTIC_QUERY_007")
 
         several = outcome(con, "SELECT MAX(t0.TOTAL_FREIGHT) FROM SEMANTIC_SALES.ORDER_HEADER t0"
                                " ORDER BY t0.SHIP_MODE")
@@ -93,11 +93,11 @@ def main() -> int:
         total = outcome(con, "SELECT TOTAL_FREIGHT FROM SEMANTIC_SALES.ORDER_HEADER")
         if wrapped[0] != "rows" or wrapped[1][1] != total[1][1]:
             raise AssertionError(f"wrapped MAX is not the metric: {wrapped} vs {total}")
-        ratio = outcome(con, "SELECT * FROM (SELECT SUM(t0.GROSS_MARGIN_PCT)"
+        ratio = outcome(con, "SELECT * FROM (SELECT COUNT(t0.GROSS_MARGIN_PCT)"
                              " FROM SEMANTIC_SALES.SALES t0) z")
         if ratio != ("refused", "SEMANTIC_QUERY_007"):
             raise AssertionError(f"a qualified mismatch inside a subquery slipped through: {ratio}")
-        print("ok inside a subquery: MAX is the metric, a qualified SUM(ratio) is SEMANTIC_QUERY_007")
+        print("ok inside a subquery: MAX is the metric, a qualified COUNT(ratio) is SEMANTIC_QUERY_007")
         return 0
     finally:
         con.close()

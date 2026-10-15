@@ -2371,7 +2371,7 @@ test("an aggregate wrapper is honoured only when the metric declares it", functi
     assert_equal(explicit.status, "OK")
     assert_equal(sql("SELECT order_status, agg(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1").status, "OK")
 
-    local mismatched = sql("SELECT order_status, AVG(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1")
+    local mismatched = sql("SELECT order_status, COUNT(total_revenue) FROM SEMANTIC_SALES.SALES GROUP BY 1")
     assert_equal(mismatched.status, "ERROR")
     assert_equal(mismatched.error_code, "SEMANTIC_QUERY_007")
     assert_contains(mismatched.error_message, "declares SUM")
@@ -2381,12 +2381,16 @@ test("an aggregate wrapper is honoured only when the metric declares it", functi
     assert_equal(sql("SELECT SUM(order_status) FROM SEMANTIC_SALES.SALES").error_code,
         "SEMANTIC_QUERY_006")
 
-    -- A metric that declares no aggregation accepts no named wrapper at all.
+    -- A metric that declares no aggregation reaches the catalog as SQL NULL,
+    -- which is userdata in Exasol; it is named as such, not stringified (#16).
     local ratio_mock = compiler_query_fixture({multi_fact = true})
     local ratio = with_query(ratio_mock, function()
-        return compile_sql("SELECT SUM(activity_ratio) FROM SEMANTIC_SALES.SALES")
+        return compile_sql("SELECT COUNT(activity_ratio) FROM SEMANTIC_SALES.SALES")
     end)
     assert_equal(ratio.error_code, "SEMANTIC_QUERY_007")
+    assert_contains(ratio.error_message, "declares no aggregation")
+    local undeclared = api.aggregate_wrapper_refusal("SUM", "ratio", "METRIC", null, false)
+    assert_contains(undeclared.error_message, "it declares no aggregation.")
 
     assert_branch("compiler.select.wrapper", declared.status == "OK", true)
     assert_branch("compiler.select.wrapper", mismatched.status == "OK", false)
@@ -2409,7 +2413,7 @@ test("a request's ORDER BY null placement is rendered and validated", function()
     assert_equal(bad.error_code, "SEMANTIC_REQUEST_063")
 end)
 
-test("a MIN/MAX wrapper is lowered where each group is one row (Tableau ATTR)", function()
+test("a wrapper is lowered where each group is one row (Tableau ATTR, Power BI SUM)", function()
     -- GitHub #8: Tableau emits MAX(metric) and MIN(metric) for attribute
     -- calculations over a SUM metric and cannot be told not to. This lane
     -- compiles at exactly the selected dimensions, so each group is one row and
@@ -2430,10 +2434,19 @@ test("a MIN/MAX wrapper is lowered where each group is one row (Tableau ATTR)", 
     assert_equal(plan.wrapper_lowerings[1].equivalence, "ONE_ROW_PER_GROUP")
     assert_equal(plan.wrapper_lowerings[2].output, "TEMP_attr:rev:qk1")
 
-    -- SUM, AVG and COUNT combine values, so a mismatch is still refused; and an
-    -- ordinary statement carries no lowering record.
-    assert_equal(sql("SELECT order_status, AVG(total_revenue) FROM SEMANTIC_SALES.SALES"
-        .. " GROUP BY 1").error_code, "SEMANTIC_QUERY_007")
+    -- GitHub #16: Power BI's table visual sums every metric. SUM of one value is
+    -- that value, so a ratio is selected as defined, not summed.
+    local summed = with_query(compiler_query_fixture({multi_fact = true}), function()
+        return compile_sql("SELECT SUM(activity_ratio) AS c1 FROM SEMANTIC_SALES.SALES")
+    end)
+    assert_equal(summed.status, "OK")
+    assert_contains(summed.generated_sql, '"activity_ratio" AS "C1"')
+    local summed_lowering = api.json_decode(summed.plan_json).wrapper_lowerings[1]
+    assert_equal(summed_lowering.wrapper, "SUM")
+    assert_equal(summed_lowering.equivalence, "ONE_ROW_PER_GROUP")
+
+    -- COUNT counts the value rather than selecting it, so it is still refused;
+    -- and an ordinary statement carries no lowering record.
     assert_equal(sql("SELECT order_status, COUNT(total_revenue) FROM SEMANTIC_SALES.SALES"
         .. " GROUP BY 1").error_code, "SEMANTIC_QUERY_007")
     local plain = sql("SELECT order_status, total_revenue FROM SEMANTIC_SALES.SALES")
@@ -2475,8 +2488,8 @@ test("reference expansion lowers MIN/MAX only when the block covers the grain", 
     assert_true(not select(3, judge("SELECT t0.customer_region, MAX(t0.total_revenue) FROM " .. O
         .. " GROUP BY t0.customer_region, x.y ORDER BY t0.order_status")))
 
-    -- A qualified argument is judged too: SUM(t0.ratio) used to bypass the guard.
-    local ratio = judge("SELECT SUM(t0.gross_margin_pct) FROM " .. O)
+    -- A qualified argument is judged too: it used to bypass the guard.
+    local ratio = judge("SELECT COUNT(t0.gross_margin_pct) FROM " .. O)
     assert_equal(ratio.error_code, "SEMANTIC_QUERY_007")
     -- Another relation's column is not ours to judge.
     assert_equal(judge("SELECT SUM(x.gross_margin_pct) FROM " .. O .. " JOIN MART.X x ON 1 = 1"), nil)
