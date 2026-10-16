@@ -11,6 +11,9 @@
 
 set -eu
 
+# pyexasol 3 reports usage on connect; a test run never does.
+export EXASOL_TELEMETRY_DISABLE=true
+
 if [ -z "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="python3"
 fi

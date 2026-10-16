@@ -1,6 +1,6 @@
-pyexasol>=0.26
-PyYAML>=6.0
-jsonschema>=4.0
-coverage>=7.4
-hypothesis>=6.100
-pytest>=8.0
+pyexasol>=3.0
+PyYAML>=6.0.3
+jsonschema>=4.26
+coverage>=7.16
+hypothesis>=6.170
+pytest>=9.1

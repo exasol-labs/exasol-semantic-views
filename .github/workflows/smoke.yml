@@ -32,6 +32,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # pyexasol 3 reports usage on connect; tests and CI never do.
+  EXASOL_TELEMETRY_DISABLE: "true"
+
 jobs:
   smoke:
     # Bump to a hosted runner with enough RAM: docker-db needs ~4 GiB steady state.
@@ -67,7 +71,6 @@ jobs:
       - name: Install host-test dependencies
         run: |
           python -m pip install -r tools/requirements-osi.txt
-          python -m pip install pyexasol
 
       - name: Install Lua (for regenerated-scripts diff step)
         run: |
@@ -106,7 +109,7 @@ jobs:
 
       - name: Upload integration test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: smoke-results
           path: smoke-results.xml

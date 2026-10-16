@@ -806,6 +806,24 @@ class LuaSpecsAreAllRun(unittest.TestCase):
         self.assertEqual(sorted(present - listed), [], "add these to specs in tests/lua/run.lua")
         self.assertEqual(sorted(listed - present), [], "specs in tests/lua/run.lua names missing files")
 
+
+class TestRunsSendNoTelemetry(unittest.TestCase):
+    """pyexasol 3 reports usage on every connect unless EXASOL_TELEMETRY_DISABLE
+    is set. A test run is not usage, so every way into one sets it: each CI
+    workflow, each test runner script, and the two Python entry points that are
+    also run directly (pytest's conftest and the fuzz harness)."""
+
+    def test_every_entry_point_disables_telemetry(self):
+        entry_points = [
+            *sorted((ROOT / ".github/workflows").glob("*.yml")),
+            *sorted((ROOT / "tools").glob("run_*.sh")),
+            ROOT / "tests/integration/conftest.py",
+            ROOT / "tests/fuzz/fuzz_semantic_differential.py",
+        ]
+        missing = [str(path.relative_to(ROOT)) for path in entry_points
+                   if "EXASOL_TELEMETRY_DISABLE" not in path.read_text(encoding="utf-8")]
+        self.assertEqual(missing, [], "set EXASOL_TELEMETRY_DISABLE in these")
+
 # ---------------------------------------------------------------------------
 # 7. A term is defined once, and the glossary stays complete
 # ---------------------------------------------------------------------------

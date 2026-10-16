@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # pyexasol 3 reports usage on connect; tests and CI never do.
+  EXASOL_TELEMETRY_DISABLE: "true"
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false

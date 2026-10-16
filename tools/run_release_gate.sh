@@ -16,6 +16,9 @@
 
 set -eu
 
+# pyexasol 3 reports usage on connect; a test run never does.
+export EXASOL_TELEMETRY_DISABLE=true
+
 if [ -z "${PYTHON_BIN:-}" ]; then
   if [ -x ../exasol-json-tables/.venv/bin/python ]; then
     PYTHON_BIN="../exasol-json-tables/.venv/bin/python"

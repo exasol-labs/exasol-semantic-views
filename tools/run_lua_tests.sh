@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+# pyexasol 3 reports usage on connect; a test run never does.
+export EXASOL_TELEMETRY_DISABLE=true
+
 if [ -n "${LUA_BIN:-}" ]; then
   lua_bin="$LUA_BIN"
 elif command -v lua >/dev/null 2>&1; then

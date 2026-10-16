@@ -33,6 +33,10 @@ from typing import Any
 
 import pytest
 
+# pyexasol 3 reports usage on connect; a test run never does. The verifier
+# subprocesses inherit it.
+os.environ.setdefault("EXASOL_TELEMETRY_DISABLE", "true")
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))

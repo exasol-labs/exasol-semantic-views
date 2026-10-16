@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # pyexasol 3 reports usage on connect; tests and CI never do.
+  EXASOL_TELEMETRY_DISABLE: "true"
+
 jobs:
   static-checks:
     # Ruff, mypy, Luacheck (lua/, tests/lua/ and the Lua embedded in

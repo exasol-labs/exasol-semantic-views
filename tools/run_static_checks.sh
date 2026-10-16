@@ -10,6 +10,9 @@
 
 set -u
 
+# pyexasol 3 reports usage on connect; a test run never does.
+export EXASOL_TELEMETRY_DISABLE=true
+
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 LUACHECK_BIN="${LUACHECK_BIN:-luacheck}"
 SHELLCHECK_BIN="${SHELLCHECK_BIN:-shellcheck}"

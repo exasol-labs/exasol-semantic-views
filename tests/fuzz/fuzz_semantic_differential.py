@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+# pyexasol 3 reports usage on connect; a test run never does.
+os.environ.setdefault("EXASOL_TELEMETRY_DISABLE", "true")
+
 
 # ---------------------------------------------------------------------------
 # Sales seed model surface (must match sql/examples/sales_model_seed.sql)
