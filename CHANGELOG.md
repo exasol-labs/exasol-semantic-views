@@ -30,6 +30,17 @@ All notable changes to Exasol Semantic Views are documented here.
   are unchanged. Release bundles ship `build/install/` built. **If you ran the
   files in `sql/install/` by hand, run them from `build/install/` instead.**
 
+### Fixed
+
+#### Three admin messages still used bare fusion labels
+
+- A published column's comment said `Fused across N temporal partitions (F3
+  UNION).`; it now says `(UNION)`, like every other fusion strategy.
+- `SEMANTIC_ADMIN_215` and `SEMANTIC_ADMIN_213` name temporal coverage, semantic
+  identity and the temporal partition instead of `F3` and `F5`. The rule against
+  bare labels in messages now covers the script bodies too, which it could not
+  see while they were inside the install SQL.
+
 ## [0.4.0] - 2026-10-16
 
 Power BI's remaining refusals are gone: its table visual's `SUM` around a ratio

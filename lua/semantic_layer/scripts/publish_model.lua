@@ -278,7 +278,7 @@ for _, object_row in ipairs(object_rows or {}) do
         local provenance = nil
         if source_count > 1 and fusion_strategy == "UNION" then
             provenance = "Fused across " .. tostring(source_count)
-                .. " temporal partitions (F3 UNION)."
+                .. " temporal partitions (UNION)."
         elseif source_count > 1 and fusion_strategy ~= "NONE" then
             provenance = "Fused across " .. tostring(source_count)
                 .. " sources (" .. fusion_strategy .. ")."

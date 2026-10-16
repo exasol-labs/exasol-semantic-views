@@ -455,7 +455,7 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("binding_role = primary_role", runtime)
         self.assertIn("binding_priority = primary_priority", runtime)
         self.assertNotIn("'PREFER', 1, TRUE, 'ACTIVE'", runtime)
-        self.assertIn("names the F3", runtime)
+        self.assertIn("names the temporal", runtime)
         self.assertIn("every partition's binding.", runtime)
         self.assertIn("coverage_predicate", runtime)
         self.assertIn("for _, partition in ipairs(partitions) do", runtime)

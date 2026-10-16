@@ -305,7 +305,7 @@ for index, item in ipairs(binding_specs) do
         seen[upper(representation_name)] = true
     else
         if partitions_by_name[upper(representation_name)] ~= nil then
-            error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " names the F3"
+            error("SEMANTIC_ADMIN_213: binding " .. tostring(index) .. " names the temporal"
                 .. " partition '" .. representation_name .. "'; EXPRESSION supplies"
                 .. " every partition's binding." .. binding_shape_help())
         end

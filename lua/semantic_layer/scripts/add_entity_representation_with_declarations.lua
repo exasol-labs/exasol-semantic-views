@@ -111,7 +111,7 @@ end
 
 if has_coverage and has_identity then
     error("SEMANTIC_ADMIN_215: coverage and identity cannot be declared on the"
-        .. " same representation. F3 temporal coverage and an F5 semantic identity"
+        .. " same representation. Temporal coverage and a semantic identity"
         .. " on one entity are rejected by SEMANTIC_MODEL_047, so this combination"
         .. " has no valid outcome. Declare one of them.")
 end

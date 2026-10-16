@@ -983,7 +983,9 @@ class TermsAreDefinedOnce(unittest.TestCase):
         representation coverage".
         """
         offenders = []
-        for path in RUNTIME_LUA_SOURCES:
+        # Every Lua file, script bodies included: a script's refusal reaches the
+        # same reader as a runtime's.
+        for path in (ROOT / "lua").rglob("*.lua"):
             for number, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):
                 # Per line, and excluding newlines from the literal, or the quote
