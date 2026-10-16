@@ -7,7 +7,7 @@ Usage:
     python3 tools/install.py --example --publish      # ... and publish it as BI-visible views
     python3 tools/install.py --example --reset        # wipe and reinstall from scratch
     python3 tools/install.py --reset                  # wipe all schemas then reinstall
-    python3 tools/install.py --skip-package           # skip Lua packaging (use existing SQL)
+    python3 tools/install.py --skip-package           # install build/install/ as it is, without rebuilding
 
 Connection is read from environment variables:
     EXASOL_HOST      (default: localhost)
@@ -39,18 +39,22 @@ class Connection(Protocol):
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The installer runs the built files, not the sources: tools/package_lua_scripts.py
+# assembles sql/install/ and lua/ into build/install/ (see sql/install/README.md).
+BUILD_DIR = ROOT / "build/install"
+
 INSTALL_FILES = [
-    ROOT / "sql/install/000_create_schemas.sql",
-    ROOT / "sql/install/001_create_semantic_catalog.sql",
+    BUILD_DIR / "000_create_schemas.sql",
+    BUILD_DIR / "001_create_semantic_catalog.sql",
     # Before the catalog views, which read it. SEMANTIC_SOURCE is what makes
     # those views principal-scoped: they read the filtered views rather than the
     # tables, so the scoping is inherited rather than restated 46 times.
-    ROOT / "sql/install/001b_create_semantic_source_views.sql",
-    ROOT / "sql/install/002_create_semantic_catalog_views.sql",
-    ROOT / "sql/install/003_create_semantic_admin_scripts.sql",
-    ROOT / "sql/install/004_create_semantic_preprocessor.sql",
-    ROOT / "sql/install/005_create_semantic_surface_helpers.sql",
-    ROOT / "sql/install/006_create_semantic_agent_views.sql",
+    BUILD_DIR / "001b_create_semantic_source_views.sql",
+    BUILD_DIR / "002_create_semantic_catalog_views.sql",
+    BUILD_DIR / "003_create_semantic_admin_scripts.sql",
+    BUILD_DIR / "004_create_semantic_preprocessor.sql",
+    BUILD_DIR / "005_create_semantic_surface_helpers.sql",
+    BUILD_DIR / "006_create_semantic_agent_views.sql",
 ]
 
 EXAMPLE_FILES = [
@@ -540,7 +544,7 @@ def install_files(con: Connection) -> list[str]:
     view outright -- which is what an upgrade did as soon as a view read an
     added column (BUG-27). Returns the columns it added.
     """
-    catalog = INSTALL_FILES.index(ROOT / "sql/install/001_create_semantic_catalog.sql") + 1
+    catalog = INSTALL_FILES.index(BUILD_DIR / "001_create_semantic_catalog.sql") + 1
     run_sql_files(con, INSTALL_FILES[:catalog], "install")
     added = migrate_added_columns(con)
     run_sql_files(con, INSTALL_FILES[catalog:], "install")
@@ -611,7 +615,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--skip-package", action="store_true",
-        help="skip Lua packaging step (use existing generated SQL)",
+        help="install build/install/ as it is, without rebuilding it",
     )
     parser.add_argument("--host",     default=os.environ.get("EXASOL_HOST",     "localhost"))
     parser.add_argument("--port",     default=int(os.environ.get("EXASOL_PORT", "8563")), type=int)
@@ -644,7 +648,7 @@ def main() -> int:
     # step 1: package Lua
     if not args.skip_package:
         step += 1
-        print(f"\n[{step}/{total_steps}] Packaging Lua scripts")
+        print(f"\n[{step}/{total_steps}] Building the install SQL")
         try:
             run_package_lua(quiet=True)
         except SystemExit:
@@ -652,6 +656,13 @@ def main() -> int:
             return 1
     else:
         total_steps -= 1
+        missing = [path.name for path in INSTALL_FILES if not path.exists()]
+        if missing:
+            print(red("--skip-package needs a built build/install/; missing: ")
+                  + ", ".join(missing), file=sys.stderr)
+            print("      run python3 tools/package_lua_scripts.py, or drop --skip-package",
+                  file=sys.stderr)
+            return 1
 
     # connect
     step += 1

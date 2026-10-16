@@ -6,6 +6,30 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+#### The install SQL is built, not checked in
+
+- `sql/install/` now holds only hand-written source. Each generated part — the
+  six runtime libraries concatenated from `lua/`, the `SEMANTIC_SOURCE` views and
+  `ADMIN_SCRIPT_PARAMETERS` — is a one-line `-- @generated <NAME>` placeholder,
+  and `tools/package_lua_scripts.py` writes the complete files to
+  `build/install/`. 003 went from 36 335 lines, 26 000 of them generated, to
+  783 lines of signatures.
+- SQL holds no Lua. The body of every script — 93 of them — is
+  `lua/semantic_layer/scripts/<script_name>.lua`; its signature stays in
+  `sql/install/` with a one-line `-- @lua <path>` in place of the body. Luacheck
+  now lints the files people edit, and the wrappers that call a runtime
+  (`COMPILE_REQUEST_JSON`, the agent scripts, …) are no longer Python strings in
+  the packager.
+- `ENABLE_SEMANTIC_SQL` and `DISABLE_SEMANTIC_SQL` were each defined twice, in 003
+  and in 005; 005's definitions, the ones that were installed, are now the only
+  ones, and `ADMIN_SCRIPT_PARAMETERS` no longer lists them twice. The build
+  refuses a script defined twice.
+- `tools/install.py` builds and runs `build/install/`; the installed statements
+  are unchanged. Release bundles ship `build/install/` built. **If you ran the
+  files in `sql/install/` by hand, run them from `build/install/` instead.**
+
 ## [0.4.0] - 2026-10-16
 
 Power BI's remaining refusals are gone: its table visual's `SUM` around a ratio

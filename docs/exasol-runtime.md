@@ -29,21 +29,23 @@ Use `EXECUTE SCRIPT`, not `CALL` or `SELECT`, for `SEMANTIC_ADMIN` APIs.
 | `SEMANTIC_AGENT` | Role-scoped discovery and review views |
 | `SEMANTIC_<MODEL>` | Guarded relational metadata surface for each published model |
 
-The installer applies seven files in dependency order:
+The installer applies eight files in dependency order:
 
 ```text
-sql/install/000_create_schemas.sql
-sql/install/001_create_semantic_catalog.sql
-sql/install/002_create_semantic_catalog_views.sql
-sql/install/003_create_semantic_admin_scripts.sql
-sql/install/004_create_semantic_preprocessor.sql
-sql/install/005_create_semantic_surface_helpers.sql
-sql/install/006_create_semantic_agent_views.sql
+000_create_schemas.sql
+001_create_semantic_catalog.sql
+001b_create_semantic_source_views.sql
+002_create_semantic_catalog_views.sql
+003_create_semantic_admin_scripts.sql
+004_create_semantic_preprocessor.sql
+005_create_semantic_surface_helpers.sql
+006_create_semantic_agent_views.sql
 ```
 
-Canonical Lua source lives under `lua/semantic_layer`. The installer runs
-`tools/package_lua_scripts.py` unless `--skip-package` is supplied, so the
-packaged SQL scripts and source modules remain synchronized.
+Their sources are in `sql/install/`, and the runtime libraries in
+`lua/semantic_layer`. The installer runs `tools/package_lua_scripts.py` first,
+which builds the complete files into `build/install/` and runs those, unless
+`--skip-package` is supplied. See [`sql/install/README.md`](../sql/install/README.md).
 
 ## Runtime Components
 

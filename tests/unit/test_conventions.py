@@ -44,8 +44,18 @@ import re
 import unittest
 from pathlib import Path
 
+import built_install  # the install SQL as the build assembles it
+
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The runtime modules: what the validator, compiler and agent runtimes are
+# concatenated from. The script bodies under lua/semantic_layer/scripts/ are
+# Lua too, but each is one script's main chunk rather than a module, so the
+# module rules below do not apply to them; ScriptHelpersAreCopied pins theirs.
+SCRIPT_BODIES_DIR = ROOT / "lua/semantic_layer/scripts"
+RUNTIME_LUA_SOURCES = sorted(path for path in (ROOT / "lua").rglob("*.lua")
+                             if SCRIPT_BODIES_DIR not in path.parents)
 INTEGRATION = ROOT / "tests" / "integration"
 
 
@@ -156,7 +166,7 @@ SEVERITY_PREFIXED_CODE = re.compile(r"SEMANTIC_[A-Z]+_[A-Z]\d+")
 def codes_everywhere() -> set[str]:
     text = "\n".join(
         [path.read_text(encoding="utf-8") for path in sorted((ROOT / "lua").rglob("*.lua"))]
-        + [path.read_text(encoding="utf-8").partition("-- BEGIN GENERATED")[0]
+        + [path.read_text(encoding="utf-8")
            for path in sorted((ROOT / "sql/install").glob("*.sql"))])
     # Comments explain the retired spelling, so they must not count as uses.
     lines = [line for line in text.split("\n") if not line.lstrip().startswith("--")]
@@ -169,7 +179,7 @@ class OneConditionOneRuleCode(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         messages: dict[str, set[str]] = collections.defaultdict(set)
-        for path in sorted((ROOT / "lua").rglob("*.lua")):
+        for path in RUNTIME_LUA_SOURCES:
             text = path.read_text(encoding="utf-8")
             for pattern in CODE_WITH_MESSAGE:
                 for code, message in pattern.findall(text):
@@ -224,8 +234,7 @@ class OneConditionOneRuleCode(unittest.TestCase):
 
     def test_the_advisory_pair_kept_its_meaning_after_renumbering(self):
         """The rename had to move numbers, so pin where they landed."""
-        admin = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-            encoding="utf-8")
+        admin = built_install.text("003_create_semantic_admin_scripts.sql")
         for code in ("SEMANTIC_ADMIN_220", "SEMANTIC_ADMIN_221"):
             self.assertIn(f'"{code}: representation', admin, code)
         self.assertNotIn("SEMANTIC_ADMIN_W06", admin.replace(
@@ -408,8 +417,7 @@ class SkillsMatchTheSurface(unittest.TestCase):
 # 3. Derive a surface, do not restate it
 # ---------------------------------------------------------------------------
 
-CATALOG_VIEWS = (ROOT / "sql/install/002_create_semantic_catalog_views.sql").read_text(
-    encoding="utf-8")
+CATALOG_VIEWS = built_install.text("002_create_semantic_catalog_views.sql")
 
 
 class DerivedNotDeclared(unittest.TestCase):
@@ -506,7 +514,7 @@ class DerivedNotDeclared(unittest.TestCase):
 # This ratchet is the comparison. A body identical in two modules is pinned with
 # the modules it appears in; the pin may shrink and may not grow.
 
-LUA_SOURCES = sorted((ROOT / "lua").rglob("*.lua"))
+LUA_SOURCES = RUNTIME_LUA_SOURCES
 
 # A body has to be substantial enough that sharing it is worth a module: two
 # statements is a spelling, not a routine.
@@ -549,7 +557,7 @@ SQL_TEXT_PRIVATE_NAMES = re.compile(
     r"|decode_quoted_identifier)\b", re.MULTILINE)
 
 
-def _lua_function_bodies():
+def _lua_function_bodies(paths=None):
     """(name, module) grouped by the exact text of the body.
 
     Comments and blank lines are dropped and each line is stripped, so a copy
@@ -557,7 +565,7 @@ def _lua_function_bodies():
     """
     opener = re.compile(r"^local function ([\w.]+)|^function ([\w.]+)")
     bodies = collections.defaultdict(set)
-    for path in LUA_SOURCES:
+    for path in LUA_SOURCES if paths is None else paths:
         lines = path.read_text(encoding="utf-8").splitlines()
         index = 0
         while index < len(lines):
@@ -575,6 +583,28 @@ def _lua_function_bodies():
                 bodies["\n".join(body)].add((name, path.name))
             index = close
     return bodies
+
+
+# Copies of one helper across script bodies: each repeat of a byte-identical
+# function in a second, third, ... script. Measured when the bodies moved out of
+# the install SQL (2026-10-16), where nothing could compare them: normalize_name
+# alone is in 24 scripts. A script can share a helper by importing a runtime;
+# fold one and lower the pin. It only shrinks.
+SCRIPT_HELPER_COPIES = 103
+
+
+class ScriptHelpersAreCopied(unittest.TestCase):
+    """The helper copies in script bodies are counted, and the count shrinks."""
+
+    def test_no_helper_gains_a_copy(self):
+        bodies = sorted(SCRIPT_BODIES_DIR.glob("*.lua"))
+        self.assertGreater(len(bodies), 80, "the script bodies were not found")
+        copies = sum(len({module for _, module in occurrences}) - 1
+                     for occurrences in _lua_function_bodies(bodies).values())
+        self.assertEqual(
+            SCRIPT_HELPER_COPIES, copies,
+            "a helper was copied into another script, or a copy was folded away "
+            "without lowering SCRIPT_HELPER_COPIES")
 
 
 class RoutinesAreWrittenOnce(unittest.TestCase):
@@ -674,9 +704,9 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
             r"^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)"
             r"[^\n]*\n(.*?)^/$", re.S | re.M)
         consumers, providers = set(), set()
-        for generated in (ROOT / "sql/install/003_create_semantic_admin_scripts.sql",
-                          ROOT / "sql/install/006_create_semantic_agent_views.sql"):
-            for match in script.finditer(generated.read_text(encoding="utf-8")):
+        for generated in ("003_create_semantic_admin_scripts.sql",
+                          "006_create_semantic_agent_views.sql"):
+            for match in script.finditer(built_install.text(generated)):
                 name, body = match.group(1), match.group(2)
                 for global_name in ("ESV_JSON", "ESV_SQL_TEXT"):
                     if global_name not in body:
@@ -953,7 +983,7 @@ class TermsAreDefinedOnce(unittest.TestCase):
         representation coverage".
         """
         offenders = []
-        for path in (ROOT / "lua").rglob("*.lua"):
+        for path in RUNTIME_LUA_SOURCES:
             for number, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):
                 # Per line, and excluding newlines from the literal, or the quote

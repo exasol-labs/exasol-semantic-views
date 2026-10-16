@@ -19,9 +19,11 @@ import re
 import unittest
 from pathlib import Path
 
+import built_install  # the install SQL as the build assembles it
+
 
 ROOT = Path(__file__).resolve().parents[2]
-INSTALL_SQL = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text()
+INSTALL_SQL = built_install.text("003_create_semantic_admin_scripts.sql")
 
 
 SCRIPT_START = re.compile(r"^CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN\.([A-Z_]+)", re.MULTILINE)

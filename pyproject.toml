@@ -18,7 +18,7 @@ ignore = ["B904"]
 files = [
     "tools/install.py",
     "tools/import_databricks.py",
-    "tools/dev/lint_embedded_lua.py",
+    "tools/dev/lint_script_bodies.py",
     "tools/osi.py",
     "tools/package_lua_scripts.py",
     "tools/release_notes.py",

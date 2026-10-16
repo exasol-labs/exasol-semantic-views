@@ -1,16 +1,33 @@
 #!/usr/bin/env python3
-"""Package Lua runtime sources into Exasol CREATE SCRIPT install SQL."""
+"""Build the install SQL from its sources.
+
+The sources are hand-written, and each language lives in its own files:
+`sql/install/*.sql` holds the SQL, including every script's signature, and
+`lua/semantic_layer/` holds all Lua -- the runtime libraries, and under
+`scripts/` the body of every script. A source file marks what goes where with
+one line: `-- @lua <path>` for a script body, `-- @generated <NAME>` for a
+generated part. This script writes the complete files to `build/install/`,
+which is what the installer runs and the release ships. Nothing generated is
+checked in, and no source file holds generated text.
+
+Generated parts:
+
+- one runtime library script per entry of RUNTIMES, concatenated from lua/;
+- SEMANTIC_SOURCE_VIEWS, derived from the compiler's catalog reads;
+- ADMIN_SCRIPT_PARAMETERS, derived from every script signature in the build.
+"""
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INSTALL_SQL = ROOT / "sql/install/003_create_semantic_admin_scripts.sql"
-AGENT_INSTALL_SQL = ROOT / "sql/install/006_create_semantic_agent_views.sql"
+SOURCE_DIR = ROOT / "sql/install"
+BUILD_DIR = ROOT / "build/install"
 COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
 MATERIALIZATIONS_SOURCE = ROOT / "lua/semantic_layer/compiler/materializations.lua"
 VALIDATOR_SOURCE = ROOT / "lua/semantic_layer/admin/validator.lua"
@@ -30,19 +47,8 @@ SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definitio
 FUSION_DECLARATION_SOURCE = ROOT / "lua/semantic_layer/admin/fusion_declaration.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
 
-BEGIN = "-- BEGIN GENERATED COMPILER_RUNTIME"
-END = "-- END GENERATED COMPILER_RUNTIME"
-VALIDATOR_BEGIN = "-- BEGIN GENERATED VALIDATOR_RUNTIME"
-VALIDATOR_END = "-- END GENERATED VALIDATOR_RUNTIME"
-SEMANTIC_BEGIN = "-- BEGIN GENERATED SEMANTIC_DEFINITION_RUNTIME"
-SEMANTIC_END = "-- END GENERATED SEMANTIC_DEFINITION_RUNTIME"
-
-FUSION_BEGIN = "-- BEGIN GENERATED FUSION_RUNTIME"
-FUSION_END = "-- END GENERATED FUSION_RUNTIME"
 SCRIPT_PARAMETERS_BEGIN = "-- BEGIN GENERATED ADMIN_SCRIPT_PARAMETERS"
 SCRIPT_PARAMETERS_END = "-- END GENERATED ADMIN_SCRIPT_PARAMETERS"
-CATALOG_VIEWS_SQL = ROOT / "sql/install/002_create_semantic_catalog_views.sql"
-SOURCE_VIEWS_SQL = ROOT / "sql/install/001b_create_semantic_source_views.sql"
 SOURCE_VIEWS_BEGIN = "-- BEGIN GENERATED SEMANTIC_SOURCE_VIEWS"
 SOURCE_VIEWS_END = "-- END GENERATED SEMANTIC_SOURCE_VIEWS"
 
@@ -155,7 +161,6 @@ def source_views_block() -> str:
             lines.append(f" WHERE MODEL_ID IN ({AUTHORIZED_MODEL_IDS});")
         lines.append("")
     body = "\n".join(lines).rstrip()
-    # The markers are part of the block: replace_between_markers consumes them.
     return f"""{SOURCE_VIEWS_BEGIN}
 {body}
 
@@ -221,10 +226,6 @@ NON_CALLABLE_SCRIPTS = frozenset({
     "SEMANTIC_PREPROCESSOR",   # LUA PREPROCESSOR, invoked by the session
     "VALIDATOR_RUNTIME",
 })
-
-AGENT_BEGIN = "-- BEGIN GENERATED AGENT_RUNTIME"
-AGENT_END = "-- END GENERATED AGENT_RUNTIME"
-
 
 # Exasol's Lua caps a single function at 200 local variables, and a generated
 # runtime script is one `CREATE ... AS` chunk holding several concatenated source
@@ -305,24 +306,25 @@ def check_main_chunk_locals(path: Path, text: str) -> None:
         )
 
 
-def admin_script_parameters_block() -> str:
+def admin_script_parameters_block(built: dict[str, str] | None = None) -> str:
     """A queryable signature for every callable SEMANTIC_ADMIN script.
 
     Exasol checks parameter arity in the SQL layer, before a script body runs,
     so a wrong call count can only ever produce `expected N script parameters
     but got M` -- no script name, no parameter name. The signatures are
     therefore published as data, generated from the install SQL itself so they
-    cannot drift from the scripts they describe.
+    cannot drift from the scripts they describe. It reads the built files, not
+    the sources: a runtime library exists in a source only as its placeholder.
     """
+    if built is None:
+        built = assemble_without_parameters()
     rows: list[str] = []
     published: set[str] = set()
     declared: set[str] = set()
-    for path in sorted(
-        (ROOT / "sql/install").glob("*.sql"), key=lambda candidate: candidate.name
-    ):
-        if path.name.startswith("002_"):
+    for name in sorted(built):
+        if name.startswith("002_"):
             continue
-        text = path.read_text(encoding="utf-8")
+        text = built[name]
         declared.update(ANY_SCRIPT_DECLARATION.findall(text))
         for match in SCRIPT_SIGNATURE.finditer(text):
             script_name = match.group(1)
@@ -385,39 +387,6 @@ FROM (VALUES
 {SCRIPT_PARAMETERS_END}"""
 
 
-def validator_block() -> str:
-    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
-    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
-    sql_text_source = SQL_TEXT_SOURCE.read_text(encoding="utf-8").rstrip()
-    graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
-    source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
-    identity_join_source = IDENTITY_JOIN_SOURCE.read_text(encoding="utf-8").rstrip()
-    # The validator classifies metrics with the planner's own code so a metric
-    # that cannot be planned is rejected when it is defined, not when it is
-    # queried. Reimplementing the classification here would let the two drift.
-    metric_plan_source = METRIC_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
-    source = VALIDATOR_SOURCE.read_text(encoding="utf-8").rstrip()
-    return f"""{VALIDATOR_BEGIN}
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.VALIDATOR_RUNTIME AS
-{json_source}
-
-{rows_source}
-
-{sql_text_source}
-
-{graph_source}
-
-{source_columns_source}
-
-{identity_join_source}
-
-{metric_plan_source}
-
-{source}
-/
-{VALIDATOR_END}"""
-
-
 # Sources whose content can change what the compiler emits for a given request.
 # The materialization runtime is included because the compiler imports it and its
 # choices land in the generated SQL.
@@ -456,754 +425,161 @@ def runtime_build_id() -> str:
     return digest.hexdigest()[:16]
 
 
-def compiler_block() -> str:
-    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
-    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
-    sql_text_source = SQL_TEXT_SOURCE.read_text(encoding="utf-8").rstrip()
-    graph_source = GRAIN_GRAPH_SOURCE.read_text(encoding="utf-8").rstrip()
-    source_columns_source = SOURCE_COLUMNS_SOURCE.read_text(encoding="utf-8").rstrip()
-    identity_join_source = IDENTITY_JOIN_SOURCE.read_text(encoding="utf-8").rstrip()
-    query_spec_source = QUERY_SPEC_SOURCE.read_text(encoding="utf-8").rstrip()
-    catalog_snapshot_source = CATALOG_SNAPSHOT_SOURCE.read_text(encoding="utf-8").rstrip()
-    metric_plan_source = METRIC_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
-    physical_plan_source = PHYSICAL_PLAN_SOURCE.read_text(encoding="utf-8").rstrip()
-    grain_sql_source = GRAIN_SQL_SOURCE.read_text(encoding="utf-8").rstrip()
-    source = COMPILER_SOURCE.read_text(encoding="utf-8").rstrip()
-    materializations_source = MATERIALIZATIONS_SOURCE.read_text(encoding="utf-8").rstrip()
-    build_id = runtime_build_id()
-    # A global, not a local: the 200-local ceiling applies to the sum of the
-    # concatenated sources in one chunk, and this must not spend one of them.
-    stamp = f'ESV_RUNTIME_BUILD = "{build_id}"'
-    return f"""{BEGIN}
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-{stamp}
+# Every runtime library script and the lua/ sources it is concatenated from, in
+# order. Shared modules come first because the module after them reads their
+# globals; the chunks share none, so a runtime that uses a shared module must
+# list it (tests/unit/test_conventions.py checks).
+#
+# The validator carries metric_plan so it classifies metrics with the planner's
+# own code: a metric that cannot be planned is refused when it is defined, not
+# when it is queried. FUSION_RUNTIME is its own script rather than more of
+# SEMANTIC_DEFINITION_RUNTIME, which is near the 200-local ceiling, and it
+# carries shared/json.lua instead of importing the definition runtime for a
+# codec, so a null it decodes is its own module's null.
+RUNTIMES: dict[str, tuple[str, ...]] = {
+    "VALIDATOR_RUNTIME": (
+        "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE", "GRAIN_GRAPH_SOURCE",
+        "SOURCE_COLUMNS_SOURCE", "IDENTITY_JOIN_SOURCE", "METRIC_PLAN_SOURCE",
+        "VALIDATOR_SOURCE"),
+    "MATERIALIZATION_RUNTIME": (
+        "BUILD_STAMP", "JSON_SOURCE", "ROWS_SOURCE", "MATERIALIZATIONS_SOURCE"),
+    "COMPILER_RUNTIME": (
+        "BUILD_STAMP", "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE",
+        "GRAIN_GRAPH_SOURCE", "SOURCE_COLUMNS_SOURCE", "IDENTITY_JOIN_SOURCE",
+        "QUERY_SPEC_SOURCE", "CATALOG_SNAPSHOT_SOURCE", "METRIC_PLAN_SOURCE",
+        "PHYSICAL_PLAN_SOURCE", "GRAIN_SQL_SOURCE", "COMPILER_SOURCE"),
+    "SEMANTIC_DEFINITION_RUNTIME": (
+        "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE", "CATALOG_ROLLBACK_SOURCE",
+        "SEMANTIC_DEFINITION_SOURCE"),
+    "FUSION_RUNTIME": (
+        "JSON_SOURCE", "ROWS_SOURCE", "CATALOG_ROLLBACK_SOURCE",
+        "FUSION_DECLARATION_SOURCE"),
+    "AGENT_RUNTIME": ("JSON_SOURCE", "ROWS_SOURCE", "AGENT_SOURCE"),
+}
 
-{json_source}
-
-{rows_source}
-
-{materializations_source}
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-{stamp}
-
-{json_source}
-
-{rows_source}
-
-{sql_text_source}
-
-{graph_source}
-
-{source_columns_source}
-
-{identity_join_source}
-
-{query_spec_source}
-
-{catalog_snapshot_source}
-
-{metric_plan_source}
-
-{physical_plan_source}
-
-{grain_sql_source}
-
-{source}
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON(
-  REQUEST_JSON
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
-
-local result = compiler.compile_request_json(REQUEST_JSON)
-
-exit({{
-    {{
-        result.status or null,
-        result.error_code or null,
-        result.error_message or null,
-        null,
-        result.generated_sql or null,
-        result.plan_json or null,
-        result.clarification_json or null,
-        result.validation_run_id or null,
-        result.agent_request_id or null,
-    }}
-}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  ERROR_MESSAGE VARCHAR(2000000),
-  ORIGINAL_SQL VARCHAR(2000000),
-  GENERATED_SQL VARCHAR(2000000),
-  PLAN_JSON VARCHAR(2000000),
-  CLARIFICATION_JSON VARCHAR(2000000),
-  VALIDATION_RUN_ID DECIMAL(18,0),
-  AGENT_REQUEST_ID DECIMAL(18,0)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL(
-  ORIGINAL_SQL
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
-
-local result = compiler.compile_sql(ORIGINAL_SQL)
-
-exit({{
-    {{
-        result.status or null,
-        result.error_code or null,
-        result.error_message or null,
-        ORIGINAL_SQL or null,
-        result.generated_sql or null,
-        result.plan_json or null,
-        result.clarification_json or null,
-        result.validation_run_id or null,
-        result.agent_request_id or null,
-    }}
-}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  ERROR_MESSAGE VARCHAR(2000000),
-  ORIGINAL_SQL VARCHAR(2000000),
-  GENERATED_SQL VARCHAR(2000000),
-  PLAN_JSON VARCHAR(2000000),
-  CLARIFICATION_JSON VARCHAR(2000000),
-  VALIDATION_RUN_ID DECIMAL(18,0),
-  AGENT_REQUEST_ID DECIMAL(18,0)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL_DEBUG(
-  ORIGINAL_SQL,
-  CLIENT_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
-
-local result = compiler.compile_sql_debug(ORIGINAL_SQL, CLIENT_NAME)
-
-exit({{
-    {{
-        result.status or null,
-        result.error_code or null,
-        result.error_message or null,
-        ORIGINAL_SQL or null,
-        result.generated_sql or null,
-        result.plan_json or null,
-        result.clarification_json or null,
-        result.validation_run_id or null,
-        result.query_log_id or null,
-    }}
-}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  ERROR_MESSAGE VARCHAR(2000000),
-  ORIGINAL_SQL VARCHAR(2000000),
-  GENERATED_SQL VARCHAR(2000000),
-  PLAN_JSON VARCHAR(2000000),
-  CLARIFICATION_JSON VARCHAR(2000000),
-  VALIDATION_RUN_ID DECIMAL(18,0),
-  QUERY_LOG_ID DECIMAL(18,0)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA(
-  MODEL_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
-
-local rows = compiler.suggest_grain_metadata(MODEL_NAME)
-
-exit(rows or {{}}, [[
-  SUGGESTION_TYPE VARCHAR(64),
-  OBJECT_NAME VARCHAR(512),
-  REASON_CODE VARCHAR(128),
-  PROPOSED_METADATA_JSON VARCHAR(2000000)
-]])
-/
-{END}"""
+PLACEHOLDER = re.compile(r"^-- @generated (\S+)$", re.M)
+LUA_BODY = re.compile(r"^-- @lua (\S+)$", re.M)
+SCRIPTS_DIR = ROOT / "lua/semantic_layer/scripts"
 
 
-def semantic_definition_block() -> str:
-    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
-    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
-    rollback_source = CATALOG_ROLLBACK_SOURCE.read_text(encoding="utf-8").rstrip()
-    sql_text_source = SQL_TEXT_SOURCE.read_text(encoding="utf-8").rstrip()
-    source = SEMANTIC_DEFINITION_SOURCE.read_text(encoding="utf-8").rstrip()
-    return f"""{SEMANTIC_BEGIN}
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME AS
-{json_source}
+def inline_script_bodies(texts: dict[str, str]) -> dict[str, str]:
+    """Put each `-- @lua <path>` script body in place, and account for every file.
 
-{rows_source}
-
-{sql_text_source}
-
-{rollback_source}
-
-{source}
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION(
-  DEFINITION_SQL,
-  DRY_RUN
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.apply_semantic_definition(DEFINITION_SQL, DRY_RUN)
-
-exit(rows or {{}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  MESSAGE VARCHAR(2000000),
-  NORMALIZED_JSON VARCHAR(2000000),
-  OPERATION_COUNT DECIMAL(18,0),
-  VALIDATION_RUN_ID DECIMAL(18,0)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION_OR_FAIL(
-  DEFINITION_SQL,
-  DRY_RUN
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.apply_semantic_definition(DEFINITION_SQL, DRY_RUN)
-local first = rows ~= nil and rows[1] or nil
-if first ~= nil and first[1] == "ERROR" then
-    local code = first[2] or "SEMANTIC_DDL_999"
-    local message = tostring(first[3] or "Semantic definition apply failed.")
-    if string.find(message, code, 1, true) == nil then
-        message = code .. ": " .. message
-    end
-    error(message, 0)
-end
-
-exit(rows or {{}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  MESSAGE VARCHAR(2000000),
-  NORMALIZED_JSON VARCHAR(2000000),
-  OPERATION_COUNT DECIMAL(18,0),
-  VALIDATION_RUN_ID DECIMAL(18,0)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_NORMALIZED_OSI_IMPORT(
-  PLAN_JSON,
-  VALIDATE_AFTER_APPLY,
-  WARNINGS_AS_ERRORS
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.apply_normalized_osi_import(
-    PLAN_JSON,
-    VALIDATE_AFTER_APPLY,
-    WARNINGS_AS_ERRORS
-)
-
-exit(rows or {{}}, [[
-  STATUS VARCHAR(32),
-  OPERATION_INDEX DECIMAL(18,0),
-  OPERATION_NAME VARCHAR(128),
-  TARGET VARCHAR(512),
-  SOURCE_PATH VARCHAR(2000000),
-  ROW_COUNT DECIMAL(18,0),
-  WARNING_JSON VARCHAR(2000000),
-  VALIDATION_RUN_ID DECIMAL(18,0),
-  MESSAGE VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW(
-  YAML_TEXT,
-  MODEL_NAME,
-  PUBLISHED_SCHEMA,
-  APPLY_IMPORT
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.import_databricks_metric_view(
-    YAML_TEXT,
-    MODEL_NAME,
-    PUBLISHED_SCHEMA,
-    APPLY_IMPORT
-)
-
-exit(rows or {{}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  ERROR_MESSAGE VARCHAR(2000000),
-  MODEL_NAME VARCHAR(256),
-  GENERATED_DDL VARCHAR(2000000),
-  DIAGNOSTICS_JSON VARCHAR(2000000),
-  VALIDATION_RUN_ID DECIMAL(18,0)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_METRIC(
-  MODEL_NAME,
-  OBJECT_NAME,
-  METRIC_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.describe_semantic_metric(MODEL_NAME, OBJECT_NAME, METRIC_NAME)
-
-exit(rows or {{}}, [[
-  SECTION_NAME VARCHAR(128),
-  PROPERTY_NAME VARCHAR(256),
-  PROPERTY_VALUE VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.EXPLAIN_SEMANTIC_METRIC(
-  MODEL_NAME,
-  OBJECT_NAME,
-  METRIC_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.explain_semantic_metric(MODEL_NAME, OBJECT_NAME, METRIC_NAME)
-
-exit(rows or {{}}, [[
-  SECTION_NAME VARCHAR(128),
-  ITEM_NAME VARCHAR(256),
-  DETAIL_TEXT VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.EXPORT_SEMANTIC_DEFINITION(
-  MODEL_NAME,
-  OBJECT_NAME,
-  METRIC_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
-
-local rows = semantic_definition.export_semantic_definition(MODEL_NAME, OBJECT_NAME, METRIC_NAME)
-
-exit(rows or {{}}, [[
-  DEFINITION_KIND VARCHAR(64),
-  DEFINITION_REF VARCHAR(1024),
-  DEFINITION_SQL VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL()
-RETURNS TABLE AS
-query("ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR")
-exit({{{{"OK", "SESSION", "SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR", "Semantic SQL enabled for this session."}}}}, [[
-  STATUS VARCHAR(32),
-  ACTIVATION_SCOPE VARCHAR(32),
-  PREPROCESSOR_SCRIPT VARCHAR(512),
-  MESSAGE VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.DISABLE_SEMANTIC_SQL()
-RETURNS TABLE AS
-query("ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = NULL")
-exit({{{{"OK", "SESSION", null, "Semantic SQL disabled for this session."}}}}, [[
-  STATUS VARCHAR(32),
-  ACTIVATION_SCOPE VARCHAR(32),
-  PREPROCESSOR_SCRIPT VARCHAR(512),
-  MESSAGE VARCHAR(2000000)
-]])
-/
-{SEMANTIC_END}"""
-
-
-def fusion_declaration_block() -> str:
-    """The tier-2 fusion document surface.
-
-    Its own script rather than more of SEMANTIC_DEFINITION_RUNTIME: that chunk
-    is near Exasol's 200 main-chunk locals, and a document format that will grow
-    should not spend someone else's headroom.
-
-    It carries shared/json.lua rather than importing the definition runtime for a
-    codec. Importing was the cheap way to avoid a fifth copy of the encoder, but
-    it made a document format depend on the DDL parser, and it left this module
-    holding decoded values whose null sentinel belonged to another module -- so
-    an explicit `null` in a declaration was unrecognisable here. Two locals of
-    this chunk's budget buy back both.
+    The body file holds exactly the lines between a script's `AS` and its `/`,
+    so the built statement is the one that would have been written inline.
     """
-    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
-    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
-    rollback_source = CATALOG_ROLLBACK_SOURCE.read_text(encoding="utf-8").rstrip()
-    source = FUSION_DECLARATION_SOURCE.read_text(encoding="utf-8").rstrip()
-    return f"""{FUSION_BEGIN}
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.FUSION_RUNTIME AS
-{json_source}
+    used: set[Path] = set()
 
-{rows_source}
+    def body(match: re.Match[str]) -> str:
+        path = (ROOT / match.group(1)).resolve()
+        if path.parent != SCRIPTS_DIR or not path.is_file():
+            raise SystemExit(f"package_lua_scripts: '-- @lua {match.group(1)}' names no "
+                             f"file in {SCRIPTS_DIR.relative_to(ROOT)}/")
+        if path in used:
+            raise SystemExit(f"package_lua_scripts: {match.group(1)} is the body of two scripts")
+        used.add(path)
+        return path.read_text(encoding="utf-8").removesuffix("\n")
 
-{rollback_source}
-
-{source}
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.EXPORT_FUSION_DECLARATION(
-  MODEL_NAME,
-  ENTITY_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.FUSION_RUNTIME", "fusion")
-
-local rows = fusion.export_fusion_declaration(MODEL_NAME, ENTITY_NAME)
-
-exit(rows or {{}}, [[
-  SCOPE_KIND VARCHAR(32),
-  SCOPE_NAME VARCHAR(256),
-  REPRESENTATION_COUNT DECIMAL(18,0),
-  DECLARATION_JSON VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION(
-  MODEL_NAME,
-  DECLARATION_JSON,
-  DRY_RUN
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.FUSION_RUNTIME", "fusion")
-
-local rows = fusion.apply_fusion_declaration(MODEL_NAME, DECLARATION_JSON, DRY_RUN)
-
-exit(rows or {{}}, [[
-  STATUS VARCHAR(32),
-  ERROR_CODE VARCHAR(128),
-  MESSAGE VARCHAR(2000000),
-  OPERATION_COUNT DECIMAL(18,0),
-  APPLIED_COUNT DECIMAL(18,0)
-]])
-/
-{FUSION_END}"""
+    inlined = {name: LUA_BODY.sub(body, text) for name, text in texts.items()}
+    orphans = sorted(path.name for path in SCRIPTS_DIR.glob("*.lua") if path.resolve() not in used)
+    if orphans:
+        raise SystemExit("package_lua_scripts: no script uses " + ", ".join(orphans))
+    return inlined
 
 
-def agent_block() -> str:
-    json_source = JSON_SOURCE.read_text(encoding="utf-8").rstrip()
-    rows_source = ROWS_SOURCE.read_text(encoding="utf-8").rstrip()
-    source = AGENT_SOURCE.read_text(encoding="utf-8").rstrip()
-    return f"""{AGENT_BEGIN}
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.AGENT_RUNTIME AS
-{json_source}
-
-{rows_source}
-
-{source}
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION(
-  MODEL_NAME,
-  SCOPE_TYPE,
-  SCOPE_NAME,
-  INSTRUCTION_KIND,
-  INSTRUCTION_TEXT,
-  APPLIES_TO_ROLE,
-  PRIORITY
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.add_agent_instruction(
-    MODEL_NAME,
-    SCOPE_TYPE,
-    SCOPE_NAME,
-    INSTRUCTION_KIND,
-    INSTRUCTION_TEXT,
-    APPLIES_TO_ROLE,
-    PRIORITY
-)
-
-exit(rows or {{}}, [[
-  INSTRUCTION_ID DECIMAL(18,0),
-  MODEL_NAME VARCHAR(256),
-  SCOPE_TYPE VARCHAR(64),
-  SCOPE_NAME VARCHAR(512),
-  INSTRUCTION_KIND VARCHAR(64),
-  STATUS VARCHAR(32)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.ADD_VERIFIED_QUERY(
-  MODEL_NAME,
-  OBJECT_NAME,
-  QUERY_NAME,
-  NATURAL_LANGUAGE_TEXT,
-  REQUEST_JSON,
-  EXPECTED_RESULT_SHAPE,
-  IS_ONBOARDING_EXAMPLE
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.add_verified_query(
-    MODEL_NAME,
-    OBJECT_NAME,
-    QUERY_NAME,
-    NATURAL_LANGUAGE_TEXT,
-    REQUEST_JSON,
-    EXPECTED_RESULT_SHAPE,
-    IS_ONBOARDING_EXAMPLE
-)
-
-exit(rows or {{}}, [[
-  VERIFIED_QUERY_ID DECIMAL(18,0),
-  MODEL_NAME VARCHAR(256),
-  OBJECT_NAME VARCHAR(256),
-  QUERY_NAME VARCHAR(512),
-  STATUS VARCHAR(32),
-  GENERATED_SQL VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SEARCH_SEMANTIC_OBJECTS(
-  QUERY_TEXT,
-  MODEL_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.search_semantic_objects(QUERY_TEXT, MODEL_NAME)
-
-exit(rows or {{}}, [[
-  RESULT_TYPE VARCHAR(64),
-  MODEL_NAME VARCHAR(256),
-  OBJECT_NAME VARCHAR(256),
-  FIELD_KIND VARCHAR(64),
-  FIELD_NAME VARCHAR(256),
-  DISPLAY_NAME VARCHAR(512),
-  DESCRIPTION VARCHAR(2000000),
-  MATCH_TEXT VARCHAR(2000000),
-  SCORE DECIMAL(18,0),
-  IS_CERTIFIED BOOLEAN
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_OBJECT(
-  MODEL_NAME,
-  OBJECT_NAME
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.describe_semantic_object(MODEL_NAME, OBJECT_NAME)
-
-exit(rows or {{}}, [[
-  MODEL_NAME VARCHAR(256),
-  OBJECT_NAME VARCHAR(256),
-  ROW_KIND VARCHAR(64),
-  FIELD_KIND VARCHAR(64),
-  FIELD_NAME VARCHAR(256),
-  SQL_COLUMN_NAME VARCHAR(256),
-  DATA_TYPE VARCHAR(128),
-  DESCRIPTION VARCHAR(2000000),
-  DETAILS_JSON VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY(
-  MODEL_NAME,
-  OBJECT_NAME,
-  QUERY_MODE
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.get_business_glossary(MODEL_NAME, OBJECT_NAME, QUERY_MODE)
-
-exit(rows or {{}}, [[
-  MODEL_NAME VARCHAR(256),
-  OBJECT_NAME VARCHAR(256),
-  QUERY_MODE VARCHAR(64),
-  GLOSSARY_TEXT VARCHAR(2000000),
-  GLOSSARY_JSON VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL(
-  HANDLE_TYPE,
-  HANDLE_ID
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.explain_compiled_sql(HANDLE_TYPE, HANDLE_ID)
-
-exit(rows or {{}}, [[
-  HANDLE_TYPE VARCHAR(64),
-  HANDLE_ID DECIMAL(18,0),
-  MODEL_NAME VARCHAR(256),
-  VERSION_ID DECIMAL(18,0),
-  STATUS VARCHAR(64),
-  ERROR_CODE VARCHAR(128),
-  ERROR_MESSAGE VARCHAR(2000000),
-  REQUEST_TEXT VARCHAR(2000000),
-  GENERATED_SQL VARCHAR(2000000),
-  PLAN_JSON VARCHAR(2000000),
-  REQUESTED_DIMENSIONS VARCHAR(2000000),
-  REQUESTED_METRICS VARCHAR(2000000),
-  SELECTED_MATERIALIZATION VARCHAR(512),
-  GOVERNANCE VARCHAR(2000000)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK(
-  HANDLE_TYPE,
-  HANDLE_ID,
-  VERDICT,
-  COMMENT_TEXT,
-  PROPOSED_CHANGE_JSON
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.record_agent_feedback(
-    HANDLE_TYPE,
-    HANDLE_ID,
-    VERDICT,
-    COMMENT_TEXT,
-    PROPOSED_CHANGE_JSON
-)
-
-exit(rows or {{}}, [[
-  FEEDBACK_ID DECIMAL(18,0),
-  SUGGESTION_ID DECIMAL(18,0),
-  HANDLE_TYPE VARCHAR(64),
-  HANDLE_ID DECIMAL(18,0),
-  VERDICT VARCHAR(64),
-  REVIEW_STATUS VARCHAR(64)
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION(
-  MODEL_NAME,
-  SUGGESTION_KIND,
-  OBJECT_TYPE,
-  OBJECT_NAME,
-  PROPOSED_CHANGE_JSON,
-  RATIONALE
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.propose_model_evolution(
-    MODEL_NAME,
-    SUGGESTION_KIND,
-    OBJECT_TYPE,
-    OBJECT_NAME,
-    PROPOSED_CHANGE_JSON,
-    RATIONALE
-)
-
-exit(rows or {{}}, [[
-  SUGGESTION_ID DECIMAL(18,0),
-  MODEL_NAME VARCHAR(256),
-  VERSION_ID DECIMAL(18,0),
-  SUGGESTION_KIND VARCHAR(64),
-  OBJECT_TYPE VARCHAR(64),
-  OBJECT_NAME VARCHAR(512),
-  REVIEW_STATUS VARCHAR(64),
-  IS_DUPLICATE BOOLEAN
-]])
-/
-
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION(
-  SUGGESTION_ID,
-  DECISION,
-  REVIEW_NOTE
-)
-RETURNS TABLE AS
-import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
-
-local rows = agent.review_model_evolution(
-    SUGGESTION_ID,
-    DECISION,
-    REVIEW_NOTE
-)
-
-exit(rows or {{}}, [[
-  SUGGESTION_ID DECIMAL(18,0),
-  MODEL_NAME VARCHAR(256),
-  VERSION_ID DECIMAL(18,0),
-  SUGGESTION_KIND VARCHAR(64),
-  REVIEW_STATUS VARCHAR(64),
-  REVIEWED_BY VARCHAR(256),
-  ACTIVATION_STATUS VARCHAR(64)
-]])
-/
-{AGENT_END}"""
+def runtime_script(name: str) -> str:
+    """CREATE SCRIPT for one runtime library, between its generated markers."""
+    parts = []
+    for source in RUNTIMES[name]:
+        if source == "BUILD_STAMP":
+            # A global, not a local: the 200-local ceiling applies to the sum of
+            # the concatenated sources in one chunk, and this must not spend one.
+            parts.append(f'ESV_RUNTIME_BUILD = "{runtime_build_id()}"')
+        else:
+            parts.append(globals()[source].read_text(encoding="utf-8").rstrip())
+    body = "\n\n".join(parts)
+    return (f"-- BEGIN GENERATED SEMANTIC_ADMIN.{name}\n"
+            f"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.{name} AS\n{body}\n/\n"
+            f"-- END GENERATED SEMANTIC_ADMIN.{name}")
 
 
-def replace_between_markers(text: str, block: str, begin: str, end: str) -> str:
-    if begin in text and end in text:
-        before = text[: text.index(begin)]
-        after = text[text.index(end) + len(end) :]
-        return before.rstrip() + "\n\n" + block + after
-    return text.rstrip() + "\n\n" + block + "\n"
+def compiler_block() -> str:
+    """The two compiler libraries, as the build places them."""
+    return (runtime_script("MATERIALIZATION_RUNTIME") + "\n\n"
+            + runtime_script("COMPILER_RUNTIME"))
+
+
+def expand(name: str, text: str, parts: dict[str, str], used: set[str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        part = match.group(1)
+        if part not in parts:
+            raise SystemExit(
+                f"package_lua_scripts: {name} asks for '@generated {part}', which "
+                f"nothing generates. Known: {', '.join(sorted(parts))}.")
+        if part in used:
+            raise SystemExit(f"package_lua_scripts: '@generated {part}' appears twice.")
+        used.add(part)
+        return parts[part]
+    return PLACEHOLDER.sub(replace, text)
+
+
+def sources() -> dict[str, str]:
+    texts = {path.name: path.read_text(encoding="utf-8")
+             for path in sorted(SOURCE_DIR.glob("*.sql"))}
+    for name, text in texts.items():
+        if "-- BEGIN GENERATED" in text:
+            raise SystemExit(
+                f"package_lua_scripts: sql/install/{name} contains generated text. "
+                "Sources hold a one-line '-- @generated <NAME>' placeholder instead.")
+    return inline_script_bodies(texts)
+
+
+def assemble_without_parameters() -> dict[str, str]:
+    """Every install file built, except the signature view that reads them."""
+    parts = {f"SEMANTIC_ADMIN.{name}": runtime_script(name) for name in RUNTIMES}
+    parts["SEMANTIC_SOURCE_VIEWS"] = source_views_block()
+    used: set[str] = set()
+    built = {name: text if name.startswith("002_") else expand(name, text, parts, used)
+             for name, text in sources().items()}
+    missing = sorted(set(parts) - used)
+    if missing:
+        raise SystemExit("package_lua_scripts: no source places " + ", ".join(missing))
+    return built
+
+
+def assemble() -> dict[str, str]:
+    """The complete install files, by name: what build/install/ holds."""
+    built = assemble_without_parameters()
+    for name, text in built.items():
+        check_main_chunk_locals(Path(name), text)
+    # A later CREATE OR REPLACE silently wins, so a second definition of a script
+    # is dead code at best, and at worst the one someone edits.
+    declared = collections.Counter(
+        script for text in built.values() for script in ANY_SCRIPT_DECLARATION.findall(text))
+    twice = sorted(script for script, count in declared.items() if count > 1)
+    if twice:
+        raise SystemExit("package_lua_scripts: defined more than once: " + ", ".join(twice))
+    signatures = {"ADMIN_SCRIPT_PARAMETERS": admin_script_parameters_block(built)}
+    used: set[str] = set()
+    for name in [name for name in built if name.startswith("002_")]:
+        built[name] = expand(name, built[name], signatures, used)
+    if not used:
+        raise SystemExit("package_lua_scripts: no source places ADMIN_SCRIPT_PARAMETERS")
+    return built
 
 
 def main() -> int:
-    original = INSTALL_SQL.read_text(encoding="utf-8")
-    updated = replace_between_markers(original, validator_block(), VALIDATOR_BEGIN, VALIDATOR_END)
-    updated = replace_between_markers(updated, semantic_definition_block(), SEMANTIC_BEGIN, SEMANTIC_END)
-    updated = replace_between_markers(updated, fusion_declaration_block(), FUSION_BEGIN, FUSION_END)
-    updated = replace_between_markers(updated, compiler_block(), BEGIN, END)
-    check_main_chunk_locals(INSTALL_SQL, updated)
-    if updated != original:
-        INSTALL_SQL.write_text(updated, encoding="utf-8")
-        print(f"updated {INSTALL_SQL.relative_to(ROOT)}")
-    else:
-        print(f"unchanged {INSTALL_SQL.relative_to(ROOT)}")
-
-    original_catalog = CATALOG_VIEWS_SQL.read_text(encoding="utf-8")
-    updated_catalog = replace_between_markers(
-        original_catalog, admin_script_parameters_block(),
-        SCRIPT_PARAMETERS_BEGIN, SCRIPT_PARAMETERS_END)
-    if updated_catalog != original_catalog:
-        CATALOG_VIEWS_SQL.write_text(updated_catalog, encoding="utf-8")
-        print(f"updated {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
-    else:
-        print(f"unchanged {CATALOG_VIEWS_SQL.relative_to(ROOT)}")
-
-    original_source = SOURCE_VIEWS_SQL.read_text(encoding="utf-8")
-    # rstrip + one newline so the file ends exactly once. The generated block
-    # deliberately does not end with a newline: replace_between_markers keeps
-    # whatever followed the END marker verbatim, and that text already starts
-    # with one, so emitting a second grew the file by a blank line on every run
-    # and reported "updated" each time. A diff that is always dirty is a diff
-    # nobody reads -- which is how the ordering fault below survived as long as
-    # it did.
-    updated_source = replace_between_markers(
-        original_source, source_views_block(), SOURCE_VIEWS_BEGIN, SOURCE_VIEWS_END
-    ).rstrip() + "\n"
-    if updated_source != original_source:
-        SOURCE_VIEWS_SQL.write_text(updated_source, encoding="utf-8")
-        print(f"updated {SOURCE_VIEWS_SQL.relative_to(ROOT)}")
-    else:
-        print(f"unchanged {SOURCE_VIEWS_SQL.relative_to(ROOT)}")
-
-    original_agent = AGENT_INSTALL_SQL.read_text(encoding="utf-8")
-    updated_agent = replace_between_markers(original_agent, agent_block(), AGENT_BEGIN, AGENT_END)
-    check_main_chunk_locals(AGENT_INSTALL_SQL, updated_agent)
-    if updated_agent != original_agent:
-        AGENT_INSTALL_SQL.write_text(updated_agent, encoding="utf-8")
-        print(f"updated {AGENT_INSTALL_SQL.relative_to(ROOT)}")
-    else:
-        print(f"unchanged {AGENT_INSTALL_SQL.relative_to(ROOT)}")
+    built = assemble()
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    for stale in sorted(set(path.name for path in BUILD_DIR.glob("*.sql")) - set(built)):
+        (BUILD_DIR / stale).unlink()
+    for name, text in built.items():
+        target = BUILD_DIR / name
+        if target.exists() and target.read_text(encoding="utf-8") == text:
+            print(f"unchanged {target.relative_to(ROOT)}")
+        else:
+            target.write_text(text, encoding="utf-8")
+            print(f"updated {target.relative_to(ROOT)}")
     return 0
 
 

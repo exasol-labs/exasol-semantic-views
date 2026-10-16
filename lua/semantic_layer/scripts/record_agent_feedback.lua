@@ -1,0 +1,18 @@
+import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
+
+local rows = agent.record_agent_feedback(
+    HANDLE_TYPE,
+    HANDLE_ID,
+    VERDICT,
+    COMMENT_TEXT,
+    PROPOSED_CHANGE_JSON
+)
+
+exit(rows or {}, [[
+  FEEDBACK_ID DECIMAL(18,0),
+  SUGGESTION_ID DECIMAL(18,0),
+  HANDLE_TYPE VARCHAR(64),
+  HANDLE_ID DECIMAL(18,0),
+  VERDICT VARCHAR(64),
+  REVIEW_STATUS VARCHAR(64)
+]])

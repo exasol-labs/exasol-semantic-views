@@ -450,8 +450,9 @@ Compilation accepts the latest completed validation run with zero errors.
 Warnings, including legacy relationships that do not yet have structured key
 mappings, do not block the existing single-branch compiler path.
 
-`tools/package_lua_scripts.py` embeds the compiler runtime, materialization
-runtime, and wrappers into `sql/install/003_create_semantic_admin_scripts.sql`.
+`tools/package_lua_scripts.py` builds the compiler and materialization runtimes
+into `build/install/003_create_semantic_admin_scripts.sql`, where the source's
+placeholders stand; the wrappers that call them are hand-written beside them.
 The embedded compiler runtime includes `query_spec.lua`,
 `catalog_snapshot.lua`, `metric_plan.lua`, `physical_plan.lua`,
 `materializations.lua`, and `grain_sql.lua` before the entrypoint module.

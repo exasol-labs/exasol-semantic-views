@@ -1,0 +1,10 @@
+import("SEMANTIC_ADMIN.FUSION_RUNTIME", "fusion")
+
+local rows = fusion.export_fusion_declaration(MODEL_NAME, ENTITY_NAME)
+
+exit(rows or {}, [[
+  SCOPE_KIND VARCHAR(32),
+  SCOPE_NAME VARCHAR(256),
+  REPRESENTATION_COUNT DECIMAL(18,0),
+  DECLARATION_JSON VARCHAR(2000000)
+]])

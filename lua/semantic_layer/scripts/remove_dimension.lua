@@ -1,0 +1,110 @@
+local function missing(value)
+    return value == nil or value == null or tostring(value) == ""
+end
+
+local function trim(value)
+    return tostring(value):match("^%s*(.-)%s*$")
+end
+
+local function normalize_name(value, label)
+    if missing(value) then
+        error("SEMANTIC_ADMIN_001: " .. label .. " is required")
+    end
+    local name = trim(value)
+    if not string.match(name, "^[A-Za-z][A-Za-z0-9_]*$") then
+        error("SEMANTIC_ADMIN_002: invalid " .. label .. ": " .. name)
+    end
+    return name
+end
+
+local function row_value(row, name, position)
+    return row[name] or row[string.lower(name)] or row[position]
+end
+
+local function scalar(sql_text, params)
+    local rows = query(sql_text, params or {})
+    if rows == nil or #rows == 0 then
+        return nil
+    end
+    return rows[1][1]
+end
+
+local function model_row(model_name)
+    local rows = query([[
+        SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID AS VERSION_ID
+        FROM SYS_SEMANTIC.MODELS m
+        WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name)
+    ]], {model_name = model_name})
+    if rows == nil or #rows == 0 then
+        error("SEMANTIC_ADMIN_011: model not found: " .. model_name)
+    end
+    return {
+        model_id = row_value(rows[1], "MODEL_ID", 1),
+        version_id = row_value(rows[1], "VERSION_ID", 2)
+    }
+end
+
+local function object_id(model, object_name)
+    local id = scalar([[
+        SELECT OBJECT_ID
+        FROM SYS_SEMANTIC.SEMANTIC_OBJECTS
+        WHERE MODEL_ID = :model_id
+          AND VERSION_ID = :version_id
+          AND UPPER(OBJECT_NAME) = UPPER(:object_name)
+    ]], {model_id = model.model_id, version_id = model.version_id, object_name = object_name})
+    if id == nil then
+        error("SEMANTIC_ADMIN_017: semantic object not found: " .. object_name)
+    end
+    return id
+end
+
+local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
+local object_name = normalize_name(OBJECT_NAME, "OBJECT_NAME")
+local dimension_name = normalize_name(DIMENSION_NAME, "DIMENSION_NAME")
+local model = model_row(model_name)
+local object_id_value = object_id(model, object_name)
+
+local dimension_id = scalar([[
+    SELECT DIMENSION_ID
+    FROM SYS_SEMANTIC.DIMENSIONS
+    WHERE MODEL_ID = :model_id
+      AND VERSION_ID = :version_id
+      AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
+]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension_name})
+
+if dimension_id == nil then
+    error("SEMANTIC_ADMIN_015: dimension not found: " .. dimension_name)
+end
+
+query([[
+    DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS
+     WHERE OBJECT_ID = :object_id
+       AND COLUMN_KIND = 'DIMENSION'
+       AND OBJECT_REF_ID = :dimension_id
+]], {object_id = object_id_value, dimension_id = dimension_id})
+
+query([[
+    DELETE FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES
+     WHERE ATTRIBUTE_TYPE = 'DIMENSION'
+       AND ATTRIBUTE_ID = :dimension_id
+]], {dimension_id = dimension_id})
+
+query([[
+    DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS
+     WHERE ATTRIBUTE_TYPE = 'DIMENSION'
+       AND ATTRIBUTE_ID = :dimension_id
+]], {dimension_id = dimension_id})
+
+query([[
+    DELETE FROM SYS_SEMANTIC.DIMENSIONS
+     WHERE DIMENSION_ID = :dimension_id
+]], {dimension_id = dimension_id})
+
+query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
+
+exit({{"OK", model_name, object_name, dimension_name}}, [[
+  STATUS VARCHAR(32),
+  MODEL_NAME VARCHAR(256),
+  OBJECT_NAME VARCHAR(256),
+  DIMENSION_NAME VARCHAR(256)
+]])

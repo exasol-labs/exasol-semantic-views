@@ -1,0 +1,12 @@
+import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+
+local rows = semantic_definition.apply_semantic_definition(DEFINITION_SQL, DRY_RUN)
+
+exit(rows or {}, [[
+  STATUS VARCHAR(32),
+  ERROR_CODE VARCHAR(128),
+  MESSAGE VARCHAR(2000000),
+  NORMALIZED_JSON VARCHAR(2000000),
+  OPERATION_COUNT DECIMAL(18,0),
+  VALIDATION_RUN_ID DECIMAL(18,0)
+]])

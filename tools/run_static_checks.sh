@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
-# Static checks: Ruff and mypy for Python, Luacheck for lua/, tests/lua/ and
-# the Lua embedded in sql/install/, ShellCheck for the shell entry points.
+# Static checks: Ruff and mypy for Python, Luacheck for lua/ and tests/lua/,
+# ShellCheck for the shell entry points. The script bodies in
+# lua/semantic_layer/scripts/ take their parameters as globals, so
+# tools/dev/lint_script_bodies.py lints them with each script's signature.
 # Configuration lives in pyproject.toml and .luacheckrc. Every check runs, and
 # the script fails if any of them did.
 #
@@ -29,8 +31,9 @@ run() {
 
 run ruff "$PYTHON_BIN" -m ruff check tools tests
 run mypy "$PYTHON_BIN" -m mypy
-run luacheck "$LUACHECK_BIN" --formatter plain --codes lua tests/lua
-run embedded-lua "$PYTHON_BIN" tools/dev/lint_embedded_lua.py "$LUACHECK_BIN"
+run luacheck "$LUACHECK_BIN" --formatter plain --codes \
+  --exclude-files "lua/semantic_layer/scripts/*.lua" -- lua tests/lua
+run script-bodies "$PYTHON_BIN" tools/dev/lint_script_bodies.py "$LUACHECK_BIN"
 run shellcheck "$SHELLCHECK_BIN" tools/*.sh
 
 if [ -n "$failed" ]; then
