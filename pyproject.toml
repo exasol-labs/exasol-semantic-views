@@ -18,13 +18,20 @@ ignore = ["B904"]
 files = [
     "tools/install.py",
     "tools/import_databricks.py",
-    "tools/lint_embedded_lua.py",
+    "tools/dev/lint_embedded_lua.py",
     "tools/osi.py",
     "tools/package_lua_scripts.py",
     "tools/release_notes.py",
     "tools/run_sql_files.py",
     "tools/semantic_client.py",
-    "tools/verify_support.py",
+    "tests/integration/conftest.py",
+    "tests/integration/verify_support.py",
 ]
 check_untyped_defs = true
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+# The live-database suite; tools/run_smoke.sh installs the example first.
+# The database-free tests are unittest modules run by tools/run_python_tests.sh.
+testpaths = ["tests/integration"]
+addopts = "-ra --durations=15"

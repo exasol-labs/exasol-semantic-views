@@ -744,7 +744,7 @@ SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
 --
 -- Declared rather than derived, because there is nothing to derive it from --
 -- the shapes live in a parser. The refusal codes are the check: each one is a
--- code the compiler actually emits, and tests/test_conventions.py already
+-- code the compiler actually emits, and tests/unit/test_conventions.py already
 -- forbids a code from meaning two things, so a row naming a code that has gone
 -- away is visible.
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.QUERY_CAPABILITIES AS

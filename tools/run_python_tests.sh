@@ -2,7 +2,7 @@
 # Database-free Python test suite with line-coverage enforcement.
 #
 # Runs each host-side test file under coverage.py, enforces the per-file
-# thresholds in tests/python_coverage_thresholds.py, and fails if any file
+# thresholds in tests/unit/python_coverage_thresholds.py, and fails if any file
 # regresses. Mirrors tools/run_lua_tests.sh's discipline for Lua.
 #
 # The DB-backed verify_* scripts live in tools/run_smoke.sh; they are
@@ -11,19 +11,16 @@
 
 set -eu
 
+# pyexasol 3 reports usage on connect; a test run never does.
+export EXASOL_TELEMETRY_DISABLE=true
+
 if [ -z "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="python3"
 fi
 
-TESTS="tests/test_osi_tool.py \
-       tests/test_install.py \
-       tests/test_release_notes.py \
-       tests/test_sql_splitter.py \
-       tests/test_property.py \
-       tests/test_admin_invariants.py \
-       tests/test_catalog_references.py \
-       tests/test_conventions.py \
-       tests/test_semantic_client.py"
+# Every module in tests/unit is a database-free test; a glob rather than a list,
+# so a new one cannot be added and never run.
+TESTS=$(ls tests/unit/test_*.py)
 
 # Discard any prior .coverage file so a stale run does not lower thresholds
 # below the honest baseline.
@@ -43,7 +40,7 @@ echo
 "$PYTHON_BIN" - <<'PY'
 import fnmatch, sys
 from coverage import Coverage
-from tests.python_coverage_thresholds import LINE_THRESHOLDS, OMIT_PATTERNS
+from tests.unit.python_coverage_thresholds import LINE_THRESHOLDS, OMIT_PATTERNS
 
 cov = Coverage()
 cov.load()

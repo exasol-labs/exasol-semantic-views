@@ -237,7 +237,7 @@ similar wording, deliberately. Grants are per schema — a caller given
 must be self-sufficient. A row pointing at another table is useless to a caller
 who cannot read it.
 
-`tools/verify_catalog_introspection.py` asserts the one-table-per-schema shape and
+`tests/integration/verify_catalog_introspection.py` asserts the one-table-per-schema shape and
 **executes every `SELECT` these tables advertise**, because a query string naming
 a column that does not exist fails nowhere except in the hands of the agent that
 followed it. `METRIC_DEFINITIONS_QUERY` had been selecting `OBJECT_NAME` from

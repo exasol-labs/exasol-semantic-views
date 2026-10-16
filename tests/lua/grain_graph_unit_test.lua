@@ -21,9 +21,9 @@ test("shared grain graph builds cardinality-preserving directions", function()
     -- visible in the complete graph for diagnostics and absent from the safe
     -- graph in both directions.
     assert_true(safe["5"] == nil)
-    for _, edge in ipairs(safe["4"] or {}) do
+    each(safe["4"] or {}, function(edge)
         assert_true(edge.name ~= "bridge")
-    end
+    end)
     assert_equal(all["5"][1].name, "bridge")
     assert_equal(all["5"][1].reason, "MANY_TO_MANY_UNSUPPORTED")
     local bridge_reason = nil

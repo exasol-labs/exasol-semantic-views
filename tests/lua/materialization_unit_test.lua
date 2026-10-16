@@ -1,6 +1,8 @@
 local api = ESV_MATERIALIZATION_TEST_API
 
 local function install_catalog(candidates, columns)
+    local original = query
+    defer(function() query = original end)
     query = function(sql)
         if sql:find("MATERIALIZATION_COLUMNS", 1, true) then return columns end
         if sql:find("MATERIALIZATIONS", 1, true) then return candidates end

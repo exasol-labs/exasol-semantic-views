@@ -22,7 +22,7 @@
 --
 -- admin/fusion_declaration.lua joined the gate 2026-08-26. Its end-to-end
 -- claims -- one document on a published model, dry run, round-trip -- are
--- proven live in tools/verify_fusion_declaration.py, which this gate cannot
+-- proven live in tests/integration/verify_fusion_declaration.py, which this gate cannot
 -- see; the unit tests cover the contract refusals, the operation order and
 -- the rollback's column discovery.
 --
@@ -137,7 +137,7 @@
 -- refuse wherever the field is named -- filters included, or the filter lane
 -- becomes the way around a field you cannot discover -- and DISPLAY_POLICY =
 -- MASK refuses the projection while permitting the filter. The live behaviour
--- is proven in tools/verify_policy_columns.py, which this gate cannot see; the
+-- is proven in tests/integration/verify_policy_columns.py, which this gate cannot see; the
 -- unit test covers the resolver refusal, which is the one place every lane goes
 -- through.
 --
@@ -162,7 +162,7 @@
 -- is a schema qualifier on 27 catalog reads plus one view in place of a
 -- three-branch union, so it moves no branch: what it changes is which
 -- privileges the caller needs, and that is provable only against a live
--- database with a real role hierarchy. tools/verify_effective_principal.py is
+-- database with a real role hierarchy. tests/integration/verify_effective_principal.py is
 -- where it is proven; this gate cannot see it.
 return {
     lines = {

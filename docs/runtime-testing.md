@@ -60,6 +60,23 @@ validation, compilation, preprocessing, execution, agent APIs,
 materializations, Ossie/OSI, Databricks compatibility, compile caching, and
 concurrent requests against Exasol.
 
+The live suite is `tests/integration/`, discovered and run by pytest after the
+install, so one failing test no longer stops the rest: the run ends with a
+summary of every failure and the slowest tests. Arguments after
+`run_smoke.sh` go to pytest. Against an installed deployment you can also run it
+directly, or any part of it:
+
+```sh
+python3 -m pytest tests/integration                      # everything
+python3 -m pytest tests/integration -k wrapped           # by name
+python3 -m pytest tests/integration/test_filter_grain.py # one module
+```
+
+`test_*.py` modules are pytest tests built on the fixtures in
+`tests/integration/conftest.py`. The older `verify_*.py` scripts each run as one
+test in their own process, and can still be run on their own with
+`python3 tests/integration/verify_<name>.py`.
+
 It also runs the host-side OSI and SQL-splitter tests, the maintained SQL smoke
 fixtures, the extended semantic-SQL suites, GROUP BY inference, and a
 non-SYS security-principal test. The security test verifies model role
@@ -70,21 +87,21 @@ The grain-aware compiler also has focused live verifiers for its stable
 single-branch boundary and executable multi-branch finalization:
 
 ```sh
-python3 tools/verify_grain_phase_b.py
-python3 tools/verify_grain_phase_c3.py
-python3 tools/verify_fusion_f3.py
-python3 tools/verify_fusion_f4.py
-python3 tools/verify_fusion_f5.py
-python3 tools/verify_fusion_f51.py
-python3 tools/verify_fusion_f7.py
-python3 tools/verify_promotion_gate.py
-python3 tools/verify_published_authoring_isolation.py
-python3 tools/verify_published_mutation_protection.py
-python3 tools/verify_published_f3_batch.py
-python3 tools/verify_published_multistep_declarations.py
-python3 tools/verify_composite_removal_and_recertification.py
-python3 tools/verify_representation_with_identity.py
-python3 tools/verify_json_table_relationship_mapping.py
+python3 tests/integration/verify_grain_phase_b.py
+python3 tests/integration/verify_grain_phase_c3.py
+python3 tests/integration/verify_fusion_f3.py
+python3 tests/integration/verify_fusion_f4.py
+python3 tests/integration/verify_fusion_f5.py
+python3 tests/integration/verify_fusion_f51.py
+python3 tests/integration/verify_fusion_f7.py
+python3 tests/integration/verify_promotion_gate.py
+python3 tests/integration/verify_published_authoring_isolation.py
+python3 tests/integration/verify_published_mutation_protection.py
+python3 tests/integration/verify_published_f3_batch.py
+python3 tests/integration/verify_published_multistep_declarations.py
+python3 tests/integration/verify_composite_removal_and_recertification.py
+python3 tests/integration/verify_representation_with_identity.py
+python3 tests/integration/verify_json_table_relationship_mapping.py
 ```
 
 The F3 verifier builds disjoint hot and cold representations, validates their
@@ -145,14 +162,14 @@ and the rule that mutating one branch cannot alter another branch's state. It
 also reports planner runtime and SQL size for one-, two-, and three-branch
 shapes.
 
-`tools/verify_concurrent_compile.py` enforces a configurable concurrency p95
+`tests/integration/verify_concurrent_compile.py` enforces a configurable concurrency p95
 limit. Defaults and overrides:
 
 ```sh
 CONCURRENT_THREADS=6 \
 CONCURRENT_ITERATIONS=8 \
 CONCURRENT_P95_MAX_MS=5000 \
-python3 tools/verify_concurrent_compile.py
+python3 tests/integration/verify_concurrent_compile.py
 ```
 
 ## 3. Runtime Performance And Scale Probe
@@ -160,7 +177,7 @@ python3 tools/verify_concurrent_compile.py
 After installing and publishing at least one model:
 
 ```sh
-python3 tools/verify_runtime_performance.py
+python3 tests/integration/verify_runtime_performance.py
 ```
 
 The probe selects the largest role-visible semantic object and measures:
@@ -185,7 +202,7 @@ PERF_COLD_MAX_MS=5000 \
 PERF_WARM_P95_MAX_MS=1000 \
 PERF_EXECUTION_MAX_MS=30000 \
 PERF_OUTPUT_JSON=build/runtime-performance.json \
-python3 tools/verify_runtime_performance.py
+python3 tests/integration/verify_runtime_performance.py
 ```
 
 Performance thresholds should be calibrated per supported Exasol deployment
@@ -196,5 +213,5 @@ profile. Changes should not weaken a committed profile merely to pass CI.
 Database-free coverage measures Lua runtime logic. It does not claim coverage
 of Exasol's `query()`, script import behavior, transaction semantics, optimizer,
 privilege evaluation, or generated SQL execution. Those belong to the live-DB
-lane. Host-side Ossie/OSI behavior remains in `tests/test_osi_tool.py`, which is
+lane. Host-side Ossie/OSI behavior remains in `tests/unit/test_osi_tool.py`, which is
 also invoked by the canonical smoke workflow.

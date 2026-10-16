@@ -17607,7 +17607,7 @@ exit(output_rows, [[
 
 -- BEGIN GENERATED COMPILER_RUNTIME
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME AS
-ESV_RUNTIME_BUILD = "08eda3cbe6fd3320"
+ESV_RUNTIME_BUILD = "d96430410834c5d1"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -18574,7 +18574,7 @@ end
 /
 
 CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.COMPILER_RUNTIME AS
-ESV_RUNTIME_BUILD = "08eda3cbe6fd3320"
+ESV_RUNTIME_BUILD = "d96430410834c5d1"
 
 -- One JSON implementation for the whole runtime.
 --
@@ -26184,7 +26184,7 @@ function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared, 
         return nil
     end
     if upper(tostring(field_kind or "")) ~= "METRIC" then
-        -- Literal, not built from a prefix: tests/test_conventions.py counts how
+        -- Literal, not built from a prefix: tests/unit/test_conventions.py counts how
         -- many distinct conditions each code carries by reading the sources, and
         -- a code assembled at run time is invisible to it. Both callers are the
         -- SQL lane anyway.
@@ -27145,7 +27145,7 @@ refusal_rules.expansion_wins = {
 -- whichever lane reads it, but expansion leaves the ORDER BY outside the derived
 -- table, compiles successfully, and Exasol then fails on `ORDER BY 0` with a
 -- message about positions in SQL the author never wrote (GitHub #14).
--- verify_order_by_ordinals.py fails if this entry is removed.
+-- tests/integration/test_order_by_ordinals.py fails if this entry is removed.
 refusal_rules.lane_final = {
     SEMANTIC_QUERY_064 = true,
 }

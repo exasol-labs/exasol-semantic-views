@@ -1,4 +1,4 @@
 # Static checks run by tools/run_static_checks.sh. Pinned: a new release that
 # adds a rule should arrive as a deliberate change, not as a red build.
-ruff==0.17.0
+ruff==0.17.1
 mypy==2.4.0

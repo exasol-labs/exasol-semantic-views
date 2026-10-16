@@ -32,7 +32,7 @@ VALIDATION_RUN_ID, AGENT_REQUEST_ID`), with `GENERATED_SQL` at **index 4**. `ORI
 is `NULL` for JSON requests but the column is present, so positional indices align with `COMPILE_SQL`.
 
 Earlier docs claimed an 8-column layout (`GENERATED_SQL` at index 3); a consumer following that read
-`NULL`. The docs and the one stale test (`tools/verify_semantic_sql_phase1.py`) have been corrected.
+`NULL`. The docs and the one stale test (`tests/integration/verify_semantic_sql_phase1.py`) have been corrected.
 The rest of the tooling (`tools/semantic_client.py`, `verify_structured_request_compiler.py`,
 `verify_dimension_discovery.py`, `verify_claude_study_issues.py`) already used the correct mapping.
 
@@ -40,7 +40,7 @@ The durable fix is not to restate the layout correctly but to stop reading it by
 set is named, `tools/semantic_client.py` now maps by column name, and
 `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT` publishes the contract as data — including the
 detail that `COMPILE_SQL_DEBUG` ends with `QUERY_LOG_ID` rather than `AGENT_REQUEST_ID`.
-`tools/verify_catalog_introspection.py` asserts that view against each script's live result set, so
+`tests/integration/verify_catalog_introspection.py` asserts that view against each script's live result set, so
 the published contract cannot drift from the scripts again.
 
 ## Historical bugs — status on Exasol 2026.1.0
@@ -51,7 +51,7 @@ Exasol 2026.1.0:
 ### BUG-001 — concurrent `COMPILE_REQUEST_JSON` transaction collisions
 
 - **Symptom (historical):** concurrent compiles raised `SEMANTIC_REQUEST_999` / `_100`.
-- **Status on 2026.1.0:** **Not reproduced.** `tools/verify_concurrent_compile.py` ran 48 compiles
+- **Status on 2026.1.0:** **Not reproduced.** `tests/integration/verify_concurrent_compile.py` ran 48 compiles
   across 6 threads — all `STATUS=OK`, no `SEMANTIC_REQUEST_100`/`_999` leakage.
 
 ### BUG-002 — `order_quarter` dimension uses `QUARTER()` (not an Exasol function)

@@ -1,6 +1,6 @@
 -- Unit tests for the tier-2 fusion document.
 --
--- The live verifier (tools/verify_fusion_declaration.py) proves the end-to-end
+-- The live verifier (tests/integration/verify_fusion_declaration.py) proves the end-to-end
 -- claims: one document lands on a published model, dry run commits nothing,
 -- re-applying is a no-op, export/apply/export round-trips. These cover the
 -- parts a live test reaches only expensively -- the closed-contract refusals,
@@ -15,15 +15,8 @@ local function fake_query(handler)
 end
 
 -- The export entrypoints read the script-context `query` global rather than
--- taking it as an argument, because that is how they run inside Exasol.
-local function with_query(mock, fn)
-    local original_query = query
-    query = mock
-    local ok, result = xpcall(fn, debug.traceback)
-    query = original_query
-    if not ok then error(result, 0) end
-    return result
-end
+-- taking it as an argument, because that is how they run inside Exasol, so the
+-- tests swap it with the harness's with_query.
 
 test("fusion document refuses keys it does not know, by name", function()
     -- A silently-dropped `authority` is a governance change nobody sees, so an
@@ -509,15 +502,6 @@ local function applying_catalog(options)
     return mock, log
 end
 
-local function with_global_query(mock, fn)
-    local original = query
-    query = mock
-    local ok, result = xpcall(fn, debug.traceback)
-    query = original
-    if not ok then error(result, 0) end
-    return result
-end
-
 local DOCUMENT = ESV_JSON.encode({
     model = "sales",
     entities = {CUSTOMER = {representations = {{name = "crm",
@@ -535,7 +519,7 @@ test("fusion apply restores the catalog when validation refuses the result", fun
         {"ERROR", "ENTITY", "CUSTOMER", "SEMANTIC_MODEL_047",
          "identity binding is incomplete"},
     }})
-    local rows = with_global_query(mock, function()
+    local rows = with_query(mock, function()
         return apply_fusion_declaration("sales", DOCUMENT, false)
     end)
     assert_equal(rows[1][1], "ERROR")
@@ -565,7 +549,7 @@ end)
 
 test("fusion apply reports what it ran, and a dry run commits none of it", function()
     local mock = applying_catalog({})
-    local applied = with_global_query(mock, function()
+    local applied = with_query(mock, function()
         return apply_fusion_declaration("sales", DOCUMENT, false)
     end)
     assert_equal(applied[1][1], "OK")
@@ -576,7 +560,7 @@ test("fusion apply reports what it ran, and a dry run commits none of it", funct
     assert_branch("fusion.apply.validated", applied[1][1] == "OK", true)
 
     local dry_mock, dry_log = applying_catalog({})
-    local dry = with_global_query(dry_mock, function()
+    local dry = with_query(dry_mock, function()
         return apply_fusion_declaration("sales", DOCUMENT, "TRUE")
     end)
     assert_equal(dry[1][1], "DRY_RUN")
@@ -599,7 +583,7 @@ test("fusion apply unwinds when a dispatched script refuses mid-sequence", funct
     -- The scripts each unwind only themselves, so a sequence that stops halfway
     -- leaves the model in a state no single script owns.
     local mock, log = applying_catalog({fail_on = "ADD_ENTITY_REPRESENTATION"})
-    local rows = with_global_query(mock, function()
+    local rows = with_query(mock, function()
         return apply_fusion_declaration("sales", DOCUMENT, false)
     end)
     assert_equal(rows[1][1], "ERROR")
@@ -618,7 +602,7 @@ test("fusion apply reports a malformed document in STATUS, not as a raise", func
     -- A caller checks one column for every kind of failure; splitting parse
     -- errors out would mean a caller that checks STATUS still misses them.
     local mock = applying_catalog({})
-    local rows = with_global_query(mock, function()
+    local rows = with_query(mock, function()
         return apply_fusion_declaration("sales", "{not json", false)
     end)
     assert_equal(rows[1][1], "ERROR")

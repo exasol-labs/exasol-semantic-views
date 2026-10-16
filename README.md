@@ -359,7 +359,7 @@ freight by product category reports 149.00 against 105.25 actually charged.
 
 `SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX` publishes the same verdict for every
 metric/dimension pair, so agents can see the boundary without hitting it. Run
-`python3 tools/verify_fanout_guardrails.py` against an installed model to walk
+`python3 tests/integration/verify_fanout_guardrails.py` against an installed model to walk
 through all of it live; it is part of the smoke suite.
 
 ## Fusion You Can See In The Number
@@ -390,7 +390,7 @@ reconciled     : {'Bronze': 27400.25, 'Gold': 100250.75, 'Silver': 102102.44}
 recovered      : 156253.44 — 68.0% of revenue, and the total is unchanged
 ```
 
-Neither number is quoted from a slide: `tools/verify_fusion_value.py` builds
+Neither number is quoted from a slide: `tests/integration/verify_fusion_value.py` builds
 both landscapes, computes both comparisons, and asserts them, so these figures
 cannot drift from what the product does. It is part of the smoke suite. See
 [docs/data-fusion.md](docs/data-fusion.md) for the six fusion levels and the
@@ -537,7 +537,7 @@ For explicit cold/warm latency, deployed-model breadth, and dimension
 cardinality measurements, run:
 
 ```sh
-python3 tools/verify_runtime_performance.py
+python3 tests/integration/verify_runtime_performance.py
 ```
 
 See [Runtime testing](docs/runtime-testing.md) for coverage scope, thresholds,

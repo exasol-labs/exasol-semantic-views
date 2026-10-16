@@ -28,15 +28,6 @@ test("agent rows convert to named objects", function()
     assert_equal(objects[2].name, "orders")
 end)
 
-local function with_query(mock, fn)
-    local original = query
-    query = mock
-    local ok, result = xpcall(fn, debug.traceback)
-    query = original
-    if not ok then error(result, 0) end
-    return result
-end
-
 local function contains(text, fragment)
     return tostring(text):find(fragment, 1, true) ~= nil
 end
@@ -379,6 +370,7 @@ end)
 
 test("F7 evolution proposals are typed versioned and idempotent", function()
     local inserted = nil
+    local target_insert = nil
     local duplicate = false
     local function mock(sql, params)
         if contains(sql, "FROM SYS_SEMANTIC.MODELS") then

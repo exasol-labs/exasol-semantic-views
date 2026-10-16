@@ -1,14 +1,5 @@
 local api = ESV_SEMANTIC_DEFINITION_TEST_API
 
-local function with_query(mock, fn)
-    local original_query = query
-    query = mock
-    local ok, result = xpcall(fn, debug.traceback)
-    query = original_query
-    if not ok then error(result, 0) end
-    return result
-end
-
 test("semantic definition splits top-level members without splitting expressions", function()
     local parts = api.split_top_level_text("SUM(a, b), RATIO(x, NULLIF(y, 0)), z")
     assert_equal(#parts, 3)
@@ -651,9 +642,9 @@ test("semantic definition rejects incomplete authoring statements", function()
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE FACT x ON ENTITY e AS f RETURNS INT"
             .. " ADD OR REPLACE DIMENSION d ON ENTITY e AS g RETURNS INT", "SEMANTIC_DDL_037"},
     }
-    for _, case in ipairs(cases) do
+    each(cases, function(case)
         assert_error(function() api.parse_definition(case[1]) end, case[2])
-    end
+    end)
 end)
 
 test("semantic definition refuses a clause it does not recognise, by name", function()
@@ -685,12 +676,12 @@ test("semantic definition refuses a clause it does not recognise, by name", func
             .. " RETURNS INT UNIT 'kg'", "SEMANTIC_DDL_043", "UNIT is not accepted on a FACT"},
         {metric:format("DISPLAY 'U'"), "SEMANTIC_DDL_044", "clause DISPLAY is given more than once"},
     }
-    for _, case in ipairs(cases) do
+    each(cases, function(case)
         local ok, err = pcall(api.parse_definition, case[1])
         assert_true(not ok)
         assert_contains(tostring(err), case[2])
         assert_contains(tostring(err), case[3])
-    end
+    end)
     local ok, err = pcall(api.parse_definition, metric:format("WOMBAT 'p'"))
     assert_equal(ok, false)
     assert_contains(tostring(err), "Accepted clauses for a METRIC: AS, ON ENTITY, RETURNS")
@@ -1067,11 +1058,11 @@ test("semantic preprocessor covers authoring discovery and explain commands", fu
         {"EXPORT SEMANTIC MODEL sales", "OK", "EXPORT_SEMANTIC_DEFINITION"},
         {"EXPLAIN SEMANTIC QUERY SELECT * FROM SEMANTIC_SALES.SALES", "OK", "COMPILE_SQL_DEBUG"},
     }
-    for _, case in ipairs(commands) do
+    each(commands, function(case)
         local result = preprocess_sql(case[1])
         assert_equal(result.status, case[2])
         assert_contains(result.generated_sql, case[3])
-    end
+    end)
     local definition = preprocess_sql([[ALTER SEMANTIC VIEW sales.SALES
         ADD OR REPLACE METRIC revenue AS SUM(net_revenue)
         ON ENTITY orders RETURNS DECIMAL(18,2) ADDITIVE PUBLIC]])
@@ -1098,11 +1089,11 @@ test("semantic preprocessor covers authoring discovery and explain commands", fu
         {"EXPORT SEMANTIC VIEW sales", "SEMANTIC_DDL_065"},
         {"EXPORT SEMANTIC MODEL", "SEMANTIC_DDL_066"},
     }
-    for _, case in ipairs(errors) do
+    each(errors, function(case)
         local result = preprocess_sql(case[1])
         assert_equal(result.status, "ERROR")
         assert_equal(result.error_code, case[2])
-    end
+    end)
 end)
 
 test("Databricks public API returns dry-run plans and stable diagnostics", function()
@@ -1164,7 +1155,7 @@ test("DDL rollback captures, clears and restores every table it declares", funct
     -- Every captured row is written back with every column and the values it
     -- was read with.
     assert_equal(#inserted, #asked)
-    for index, write in ipairs(inserted) do
+    each(inserted, function(write, index)
         assert_equal(write.name, asked[index])
         for _, column in ipairs(COLUMNS) do
             assert_contains(write.sql, column, write.name)
@@ -1172,7 +1163,7 @@ test("DDL rollback captures, clears and restores every table it declares", funct
         assert_equal(write.params.c1, 101, write.name)
         assert_equal(write.params.c4, false, write.name .. " lost a FALSE")
         assert_equal(write.params.c5, write.name .. ":text", write.name)
-    end
+    end)
 
     -- The two tables the hand-written version cleared and never restored.
     local captured = {}
@@ -1233,10 +1224,10 @@ test("normalized OSI import dispatches every target with its own arguments", fun
             placeholders[#placeholders + 1] = placeholder
         end
         assert_true(#placeholders > 0, name .. " renders no placeholders")
-        for _, placeholder in ipairs(placeholders) do
+        each(placeholders, function(placeholder)
             assert_equal(bound[placeholder], "value:" .. placeholder,
                 name .. " binds " .. placeholder .. " from the wrong key")
-        end
+        end)
         local placeholder_set = {}
         for _, placeholder in ipairs(placeholders) do
             placeholder_set[placeholder] = true

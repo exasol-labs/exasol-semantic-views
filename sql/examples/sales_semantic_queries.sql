@@ -15,7 +15,7 @@ ORDER BY METRIC_NAME;
 -- The metric/dimension pairs this model refuses to answer, and why. The demo
 -- is multi-grain on purpose: order-grain freight cannot be attributed to a
 -- product without fanning one order row out across its lines.
--- tools/verify_fanout_guardrails.py walks through the same guardrail live.
+-- tests/integration/verify_fanout_guardrails.py walks through the same guardrail live.
 SELECT METRIC_NAME, DIMENSION_NAME, REASON_CODE, RELATIONSHIP_PATH
 FROM SEMANTIC_CATALOG.METRIC_DIMENSION_MATRIX
 WHERE MODEL_NAME = 'sales'

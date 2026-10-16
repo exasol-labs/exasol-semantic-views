@@ -44,6 +44,11 @@ python3 tools/install.py --example
 ```sh
 sh tools/run_smoke.sh
 ```
+It installs from scratch, checks the fresh install (`tests/integration/fresh_install/`),
+loads the example materializations, then runs the live suite in `tests/integration/`
+with pytest — every test runs, and the run ends with a summary of all failures.
+Arguments go to pytest (`sh tools/run_smoke.sh -k wrapped`). Against an already
+installed deployment, run it directly: `python3 -m pytest tests/integration -k order_by`.
 
 **Run the release gate before major releases** (smoke + wide fuzz campaign, minutes long):
 ```sh
@@ -51,20 +56,24 @@ sh tools/run_release_gate.sh
 ```
 This is deliberately NOT part of `run_smoke.sh` — a full fuzz campaign is
 too slow to run on every check. The release gate wraps the smoke suite and adds
-`tools/fuzz_semantic_differential.py` under both oracles (`differential` and
+`tests/fuzz/fuzz_semantic_differential.py` under both oracles (`differential` and
 `tlp`) across multiple seeds. Override cadence with `FUZZ_SEEDS` and `FUZZ_CASES`.
 
 **Run database-free Lua runtime tests with coverage:**
 ```sh
-sh tools/run_lua_tests.sh
+sh tools/run_lua_tests.sh            # add a name substring to run matching tests only
 ```
+Shuffled by default (the seed is printed; `ESV_TEST_SEED` reproduces it), and a
+test that leaves a global changed fails. `tests/lua/README.md` lists the
+harness helpers (`each`, `with_query`, `defer`, `assert_branch`) and the Exasol
+stand-ins.
 
 **Run database-free Python tests with coverage:**
 ```sh
 sh tools/run_python_tests.sh
 ```
-Enforces per-file thresholds from `tests/python_coverage_thresholds.py` and
-runs the property-based tests in `tests/test_property.py`. Same ratcheting
+Enforces per-file thresholds from `tests/unit/python_coverage_thresholds.py` and
+runs the property-based tests in `tests/unit/test_property.py`. Same ratcheting
 discipline as the Lua coverage gate: raise a threshold whenever coverage
 grows; do not lower one to merge.
 
@@ -72,7 +81,7 @@ grows; do not lower one to merge.
 ```sh
 sh tools/run_static_checks.sh
 ```
-Luacheck covers `lua/`, `tests/lua/`, and — through `tools/lint_embedded_lua.py`
+Luacheck covers `lua/`, `tests/lua/`, and — through `tools/dev/lint_embedded_lua.py`
 — every script body embedded in `sql/install/`, which is where most of the admin
 Lua lives. Exasol's globals and the `ESV_*` namespaces are declared in
 `.luacheckrc`; Python rules and the gradually-typed module list are in
@@ -81,15 +90,15 @@ pinned in `tools/requirements-static.txt` (plus `luarocks install luacheck 1.2.0
 
 **Run the live cold/warm and scale probe** (requires an installed model):
 ```sh
-python3 tools/verify_runtime_performance.py
+python3 tests/integration/verify_runtime_performance.py
 ```
 
-**Run a focused verification:**
+**Run a focused verification** (or select it with `pytest -k`):
 ```sh
-python3 tools/verify_structured_request_compiler.py  # structured request compiler
-python3 tools/verify_materialization_selection.py    # materialization selection
-python3 tools/verify_semantic_sql_phase1.py   # ORDER BY ordinals, BETWEEN
-python3 tools/verify_semantic_sql_phase2.py   # HAVING, metric WHERE predicates
+python3 tests/integration/verify_structured_request_compiler.py  # structured request compiler
+python3 tests/integration/verify_materialization_selection.py    # materialization selection
+python3 tests/integration/verify_semantic_sql_phase1.py   # ORDER BY ordinals, BETWEEN
+python3 tests/integration/verify_semantic_sql_phase2.py   # HAVING, metric WHERE predicates
 ```
 
 **After editing any Lua source file, regenerate the install SQL before testing:**
@@ -178,7 +187,7 @@ rewriting, literal stripping and lexing belong to
 expression safe and the compiler emits SQL from the same expression, so two
 copies of `replace_qualified_alias` mean SQL that is wrong *and validates*.
 BUG-G03 was one defect living in five copies of the same join.
-`tests/test_conventions.py` enforces it: no module outside the owner may declare
+`tests/unit/test_conventions.py` enforces it: no module outside the owner may declare
 a private copy.
 
 Every active entity has exactly one active `PRIMARY` representation. Alternates
@@ -271,7 +280,7 @@ not enforced on write. Adding a table or an ID column means adding its FK to the
 declaration block at the end of
 `sql/install/001_create_semantic_catalog.sql`; the block is idempotent
 (`DROP CONSTRAINT IF EXISTS` then `ADD CONSTRAINT`) because 001 re-runs over an
-existing catalog. `tests/test_sql_splitter.py` pins the statement count, so it
+existing catalog. `tests/unit/test_sql_splitter.py` pins the statement count, so it
 fails if a new statement is added there without updating it.
 
 Two kinds of edge are not FK constraints and will not appear in
@@ -392,8 +401,8 @@ check `missing` *before* normalizing, not after.
 
 This matters most through `CALL_ADMIN_JSON`, which renders every omitted key as
 SQL NULL. Two tests hold the line: `NullNormalisationTest` in
-`tests/test_install.py` rejects the idiom statically, and
-`tools/verify_named_admin_api.py` calls every model-scoped script with only
+`tests/unit/test_install.py` rejects the idiom statically, and
+`tests/integration/verify_named_admin_api.py` calls every model-scoped script with only
 `MODEL_NAME` set and fails if any refusal mentions `userdata`.
 
 ### The 200-Local Ceiling Applies to the Sum, Not to a File
@@ -428,14 +437,14 @@ number in a 29 000-line generated file.
 
 **Every runtime that uses a shared module must embed it.** The chunks share no
 globals, so a `shared/` file that one block in the packager forgets leaves that
-runtime asserting on a nil global at install time. `tests/test_conventions.py`
+runtime asserting on a nil global at install time. `tests/unit/test_conventions.py`
 derives this from the generated SQL: any script referencing `ESV_JSON` must also
 contain its definition.
 
 ## Conventions
 
 Six rules with no correctness consequence, so nothing else fails when one is
-broken. `tests/test_conventions.py` enforces each as a ratchet — the current
+broken. `tests/unit/test_conventions.py` enforces each as a ratchet — the current
 state is pinned, may shrink, and may not grow. The first two both govern the
 error-code namespace.
 
@@ -460,15 +469,22 @@ second convention into one namespace to say what the column already said.
 not `verify_bug26_published_f3_batch.py`. The grandfather list held 24 names for
 a week and is **now empty**: eighteen needed only the ticket prefix removed —
 the rest of `verify_bug26_published_f3_batch` was already the invariant — and the
-six `verify_milestoneN` files are named for what they protect. What made the
-rename safe was removing its risk first: `tests/test_conventions.py` now requires
-every verifier to be wired into `tools/run_smoke.sh` **and** `run_smoke.sh` to
-name no verifier that is gone, so a rename that misses one fails instead of
-silently dropping coverage.
+six `verify_milestoneN` files are named for what they protect. A rename can no
+longer drop one from the suite: pytest discovers `tests/integration/`, and
+`tests/unit/test_conventions.py` fails on a module there that it would not collect.
 
-**A verifier shares its host-side plumbing.** `tools/verify_support.py` owns
-`connect()`, `sql_string()`, reading a script result *by column name*, and
-calling an admin script by keyword. 59 verifiers each had their own `connect()`,
+**An integration test is a pytest module.** `tests/integration/test_*.py`, with
+the `con` and `semantic_con` fixtures from `tests/integration/conftest.py`, one
+test per property, and setup and teardown in fixtures. The `verify_*.py` scripts
+that predate it still run, each as one test in its own process; `LEGACY_SCRIPTS`
+pins how many remain, and it only shrinks. Convert one when you next touch it —
+`test_wrapped_semantic_blocks.py` and `test_preprocessor_query_logging.py` are
+worked examples.
+
+**A verifier shares its host-side plumbing.** `tests/integration/verify_support.py` owns
+`connect()`, `sql_string()`, reading a script result *by column name*,
+`outcome()` for comparing what two statements answer, and calling an admin
+script by keyword. 59 verifiers each had their own `connect()`,
 29 identically; `PRIVATE_CONNECT` pins how many still do, and it only shrinks.
 Convert one when you next touch it.
 
@@ -509,6 +525,7 @@ the six names.
 | `tools/install.py` | Full installer: package → connect → reset? → run SQL files |
 | `tools/import_databricks.py` | Host helper: reads a Databricks UCMV YAML file and calls the in-DB importer |
 | `tools/run_smoke.sh` | Full smoke suite |
+| `tests/README.md` | The test lanes: which directory, what it needs, how it runs |
 
 The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) and its YAML parser/translator live in `semantic_definition.lua`; the MEASURE()/`GROUP BY ALL` query surface lives in `request_json.lua`. See `docs/databricks-metric-views.md`.
 

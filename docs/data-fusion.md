@@ -636,10 +636,10 @@ fact in the semantic layer rather than as a compile-time materialization.
 - `docs/validation-rules.md` — the full rule inventory
   (`SEMANTIC_MODEL_034` through `_052` are fusion-specific).
 - Live-DB worked examples, one per level:
-  - `tools/verify_fusion_declaration.py` — the tier-2 document, both directions
-  - `tools/verify_fusion_f3.py` — Temporal Partition Fusion
-  - `tools/verify_fusion_f4.py` — Attribute Reconciliation
-  - `tools/verify_fusion_f5.py` — Semantic Identity
-  - `tools/verify_fusion_f51.py` — Identity Remap
-  - `tools/verify_fusion_f7.py` — Governed Model Evolution
+  - `tests/integration/verify_fusion_declaration.py` — the tier-2 document, both directions
+  - `tests/integration/verify_fusion_f3.py` — Temporal Partition Fusion
+  - `tests/integration/verify_fusion_f4.py` — Attribute Reconciliation
+  - `tests/integration/verify_fusion_f5.py` — Semantic Identity
+  - `tests/integration/verify_fusion_f51.py` — Identity Remap
+  - `tests/integration/verify_fusion_f7.py` — Governed Model Evolution
 

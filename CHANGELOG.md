@@ -6,6 +6,20 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-16
+
+Power BI's remaining refusals are gone: its table visual's `SUM` around a ratio
+metric, and its filter-domain query with `COUNT(1)`. Preprocessor query logging
+becomes a setting, so the BI path no longer has to pay an insert per statement.
+Under the hood the test suite moved to pytest, gained static checks, and every
+test lane now has its own directory.
+
+**Upgrading.** The install adds `SYS_SEMANTIC.SETTINGS` and
+`SEMANTIC_ADMIN.SET_QUERY_LOGGING`; logging stays on unless switched off. A SQL
+statement's `LIMIT` is no longer capped at 10000. The host-side tools now need
+pyexasol 3 (Python 3.10 or later); pyexasol 3 reports anonymous usage on
+connect unless `EXASOL_TELEMETRY_DISABLE` is set.
+
 ### Added
 
 #### Power BI filter-domain queries with `COUNT(1)` (#17)
@@ -60,6 +74,34 @@ All notable changes to Exasol Semantic Views are documented here.
   `it declares USERDATA: 0X…` — SQL NULL, stringified. It now says `it declares
   no aggregation`. `SEMANTIC_QUERY_018` no longer names the declared aggregation,
   which had the same flaw.
+
+### Changed
+
+#### Host tools require pyexasol 3
+
+- `tools/requirements-osi.txt` now asks for pyexasol 3.0 or later, and with it
+  Python 3.10. Results are unchanged: `pyexasol.connect` still returns values as
+  before; the new Python types apply only to its DB-API driver.
+- pyexasol 3 sends anonymous usage telemetry on connect. Every test runner, the
+  integration suite and CI set `EXASOL_TELEMETRY_DISABLE`, and a convention test
+  keeps new entry points in line. Set it yourself to opt out elsewhere.
+
+#### One directory per test lane
+
+- `tests/unit/` (database-free Python), `tests/lua/`, `tests/integration/`
+  (live, with `fresh_install/` and the SQL smoke scripts), and `tests/fuzz/`.
+  Developer helpers moved to `tools/dev/`; `tests/README.md` maps each lane to
+  what it needs and how it runs.
+- The live suite runs under pytest: every test runs, the run ends with one
+  summary of failures, and CI uploads a JUnit report. The remaining `verify_*.py`
+  scripts each run as one time-limited test; the persona-study checks are now
+  assertions.
+- The Lua runner selects tests by name, names the failing case of a table-driven
+  test, runs cleanup after a failure, shuffles the order (`ESV_TEST_SEED`
+  reproduces it), and fails a test that leaves a global changed.
+- `tools/run_static_checks.sh` and the required `static-checks` CI job run Ruff,
+  mypy, Luacheck — including the Lua embedded in `sql/install/` — and
+  ShellCheck (#22).
 
 ## [0.3.1] - 2026-09-29
 
@@ -2610,8 +2652,8 @@ not select is refused. Each is called out below.
 
 ## Notes on versioning
 
-Version 0.3.1 is a patch release on 0.3, the third tagged release. Items above
-are tracked against the development baseline established by the user-study
-simulations run on 2026-05-13. Phases 1 and 2 are complete, and the statements
-Phase 3 deferred -- subqueries, CTEs and CAST around a semantic object -- compile
-as of 0.3 through reference expansion.
+Version 0.4.0 is the fourth tagged release. Items above are tracked against the
+development baseline established by the user-study simulations run on
+2026-05-13. Phases 1 and 2 are complete, and the statements Phase 3 deferred --
+subqueries, CTEs and CAST around a semantic object -- compile as of 0.3 through
+reference expansion.

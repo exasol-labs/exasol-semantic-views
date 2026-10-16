@@ -522,7 +522,7 @@ SELECT 'HANDLE_TYPE', 'QUERY_LOG', 'Use with EXPLAIN_COMPILED_SQL and RECORD_AGE
 -- scripts but QUERY_LOG_ID for the debug variant.
 --
 -- The first eight columns are shared by construction here, so the three
--- layouts cannot drift apart in this view; tools/verify_catalog_introspection.py
+-- layouts cannot drift apart in this view; tests/integration/verify_catalog_introspection.py
 -- asserts every row against the live result set of each script.
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT AS
 WITH ENTRYPOINTS AS (

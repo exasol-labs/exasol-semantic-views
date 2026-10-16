@@ -413,7 +413,7 @@ Fixtures:
 - `invalid_relationship.yaml`: valid OSI that fails import planning with
   `OSI_IMPORT_060` because relationship key arrays have different lengths.
 
-`tests/test_osi_tool.py` fails if `sql/examples/sales_osi.yaml` diverges from
+`tests/unit/test_osi_tool.py` fails if `sql/examples/sales_osi.yaml` diverges from
 `tests/fixtures/osi/sales_interoperability.yaml`.
 
 ## Verification
@@ -423,7 +423,7 @@ verifiers.
 
 Offline:
 
-- `tests/test_osi_tool.py` covers schema validation, JSON/YAML loading,
+- `tests/unit/test_osi_tool.py` covers schema validation, JSON/YAML loading,
   simulated no-PyYAML behavior, fixture drift, JSON planning parity for rich
   YAML fixtures, import planning, dialect fallback diagnostics, extension
   preservation, helper-surface loss diagnostics, validation warnings-as-errors,
@@ -432,16 +432,16 @@ Offline:
 
 Live-DB verifiers:
 
-- `tools/verify_osi_export.py` checks live export, schema validation, simple key
+- `tests/integration/verify_osi_export.py` checks live export, schema validation, simple key
   extraction, relationship column ordering, Exasol extensions, YAML output, and
   third-party extension preservation.
-- `tools/verify_osi_import.py` checks script apply, collision preflight,
+- `tests/integration/verify_osi_import.py` checks script apply, collision preflight,
   validation after import, catalog row counts, semantic object creation, and
   representative compile/query execution.
-- `tools/verify_osi_batch_import.py` checks normalized batch apply, returned row
+- `tests/integration/verify_osi_batch_import.py` checks normalized batch apply, returned row
   shape, metadata patches, validation run id, and representative compile/query
   execution.
-- `tools/verify_osi_roundtrip.py` checks lossless export/import/export
+- `tests/integration/verify_osi_roundtrip.py` checks lossless export/import/export
   equivalence, normalized catalog equivalence, representative compiler SQL and
   result equivalence, third-party custom-extension preservation, expected
   script-mode loss diagnostics, and rollback on injected batch failures.
