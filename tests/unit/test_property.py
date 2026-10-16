@@ -21,7 +21,7 @@ from typing import Any
 from hypothesis import given, strategies as st, settings
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load(module_name: str, relative_path: str) -> Any:

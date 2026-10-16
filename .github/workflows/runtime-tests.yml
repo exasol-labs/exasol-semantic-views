@@ -53,7 +53,7 @@ jobs:
         # Runs test_osi_tool, test_install, test_release_notes,
         # test_sql_splitter, and the property-based test suite (test_property)
         # under coverage.py and enforces the per-file thresholds in
-        # tests/python_coverage_thresholds.py.
+        # tests/unit/python_coverage_thresholds.py.
         run: PYTHON_BIN=python sh tools/run_python_tests.sh
       - name: Verify generated install scripts
         run: |

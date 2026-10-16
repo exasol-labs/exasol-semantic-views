@@ -263,7 +263,7 @@ layer:
 | a composed statement, refused | `SEMANTIC_QUERY_012` | 272.5 ms | 1.68× |
 | the same wrapped, refused | `SEMANTIC_QUERY_012` | 219.1 ms | 1.35× |
 
-`tools/measure_expansion_cost.py` regenerates this table on your own hardware.
+`tools/dev/measure_expansion_cost.py` regenerates this table on your own hardware.
 The `outcome` column is there because a median says nothing about *what* was
 measured: a refused row that quietly started compiling would keep printing a
 number that no longer means the same thing.

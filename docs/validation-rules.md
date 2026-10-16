@@ -53,7 +53,7 @@ for a sentence any edit could have reworded. It is now `SEMANTIC_MODEL_060`, and
 the check is a comparison.
 
 So: when a rule you are touching already carries several meanings, split out the
-one you came for. `tests/test_conventions.py` pins the per-code count of distinct
+one you came for. `tests/unit/test_conventions.py` pins the per-code count of distinct
 messages — it may fall, and it may not rise.
 
 | Code | Severity | Meaning |

@@ -9,7 +9,7 @@ do, after a documented column layout drifted and positional readers silently
 returned `NULL`.
 
 So the fix is not another helper nobody imports. It is one module that makes the
-correct thing shorter than the copy, plus a ratchet in `tests/test_conventions.py`
+correct thing shorter than the copy, plus a ratchet in `tests/unit/test_conventions.py`
 pinning how many verifiers still roll their own. The pin may shrink and may not
 grow; convert a verifier when you next touch it.
 

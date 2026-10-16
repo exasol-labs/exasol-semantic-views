@@ -17,7 +17,7 @@ from pathlib import Path
 
 # Connection defaults, SQL escaping and named result reads live in
 # tests/integration/verify_support.py so verifiers do not each carry their own. See the
-# ratchet in tests/test_conventions.py.
+# ratchet in tests/unit/test_conventions.py.
 _SUPPORT = importlib.util.spec_from_file_location(
     "verify_support", Path(__file__).with_name("verify_support.py"))
 support = importlib.util.module_from_spec(_SUPPORT)

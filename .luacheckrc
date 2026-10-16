@@ -1,5 +1,5 @@
 -- Luacheck configuration: lua/, tests/lua/, and every script body embedded in
--- sql/install/ (tools/lint_embedded_lua.py extracts those). Run through
+-- sql/install/ (tools/dev/lint_embedded_lua.py extracts those). Run through
 -- tools/run_static_checks.sh.
 
 -- Exasol 7.1+ runs Lua 5.4.

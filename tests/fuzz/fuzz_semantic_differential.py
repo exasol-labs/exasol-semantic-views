@@ -19,10 +19,10 @@ Two oracle modes, both fed by one shared random generator:
 Requires the sales seed model to be installed (tools/install.py --example).
 
 Usage:
-    python3 tools/fuzz_semantic_differential.py                # default: differential, 30 cases, seed=0
-    python3 tools/fuzz_semantic_differential.py --oracle tlp   # TLP correctness partitions
-    python3 tools/fuzz_semantic_differential.py --seed 42 --cases 200
-    python3 tools/fuzz_semantic_differential.py --verbose      # print each spec
+    python3 tests/fuzz/fuzz_semantic_differential.py                # default: differential, 30 cases, seed=0
+    python3 tests/fuzz/fuzz_semantic_differential.py --oracle tlp   # TLP correctness partitions
+    python3 tests/fuzz/fuzz_semantic_differential.py --seed 42 --cases 200
+    python3 tests/fuzz/fuzz_semantic_differential.py --verbose      # print each spec
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ from typing import Any
 import pyexasol  # type: ignore
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 REPORTS = ROOT / "reports"
 DSN = "localhost:8563"
 USER = "sys"

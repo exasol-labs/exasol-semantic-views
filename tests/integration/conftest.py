@@ -11,7 +11,7 @@ Two kinds of module live here:
 - `verify_*.py` -- scripts written before the move to pytest. Each is collected
   as one test that runs the script exactly as run_smoke.sh used to, in its own
   process, and fails on a non-zero exit. Convert one to `test_*.py` when you
-  next touch it; tests/test_conventions.py pins how many remain, and the number
+  next touch it; tests/unit/test_conventions.py pins how many remain, and the number
   only shrinks.
 
 A test must establish the state it needs -- publish the model, register the

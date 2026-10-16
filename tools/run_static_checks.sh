@@ -27,7 +27,7 @@ run() {
 run ruff "$PYTHON_BIN" -m ruff check tools tests
 run mypy "$PYTHON_BIN" -m mypy
 run luacheck "$LUACHECK_BIN" --formatter plain --codes lua tests/lua
-run embedded-lua "$PYTHON_BIN" tools/lint_embedded_lua.py "$LUACHECK_BIN"
+run embedded-lua "$PYTHON_BIN" tools/dev/lint_embedded_lua.py "$LUACHECK_BIN"
 run shellcheck "$SHELLCHECK_BIN" tools/*.sh
 
 if [ -n "$failed" ]; then

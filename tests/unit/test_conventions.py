@@ -20,7 +20,7 @@ Six rules that cost nothing to follow and compound if they are not. None is a
 correctness property, so nothing else will ever fail because one was broken --
 which is exactly why they need a test. Each is a *ratchet*: the current state is
 pinned, the pinned state may shrink, and it may not grow. Same discipline as
-`tests/python_coverage_thresholds.py` and the Lua coverage floors.
+`tests/unit/python_coverage_thresholds.py` and the Lua coverage floors.
 
   1. One condition, one rule code.
   2. Severity is carried by the channel, never by a code's spelling.
@@ -45,7 +45,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 INTEGRATION = ROOT / "tests" / "integration"
 
 
@@ -285,7 +285,7 @@ TICKET_NAMED = re.compile(r"^(?:verify|test)_(?:bug\d+|g\d+|fb\d+|f\d+_|mileston
 
 # Drained to empty on 2026-08-31. The 2026-08-25 review pinned 24 names and
 # declined to rename them, for a good reason: a rename touches run_smoke.sh,
-# tests/test_install.py and the docs for no behaviour change, and "carries real
+# tests/unit/test_install.py and the docs for no behaviour change, and "carries real
 # risk of silently dropping a verifier from the suite".
 #
 # That risk is checkable, so it was checked -- and is now gone: pytest discovers

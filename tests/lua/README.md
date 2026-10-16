@@ -18,7 +18,7 @@ whole suite.
 sources under `lua/semantic_layer` into one global environment — the way
 `import()` exposes a runtime's top-level globals inside Exasol — then runs every
 `*_unit_test.lua` listed in `specs`. Plain Lua cannot list a directory, so
-`tests/test_conventions.py` checks that the list names every such file.
+`tests/unit/test_conventions.py` checks that the list names every such file.
 
 | Global | Purpose |
 |---|---|

@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CATALOG_DDL = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(
     encoding="utf-8"
 )

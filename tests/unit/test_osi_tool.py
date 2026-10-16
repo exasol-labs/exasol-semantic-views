@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OSI_PATH = ROOT / "tools/osi.py"
 
 spec = importlib.util.spec_from_file_location("osi_tool", OSI_PATH)

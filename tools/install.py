@@ -58,7 +58,7 @@ EXAMPLE_FILES = [
     ROOT / "sql/examples/sales_model_seed.sql",
 ]
 
-# Mirrors tools/reset_milestone1.sql — drops all managed schemas for a clean slate.
+# Drops all managed schemas for a clean slate.
 RESET_STATEMENTS = [
     "DROP SCHEMA IF EXISTS SEMANTIC_SALES CASCADE",
     "DROP SCHEMA IF EXISTS SEMANTIC_AGENT CASCADE",

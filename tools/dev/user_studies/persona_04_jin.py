@@ -3,9 +3,10 @@ Persona Test: Jin — BI Platform Administrator
 Simulated user test for the Exasol Semantic Views project.
 """
 import sys
+from pathlib import Path
 import json
 
-sys.path.insert(0, '/Users/alexander.stigsen/Dev/exasol-semantic-views/tools')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from persona_test_helper import sql, execute_script, run_statement, get_conn, TestLog
 
 log = TestLog("Jin — BI Platform Administrator")

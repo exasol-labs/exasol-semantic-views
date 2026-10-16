@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("semantic_install", ROOT / "tools/install.py")
 INSTALL = importlib.util.module_from_spec(SPEC)  # type: ignore[arg-type]
 SPEC.loader.exec_module(INSTALL)  # type: ignore[union-attr]

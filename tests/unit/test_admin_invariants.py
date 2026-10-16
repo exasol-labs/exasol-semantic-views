@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SQL = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text()
 
 

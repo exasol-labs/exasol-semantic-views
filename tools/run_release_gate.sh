@@ -36,7 +36,7 @@ FUZZ_FAILURES=0
 for FUZZ_SEED in $FUZZ_SEEDS; do
   for FUZZ_ORACLE in differential tlp; do
     printf "  seed=%s oracle=%s " "$FUZZ_SEED" "$FUZZ_ORACLE"
-    if "$PYTHON_BIN" tools/fuzz_semantic_differential.py \
+    if "$PYTHON_BIN" tests/fuzz/fuzz_semantic_differential.py \
          --oracle "$FUZZ_ORACLE" --seed "$FUZZ_SEED" --cases "$FUZZ_CASES" \
          > /tmp/fuzz.$$.out 2>&1
     then

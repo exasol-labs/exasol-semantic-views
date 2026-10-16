@@ -413,7 +413,7 @@ Fixtures:
 - `invalid_relationship.yaml`: valid OSI that fails import planning with
   `OSI_IMPORT_060` because relationship key arrays have different lengths.
 
-`tests/test_osi_tool.py` fails if `sql/examples/sales_osi.yaml` diverges from
+`tests/unit/test_osi_tool.py` fails if `sql/examples/sales_osi.yaml` diverges from
 `tests/fixtures/osi/sales_interoperability.yaml`.
 
 ## Verification
@@ -423,7 +423,7 @@ verifiers.
 
 Offline:
 
-- `tests/test_osi_tool.py` covers schema validation, JSON/YAML loading,
+- `tests/unit/test_osi_tool.py` covers schema validation, JSON/YAML loading,
   simulated no-PyYAML behavior, fixture drift, JSON planning parity for rich
   YAML fixtures, import planning, dialect fallback diagnostics, extension
   preservation, helper-surface loss diagnostics, validation warnings-as-errors,

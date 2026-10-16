@@ -213,5 +213,5 @@ profile. Changes should not weaken a committed profile merely to pass CI.
 Database-free coverage measures Lua runtime logic. It does not claim coverage
 of Exasol's `query()`, script import behavior, transaction semantics, optimizer,
 privilege evaluation, or generated SQL execution. Those belong to the live-DB
-lane. Host-side Ossie/OSI behavior remains in `tests/test_osi_tool.py`, which is
+lane. Host-side Ossie/OSI behavior remains in `tests/unit/test_osi_tool.py`, which is
 also invoked by the canonical smoke workflow.

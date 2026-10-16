@@ -10,7 +10,7 @@ shapes a BI tool actually emits. A measurement nobody can reproduce cheaply is a
 measurement that goes stale silently, so this prints the table that
 `docs/bi-tools.md` and the CHANGELOG quote, with the machine it came from.
 
-    python3 tools/measure_expansion_cost.py [rounds]
+    python3 tools/dev/measure_expansion_cost.py [rounds]
 
 Read the *ratios* first and the differences second; the absolutes are the least
 portable thing here. The baseline moves with the hardware and with what else the
@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "integration"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "integration"))
 
 from verify_support import connect  # noqa: E402
 
