@@ -790,6 +790,22 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
             f"the pin is stale — lower LEGACY_SCRIPTS to {len(legacy)}")
 
 
+
+class LuaSpecsAreAllRun(unittest.TestCase):
+    """tests/lua/run.lua runs the files its `specs` list names, and only those.
+
+    Plain Lua cannot list a directory, so the list is written by hand -- and a
+    unit-test file missing from it never runs, while everything stays green.
+    """
+
+    def test_every_unit_test_file_is_in_the_specs_list(self):
+        runner = (ROOT / "tests/lua/run.lua").read_text(encoding="utf-8")
+        listed = set(re.findall(r'"(tests/lua/[a-z_]+_unit_test\.lua)"', runner))
+        present = {f"tests/lua/{path.name}" for path in (ROOT / "tests/lua").glob("*_unit_test.lua")}
+        self.assertGreater(len(present), 5)
+        self.assertEqual(sorted(present - listed), [], "add these to specs in tests/lua/run.lua")
+        self.assertEqual(sorted(listed - present), [], "specs in tests/lua/run.lua names missing files")
+
 # ---------------------------------------------------------------------------
 # 7. A term is defined once, and the glossary stays complete
 # ---------------------------------------------------------------------------

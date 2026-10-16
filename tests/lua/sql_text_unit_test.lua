@@ -168,9 +168,9 @@ test("shared lexer's two modes differ in exactly the two documented ways", funct
         if token.kind == "operator" then operators[#operators + 1] = token.text end
     end
     assert_equal(table.concat(operators, " "), ">= <> != <=")
-    for _, token in ipairs(split) do
+    each(split, function(token)
         assert_true(token.kind ~= "operator", "unfused mode emits no operator tokens")
-    end
+    end)
     assert_branch("sql_text.lexer.operators", #operators > 0, true)
     assert_branch("sql_text.lexer.operators", false, false)
 

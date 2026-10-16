@@ -12,4 +12,4 @@ else
   exit 2
 fi
 
-"$lua_bin" tests/lua/run.lua
+"$lua_bin" tests/lua/run.lua "$@"

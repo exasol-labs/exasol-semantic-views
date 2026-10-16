@@ -1,5 +1,9 @@
 -- Minimal database-free test runner and coverage collector for the Exasol Lua
--- runtime. It intentionally has no LuaRocks dependencies.
+-- runtime. It intentionally has no LuaRocks dependencies; see README.md for
+-- what it provides and why it is not busted.
+--
+--   lua tests/lua/run.lua [name-substring]
+--   ESV_TEST_SEED=<n>    reproduce a shuffled order; =none keeps file order
 
 local script_path = arg[0]:gsub("\\", "/")
 local repo_root = script_path:gsub("/tests/lua/run%.lua$", "")
@@ -144,6 +148,39 @@ local function render(value)
     return "{" .. table.concat(parts, ",") .. "}"
 end
 
+-- Run fn(case, index) for every case, naming the case a failure came from.
+-- A loop of assertions otherwise reports only that something in the list
+-- failed, and the list has to be bisected by hand.
+function each(cases, fn)
+    for index, case in ipairs(cases) do
+        local ok, err = pcall(fn, case, index)
+        if not ok then
+            local label = render(case)
+            if #label > 240 then label = label:sub(1, 240) .. "..." end
+            error(string.format("case %d of %d (%s): %s", index, #cases, label, tostring(err)), 0)
+        end
+    end
+end
+
+-- Register cleanup to run after the current test, even if it fails; the
+-- latest registered runs first. For setup a test cannot wrap in a function.
+local deferred = {}
+function defer(fn)
+    deferred[#deferred + 1] = fn
+end
+
+-- Exasol's query() global, replaced by a fixture for the duration of fn.
+-- Restored even when fn fails, so one failing test cannot leave its mock
+-- installed for the next.
+function with_query(mock, fn)
+    local original = query
+    query = mock
+    local result = table.pack(xpcall(fn, debug.traceback))
+    query = original
+    if not result[1] then error(result[2], 0) end
+    return table.unpack(result, 2, result.n)
+end
+
 function assert_equal(actual, expected, message)
     if actual ~= expected then
         error((message or "values differ") .. ": expected " .. render(expected)
@@ -192,9 +229,64 @@ local specs = {
 }
 for _, spec in ipairs(specs) do dofile(repo_root .. "/" .. spec) end
 
+local filter = arg[1] or os.getenv("ESV_TEST_FILTER")
+if filter then
+    local selected = {}
+    for _, case in ipairs(tests) do
+        if case.name:find(filter, 1, true) then selected[#selected + 1] = case end
+    end
+    tests = selected
+end
+
+-- Shuffled by default, so a test that depends on another having run first
+-- fails here rather than when someone reorders a file. The seed is printed;
+-- ESV_TEST_SEED reproduces the order.
+local seed = os.getenv("ESV_TEST_SEED") or "random"
+if seed ~= "none" then
+    seed = seed == "random" and os.time() or assert(tonumber(seed), "ESV_TEST_SEED must be a number")
+    math.randomseed(seed)
+    for index = #tests, 2, -1 do
+        local other = math.random(index)
+        tests[index], tests[other] = tests[other], tests[index]
+    end
+    io.write("shuffled with ESV_TEST_SEED=", seed, "\n")
+end
+
+-- A test must leave the globals as it found them: a mock left installed, or a
+-- global set and not cleared, otherwise passes here and changes what every
+-- later test sees. The difference fails the test that made it, and is undone.
+local function snapshot()
+    local copy = {}
+    for key, value in pairs(_G) do copy[key] = value end
+    return copy
+end
+
+local function leaked(before)
+    local names = {}
+    for key, value in pairs(_G) do
+        if before[key] ~= value then names[#names + 1] = tostring(key) end
+    end
+    for key, _ in pairs(before) do
+        if rawget(_G, key) == nil then names[#names + 1] = tostring(key) end
+    end
+    table.sort(names)
+    for _, key in ipairs(names) do rawset(_G, key, before[key]) end
+    return names
+end
+
 local failures = 0
 for _, case in ipairs(tests) do
+    local before = snapshot()
     local ok, err = xpcall(case.fn, debug.traceback)
+    for index = #deferred, 1, -1 do
+        local cleaned, cleanup_err = xpcall(deferred[index], debug.traceback)
+        if ok and not cleaned then ok, err = false, cleanup_err end
+    end
+    deferred = {}
+    local changed = leaked(before)
+    if ok and #changed > 0 then
+        ok, err = false, "left global state changed: " .. table.concat(changed, ", ")
+    end
     if ok then
         io.write("PASS ", case.name, "\n")
     else
@@ -203,6 +295,12 @@ for _, case in ipairs(tests) do
     end
 end
 debug.sethook()
+
+if filter then
+    io.write(string.format("\n%d tests matching %q, %d test failures (coverage gate skipped)\n",
+        #tests, filter, failures))
+    os.exit(failures > 0 and 1 or 0)
+end
 
 local thresholds = dofile(repo_root .. "/tests/lua/coverage_thresholds.lua")
 local coverage_failures = 0

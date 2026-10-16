@@ -231,11 +231,11 @@ test("WHERE parser returns stable errors for unsafe predicate shapes", function(
         {"amount BETWEEN other + 1 AND 20", "SEMANTIC_QUERY_035"},
         {"region =", "SEMANTIC_QUERY_033"},
     }
-    for _, case in ipairs(cases) do
+    each(cases, function(case)
         local filters, err = parse_where(case[1])
         assert_equal(filters, nil)
         assert_equal(err.error_code, case[2])
-    end
+    end)
 end)
 
 test("ORDER BY parser resolves aliases ordinals and directions", function()
@@ -273,12 +273,12 @@ test("ORDER BY parser keeps null placement and bounds ordinals (Tableau)", funct
     assert_equal(order_by[3].nulls, "LAST")
     assert_equal(parse("1").nulls, nil)
 
-    for _, bad in ipairs({"0", "3", "-1", "1.5"}) do
+    each({"0", "3", "-1", "1.5"}, function(bad)
         local result, err = parse(bad .. " ASC NULLS FIRST")
         assert_equal(result, nil)
         assert_equal(err.error_code, "SEMANTIC_QUERY_064")
         assert_contains(err.error_message, "which has 2 items")
-    end
+    end)
     local _, placement = parse("1 NULLS SOMEWHERE")
     assert_equal(placement.error_code, "SEMANTIC_QUERY_060")
 end)
@@ -291,9 +291,9 @@ test("SQL literal parser covers scalar and temporal forms", function()
         {"DATE '2026-07-18'", "2026-07-18"},
         {"TIMESTAMP '2026-07-18 12:30:00'", "2026-07-18 12:30:00"},
     }
-    for _, case in ipairs(cases) do
+    each(cases, function(case)
         assert_equal(api.literal_from_tokens(api.sql_tokens(case[1])), case[2])
-    end
+    end)
     assert_equal(api.literal_from_tokens(api.sql_tokens("-12.5")), nil)
     assert_equal(api.literal_from_tokens(api.sql_tokens("1 + 2")), nil)
 end)
@@ -364,7 +364,7 @@ test("WHERE and HAVING parse the same predicate grammar identically", function()
         {"IN (1, 2, 3)", "IN"},
         {"BETWEEN 1 AND 9", "BETWEEN"},
     }
-    for _, shape in ipairs(shapes) do
+    each(shapes, function(shape)
         local suffix, expected_op = shape[1], shape[2]
 
         local where_tokens = api.sql_tokens("customer_region " .. suffix)
@@ -384,7 +384,7 @@ test("WHERE and HAVING parse the same predicate grammar identically", function()
         assert_equal(api.json_encode(where_filters[1].value),
             api.json_encode(having_filters[1].value),
             "value shape differs for " .. suffix)
-    end
+    end)
 
     -- A conjunction whose second predicate is a BETWEEN: the AND that belongs
     -- to the range must not split the chunk. Same bug surface on both sides.
@@ -404,12 +404,12 @@ test("WHERE and HAVING parse the same predicate grammar identically", function()
         {"total_revenue BETWEEN 1 + 1 AND 3", "SEMANTIC_QUERY_035"},
         {"total_revenue", "SEMANTIC_QUERY_030"},
     }
-    for _, case in ipairs(malformed) do
+    each(malformed, function(case)
         local tokens = api.sql_tokens(case[1])
         local filters, err = api.parse_having_filters(ctx, tokens, 1, #tokens)
         assert_equal(filters, nil, case[1])
         assert_equal(err.error_code, case[2], case[1])
-    end
+    end)
 
     -- HAVING is metric-only; that is the one asymmetry, and it is deliberate.
     local dimension_tokens = api.sql_tokens("customer_region = 'EMEA'")
@@ -644,11 +644,11 @@ test("compiler rejects malformed filters and ordering contracts", function()
         {{{field = "region", op = "IN", value = {}}}, "SEMANTIC_REQUEST_032"},
         {{{field = "region", op = "REGEXP", value = "x"}}, "SEMANTIC_REQUEST_033"},
     }
-    for _, case in ipairs(cases) do
+    each(cases, function(case)
         local filters, _, err = api.build_filters(ctx, case[1], {}, {})
         assert_equal(filters, nil)
         assert_equal(err.error_code, case[2])
-    end
+    end)
 
     local clauses, type_err = api.build_order_by(ctx, {"region"}, output)
     assert_equal(clauses, nil)
@@ -662,15 +662,6 @@ test("compiler rejects malformed filters and ordering contracts", function()
     assert_equal(direction, nil)
     assert_equal(direction_err.error_code, "SEMANTIC_REQUEST_062")
 end)
-
-local function with_query(mock, fn)
-    local original_query = query
-    query = mock
-    local ok, result, second, third = xpcall(fn, debug.traceback)
-    query = original_query
-    if not ok then error(result, 0) end
-    return result, second, third
-end
 
 -- Every physical relation this fixture's compiler can render. The live
 -- trust-boundary check reads the same four declaration tables the planner does,
@@ -1497,13 +1488,13 @@ test("F4 reconciled dimensions participate in every multi-fact branch", function
 
     local physical_plan = api.json_decode(result.plan_json)
         .logical_plan.physical_plan
-    for _, branch in ipairs(physical_plan.branches) do
+    each(physical_plan.branches, function(branch)
         local found_fusion_join = false
         for _, join in ipairs(branch.joins) do
             if join.fusion == true then found_fusion_join = true end
         end
         assert_true(found_fusion_join)
-    end
+    end)
 end)
 
 test("F4 reconciled facts remain blocked in multi-fact plans", function()
@@ -1648,13 +1639,13 @@ test("structured compiler maps request and validation failures", function()
             having = {{field = "total_revenue", op = ">", value = 1}}},
             nil, "SEMANTIC_REQUEST_026"},
     }
-    for _, case in ipairs(cases) do
+    each(cases, function(case)
         local result, state = compile_with_fixture(case[1], case[2])
         assert_equal(result.status, "ERROR")
         assert_equal(result.error_code, case[3])
         assert_equal(state.cache_inserts, 0)
         assert_equal(#state.request_logs, 1)
-    end
+    end)
 
     local unknown_keys = compile_with_fixture(
         {model = "sales", object = "SALES", metrics = {"revenue"},
@@ -1874,11 +1865,11 @@ test("an outer SUM or AVG over a metric that does not add up is refused", functi
         "SELECT customer_region, AVG(t.gross_margin_pct) FROM (SELECT customer_region, order_status,"
             .. " gross_margin_pct FROM " .. O .. ") t GROUP BY customer_region",
     }
-    for _, text in ipairs(refused) do
+    each(refused, function(text)
         local refusal = judge(text)
         assert_true(refusal ~= nil)
         assert_equal(refusal.error_code, "SEMANTIC_QUERY_016")
-    end
+    end)
     local message = judge(refused[1]).error_message
     assert_contains(message, "AVG(t.avg_resolution_h) re-aggregates avg_resolution_h")
     assert_contains(message, "grouped by customer_region")
@@ -1911,9 +1902,9 @@ test("an outer SUM or AVG over a metric that does not add up is refused", functi
         -- Not a derived table or CTE: nothing re-aggregates it.
         "SELECT customer_region, gross_margin_pct FROM " .. O,
     }
-    for _, text in ipairs(accepted) do
+    each(accepted, function(text)
         assert_equal(judge(text), nil)
-    end
+    end)
 end)
 
 test("a filter on a dimension nobody selects runs inside the compile", function()

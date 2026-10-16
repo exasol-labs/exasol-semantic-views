@@ -917,7 +917,7 @@ test("C2 physical planner binds filter variants and rejects broken proofs", func
         {operator = "IS NOT NULL", value = nil,
             expected = "r.region_name IS NOT NULL"},
     }
-    for _, variant in ipairs(variants) do
+    each(variants, function(variant)
         local candidate = snapshots.copy(logical)
         local filter = candidate.bound_query.global_filters[1]
         filter.operator = variant.operator
@@ -926,7 +926,7 @@ test("C2 physical planner binds filter variants and rejects broken proofs", func
         assert_true(physical ~= nil, physical_error and physical_error.reason_code)
         assert_equal(physical.branches[1].where_predicates[1].expression,
             variant.expected)
-    end
+    end)
 
     local invalid_filter = snapshots.copy(logical)
     invalid_filter.bound_query.global_filters[1].operator = "REGEXP"

@@ -96,9 +96,9 @@ test("shared json strict validation refuses what the decoder tolerates", functio
     assert_equal(json.decode("01"), 1)            -- leading zero
     assert_equal(json.decode("1."), 1.0)          -- fraction with no digits
     assert_equal(json.encode(json.decode("[00]")), "[0]")
-    for _, lenient in ipairs({"01", "1.", "[00]"}) do
+    each({"01", "1.", "[00]"}, function(lenient)
         assert_equal(json.is_valid(lenient), false, lenient)
-    end
+    end)
 
     -- A bad unicode escape and a raw control character are structurally fine and
     -- semantically wrong; only the strict mode says so.

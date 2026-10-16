@@ -61,8 +61,12 @@ too slow to run on every check. The release gate wraps the smoke suite and adds
 
 **Run database-free Lua runtime tests with coverage:**
 ```sh
-sh tools/run_lua_tests.sh
+sh tools/run_lua_tests.sh            # add a name substring to run matching tests only
 ```
+Shuffled by default (the seed is printed; `ESV_TEST_SEED` reproduces it), and a
+test that leaves a global changed fails. `tests/lua/README.md` lists the
+harness helpers (`each`, `with_query`, `defer`, `assert_branch`) and the Exasol
+stand-ins.
 
 **Run database-free Python tests with coverage:**
 ```sh

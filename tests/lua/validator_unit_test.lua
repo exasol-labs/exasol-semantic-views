@@ -404,18 +404,14 @@ test("validator distinguishes legacy and invalid relationship mappings", functio
     assert_true(has_rule(invalid, "SEMANTIC_MODEL_033"))
 end)
 
+-- The validator caches a relation's columns for the life of one validation.
+-- These tests drive its internals directly rather than through validate_model,
+-- so each mock swap starts the cache over -- otherwise the first test's columns
+-- would answer for every test after it.
+local harness_with_query = with_query
 local function with_query(mock, fn)
-    local original = query
-    -- The validator caches a relation's columns for the life of one validation.
-    -- These tests drive its internals directly rather than through
-    -- validate_model, so each mock swap starts the cache over -- otherwise the
-    -- first test's columns would answer for every test after it.
     if api.reset_source_column_cache then api.reset_source_column_cache() end
-    query = mock
-    local ok, result = xpcall(fn, debug.traceback)
-    query = original
-    if not ok then error(result, 0) end
-    return result
+    return harness_with_query(mock, fn)
 end
 
 -- The validator reads a relation's whole column list once now, instead of
@@ -882,7 +878,7 @@ test("SEMANTIC_MODEL_072 binds expressions against their source relation", funct
     -- only a stand-in built from its column metadata -- combined, the stand-in
     -- on its own, then the two dimensions.
     local relation_probes, stand_in_probes = 0, 0
-    for _, sql in ipairs(probes) do
+    each(probes, function(sql)
         assert_true(not contains(sql, '"VS"."TICKETS"'))
         if contains(sql, '"MART"."TICKETS" tk WHERE FALSE') then
             relation_probes = relation_probes + 1
@@ -891,7 +887,7 @@ test("SEMANTIC_MODEL_072 binds expressions against their source relation", funct
             assert_contains(sql, ") tk WHERE FALSE")
             stand_in_probes = stand_in_probes + 1
         end
-    end
+    end)
     assert_equal(relation_probes, 4)
     assert_equal(stand_in_probes, 4)
     local remote_issue
@@ -902,13 +898,13 @@ test("SEMANTIC_MODEL_072 binds expressions against their source relation", funct
     end
     assert_equal(remote_issue.object_name, "resolved_flag")
     local dimension_issue, binding_issue
-    for _, issue in ipairs(ctx.issues) do
+    each(ctx.issues, function(issue)
         if issue.rule_code == "SEMANTIC_MODEL_072" then
             if issue.object_type == "DIMENSION" then dimension_issue = issue end
             if issue.object_type == "ATTRIBUTE_BINDING" then binding_issue = issue end
             assert_true(issue.object_name ~= "priority")
         end
-    end
+    end)
     assert_equal(dimension_issue.object_name, "resolved_flag")
     assert_contains(dimension_issue.message, "unexpected OPEN_")
     assert_contains(dimension_issue.message, "Quote string literals")
@@ -970,14 +966,14 @@ test("SEMANTIC_MODEL_073 refuses a declared data type Exasol cannot cast to", fu
     end, function() api.validate_declared_types(ctx) end)
 
     local refused = {}
-    for _, issue in ipairs(ctx.issues) do
+    each(ctx.issues, function(issue)
         assert_equal(issue.rule_code, "SEMANTIC_MODEL_073")
         refused[issue.object_name] = issue.message
-    end
+    end)
     -- The two malformed shapes never reach the database.
-    for _, sql in ipairs(probes) do
+    each(probes, function(sql)
         assert_true(not contains(sql, "UNIT") and not contains(sql, "SELECT 1"))
-    end
+    end)
     assert_contains(refused.total_co2, "DECIMAL(18,2) UNIT 'kg'")
     assert_contains(refused.total_co2, "correct the RETURNS clause")
     assert_true(refused.smuggled ~= nil)
@@ -2416,9 +2412,9 @@ test("coverage predicate errors name a DATE literal as the near-miss", function(
     -- The canonical form gets no literal hint. (It still reports the stubbed
     -- column probe, which is what a database-free context can say about a
     -- physical column.)
-    for _, reported in ipairs(canonical.issues) do
+    each(canonical.issues, function(reported)
         assert_true(string.find(reported.message, "Found ", 1, true) == nil)
-    end
+    end)
     assert_branch("validator.coverage.literal_hint",
         string.find(canonical.issues[1].message, "Found ", 1, true) ~= nil, false)
 end)
