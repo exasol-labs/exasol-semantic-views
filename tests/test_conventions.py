@@ -712,7 +712,7 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
 # shrink, and may not grow. Convert one when you next touch it —
 # `tests/integration/verify_support.py` is the target. A pytest module takes the
 # `con` fixture from tests/integration/conftest.py instead.
-PRIVATE_CONNECT = 52
+PRIVATE_CONNECT = 51
 
 # Integration tests are discovered by pytest, not listed. tools/run_smoke.sh
 # used to name each verifier, and a rename that missed it silently stopped the
@@ -727,7 +727,7 @@ SMOKE_SUITE = ROOT / "tools/run_smoke.sh"
 # did. A test_*.py module reports each check by name, takes its connection from
 # a fixture and cleans up in one, and runs on its own with -k. Convert a script
 # when you next touch it; this pin may shrink and may not grow.
-LEGACY_SCRIPTS = 84
+LEGACY_SCRIPTS = 83
 
 
 class VerifiersShareTheirPlumbing(unittest.TestCase):

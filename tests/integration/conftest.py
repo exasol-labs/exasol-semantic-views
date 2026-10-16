@@ -24,6 +24,7 @@ explicitly.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -47,12 +48,23 @@ class VerifierFailed(Exception):
         self.result = result
 
 
+# A stuck script fails instead of stalling the suite. The slowest takes about a
+# minute; override with VERIFIER_TIMEOUT (seconds) for a slow deployment.
+VERIFIER_TIMEOUT = float(os.environ.get("VERIFIER_TIMEOUT", "600"))
+
+
 class VerifierRun(pytest.Item):
     """One verify_*.py script, run in its own process."""
 
     def runtest(self) -> None:
-        result = subprocess.run([sys.executable, str(self.path)], cwd=ROOT,
-                                capture_output=True, text=True)
+        try:
+            result = subprocess.run([sys.executable, str(self.path)], cwd=ROOT,
+                                    capture_output=True, text=True, timeout=VERIFIER_TIMEOUT)
+        except subprocess.TimeoutExpired as expired:
+            output = "".join(part.decode() if isinstance(part, bytes) else part or ""
+                             for part in (expired.stdout, expired.stderr))
+            raise VerifierFailed(subprocess.CompletedProcess(
+                expired.cmd, -1, output, f"timed out after {VERIFIER_TIMEOUT:.0f}s")) from None
         self.add_report_section("call", "stdout", result.stdout)
         self.add_report_section("call", "stderr", result.stderr)
         if result.returncode != 0:
