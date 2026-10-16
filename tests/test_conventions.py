@@ -46,6 +46,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+INTEGRATION = ROOT / "tests" / "integration"
 
 
 # ---------------------------------------------------------------------------
@@ -280,17 +281,16 @@ class OneConditionOneRuleCode(unittest.TestCase):
 # across 58 verifiers and a ~20 minute full run, nobody can tell from the
 # listing whether a change is already covered, so coverage gets re-added under a
 # new ticket name instead of extending the file that owns the behaviour.
-TICKET_NAMED = re.compile(r"^verify_(?:bug\d+|g\d+|fb\d+|f\d+_|milestone\d+)")
+TICKET_NAMED = re.compile(r"^(?:verify|test)_(?:bug\d+|g\d+|fb\d+|f\d+_|milestone\d+)")
 
 # Drained to empty on 2026-08-31. The 2026-08-25 review pinned 24 names and
 # declined to rename them, for a good reason: a rename touches run_smoke.sh,
 # tests/test_install.py and the docs for no behaviour change, and "carries real
 # risk of silently dropping a verifier from the suite".
 #
-# That risk is checkable, so it is now checked -- see
-# VerifiersShareTheirPlumbing, which requires every verifier to be wired into
-# run_smoke.sh and run_smoke.sh to name no verifier that is gone. With both
-# directions pinned, the rename stopped being a gamble and became a rename.
+# That risk is checkable, so it was checked -- and is now gone: pytest discovers
+# tests/integration/, so a renamed module runs under its new name. See
+# VerifiersShareTheirPlumbing.
 #
 # Eighteen of the 24 needed only the ticket prefix removed: the rest of
 # `verify_bug26_published_f3_batch` was already the invariant. The six
@@ -309,7 +309,8 @@ class VerifiersNamedByInvariant(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.verifiers = {path.name for path in (ROOT / "tools").glob("verify_*.py")}
+        cls.verifiers = {path.name for path in INTEGRATION.rglob("*.py")
+                         if path.name.startswith(("verify_", "test_"))}
 
     def test_the_directory_is_being_read(self):
         self.assertGreater(len(self.verifiers), 40, sorted(self.verifiers)[:5])
@@ -329,7 +330,8 @@ class VerifiersNamedByInvariant(unittest.TestCase):
     def test_the_pattern_recognises_the_shapes_that_exist(self):
         # Illustrative names, not files -- the shapes the pattern has to catch.
         for name in ("verify_bug26_published_f3_batch.py", "verify_g04_x.py",
-                     "verify_fb015_x.py", "verify_f13_x.py", "verify_milestone3.py"):
+                     "verify_fb015_x.py", "verify_f13_x.py", "verify_milestone3.py",
+                     "test_bug26_x.py"):
             self.assertRegex(name, TICKET_NAMED, name)
         # A feature or phase level inside a descriptive name is not a ticket id.
         for name in ("verify_fusion_f5.py", "verify_fanout_guardrails.py",
@@ -448,12 +450,12 @@ class DerivedNotDeclared(unittest.TestCase):
     def test_the_library_exclusion_list_is_declared_once(self):
         """`NON_CALLABLE_SCRIPTS` lives in the packager and is read, not copied.
 
-        `tools/verify_named_admin_api.py` used to carry a second copy with a
+        `tests/integration/verify_named_admin_api.py` used to carry a second copy with a
         comment claiming the two "cannot drift apart silently". They then did:
         FUSION_RUNTIME was added to the packager's set and not the copy, and
         nothing failed until a full smoke run reached that verifier.
         """
-        verifier = (ROOT / "tools/verify_named_admin_api.py").read_text(
+        verifier = (INTEGRATION / "verify_named_admin_api.py").read_text(
             encoding="utf-8")
         self.assertIn("_PACKAGER.NON_CALLABLE_SCRIPTS", verifier)
         for library in ("COMPILER_RUNTIME", "VALIDATOR_RUNTIME", "FUSION_RUNTIME"):
@@ -708,27 +710,35 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
 # A helper nobody imports is not a fix, so this is a ratchet rather than an
 # announcement: the count of verifiers still rolling their own is pinned, may
 # shrink, and may not grow. Convert one when you next touch it —
-# `tools/verify_support.py` is the target and six verifiers already use it.
+# `tests/integration/verify_support.py` is the target. A pytest module takes the
+# `con` fixture from tests/integration/conftest.py instead.
 PRIVATE_CONNECT = 52
 
-# The reason renaming a verifier used to be risky, removed.
-#
-# The 2026-08-25 review declined to drain LEGACY_TICKET_NAMED because a rename
-# "carries real risk of silently dropping a verifier from the suite" — a file
-# renamed but not renamed in run_smoke.sh simply stops running, and nothing says
-# so. That is checkable, so it is checked here, and the rename stops being a
-# gamble.
+# Integration tests are discovered by pytest, not listed. tools/run_smoke.sh
+# used to name each verifier, and a rename that missed it silently stopped the
+# verifier running -- the 2026-08-25 review declined to rename the
+# ticket-named ones for exactly that reason. Discovery removes the list; what
+# remains checkable is that every module in the directory is one pytest
+# collects, and that run_smoke.sh runs the directory.
 SMOKE_SUITE = ROOT / "tools/run_smoke.sh"
+
+# verify_*.py scripts that predate the move to pytest. tests/integration/
+# conftest.py runs each as one test, in its own process, exactly as run_smoke.sh
+# did. A test_*.py module reports each check by name, takes its connection from
+# a fixture and cleans up in one, and runs on its own with -k. Convert a script
+# when you next touch it; this pin may shrink and may not grow.
+LEGACY_SCRIPTS = 84
 
 
 class VerifiersShareTheirPlumbing(unittest.TestCase):
-    """Connection defaults and result reading belong to tools/verify_support.py."""
+    """Connection defaults and result reading belong to tests/integration/verify_support.py."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.verifiers = {path.name: path.read_text(encoding="utf-8")
-                         for path in (ROOT / "tools").glob("verify_*.py")
-                         if path.name != "verify_support.py"}
+                         for path in INTEGRATION.rglob("*.py")
+                         if path.name.startswith(("verify_", "test_"))
+                         and path.name != "verify_support.py"}
 
     def test_the_directory_is_being_read(self):
         self.assertGreater(len(self.verifiers), 40, sorted(self.verifiers)[:5])
@@ -739,7 +749,7 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
         self.assertLessEqual(
             len(private), PRIVATE_CONNECT,
             f"{len(private)} verifiers define their own connect() against a pin "
-            f"of {PRIVATE_CONNECT}. Import tools/verify_support.py instead")
+            f"of {PRIVATE_CONNECT}. Use verify_support.py, or the con fixture")
         self.assertEqual(
             PRIVATE_CONNECT, len(private),
             "the pin is stale — lower PRIVATE_CONNECT to "
@@ -747,31 +757,37 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
 
     def test_the_shared_helpers_exist_and_read_results_by_name(self):
         """Deriving the rule from an empty module would pass silently."""
-        support = (ROOT / "tools/verify_support.py").read_text(encoding="utf-8")
+        support = (INTEGRATION / "verify_support.py").read_text(encoding="utf-8")
         for helper in ("def connect(", "def sql_string(", "def named_row(",
                        "def named_rows(", "def call_admin(", "def validate_model("):
             self.assertIn(helper, support)
         self.assertIn("statement.columns().keys()", support,
                       "named_rows must read the result set's own column names")
 
-    def test_every_verifier_is_wired_into_the_smoke_suite(self):
-        """A verifier nobody runs is a file, not a test.
+    def test_every_module_is_one_pytest_collects(self):
+        """A module pytest does not collect is a file, not a test."""
+        helpers = {"conftest.py", "verify_support.py", "__init__.py"}
+        uncollected = sorted(path.name for path in INTEGRATION.rglob("*.py")
+                             if path.name not in helpers
+                             and not path.name.startswith(("verify_", "test_")))
+        self.assertEqual([], uncollected,
+                         "name an integration test test_*.py, or it never runs")
 
-        This is also what makes renaming one safe: a rename that misses
-        run_smoke.sh fails here instead of quietly removing coverage.
-        """
+    def test_the_smoke_suite_runs_the_integration_directory(self):
         smoke = SMOKE_SUITE.read_text(encoding="utf-8")
-        unwired = sorted(name for name in self.verifiers if name not in smoke)
-        self.assertEqual([], unwired,
-                         "these verifiers are never run by tools/run_smoke.sh")
+        self.assertIn("-m pytest tests/integration", smoke)
+        self.assertNotRegex(smoke, r"(?m)^[^#\n]*verify_[a-z0-9_]+\.py",
+                            "run_smoke.sh runs a verifier by name again; pytest discovers them")
 
-    def test_the_smoke_suite_names_no_verifier_that_is_gone(self):
-        """The other half of a rename: a stale name is a step that cannot run."""
-        smoke = SMOKE_SUITE.read_text(encoding="utf-8")
-        named = set(re.findall(r"verify_[a-z0-9_]+\.py", smoke))
-        missing = sorted(named - set(self.verifiers) - {"verify_support.py"})
-        self.assertEqual([], missing,
-                         "tools/run_smoke.sh names verifiers that do not exist")
+    def test_legacy_scripts_only_decrease(self):
+        legacy = sorted(name for name in self.verifiers if name.startswith("verify_"))
+        self.assertLessEqual(
+            len(legacy), LEGACY_SCRIPTS,
+            f"{len(legacy)} verify_*.py scripts against a pin of {LEGACY_SCRIPTS}. "
+            "Write a new integration test as a pytest test_*.py module")
+        self.assertEqual(
+            LEGACY_SCRIPTS, len(legacy),
+            f"the pin is stale — lower LEGACY_SCRIPTS to {len(legacy)}")
 
 
 # ---------------------------------------------------------------------------

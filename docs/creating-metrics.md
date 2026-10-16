@@ -777,7 +777,7 @@ means accepting that a join may repeat rows. See
 [data fusion](data-fusion.md) for combining *sources* for one entity, which is a
 different problem from combining *grains*.
 
-`tools/verify_fanout_guardrails.py` asserts each of the four steps above, so this
+`tests/integration/verify_fanout_guardrails.py` asserts each of the four steps above, so this
 section cannot drift from what the layer does.
 
 ## Common Mistakes

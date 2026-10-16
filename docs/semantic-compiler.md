@@ -97,7 +97,7 @@ ORDER BY ORDINAL_POSITION;
 ```
 
 The three layouts share their first eight rows by construction in that view, and
-`tools/verify_catalog_introspection.py` asserts every row against the live
+`tests/integration/verify_catalog_introspection.py` asserts every row against the live
 result set of each script, so the published contract cannot drift from the
 scripts. For catalog and agent *views*, use
 [`SEMANTIC_CATALOG.CATALOG_COLUMNS`](semantic-catalog.md#column-introspection).

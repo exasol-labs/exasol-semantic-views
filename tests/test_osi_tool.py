@@ -1275,7 +1275,7 @@ def test_a_model_with_no_fusion_layer_exports_without_a_warning() -> None:
 
     That F0 compatibility row is not a fusion declaration, and counting it would
     refuse every export of every model -- including the sales demo, which
-    tools/verify_osi_roundtrip.py round-trips.
+    tests/integration/verify_osi_roundtrip.py round-trips.
     """
     con = _FusionCatalogConnection({})
     _, warnings = osi.export_model(con, osi.ExportOptions(

@@ -1,6 +1,6 @@
 -- Unit tests for the tier-2 fusion document.
 --
--- The live verifier (tools/verify_fusion_declaration.py) proves the end-to-end
+-- The live verifier (tests/integration/verify_fusion_declaration.py) proves the end-to-end
 -- claims: one document lands on a published model, dry run commits nothing,
 -- re-applying is a no-op, export/apply/export round-trips. These cover the
 -- parts a live test reaches only expensively -- the closed-contract refusals,

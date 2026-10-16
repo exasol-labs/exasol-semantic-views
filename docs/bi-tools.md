@@ -344,13 +344,13 @@ preprocessor gets `SEMANTIC_QUERY_027`, the structured request lane gets
 used to publish only the request-lane spelling, so a BI integrator matching the
 published code never matched.
 
-Every row is asserted by running it: `tools/verify_query_capabilities_contract.py`
+Every row is asserted by running it: `tests/integration/verify_query_capabilities_contract.py`
 executes a statement for each published shape, in the lane the row names, and
 fails if the code that comes back is not the one published. A row nobody
 demonstrates fails too, so the contract cannot grow claims it does not keep.
 
 So is every statement printed in this file next to an expected code — including
-the join in §4. `tools/verify_documented_examples.py` extracts those blocks from
+the join in §4. `tests/integration/verify_documented_examples.py` extracts those blocks from
 the Markdown and runs them verbatim, because the statement a reader copies is
 the one that has to hold: §4's join was published as `SEMANTIC_QUERY_012` and
 returned `SEMANTIC_QUERY_003`, and the capability verifier missed it by

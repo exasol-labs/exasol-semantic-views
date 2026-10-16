@@ -4758,7 +4758,7 @@ refusal_rules.expansion_wins = {
 -- whichever lane reads it, but expansion leaves the ORDER BY outside the derived
 -- table, compiles successfully, and Exasol then fails on `ORDER BY 0` with a
 -- message about positions in SQL the author never wrote (GitHub #14).
--- verify_order_by_ordinals.py fails if this entry is removed.
+-- tests/integration/test_order_by_ordinals.py fails if this entry is removed.
 refusal_rules.lane_final = {
     SEMANTIC_QUERY_064 = true,
 }

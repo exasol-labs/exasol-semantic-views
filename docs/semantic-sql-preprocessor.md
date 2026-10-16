@@ -203,7 +203,7 @@ SELECT * FROM (
 Both run now. A redundant subquery used to be the difference between a working
 report and a refusal naming a construct SQL has had for forty years, and nothing
 on any surface said so — the workaround could not be discovered, only stumbled
-upon. `tools/verify_sql_lane_parity.py` holds the invariant: for each construct
+upon. `tests/integration/verify_sql_lane_parity.py` holds the invariant: for each construct
 it runs the bare and wrapped forms and requires the same rows, or the same
 refusal code.
 
@@ -251,7 +251,7 @@ the spliced characters and can point past the end of that line, which inline
 rewriting cannot avoid. Read the line; ignore the column.
 
 A valid statement never fails this way at all: if the layer cannot compile one it
-refuses with a `SEMANTIC_*` code, and `tools/verify_no_raw_parse_errors.py` holds
+refuses with a `SEMANTIC_*` code, and `tests/integration/verify_no_raw_parse_errors.py` holds
 that over a corpus of statement shapes rather than over the three that were
 reported.
 

@@ -278,7 +278,7 @@ REPLACE METRICS (
 -- the order-grain metric gets its own object rooted at `order`, where every
 -- exposed dimension is reachable without fan-out.
 --
--- tools/verify_fanout_guardrails.py demonstrates and asserts both halves.
+-- tests/integration/verify_fanout_guardrails.py demonstrates and asserts both halves.
 -- ---------------------------------------------------------------------------
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT(

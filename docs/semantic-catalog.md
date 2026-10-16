@@ -166,7 +166,7 @@ published model to `NEEDS_VALIDATION` over a cosmetic fix. Renaming to the name
 a representation already carries is a no-op (`CHANGED = FALSE`), and a name the
 entity already uses is refused with `SEMANTIC_ADMIN_046`.
 
-`tools/verify_representation_promotion.py` runs a promotion end to end — roles
+`tests/integration/verify_representation_promotion.py` runs a promotion end to end — roles
 swap, the entity's source moves, a query returns rows from the promoted source,
 and the warning above appears with its remedy. That verifier exists because the
 behaviour was reported twice as an open question and never actually observed:

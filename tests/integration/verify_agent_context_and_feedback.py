@@ -1,0 +1,548 @@
+#!/usr/bin/env python3
+"""Verify the agent context and feedback workflow on Exasol.
+
+What an autonomous caller sees and writes back: discovery, glossary, verified
+queries, instructions, and the feedback it records against a compile.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+from typing import Any
+
+# Connection defaults, SQL escaping and named result reads live in
+# tests/integration/verify_support.py so 59 verifiers do not each carry their own. See the
+# ratchet in tests/test_conventions.py.
+_SUPPORT = importlib.util.spec_from_file_location(
+    "verify_support", Path(__file__).with_name("verify_support.py"))
+support = importlib.util.module_from_spec(_SUPPORT)
+_SUPPORT.loader.exec_module(support)
+
+connect = support.connect
+sql_string = support.sql_string
+
+
+def fetchall(con, sql: str) -> list[tuple[Any, ...]]:
+    return [tuple(row) for row in con.execute(sql).fetchall()]
+
+
+def scalar(con, sql: str) -> int:
+    rows = fetchall(con, sql)
+    return int(rows[0][0])
+
+
+def assert_equal(name: str, actual: Any, expected: Any) -> None:
+    if actual != expected:
+        raise AssertionError(f"{name}: expected {expected!r}, got {actual!r}")
+    print(f"ok {name}: {actual!r}")
+
+
+def assert_at_least(name: str, actual: int, expected: int) -> None:
+    if actual < expected:
+        raise AssertionError(f"{name}: expected at least {expected}, got {actual}")
+    print(f"ok {name}: {actual}")
+
+
+def assert_contains(name: str, text: str, expected: str) -> None:
+    if expected not in text:
+        raise AssertionError(f"{name}: expected to find {expected!r} in {text!r}")
+    print(f"ok {name}: found {expected!r}")
+
+
+def assert_fails_with(con, name: str, sql: str, expected: str) -> None:
+    try:
+        con.execute(sql).fetchall()
+    except Exception as exc:
+        assert_contains(name, str(exc), expected)
+        return
+    raise AssertionError(f"{name}: expected failure containing {expected!r}")
+
+
+def compile_request(con, request: dict[str, Any]) -> dict[str, Any]:
+    payload = json.dumps(request, separators=(",", ":"))
+    rows = fetchall(con, f"EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_REQUEST_JSON({sql_string(payload)})")
+    if len(rows) != 1:
+        raise AssertionError(f"expected one compiler row, got {len(rows)}")
+    row = rows[0]
+    return {
+        "status": row[0],
+        "error_code": row[1],
+        "error_message": row[2],
+        "original_sql": row[3],
+        "generated_sql": row[4],
+        "plan_json": row[5],
+        "clarification_json": row[6],
+        "validation_run_id": row[7],
+        "agent_request_id": row[8],
+    }
+
+
+def compile_sql_debug(con, sql: str, client_name: str) -> dict[str, Any]:
+    rows = fetchall(
+        con,
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.COMPILE_SQL_DEBUG("
+        f"{sql_string(sql)}, {sql_string(client_name)})",
+    )
+    if len(rows) != 1:
+        raise AssertionError(f"expected one debug compiler row, got {len(rows)}")
+    row = rows[0]
+    return {
+        "status": row[0],
+        "generated_sql": row[4],
+        "plan_json": row[5],
+        "validation_run_id": row[7],
+        "query_log_id": row[8],
+    }
+
+
+def main() -> int:
+    con = connect()
+    try:
+        # Readiness is reported for a published model; publish it rather than
+        # rely on an earlier test having done so.
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+        con.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")
+        agent_view_names = (
+            "'MODELS_FOR_AGENT', 'OBJECTS_FOR_AGENT', 'FIELDS_FOR_AGENT', "
+            "'VALID_COMBINATIONS_FOR_AGENT', 'MEASURE_GROUPS_FOR_AGENT', "
+            "'VERIFIED_QUERIES_FOR_AGENT', 'INSTRUCTIONS_FOR_AGENT', "
+            "'BUSINESS_GLOSSARY_FOR_AGENT', 'REQUEST_HISTORY_FOR_AGENT'"
+        )
+        assert_equal(
+            "agent views",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS.EXA_ALL_VIEWS "
+                "WHERE VIEW_SCHEMA = 'SEMANTIC_AGENT' "
+                f"AND VIEW_NAME IN ({agent_view_names})",
+            ),
+            9,
+        )
+
+        agent_script_names = (
+            "'AGENT_RUNTIME', 'ADD_AGENT_INSTRUCTION', 'ADD_VERIFIED_QUERY', "
+            "'SEARCH_SEMANTIC_OBJECTS', 'DESCRIBE_SEMANTIC_OBJECT', "
+            "'GET_BUSINESS_GLOSSARY', 'EXPLAIN_COMPILED_SQL', "
+            "'RECORD_AGENT_FEEDBACK'"
+        )
+        assert_equal(
+            "agent scripts",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS.EXA_ALL_SCRIPTS "
+                "WHERE SCRIPT_SCHEMA = 'SEMANTIC_ADMIN' "
+                f"AND SCRIPT_NAME IN ({agent_script_names})",
+            ),
+            8,
+        )
+
+        assert_equal(
+            "agent model readiness",
+            fetchall(
+                con,
+                "SELECT MODEL_NAME, PUBLISHED_SCHEMA, AGENT_READINESS "
+                "FROM SEMANTIC_AGENT.MODELS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales'",
+            ),
+            [("sales", "SEMANTIC_SALES", "VALID")],
+        )
+        # 9 visible fields in SALES + 3 in ORDER_HEADER.
+        assert_equal(
+            "agent fields count",
+            scalar(con, "SELECT COUNT(*) FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT WHERE MODEL_NAME = 'sales'"),
+            12,
+        )
+        assert_equal(
+            "agent sql field names",
+            fetchall(
+                con,
+                "SELECT FIELD_NAME, SQL_COLUMN_NAME FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND FIELD_NAME IN ('customer_region', 'total_revenue') "
+                "ORDER BY FIELD_NAME",
+            ),
+            [("customer_region", "CUSTOMER_REGION"), ("total_revenue", "TOTAL_REVENUE")],
+        )
+        assert_equal(
+            "agent field role alias",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND FIELD_ROLE = FIELD_KIND",
+            ),
+            12,
+        )
+        assert_equal(
+            "agent valid combinations",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND IS_VALID = TRUE",
+            ),
+            22,
+        )
+        assert_equal(
+            "agent measure group",
+            fetchall(
+                con,
+                "SELECT MEASURE_GROUP_NAME, METRIC_COUNT FROM SEMANTIC_AGENT.MEASURE_GROUPS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' ORDER BY OBJECT_NAME",
+            ),
+            [("default", 1), ("default", 5)],
+        )
+
+        con.execute("UPDATE SYS_SEMANTIC.METRICS SET IS_PRIVATE = TRUE WHERE METRIC_NAME = 'total_cost'")
+        try:
+            assert_equal(
+                "hidden metric not visible",
+                scalar(
+                    con,
+                    "SELECT COUNT(*) FROM SEMANTIC_AGENT.FIELDS_FOR_AGENT "
+                    "WHERE MODEL_NAME = 'sales' AND FIELD_NAME = 'total_cost'",
+                ),
+                0,
+            )
+            hidden_search = fetchall(
+                con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.SEARCH_SEMANTIC_OBJECTS('cost', 'sales')",
+            )
+            if any(row[4] == "total_cost" for row in hidden_search):
+                raise AssertionError(f"hidden metric leaked through search: {hidden_search!r}")
+            print("ok hidden synonym search: total_cost absent")
+        finally:
+            con.execute("UPDATE SYS_SEMANTIC.METRICS SET IS_PRIVATE = FALSE WHERE METRIC_NAME = 'total_cost'")
+
+        instruction_rows = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION("
+            "'sales', 'METRIC', 'total_revenue', 'DEFINITION', "
+            "'Use total_revenue for recognized net revenue analysis.', NULL, 10)",
+        )
+        assert_equal("add instruction status", instruction_rows[0][5], "ACTIVE")
+        assert_equal(
+            "instruction visible",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND SCOPE_NAME = 'total_revenue'",
+            ),
+            1,
+        )
+        general_instruction_rows = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION("
+            "'sales', 'MODEL', 'sales', 'GENERAL', "
+            "'Use current company sales definitions unless a user asks for experimental metrics.', NULL, 20)",
+        )
+        assert_equal("general instruction status", general_instruction_rows[0][5], "ACTIVE")
+        assert_equal(
+            "general instruction visible",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND SCOPE_NAME = 'sales' AND INSTRUCTION_KIND = 'GENERAL'",
+            ),
+            1,
+        )
+
+        request = {
+            "model": "sales",
+            "object": "SALES",
+            "metrics": ["total_revenue"],
+            "dimensions": ["customer_region"],
+            "order_by": [{"field": "total_revenue", "direction": "desc"}],
+            "limit": 2,
+            "client": "verify_agent_context_and_feedback",
+        }
+        verified_rows = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_VERIFIED_QUERY("
+            "'sales', 'SALES', 'Revenue by region', "
+            "'What is revenue by customer region?', "
+            f"{sql_string(json.dumps(request, separators=(',', ':')))}, "
+            "'customer_region,total_revenue', TRUE)",
+        )
+        assert_equal("add verified query status", verified_rows[0][4], "ACTIVE")
+        assert_contains("verified generated SQL", verified_rows[0][5], 'ORDER BY "total_revenue" DESC')
+        assert_equal(
+            "verified query visible",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.VERIFIED_QUERIES_FOR_AGENT "
+                f"WHERE VERIFIED_QUERY_ID = {int(verified_rows[0][0])}",
+            ),
+            1,
+        )
+
+        search_rows = fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.SEARCH_SEMANTIC_OBJECTS('revenue', 'sales')")
+        assert_at_least("search result count", len(search_rows), 1)
+        assert_equal("search top field", search_rows[0][4], "total_revenue")
+
+        describe_rows = fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_OBJECT('sales', 'SALES')")
+        assert_at_least("describe rows", len(describe_rows), 10)
+        if not any(row[2] == "FIELD" and row[4] == "total_revenue" for row in describe_rows):
+            raise AssertionError("describe output missing total_revenue field")
+        print("ok describe includes total_revenue")
+
+        structured_glossary = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY('sales', 'SALES', 'STRUCTURED_REQUEST')",
+        )
+        assert_contains("structured glossary mode", structured_glossary[0][3], "Use COMPILE_REQUEST_JSON")
+        sql_glossary = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY('sales', 'SALES', 'SEMANTIC_SQL')",
+        )
+        assert_contains("sql glossary mode", sql_glossary[0][3], "Use semantic SQL")
+
+        compiled = compile_request(con, request)
+        assert_equal("agent compile status", compiled["status"], "OK")
+        explain_agent = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL("
+            f"'AGENT_REQUEST', {int(compiled['agent_request_id'])})",
+        )
+        assert_equal("explain agent handle", explain_agent[0][0], "AGENT_REQUEST")
+        assert_contains("explain agent plan", explain_agent[0][9], '"metrics":["total_revenue"]')
+        assert_contains("explain agent requested dimensions", explain_agent[0][10], "customer_region")
+        assert_contains("explain agent requested metrics", explain_agent[0][11], "total_revenue")
+
+        semantic_sql = (
+            "SELECT customer_region, total_revenue "
+            "FROM SEMANTIC_SALES.SALES "
+            "GROUP BY customer_region "
+            "ORDER BY total_revenue DESC "
+            "LIMIT 2"
+        )
+        debug = compile_sql_debug(con, semantic_sql, "verify_agent_context_and_feedback")
+        assert_equal("sql debug status", debug["status"], "OK")
+        explain_query = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL("
+            f"'QUERY_LOG', {int(debug['query_log_id'])})",
+        )
+        assert_equal("explain query handle", explain_query[0][0], "QUERY_LOG")
+        assert_contains("explain query plan", explain_query[0][9], '"metrics":["total_revenue"]')
+
+        metric_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS")
+        suggestion_count_before = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS")
+        feedback_agent = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK("
+            f"'AGENT_REQUEST', {int(compiled['agent_request_id'])}, "
+            "'NEEDS_CHANGE', 'Add a synonym for recognized revenue.', "
+            "'{\"kind\":\"synonym\",\"metric\":\"total_revenue\",\"synonym\":\"recognized revenue\"}')",
+        )
+        assert_equal("agent feedback pending", feedback_agent[0][5], "PENDING")
+        feedback_query = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK("
+            f"'QUERY_LOG', {int(debug['query_log_id'])}, "
+            "'HELPFUL', 'SQL result matched expectation.', NULL)",
+        )
+        assert_equal("query feedback pending", feedback_query[0][5], "PENDING")
+        feedback_count_before_invalid = scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_FEEDBACK")
+        assert_fails_with(
+            con,
+            "invalid feedback verdict rejected",
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.RECORD_AGENT_FEEDBACK("
+            f"'AGENT_REQUEST', {int(compiled['agent_request_id'])}, "
+            "'completed_successfully', 'Invalid verdict robustness check.', NULL)",
+            "SEMANTIC_AGENT_003",
+        )
+        assert_equal(
+            "invalid feedback verdict did not insert",
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_FEEDBACK"),
+            feedback_count_before_invalid,
+        )
+        assert_equal(
+            "suggestion created",
+            scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS"),
+            suggestion_count_before + 1,
+        )
+        assert_equal("feedback no metadata mutation", scalar(con, "SELECT COUNT(*) FROM SYS_SEMANTIC.METRICS"), metric_count_before)
+
+        assert_at_least(
+            "request history rows",
+            scalar(con, "SELECT COUNT(*) FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT"),
+            2,
+        )
+        assert_equal(
+            "request history request time alias",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT "
+                "WHERE REQUEST_TIME = STARTED_AT",
+            ),
+            scalar(con, "SELECT COUNT(*) FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT"),
+        )
+
+        assert_at_least(
+            "request history agent_request_id column",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT "
+                "WHERE HANDLE_TYPE = 'AGENT_REQUEST' AND AGENT_REQUEST_ID IS NOT NULL",
+            ),
+            1,
+        )
+
+        try:
+            fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.DESCRIBE_SEMANTIC_OBJECT('sales', 'total_revenue')")
+            raise AssertionError("describe metric as object: expected failure")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            err = str(exc)
+            assert_contains("describe metric as object error code", err, "SEMANTIC_AGENT_011")
+            assert_contains("describe metric as object mentions kind", err, "metric")
+
+        try:
+            fetchall(
+                con,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.GET_BUSINESS_GLOSSARY('sales', 'SALES', 'INVALID_MODE')",
+            )
+            raise AssertionError("invalid query mode: expected failure")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            err = str(exc)
+            assert_contains("invalid query mode error code", err, "SEMANTIC_AGENT_003")
+            assert_contains("invalid query mode lists valid values", err, "STRUCTURED_REQUEST")
+
+        dup_instruction = fetchall(
+            con,
+            "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_AGENT_INSTRUCTION("
+            "'sales', 'METRIC', 'total_revenue', 'DEFINITION', "
+            "'Use total_revenue for recognized net revenue analysis.', NULL, 10)",
+        )
+        assert_equal("idempotent instruction status", dup_instruction[0][5], "ACTIVE")
+        assert_equal(
+            "idempotent instruction no duplicate",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT "
+                "WHERE MODEL_NAME = 'sales' AND SCOPE_NAME = 'total_revenue' "
+                "AND INSTRUCTION_KIND = 'DEFINITION'",
+            ),
+            1,
+        )
+
+        assert_at_least(
+            "request log has requested metrics",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS_SEMANTIC.AGENT_REQUEST_LOG "
+                "WHERE REQUESTED_METRICS IS NOT NULL AND USER_NAME = CURRENT_USER",
+            ),
+            1,
+        )
+
+        # COMPILE_REQUEST_SCHEMA_FOR_AGENT tells an agent that
+        # `natural_language_text` is "retained as request metadata", and
+        # AGENT_REQUEST_LOG.NATURAL_LANGUAGE_TEXT exists to hold it -- but the
+        # INSERT omitted the column, so the promise was kept only accidentally,
+        # by REQUEST_JSON storing the request whole. Anything reading the
+        # dedicated column got NULL. The contract is asserted here so it cannot
+        # drift back into being true only by accident.
+        question = "Which region earned the most revenue last quarter?"
+        compiled = compile_request(con, {
+            "model": "sales",
+            "object": "SALES",
+            "metrics": ["total_revenue"],
+            "dimensions": ["customer_region"],
+            "client": "verify_agent_context",
+            "natural_language_text": question,
+        })
+        assert_equal("compile carrying a question succeeds", compiled["status"], "OK")
+        assert_equal(
+            "the question reaches its own column",
+            fetchall(
+                con,
+                "SELECT NATURAL_LANGUAGE_TEXT FROM SYS_SEMANTIC.AGENT_REQUEST_LOG "
+                f"WHERE AGENT_REQUEST_ID = {int(compiled['agent_request_id'])}",
+            ),
+            [(question,)],
+        )
+        # A request without one must leave the column NULL rather than inventing
+        # a value -- the key is optional in the contract.
+        silent = compile_request(con, {
+            "model": "sales",
+            "object": "SALES",
+            "metrics": ["total_revenue"],
+            "client": "verify_agent_context",
+        })
+        assert_equal(
+            "no question leaves the column NULL",
+            fetchall(
+                con,
+                "SELECT NATURAL_LANGUAGE_TEXT FROM SYS_SEMANTIC.AGENT_REQUEST_LOG "
+                f"WHERE AGENT_REQUEST_ID = {int(silent['agent_request_id'])}",
+            ),
+            [(None,)],
+        )
+
+        assert_equal(
+            "schema view has new columns",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SYS.EXA_ALL_COLUMNS "
+                "WHERE COLUMN_SCHEMA = 'SEMANTIC_AGENT' "
+                "AND COLUMN_TABLE = 'COMPILE_REQUEST_SCHEMA_FOR_AGENT' "
+                "AND COLUMN_NAME IN ('IS_REQUIRED', 'VALUE_TYPE', 'ALLOWED_VALUES')",
+            ),
+            3,
+        )
+
+        assert_at_least(
+            "schema view includes BETWEEN operator",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT "
+                "WHERE CONTRACT_SECTION = 'FILTER_OPERATOR' AND NAME = 'BETWEEN'",
+            ),
+            1,
+        )
+
+        assert_equal(
+            "schema view includes both unary null operators",
+            scalar(
+                con,
+                "SELECT COUNT(*) FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT "
+                "WHERE CONTRACT_SECTION = 'FILTER_OPERATOR' "
+                "AND NAME IN ('IS NULL', 'IS NOT NULL')",
+            ),
+            2,
+        )
+
+        assert_equal(
+            "schema view lists exactly the accepted request keys",
+            fetchall(
+                con,
+                "SELECT NAME FROM SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT "
+                "WHERE CONTRACT_SECTION = 'REQUEST_KEY' ORDER BY NAME",
+            ),
+            [
+                ("client",),
+                ("dimensions",),
+                ("filters",),
+                ("having",),
+                ("limit",),
+                ("metrics",),
+                ("model",),
+                ("natural_language_text",),
+                ("object",),
+                ("options",),
+                ("order_by",),
+                ("proof_mode",),
+                ("purpose",),
+            ],
+        )
+    finally:
+        con.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

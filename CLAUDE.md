@@ -44,6 +44,11 @@ python3 tools/install.py --example
 ```sh
 sh tools/run_smoke.sh
 ```
+It installs from scratch, checks the fresh install (`tests/integration/fresh_install/`),
+loads the example materializations, then runs the live suite in `tests/integration/`
+with pytest — every test runs, and the run ends with a summary of all failures.
+Arguments go to pytest (`sh tools/run_smoke.sh -k wrapped`). Against an already
+installed deployment, run it directly: `python3 -m pytest tests/integration -k order_by`.
 
 **Run the release gate before major releases** (smoke + wide fuzz campaign, minutes long):
 ```sh
@@ -81,15 +86,15 @@ pinned in `tools/requirements-static.txt` (plus `luarocks install luacheck 1.2.0
 
 **Run the live cold/warm and scale probe** (requires an installed model):
 ```sh
-python3 tools/verify_runtime_performance.py
+python3 tests/integration/verify_runtime_performance.py
 ```
 
-**Run a focused verification:**
+**Run a focused verification** (or select it with `pytest -k`):
 ```sh
-python3 tools/verify_structured_request_compiler.py  # structured request compiler
-python3 tools/verify_materialization_selection.py    # materialization selection
-python3 tools/verify_semantic_sql_phase1.py   # ORDER BY ordinals, BETWEEN
-python3 tools/verify_semantic_sql_phase2.py   # HAVING, metric WHERE predicates
+python3 tests/integration/verify_structured_request_compiler.py  # structured request compiler
+python3 tests/integration/verify_materialization_selection.py    # materialization selection
+python3 tests/integration/verify_semantic_sql_phase1.py   # ORDER BY ordinals, BETWEEN
+python3 tests/integration/verify_semantic_sql_phase2.py   # HAVING, metric WHERE predicates
 ```
 
 **After editing any Lua source file, regenerate the install SQL before testing:**
@@ -393,7 +398,7 @@ check `missing` *before* normalizing, not after.
 This matters most through `CALL_ADMIN_JSON`, which renders every omitted key as
 SQL NULL. Two tests hold the line: `NullNormalisationTest` in
 `tests/test_install.py` rejects the idiom statically, and
-`tools/verify_named_admin_api.py` calls every model-scoped script with only
+`tests/integration/verify_named_admin_api.py` calls every model-scoped script with only
 `MODEL_NAME` set and fails if any refusal mentions `userdata`.
 
 ### The 200-Local Ceiling Applies to the Sum, Not to a File
@@ -460,15 +465,22 @@ second convention into one namespace to say what the column already said.
 not `verify_bug26_published_f3_batch.py`. The grandfather list held 24 names for
 a week and is **now empty**: eighteen needed only the ticket prefix removed —
 the rest of `verify_bug26_published_f3_batch` was already the invariant — and the
-six `verify_milestoneN` files are named for what they protect. What made the
-rename safe was removing its risk first: `tests/test_conventions.py` now requires
-every verifier to be wired into `tools/run_smoke.sh` **and** `run_smoke.sh` to
-name no verifier that is gone, so a rename that misses one fails instead of
-silently dropping coverage.
+six `verify_milestoneN` files are named for what they protect. A rename can no
+longer drop one from the suite: pytest discovers `tests/integration/`, and
+`tests/test_conventions.py` fails on a module there that it would not collect.
 
-**A verifier shares its host-side plumbing.** `tools/verify_support.py` owns
-`connect()`, `sql_string()`, reading a script result *by column name*, and
-calling an admin script by keyword. 59 verifiers each had their own `connect()`,
+**An integration test is a pytest module.** `tests/integration/test_*.py`, with
+the `con` and `semantic_con` fixtures from `tests/integration/conftest.py`, one
+test per property, and setup and teardown in fixtures. The `verify_*.py` scripts
+that predate it still run, each as one test in its own process; `LEGACY_SCRIPTS`
+pins how many remain, and it only shrinks. Convert one when you next touch it —
+`test_wrapped_semantic_blocks.py` and `test_preprocessor_query_logging.py` are
+worked examples.
+
+**A verifier shares its host-side plumbing.** `tests/integration/verify_support.py` owns
+`connect()`, `sql_string()`, reading a script result *by column name*,
+`outcome()` for comparing what two statements answer, and calling an admin
+script by keyword. 59 verifiers each had their own `connect()`,
 29 identically; `PRIVATE_CONNECT` pins how many still do, and it only shrinks.
 Convert one when you next touch it.
 

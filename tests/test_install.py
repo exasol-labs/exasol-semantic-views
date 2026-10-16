@@ -674,21 +674,21 @@ class InstallerResetTest(unittest.TestCase):
 
         published_compound_reachability = {
             "ADD_ENTITY_REPRESENTATION_WITH_COVERAGE":
-                "tools/verify_published_multistep_declarations.py",
+                "tests/integration/verify_published_multistep_declarations.py",
             "ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY":
-                "tools/verify_fusion_governance.py",
+                "tests/integration/verify_fusion_governance.py",
             "ADD_UNIQUE_KEY_WITH_COLUMNS":
-                "tools/verify_published_multistep_declarations.py",
+                "tests/integration/verify_published_multistep_declarations.py",
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS":
-                "tools/verify_published_identity_setup.py",
+                "tests/integration/verify_published_identity_setup.py",
             "ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING":
-                "tools/verify_representation_with_identity.py",
+                "tests/integration/verify_representation_with_identity.py",
             "ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS":
-                "tools/verify_identity_binding_diagnostic.py",
+                "tests/integration/verify_identity_binding_diagnostic.py",
             "ADD_DIMENSION_WITH_BINDINGS":
-                "tools/verify_attribute_with_bindings.py",
+                "tests/integration/verify_attribute_with_bindings.py",
             "ADD_FACT_WITH_BINDINGS":
-                "tools/verify_attribute_with_bindings.py",
+                "tests/integration/verify_attribute_with_bindings.py",
         }
         compound_scripts = {name for name in add_scripts if "_WITH_" in name}
         self.assertEqual(compound_scripts, set(published_compound_reachability))
@@ -698,7 +698,7 @@ class InstallerResetTest(unittest.TestCase):
             self.assertIn("SEMANTIC_ADMIN.PUBLISH_MODEL", verifier)
 
         relationship_verifier = (
-            ROOT / "tools/verify_relationship_types_and_removal.py"
+            ROOT / "tests/integration/verify_relationship_types_and_removal.py"
         ).read_text(encoding="utf-8")
         self.assertIn("SEMANTIC_ADMIN.ADD_RELATIONSHIP", relationship_verifier)
         self.assertIn("SEMANTIC_ADMIN.PUBLISH_MODEL", relationship_verifier)
@@ -1090,7 +1090,7 @@ class NullNormalisationTest(unittest.TestCase):
     reason. `DESCRIBE_SEMANTIC_METRIC` and `EXPLAIN_SEMANTIC_METRIC` were worse
     still: they concatenated the userdata and crashed.
 
-    `tools/verify_named_admin_api.py` probes this live against every
+    `tests/integration/verify_named_admin_api.py` probes this live against every
     model-scoped script; this is the cheap static half, because the idiom is
     short enough to be retyped from memory.
     """

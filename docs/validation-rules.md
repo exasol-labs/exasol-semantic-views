@@ -464,7 +464,7 @@ The smoke now verifies:
 - valid sales model has no validation errors
 - sales metric/dimension matrix has 35 valid rows and one deliberately invalid
   pair: `total_freight` x `product_category`, which no policy can make safe
-  (`tools/verify_fanout_guardrails.py`)
+  (`tests/integration/verify_fanout_guardrails.py`)
 - metric dependencies are extracted into `METRIC_DEPENDENCIES`
 - missing source object returns `SEMANTIC_MODEL_001`
 - invalid metric dependency returns `SEMANTIC_MODEL_011`
@@ -473,7 +473,7 @@ The smoke now verifies:
   and an unrecognized or misplaced policy value warns with `SEMANTIC_MODEL_053`
 - a visible metric/dimension pair that needs a many-to-many edge returns
   `SEMANTIC_MODEL_030` with reason `MANY_TO_MANY_UNSUPPORTED`, and the compiler
-  refuses the same request (`tools/verify_many_to_many_refusal.py`)
+  refuses the same request (`tests/integration/verify_many_to_many_refusal.py`)
 - ambiguous certified synonym returns `SEMANTIC_MODEL_021`
 - stale verified query references return `SEMANTIC_MODEL_023`
 - invalid OSI extension scope or JSON returns `SEMANTIC_MODEL_026` or

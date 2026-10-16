@@ -10,7 +10,7 @@ name and this suite holds that line.
 The second half is a static invariant on the install SQL:
 `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT` hand-declares the compile
 result contract, so it can drift from the scripts it describes.
-`tools/verify_catalog_introspection.py` catches that against a live database;
+`tests/integration/verify_catalog_introspection.py` catches that against a live database;
 this catches it at parse time, without one.
 """
 

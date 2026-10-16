@@ -38,7 +38,7 @@ Runnable example files:
 - `sql/examples/sales_databricks_metric_view.yaml`
 - `sql/examples/sales_osi.yaml`
 - `sql/examples/sales_semantic_queries.sql`
-- `tools/verify_fanout_guardrails.py`
+- `tests/integration/verify_fanout_guardrails.py`
 
 The demo installs as a draft. `PUBLISH_MODEL` is what creates the
 `SEMANTIC_SALES` schema and its typed, BI-discoverable views; Semantic SQL
@@ -101,7 +101,7 @@ WHERE MODEL_NAME = 'sales' AND NOT IS_VALID;
 Run the whole walkthrough, including the wrong number the guardrail prevents:
 
 ```sh
-python3 tools/verify_fanout_guardrails.py
+python3 tests/integration/verify_fanout_guardrails.py
 ```
 
 ## Databricks UCMV Example
@@ -118,7 +118,7 @@ python3 tools/import_databricks.py sql/examples/sales_databricks_metric_view.yam
 The import path is verified by:
 
 ```sh
-python3 tools/verify_databricks_import.py
+python3 tests/integration/verify_databricks_import.py
 ```
 
 See [Databricks metric views](databricks-metric-views.md) for the supported
@@ -199,7 +199,7 @@ Run the live round-trip verifier against a local Exasol Personal deployment when
 lossless path:
 
 ```sh
-python3 tools/verify_osi_roundtrip.py
+python3 tests/integration/verify_osi_roundtrip.py
 ```
 
 YAML input and output require PyYAML. JSON validation and JSON import planning

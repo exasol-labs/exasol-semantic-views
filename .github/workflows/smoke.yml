@@ -102,4 +102,12 @@ jobs:
           PY
 
       - name: Run full smoke suite
-        run: sh tools/run_smoke.sh
+        run: sh tools/run_smoke.sh --junitxml=smoke-results.xml
+
+      - name: Upload integration test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-results
+          path: smoke-results.xml
+          if-no-files-found: ignore
