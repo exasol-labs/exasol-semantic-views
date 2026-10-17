@@ -1,3 +1,16 @@
+--- Adds an ALTERNATE representation to an entity together with coverage declarations; returns one row describing it.
+-- @script SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_COVERAGE
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that gets the representation; must be active and have an active primary representation.
+-- @param REPRESENTATION_NAME New representation name; required identifier, unique within the entity.
+-- @param SOURCE_KIND
+-- @param SOURCE_SCHEMA Schema of the alternate source; required identifier.
+-- @param SOURCE_OBJECT Table or view of the alternate source; required identifier.
+-- @param PRIORITY Positive integer priority; NULL defaults to 100.
+-- @param FRESHNESS_POLICY Optional free-text freshness policy; NULL leaves it unset.
+-- @param COVERAGE_JSON Required non-empty JSON array of {representation_name, coverage_predicate, valid_from, valid_to}, applied as one batch.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

@@ -1,3 +1,15 @@
+--- Sets the certified mapping table for a MAPPED identity binding, replacing any existing one; returns one row with the mapping id.
+-- @script SEMANTIC_ADMIN.ADD_IDENTITY_MAPPING_RELATION
+-- @param MODEL_NAME
+-- @param IDENTITY_NAME Active semantic identity whose binding is mapped; required.
+-- @param REPRESENTATION_NAME Representation with an active MAPPED binding for that identity; required.
+-- @param SOURCE_SCHEMA Schema of the mapping relation; required.
+-- @param SOURCE_OBJECT Table or view holding the mapping; required.
+-- @param SOURCE_LOCAL_COLUMN Mapping column holding the representation's local key; required.
+-- @param SEMANTIC_KEY_COLUMN Mapping column holding the semantic identity key; required.
+-- @param CERTIFICATION_STATUS Must be CERTIFIED (case-insensitive); any other value is refused.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

@@ -1,3 +1,7 @@
+--- Sets SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR as the session's SQL preprocessor; returns one status row.
+-- @script SEMANTIC_ADMIN.ENABLE_SEMANTIC_SQL
+-- @returns TABLE
+
 query([[ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR]])
 exit({{"OK", "SESSION", "SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR", "Semantic SQL enabled for this session."}}, [[
   STATUS VARCHAR(32),

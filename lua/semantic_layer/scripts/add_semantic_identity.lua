@@ -1,3 +1,13 @@
+--- Creates or updates an entity's semantic identity, restoring it if a published model fails validation; returns one row.
+-- @script SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Active entity that owns the identity; required. An entity can hold only one active identity.
+-- @param IDENTITY_NAME Identity name; required, unique across entities. An existing one on this entity is updated.
+-- @param IDENTITY_KIND BUSINESS or GLOBAL (case-insensitive); required.
+-- @param DATA_TYPE SQL data type of the identity key; required.
+-- @param DESCRIPTION Optional description, stored as given.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

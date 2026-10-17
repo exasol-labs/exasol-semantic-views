@@ -1,3 +1,12 @@
+--- Sets display policy and sensitivity label on a semantic view's dimension or metric; returns one row with the values.
+-- @script SEMANTIC_ADMIN.SET_FIELD_POLICY
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic view that exposes the field.
+-- @param FIELD_NAME Dimension or metric column of the view; facts are refused.
+-- @param DISPLAY_POLICY Display policy text, stored trimmed; NULL clears it. Checked later by VALIDATE_MODEL.
+-- @param SENSITIVITY_LABEL Sensitivity label text, stored trimmed; NULL clears it.
+-- @returns TABLE
+
 -- How a steward sets the two handling-policy columns on a field.
 --
 -- They had no writer. `DIMENSIONS` and `METRICS` have carried DISPLAY_POLICY and

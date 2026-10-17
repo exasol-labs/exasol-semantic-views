@@ -1,3 +1,17 @@
+--- Adds a dimension on an entity, exposes it in a semantic view and validates; returns one row, rolling back on validation errors.
+-- @script SEMANTIC_ADMIN.ADD_DIMENSION
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic view (object) that exposes the dimension as a column.
+-- @param ENTITY_NAME Entity the dimension is defined on.
+-- @param DIMENSION_NAME New dimension name; must be unique across the whole model, not only the view.
+-- @param EXPRESSION Required SQL expression over the entity's source alias.
+-- @param DATA_TYPE Required SQL data type of the dimension, stored as given.
+-- @param DISPLAY_NAME Optional display name; NULL stores none.
+-- @param DESCRIPTION Optional description; NULL stores none.
+-- @param FORMAT_HINT Optional format hint; NULL stores none.
+-- @param IS_CERTIFIED
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

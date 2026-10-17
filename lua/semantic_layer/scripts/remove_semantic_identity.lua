@@ -1,3 +1,10 @@
+--- Removes an entity's semantic identity that has no active bindings; returns one row with status REMOVED.
+-- @script SEMANTIC_ADMIN.REMOVE_SEMANTIC_IDENTITY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Active entity owning the identity; required.
+-- @param IDENTITY_NAME Active identity to remove; required. Refused while active bindings exist.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

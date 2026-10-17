@@ -1,23 +1,31 @@
 # SQL Install Sources
 
-Every file here is hand-written; edit them directly. They hold the SQL — tables,
-views, grants, and the signature of every script — and no Lua. Each language
-has its own files:
+Every file here is hand-written; edit them directly. They hold the SQL —
+tables, views and grants — and no Lua. Each language has its own files:
 
 | What | Where |
 |---|---|
-| tables, views, grants, script signatures | `sql/install/*.sql` |
-| the body of each script | `lua/semantic_layer/scripts/<script_name>.lua` |
+| tables, views, grants, and where each script installs | `sql/install/*.sql` |
+| each script: its signature, documentation and body | `lua/semantic_layer/scripts/<script_name>.lua` |
 | the runtime libraries the scripts import | `lua/semantic_layer/{shared,compiler,admin,agent}/` |
 
-A script's body is one line in its source, naming the file:
+A script is one line in the source that installs it:
 
 ```sql
-CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.CREATE_MODEL(
-  MODEL_NAME, PUBLISHED_SCHEMA, DESCRIPTION, OWNER_ROLE
-) AS
 -- @lua lua/semantic_layer/scripts/create_model.lua
-/
+```
+
+The file opens with an annotation block, from which the build writes the
+`CREATE OR REPLACE SCRIPT` statement and the script's rows in
+`SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS`; the format is in
+[`lua/semantic_layer/scripts/PARAMETERS.md`](../../lua/semantic_layer/scripts/PARAMETERS.md):
+
+```lua
+--- Creates a DRAFT semantic model with its initial version 1 and sets it active; returns nothing.
+-- @script SEMANTIC_ADMIN.CREATE_MODEL
+-- @param MODEL_NAME
+-- @param PUBLISHED_SCHEMA Schema that PUBLISH_MODEL will create views in; required identifier.
+-- @returns nothing
 ```
 
 A part that is generated rather than written is one line too:
@@ -43,10 +51,11 @@ python3 tools/install.py
 |---|---|---|
 | `SEMANTIC_ADMIN.<NAME>_RUNTIME` (six) | `003`, `006` | the `lua/` modules listed for it in `RUNTIMES` in `tools/package_lua_scripts.py` |
 | `SEMANTIC_SOURCE_VIEWS` | `001b` | the `SEMANTIC_SOURCE.*` tables the compiler reads |
-| `ADMIN_SCRIPT_PARAMETERS` | `002` | the signature of every script in the build |
+| `ADMIN_SCRIPT_PARAMETERS` | `002` | the annotated signature and descriptions of every script |
 
-The build refuses a body file no script names, a script defined twice, and a
-placeholder nothing fills.
+The build refuses a script file no source installs, a script defined twice, a
+placeholder nothing fills, and an annotation block that is incomplete: no
+summary, a parameter without a description, or one the body never reads.
 
 ## File order
 

@@ -1,3 +1,21 @@
+--- Adds a dimension or fact with explicit per-representation bindings and validates, rolling back on error; returns one row.
+-- @script SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS
+-- @param ATTRIBUTE_TYPE DIMENSION or FACT (case-insensitive); required.
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic object that exposes the dimension; required for DIMENSION, ignored for FACT.
+-- @param ENTITY_NAME Active entity the attribute is declared on; required.
+-- @param ATTRIBUTE_NAME New dimension or fact name; required identifier, unique in the model.
+-- @param EXPRESSION SQL expression; required. Supplies the primary representation's binding.
+-- @param DATA_TYPE SQL data type; required.
+-- @param ADDITIVE_POLICY For FACT only: ADDITIVE, SEMI_ADDITIVE or NON_ADDITIVE. Ignored for DIMENSION.
+-- @param DISPLAY_NAME Optional display label; NULL leaves it unset.
+-- @param DESCRIPTION Optional description; NULL leaves it unset.
+-- @param FORMAT_HINT Optional format hint; stored for DIMENSION only.
+-- @param IS_PRIVATE Boolean for FACT only; true, 'true' or '1' marks it private. NULL means FALSE.
+-- @param IS_CERTIFIED
+-- @param BINDINGS_JSON JSON array of {representation_name, source_expression, binding_role PREFER|FALLBACK, binding_priority}, per alternate.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or string.match(tostring(value), "^%s*$") ~= nil

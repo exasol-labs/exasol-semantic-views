@@ -1,3 +1,8 @@
+--- Re-validates a model and returns one row per ERROR or PRECONDITION finding absent from the previous validation run.
+-- @script SEMANTIC_ADMIN.NEW_VALIDATION_ERRORS
+-- @param MODEL_NAME
+-- @returns TABLE
+
 -- Revalidate a candidate and report only the errors it *introduced*.
 --
 -- Every published mutator reverts itself when the candidate model fails

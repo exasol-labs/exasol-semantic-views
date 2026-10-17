@@ -1,3 +1,16 @@
+--- Registers an alternate representation with optional authority, coverage, identity and attribute bindings in one call; returns one row.
+-- @script SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that must already have an active PRIMARY representation.
+-- @param REPRESENTATION_NAME New representation name, unique per entity.
+-- @param SOURCE_KIND
+-- @param SOURCE_SCHEMA Schema of the source table or view (identifier).
+-- @param SOURCE_OBJECT Table or view name in SOURCE_SCHEMA (identifier).
+-- @param PRIORITY Positive integer; NULL defaults to 100.
+-- @param FRESHNESS_POLICY Optional freshness policy text; NULL stores none.
+-- @param DECLARATIONS_JSON Object, keys optional: authority, coverage [..], identity {..}, attribute_bindings [..]. NULL/{} = plain registration.
+-- @returns TABLE
+
 -- One entry point for registering a representation with whatever has to be
 -- declared alongside it.
 --

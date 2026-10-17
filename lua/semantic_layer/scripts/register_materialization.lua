@@ -1,3 +1,13 @@
+--- Registers an existing table or view as an aggregate materialization for a model; returns nothing.
+-- @script SEMANTIC_ADMIN.REGISTER_MATERIALIZATION
+-- @param MODEL_NAME
+-- @param MATERIALIZATION_NAME New materialization name, unique in the model's active version.
+-- @param PHYSICAL_SCHEMA Schema of the physical table or view, which must exist.
+-- @param PHYSICAL_OBJECT Table or view name in PHYSICAL_SCHEMA.
+-- @param MATERIALIZATION_TYPE Must be AGGREGATE.
+-- @param FRESHNESS_POLICY ALWAYS, MANUAL, SNAPSHOT or MAX_AGE <n> MINUTES|HOURS|DAYS; NULL leaves it undeclared.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

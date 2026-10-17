@@ -1,3 +1,9 @@
+--- Removes a semantic view with its dimensions and metrics and drops its published view; returns one summary row.
+-- @script SEMANTIC_ADMIN.REMOVE_SEMANTIC_OBJECT
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic view to remove; refused if another view's metric depends on its metrics.
+-- @returns TABLE
+
 -- Take a semantic view out of a model.
 --
 -- Until this existed there was no way to. ADD_SEMANTIC_OBJECT had no counterpart,

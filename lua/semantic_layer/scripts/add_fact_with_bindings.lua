@@ -1,3 +1,18 @@
+--- Adds a fact on an entity with per-representation attribute bindings; returns one row with the fact id and active binding count.
+-- @script SEMANTIC_ADMIN.ADD_FACT_WITH_BINDINGS
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity the fact is defined on.
+-- @param FACT_NAME New fact name, unique in the model's active version.
+-- @param EXPRESSION Required SQL expression for the primary representation.
+-- @param DATA_TYPE Required SQL data type of the fact.
+-- @param ADDITIVE_POLICY ADDITIVE, SEMI_ADDITIVE or NON_ADDITIVE.
+-- @param DISPLAY_NAME Optional display name; NULL stores none.
+-- @param DESCRIPTION Optional description; NULL stores none.
+-- @param IS_PRIVATE
+-- @param IS_CERTIFIED
+-- @param BINDINGS_JSON Array of {representation_name, source_expression, binding_role: PREFER|FALLBACK, binding_priority}.
+-- @returns TABLE
+
 query([[
     EXECUTE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
       'FACT', :model_name, NULL, :entity_name, :attribute_name,

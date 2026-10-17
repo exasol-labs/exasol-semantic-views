@@ -1,3 +1,18 @@
+--- Adds a dimension together with its bindings for every active alternate representation; returns one row with the binding count.
+-- @script SEMANTIC_ADMIN.ADD_DIMENSION_WITH_BINDINGS
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic object that exposes the dimension. Required; must be active.
+-- @param ENTITY_NAME Entity the dimension is declared on. Required; must be active.
+-- @param DIMENSION_NAME New dimension name; must be unique in the model and in the object's columns.
+-- @param EXPRESSION Dimension expression on the primary representation (also used for temporal partitions). Required.
+-- @param DATA_TYPE SQL data type of the dimension. Required.
+-- @param DISPLAY_NAME Optional display name; NULL stores NULL.
+-- @param DESCRIPTION Optional description; NULL stores NULL.
+-- @param FORMAT_HINT Optional format hint; NULL stores NULL.
+-- @param IS_CERTIFIED
+-- @param BINDINGS_JSON JSON array of {representation_name, source_expression, binding_role: PREFER|FALLBACK, binding_priority}.
+-- @returns TABLE
+
 query([[
     EXECUTE SCRIPT SEMANTIC_ADMIN.ATTRIBUTE_WITH_BINDINGS(
       'DIMENSION', :model_name, :object_name, :entity_name, :attribute_name,

@@ -1,3 +1,14 @@
+--- Adds a semantic identity to an entity with a binding for every active representation; returns one row per binding.
+-- @script SEMANTIC_ADMIN.ADD_SEMANTIC_IDENTITY_WITH_BINDINGS
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that receives the identity; it must not already have an active one.
+-- @param IDENTITY_NAME New identity name, unique among the model's active identities.
+-- @param IDENTITY_KIND BUSINESS or GLOBAL.
+-- @param DATA_TYPE Required SQL data type of the identity value.
+-- @param DESCRIPTION Optional description, stored as given.
+-- @param BINDINGS_JSON Array, one per active representation: {representation_name, source_expression, binding_kind: DIRECT|MAPPED, mapping}.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""

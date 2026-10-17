@@ -1,3 +1,9 @@
+--- Sets whether a model's published objects may be joined as derived tables in ordinary SQL and clears its compile cache; returns nothing.
+-- @script SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION
+-- @param MODEL_NAME
+-- @param ALLOWED Required: TRUE, YES or 1 allows composition; FALSE, NO or 0 refuses it (case-insensitive).
+-- @returns nothing
+
 -- Whether this model's published objects may be composed with other relations
 -- in ordinary SQL.
 --

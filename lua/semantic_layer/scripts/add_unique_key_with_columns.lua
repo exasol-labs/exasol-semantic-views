@@ -1,3 +1,14 @@
+--- Declares a unique key and its columns on an entity, restoring on a published-model validation error; returns one row per column.
+-- @script SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Active entity that owns the key; required.
+-- @param KEY_NAME Key name; required identifier, unique within the entity.
+-- @param KEY_KIND PRIMARY, UNIQUE or ALTERNATE; NULL defaults to UNIQUE.
+-- @param DESCRIPTION Optional description; NULL leaves it unset.
+-- @param SOURCE_FORMAT Format label, upper-cased; NULL defaults to OSI.
+-- @param COLUMNS_JSON Non-empty JSON array of {column_name or expression, ordinal_position?}; ordinals contiguous from 1, default list order.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""

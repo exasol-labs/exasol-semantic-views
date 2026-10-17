@@ -1,3 +1,13 @@
+--- Sets a representation's coverage predicate and validity bounds, restoring on validation error; returns one row.
+-- @script SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity owning the representation; required.
+-- @param REPRESENTATION_NAME Active representation to update; required.
+-- @param COVERAGE_PREDICATE SQL predicate of the rows this representation covers; NULL clears coverage and needs NULL bounds.
+-- @param VALID_FROM Lower validity bound; with a predicate, VALID_FROM or VALID_TO is required.
+-- @param VALID_TO Upper validity bound; with a predicate, VALID_FROM or VALID_TO is required.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

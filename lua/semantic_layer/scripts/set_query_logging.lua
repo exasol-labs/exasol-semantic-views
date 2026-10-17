@@ -1,3 +1,9 @@
+--- Sets preprocessor query logging for the deployment or the current session; returns one row with the effective setting.
+-- @script SEMANTIC_ADMIN.SET_QUERY_LOGGING
+-- @param SCOPE DEPLOYMENT or SESSION (case-insensitive).
+-- @param LOGGING ON or OFF (case-insensitive); NULL with SCOPE SESSION clears the session override.
+-- @returns TABLE
+
 local function word(value)
     if value == nil or value == null then return "" end
     return string.upper(tostring(value):match("^%s*(.-)%s*$"))

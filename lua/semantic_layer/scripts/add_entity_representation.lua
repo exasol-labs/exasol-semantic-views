@@ -1,3 +1,15 @@
+--- Registers an ALTERNATE source for an entity and reports issues in its seeded bindings; returns one row with the representation.
+-- @script SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that must already have an active PRIMARY representation.
+-- @param REPRESENTATION_NAME New representation name, unique per entity.
+-- @param SOURCE_KIND
+-- @param SOURCE_SCHEMA Schema of the source table or view (identifier).
+-- @param SOURCE_OBJECT Table or view name in SOURCE_SCHEMA (identifier).
+-- @param PRIORITY Positive integer; NULL defaults to 100.
+-- @param FRESHNESS_POLICY Optional freshness policy text, stored as given; NULL stores none.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

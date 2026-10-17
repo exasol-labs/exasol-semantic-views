@@ -30,6 +30,20 @@ All notable changes to Exasol Semantic Views are documented here.
   are unchanged. Release bundles ship `build/install/` built. **If you ran the
   files in `sql/install/` by hand, run them from `build/install/` instead.**
 
+#### Each script is one annotated file, and its parameters are described
+
+- A script's signature moved out of the SQL into its `.lua` file, as an
+  annotation block — `--- summary`, `@script`, `@param NAME [description]`,
+  `@returns` — and the build generates the `CREATE SCRIPT` statement from it.
+  A source installs a script with one line, `-- @lua <path>`.
+- `SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS` gains `PARAMETER_DESCRIPTION` and
+  `SCRIPT_DESCRIPTION`: every one of the 93 scripts and 412 parameters is
+  described. A parameter that means the same everywhere (`MODEL_NAME`,
+  `IS_CERTIFIED`, …) is described once, in
+  `lua/semantic_layer/scripts/PARAMETERS.md`.
+- The build refuses a parameter without a description and one the body never
+  reads.
+
 ### Fixed
 
 #### Three admin messages still used bare fusion labels

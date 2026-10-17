@@ -1,3 +1,12 @@
+--- Adds a search synonym to a model element; returns one row echoing the synonym and its source.
+-- @script SEMANTIC_ADMIN.ADD_SYNONYM
+-- @param MODEL_NAME
+-- @param OBJECT_TYPE Element kind: SEMANTIC_OBJECT, ENTITY, DIMENSION, FACT or METRIC; required.
+-- @param OBJECT_NAME Name of the element; required identifier, must exist.
+-- @param SYNONYM Synonym text; required, unique per element (case-insensitive).
+-- @param SOURCE Origin label, upper-cased; NULL defaults to MANUAL.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

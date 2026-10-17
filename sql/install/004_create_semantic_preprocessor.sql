@@ -1,8 +1,6 @@
 ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = NULL;
 
-CREATE OR REPLACE LUA PREPROCESSOR SCRIPT SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR AS
 -- @lua lua/semantic_layer/scripts/semantic_preprocessor.lua
-/
 
 -- Database-wide activation is the supported BI deployment mode
 -- (docs/admin-db-wide-setup.md), and Exasol runs the preprocessor as the caller.

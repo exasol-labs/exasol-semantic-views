@@ -1,3 +1,9 @@
+--- Explains a past compilation by handle; returns one row with request, generated SQL, plan and governance narrative.
+-- @script SEMANTIC_ADMIN.EXPLAIN_COMPILED_SQL
+-- @param HANDLE_TYPE AGENT_REQUEST (or AGENT_REQUEST_ID, AGENT) or QUERY_LOG (or QUERY_LOG_ID, SQL).
+-- @param HANDLE_ID Numeric id of the agent request or query log entry; another principal's handle reports as not found.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.AGENT_RUNTIME", "agent")
 
 local rows = agent.explain_compiled_sql(HANDLE_TYPE, HANDLE_ID)

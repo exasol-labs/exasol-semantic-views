@@ -22,6 +22,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import re
+import typing
 from pathlib import Path
 
 
@@ -306,6 +307,10 @@ def check_main_chunk_locals(path: Path, text: str) -> None:
         )
 
 
+def sql_text_literal(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
 def admin_script_parameters_block(built: dict[str, str] | None = None) -> str:
     """A queryable signature for every callable SEMANTIC_ADMIN script.
 
@@ -318,6 +323,7 @@ def admin_script_parameters_block(built: dict[str, str] | None = None) -> str:
     """
     if built is None:
         built = assemble_without_parameters()
+    registry = script_registry()
     rows: list[str] = []
     published: set[str] = set()
     declared: set[str] = set()
@@ -336,20 +342,26 @@ def admin_script_parameters_block(built: dict[str, str] | None = None) -> str:
                 for parameter in (match.group(2) or "").split(",")
                 if parameter.strip()
             ]
+            script = registry[script_name]
+            if [name for name, _ in script.params] != parameters:
+                raise SystemExit(f"package_lua_scripts: {script_name}'s signature and its "
+                                 "@param annotations disagree")
+            summary = sql_text_literal(script.summary)
             if not parameters:
                 rows.append(
                     f"  ('{script_name}', 0, NULL, NULL, "
-                    f"'EXECUTE SCRIPT SEMANTIC_ADMIN.{script_name}()')"
+                    f"'EXECUTE SCRIPT SEMANTIC_ADMIN.{script_name}()', NULL, {summary})"
                 )
                 continue
             template = "EXECUTE SCRIPT SEMANTIC_ADMIN.{}({})".format(
                 script_name, ", ".join(f"<{name.lower()}>" for name in parameters)
             )
             escaped_template = template.replace("'", "''")
-            for ordinal, parameter in enumerate(parameters, start=1):
+            for ordinal, (parameter, description) in enumerate(script.params, start=1):
                 rows.append(
                     f"  ('{script_name}', {len(parameters)}, {ordinal}, "
-                    f"'{parameter}', '{escaped_template}')"
+                    f"'{parameter}', '{escaped_template}', "
+                    f"{sql_text_literal(description)}, {summary})"
                 )
     # Enforce the "cannot drift" claim instead of intending it. A callable script
     # that the signature pattern fails to match is invisible to CALL_ADMIN_JSON
@@ -380,10 +392,13 @@ SELECT
   CAST(PARAMETER_COUNT AS DECIMAL(18,0)) AS PARAMETER_COUNT,
   CAST(ORDINAL_POSITION AS DECIMAL(18,0)) AS ORDINAL_POSITION,
   CAST(PARAMETER_NAME AS VARCHAR(128)) AS PARAMETER_NAME,
-  CAST(CALL_TEMPLATE AS VARCHAR(2000000)) AS CALL_TEMPLATE
+  CAST(CALL_TEMPLATE AS VARCHAR(2000000)) AS CALL_TEMPLATE,
+  CAST(PARAMETER_DESCRIPTION AS VARCHAR(2000)) AS PARAMETER_DESCRIPTION,
+  CAST(SCRIPT_DESCRIPTION AS VARCHAR(2000)) AS SCRIPT_DESCRIPTION
 FROM (VALUES
 {body}
-) AS signatures (SCRIPT_NAME, PARAMETER_COUNT, ORDINAL_POSITION, PARAMETER_NAME, CALL_TEMPLATE);
+) AS signatures (SCRIPT_NAME, PARAMETER_COUNT, ORDINAL_POSITION, PARAMETER_NAME, CALL_TEMPLATE,
+                 PARAMETER_DESCRIPTION, SCRIPT_DESCRIPTION);
 {SCRIPT_PARAMETERS_END}"""
 
 
@@ -462,28 +477,146 @@ LUA_BODY = re.compile(r"^-- @lua (\S+)$", re.M)
 SCRIPTS_DIR = ROOT / "lua/semantic_layer/scripts"
 
 
-def inline_script_bodies(texts: dict[str, str]) -> dict[str, str]:
-    """Put each `-- @lua <path>` script body in place, and account for every file.
+PARAMETERS_DOC = SCRIPTS_DIR / "PARAMETERS.md"
 
-    The body file holds exactly the lines between a script's `AS` and its `/`,
-    so the built statement is the one that would have been written inline.
+# The annotation block at the top of a script file: a `--- summary` line, then
+# tags. It stays in the installed body, so a line number Exasol reports is the
+# line number in the file.
+ANNOTATION_TAG = re.compile(r"^-- @(\w+)(?:\s+(.*?))?\s*$")
+SCRIPT_KINDS = {
+    "scripting": "CREATE OR REPLACE SCRIPT",
+    "scalar": "CREATE OR REPLACE LUA SCALAR SCRIPT",
+    "preprocessor": "CREATE OR REPLACE LUA PREPROCESSOR SCRIPT",
+}
+PARAMETER_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+class Script(typing.NamedTuple):
+    """One script, as its file's annotations declare it.
+
+    A NamedTuple rather than a dataclass: this module is loaded by path from the
+    installer, the tests and the linter, and a dataclass needs its module
+    registered in sys.modules.
     """
+
+    path: Path
+    name: str                         # e.g. CREATE_MODEL, in schema SEMANTIC_ADMIN
+    kind: str                         # a key of SCRIPT_KINDS
+    summary: str
+    params: tuple[tuple[str, str], ...]   # (name, description), in call order
+    returns: str                      # TABLE, ROWCOUNT, nothing, or a scalar type
+
+    def statement(self) -> str:
+        """The CREATE SCRIPT statement: generated header, the file as the body."""
+        head = f"{SCRIPT_KINDS[self.kind]} SEMANTIC_ADMIN.{self.name}"
+        if self.kind != "preprocessor":
+            names = [name for name, _ in self.params]
+            head += ("(\n" + ",\n".join(f"  {name}" for name in names) + "\n)") if names else "()"
+        head += " AS" if self.returns == "nothing" else f"\nRETURNS {self.returns} AS"
+        body = self.path.read_text(encoding="utf-8").removesuffix("\n")
+        return f"{head}\n{body}\n/"
+
+
+def shared_parameter_descriptions() -> dict[str, str]:
+    """`| `NAME` | description |` rows of lua/semantic_layer/scripts/PARAMETERS.md."""
+    rows = re.findall(r"^\| `([A-Z][A-Z0-9_]*)` \| (.+?) \|$",
+                      PARAMETERS_DOC.read_text(encoding="utf-8"), re.M)
+    shared: dict[str, str] = {}
+    for name, description in rows:
+        if name in shared:
+            raise SystemExit(f"package_lua_scripts: {PARAMETERS_DOC.name} describes {name} twice")
+        shared[name] = description.strip()
+    return shared
+
+
+def parse_script(path: Path, shared: dict[str, str]) -> Script:
+    """Read a script file's annotation block; refuse anything incomplete."""
+    where = path.relative_to(ROOT) if path.is_relative_to(ROOT) else path
+    lines = path.read_text(encoding="utf-8").split("\n")
+    block = []
+    for line in lines:
+        if not line.startswith("--"):
+            break
+        block.append(line)
+    if not block or not block[0].startswith("--- ") or not block[0][4:].strip():
+        raise SystemExit(f"{where}: must open with a `--- <summary>` line")
+    summary = block[0][4:].strip()
+    tags: dict[str, list[str]] = {}
+    for line in block[1:]:
+        match = ANNOTATION_TAG.match(line)
+        if match:
+            tags.setdefault(match.group(1), []).append(match.group(2) or "")
+    unknown = sorted(set(tags) - {"script", "kind", "param", "returns"})
+    if unknown:
+        raise SystemExit(f"{where}: unknown annotation(s) " + ", ".join("@" + t for t in unknown))
+    for single in ("script", "returns"):
+        if len(tags.get(single, [])) != 1:
+            raise SystemExit(f"{where}: needs exactly one @{single}")
+    qualified = tags["script"][0]
+    expected = f"SEMANTIC_ADMIN.{path.stem.upper()}"
+    if qualified != expected:
+        raise SystemExit(f"{where}: @script {qualified}; the file name says {expected}")
+    kind = (tags.get("kind") or ["scripting"])[0]
+    if kind not in SCRIPT_KINDS:
+        raise SystemExit(f"{where}: @kind {kind}; expected one of {', '.join(SCRIPT_KINDS)}")
+    params: list[tuple[str, str]] = []
+    for text in tags.get("param", []):
+        name, _, description = text.partition(" ")
+        description = description.strip() or shared.get(name, "")
+        if not PARAMETER_NAME.match(name):
+            raise SystemExit(f"{where}: @param '{name}' is not an upper-case parameter name")
+        if any(name == seen for seen, _ in params):
+            raise SystemExit(f"{where}: @param {name} declared twice")
+        if not description:
+            raise SystemExit(f"{where}: @param {name} has no description here or in "
+                             f"{PARAMETERS_DOC.relative_to(ROOT)}")
+        params.append((name, description))
+    if kind != "scripting" and params:
+        raise SystemExit(f"{where}: only a scripting script takes @param")
+    returns = tags["returns"][0]
+    if kind == "scripting" and returns not in ("TABLE", "ROWCOUNT", "nothing"):
+        raise SystemExit(f"{where}: @returns {returns}; a scripting script returns TABLE, ROWCOUNT or nothing")
+    if kind == "preprocessor" and returns != "nothing":
+        raise SystemExit(f"{where}: a preprocessor returns nothing")
+    body = "\n".join(lines[len(block):])
+    unused = [name for name, _ in params if not re.search(rf"\b{name}\b", body)]
+    if unused:
+        raise SystemExit(f"{where}: declares @param {', '.join(unused)} but never reads it")
+    return Script(path, path.stem.upper(), kind, summary, tuple(params), returns)
+
+
+def script_registry() -> dict[str, Script]:
+    """Every script file, parsed, by script name."""
+    shared = shared_parameter_descriptions()
+    scripts = {path.stem.upper(): parse_script(path, shared)
+               for path in sorted(SCRIPTS_DIR.glob("*.lua"))}
+    used = {name for script in scripts.values() for name, _ in script.params}
+    stale = sorted(set(shared) - used)
+    if stale:
+        raise SystemExit(f"package_lua_scripts: {PARAMETERS_DOC.name} describes parameters "
+                         "no script takes: " + ", ".join(stale))
+    return scripts
+
+
+def inline_scripts(texts: dict[str, str]) -> dict[str, str]:
+    """Replace each `-- @lua <path>` line with that script's whole statement."""
+    registry = script_registry()
     used: set[Path] = set()
 
-    def body(match: re.Match[str]) -> str:
+    def statement(match: re.Match[str]) -> str:
         path = (ROOT / match.group(1)).resolve()
         if path.parent != SCRIPTS_DIR or not path.is_file():
             raise SystemExit(f"package_lua_scripts: '-- @lua {match.group(1)}' names no "
                              f"file in {SCRIPTS_DIR.relative_to(ROOT)}/")
         if path in used:
-            raise SystemExit(f"package_lua_scripts: {match.group(1)} is the body of two scripts")
+            raise SystemExit(f"package_lua_scripts: {match.group(1)} is installed twice")
         used.add(path)
-        return path.read_text(encoding="utf-8").removesuffix("\n")
+        return registry[path.stem.upper()].statement()
 
-    inlined = {name: LUA_BODY.sub(body, text) for name, text in texts.items()}
+    inlined = {name: LUA_BODY.sub(statement, text) for name, text in texts.items()}
     orphans = sorted(path.name for path in SCRIPTS_DIR.glob("*.lua") if path.resolve() not in used)
     if orphans:
-        raise SystemExit("package_lua_scripts: no script uses " + ", ".join(orphans))
+        raise SystemExit("package_lua_scripts: no source installs " + ", ".join(orphans))
     return inlined
 
 
@@ -531,7 +664,7 @@ def sources() -> dict[str, str]:
             raise SystemExit(
                 f"package_lua_scripts: sql/install/{name} contains generated text. "
                 "Sources hold a one-line '-- @generated <NAME>' placeholder instead.")
-    return inline_script_bodies(texts)
+    return inline_scripts(texts)
 
 
 def assemble_without_parameters() -> dict[str, str]:

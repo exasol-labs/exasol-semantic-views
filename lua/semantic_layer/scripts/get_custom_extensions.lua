@@ -1,3 +1,11 @@
+--- Lists vendor extension payloads stored on a model, optionally filtered; returns one row per extension.
+-- @script SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
+-- @param MODEL_NAME
+-- @param SCOPE_TYPE Optional filter: MODEL, SEMANTIC_OBJECT, ENTITY, RELATIONSHIP, DIMENSION, FACT or METRIC. NULL lists all scopes.
+-- @param SCOPE_NAME Element name for the SCOPE_TYPE filter; required when SCOPE_TYPE is set and not MODEL.
+-- @param VENDOR_NAME Optional vendor filter (case-insensitive); NULL lists all vendors.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

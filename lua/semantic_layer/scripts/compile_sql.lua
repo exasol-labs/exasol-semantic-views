@@ -1,3 +1,8 @@
+--- Compiles a Semantic SQL query into governed SQL; returns one row with status, generated SQL, plan and handles.
+-- @script SEMANTIC_ADMIN.COMPILE_SQL
+-- @param ORIGINAL_SQL Semantic SQL statement to compile; echoed back in the ORIGINAL_SQL column.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
 
 local result = compiler.compile_sql(ORIGINAL_SQL)

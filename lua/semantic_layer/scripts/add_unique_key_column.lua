@@ -1,3 +1,13 @@
+--- Adds or replaces a column of an entity's unique key, undoing it on a published model if validation fails; returns one row.
+-- @script SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that owns the unique key. Required.
+-- @param KEY_NAME Existing unique key on the entity. Required.
+-- @param COLUMN_NAME Key column name; give exactly one of COLUMN_NAME or EXPRESSION.
+-- @param EXPRESSION Key SQL expression; give exactly one of COLUMN_NAME or EXPRESSION.
+-- @param ORDINAL_POSITION Position in the key; an existing column there is replaced. NULL appends after the last.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

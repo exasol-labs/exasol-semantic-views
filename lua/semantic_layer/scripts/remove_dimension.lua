@@ -1,3 +1,10 @@
+--- Removes a dimension with its object column, bindings and fusion policy, then revalidates; returns one status row.
+-- @script SEMANTIC_ADMIN.REMOVE_DIMENSION
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic object that exposes the dimension; required, must exist.
+-- @param DIMENSION_NAME Dimension to remove; required, must exist.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

@@ -1,3 +1,8 @@
+--- Re-runs PUBLISH_MODEL for a model; returns one row per published view.
+-- @script SEMANTIC_ADMIN.REFRESH_SEMANTIC_SURFACE
+-- @param MODEL_NAME
+-- @returns TABLE
+
 local function row_value(row, name, position)
     if row == nil then
         return nil

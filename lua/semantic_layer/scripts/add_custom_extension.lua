@@ -1,3 +1,14 @@
+--- Stores or updates a vendor extension JSON payload on a model element; returns one row with its id and whether it was an update.
+-- @script SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION
+-- @param MODEL_NAME
+-- @param SCOPE_TYPE Element kind: MODEL, SEMANTIC_OBJECT, ENTITY, RELATIONSHIP, DIMENSION, FACT or METRIC (case-insensitive); required.
+-- @param SCOPE_NAME Name of the scoped element; ignored for MODEL, required for every other SCOPE_TYPE.
+-- @param VENDOR_NAME Vendor that owns the payload; required. Part of the upsert key.
+-- @param DATA_JSON Extension payload; required and must be valid JSON (any shape). Replaces the stored payload on update.
+-- @param SOURCE_FORMAT Format label, upper-cased; NULL defaults to OSI. Part of the upsert key.
+-- @param EXTENSION_NAME Extension name within the vendor; NULL defaults to 'default'. Part of the upsert key.
+-- @returns TABLE
+
 local JSON_NULL = {}
 
 local function missing(value)

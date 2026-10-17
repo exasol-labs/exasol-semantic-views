@@ -1,3 +1,8 @@
+--- Rewrites session statements that are Semantic DDL or queries on published semantic schemas; others pass unchanged; returns nothing.
+-- @script SEMANTIC_ADMIN.SEMANTIC_PREPROCESSOR
+-- @kind preprocessor
+-- @returns nothing
+
 -- This script runs for EVERY statement in the session -- and every nested query
 -- a Lua script issues is itself a statement, so this cost is multiplied by the
 -- internal query count of every admin script that runs in the session.

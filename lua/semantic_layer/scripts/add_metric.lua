@@ -1,3 +1,20 @@
+--- Adds a metric to a semantic object and rolls it back if model validation fails; returns one row for the new metric.
+-- @script SEMANTIC_ADMIN.ADD_METRIC
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic object that exposes the metric. Required.
+-- @param METRIC_NAME New metric name; must be unique in the model and in the object's columns.
+-- @param EXPRESSION Metric SQL expression. Required.
+-- @param FILTER_EXPR Optional SQL filter applied to the metric; NULL means no filter.
+-- @param METRIC_TYPE One of ADDITIVE, RATIO, DISTINCT, SEMI_ADDITIVE, WINDOW, DERIVED (case-insensitive). Required.
+-- @param BASE_ENTITY_NAME Entity the metric aggregates over. Required.
+-- @param DATA_TYPE SQL data type of the metric result. Required.
+-- @param DISPLAY_NAME Optional display name; NULL stores NULL.
+-- @param DESCRIPTION Optional description; NULL stores NULL.
+-- @param FORMAT_HINT Optional format hint; NULL stores NULL.
+-- @param IS_PRIVATE
+-- @param IS_CERTIFIED
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

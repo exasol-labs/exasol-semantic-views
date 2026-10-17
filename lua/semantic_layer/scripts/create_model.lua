@@ -1,3 +1,11 @@
+--- Creates a DRAFT semantic model with its initial version 1 and sets it active; returns nothing.
+-- @script SEMANTIC_ADMIN.CREATE_MODEL
+-- @param MODEL_NAME
+-- @param PUBLISHED_SCHEMA Schema that PUBLISH_MODEL will create views in; required identifier.
+-- @param DESCRIPTION Optional model description; NULL leaves it unset.
+-- @param OWNER_ROLE Optional owning role name; NULL leaves it unset.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

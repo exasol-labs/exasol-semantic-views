@@ -1253,24 +1253,68 @@ class SourcesAreHandWrittenTest(unittest.TestCase):
                 self.assertGreaterEqual(found, 0, f"{path.name}: source text missing")
                 position = found + len(literal)
 
-    def test_no_source_holds_lua(self):
-        """Every script's body is a file in lua/semantic_layer/scripts/, named after it."""
-        header = re.compile(r"^CREATE OR REPLACE (?:LUA )?(?:[A-Z]+ )?SCRIPT SEMANTIC_ADMIN\.(\w+)"
-                            r"[^/]*?\bAS\n(.*?)^/$", re.S | re.M)
-        scripts = 0
+    def test_no_source_declares_a_script(self):
+        """A script is its file: the SQL places it with one `-- @lua <path>` line."""
+        placed = []
         for path in sorted((ROOT / "sql/install").glob("*.sql")):
-            for name, body in header.findall(path.read_text(encoding="utf-8")):
-                scripts += 1
-                self.assertEqual(
-                    f"-- @lua lua/semantic_layer/scripts/{name.lower()}.lua\n", body,
-                    f"{path.name}: {name} must have its body in its own .lua file")
-        self.assertEqual(scripts, len(list((ROOT / "lua/semantic_layer/scripts").glob("*.lua"))))
+            text = path.read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"(?m)^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT\b",
+                                f"{path.name} declares a script; annotate its .lua file instead")
+            placed += PACKAGER.LUA_BODY.findall(text)
+        files = sorted(f"lua/semantic_layer/scripts/{path.name}"
+                       for path in (ROOT / "lua/semantic_layer/scripts").glob("*.lua"))
+        self.assertEqual(files, sorted(placed))
 
     def test_the_installer_runs_the_build(self):
         self.assertTrue(all(path.parent == ROOT / "build/install"
                             for path in INSTALL.INSTALL_FILES))
         self.assertEqual(sorted(path.name for path in INSTALL.INSTALL_FILES),
                          sorted(built_install.files()))
+
+
+class ScriptAnnotationTest(unittest.TestCase):
+    """The annotation block is the script's signature; the build refuses a bad one."""
+
+    def parse(self, text: str, name: str = "probe_script"):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        path = Path(scratch.name) / f"{name}.lua"
+        path.write_text(text, encoding="utf-8")
+        return PACKAGER.parse_script(path, {"MODEL_NAME": "the model"})
+
+    def refused(self, text: str, fragment: str, name: str = "probe_script"):
+        with self.assertRaises(SystemExit) as raised:
+            self.parse(text, name)
+        self.assertIn(fragment, str(raised.exception))
+
+    GOOD = ("--- Probes.\n-- @script SEMANTIC_ADMIN.PROBE_SCRIPT\n-- @param MODEL_NAME\n"
+            "-- @param LIMIT_ROWS How many.\n-- @returns TABLE\n\nexit({{MODEL_NAME, LIMIT_ROWS}})\n")
+
+    def test_a_complete_block_becomes_the_statement(self):
+        script = self.parse(self.GOOD)
+        self.assertEqual(script.params, (("MODEL_NAME", "the model"), ("LIMIT_ROWS", "How many.")))
+        statement = script.statement()
+        self.assertTrue(statement.startswith(
+            "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE_SCRIPT(\n  MODEL_NAME,\n  LIMIT_ROWS\n)\n"
+            "RETURNS TABLE AS\n--- Probes."))
+        self.assertTrue(statement.endswith("exit({{MODEL_NAME, LIMIT_ROWS}})\n/"))
+
+    def test_each_omission_is_refused_by_name(self):
+        self.refused(self.GOOD.replace("--- Probes.\n", ""), "--- <summary>")
+        self.refused(self.GOOD.replace("PROBE_SCRIPT\n", "OTHER\n"), "the file name says")
+        self.refused(self.GOOD.replace("-- @returns TABLE\n", ""), "exactly one @returns")
+        self.refused(self.GOOD.replace("LIMIT_ROWS How many.", "LIMIT_ROWS"), "has no description")
+        self.refused(self.GOOD.replace("{{MODEL_NAME, LIMIT_ROWS}}", "{{MODEL_NAME}}"),
+                     "never reads it")
+        self.refused(self.GOOD.replace("-- @returns TABLE", "-- @return TABLE"), "unknown annotation")
+        self.refused(self.GOOD.replace("@returns TABLE", "@returns VARCHAR(10)"), "returns TABLE")
+
+    def test_every_published_signature_is_described(self):
+        block = PACKAGER.admin_script_parameters_block()
+        rows = [line for line in block.splitlines() if line.startswith("  ('")]
+        self.assertGreater(len(rows), 300)
+        for row in rows:
+            self.assertFalse(row.endswith(", NULL, NULL)") or row.endswith(", NULL)"), row)
 
 
 class MainChunkLocalCeilingTest(unittest.TestCase):

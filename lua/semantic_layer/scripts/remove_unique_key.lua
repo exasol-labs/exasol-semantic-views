@@ -1,3 +1,10 @@
+--- Removes an entity's unique key once it has no columns, restoring it on a published model if validation fails; one row.
+-- @script SEMANTIC_ADMIN.REMOVE_UNIQUE_KEY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that owns the key. Required.
+-- @param KEY_NAME Active unique key to remove; its columns must be removed first. Required.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

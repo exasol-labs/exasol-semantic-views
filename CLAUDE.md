@@ -83,8 +83,8 @@ sh tools/run_static_checks.sh
 ```
 Luacheck covers `lua/` and `tests/lua/`. The script bodies in
 `lua/semantic_layer/scripts/` take their parameters as globals, so
-`tools/dev/lint_script_bodies.py` lints each with its signature from
-`sql/install/` declared. Exasol's globals and the `ESV_*` namespaces are declared in
+`tools/dev/lint_script_bodies.py` lints each with the parameters its annotation
+block declares. Exasol's globals and the `ESV_*` namespaces are declared in
 `.luacheckrc`; Python rules and the gradually-typed module list are in
 `pyproject.toml`. Add a module to mypy's `files` once it is clean. The tools are
 pinned in `tools/requirements-static.txt` (plus `luarocks install luacheck 1.2.0`).
@@ -107,9 +107,13 @@ python3 tests/integration/verify_semantic_sql_phase2.py   # HAVING, metric WHERE
 python3 tools/package_lua_scripts.py      # writes build/install/
 ```
 Everything under `sql/install/` and `lua/` is hand-written; edit it directly.
-SQL holds no Lua: every script's signature is in `sql/install/`, and its body is
-`lua/semantic_layer/scripts/<script_name>.lua`, named by a one-line
-`-- @lua <path>` in place of the body. A source file marks each generated part
+SQL holds no Lua: each script is `lua/semantic_layer/scripts/<script_name>.lua`,
+installed where a source has the line `-- @lua <path>`. The file opens with an
+annotation block (`--- summary`, `@script`, `@param NAME [description]`,
+`@returns`) from which the build generates the `CREATE SCRIPT` statement and the
+described signatures in `SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS`; a parameter
+that means the same everywhere is described once, in
+`lua/semantic_layer/scripts/PARAMETERS.md`. A source file marks each generated part
 with a one-line `-- @generated <NAME>` placeholder, and the build writes the complete files to `build/install/`
 (gitignored), which is what the installer runs and the release ships.
 `tools/install.py` builds first, and the unit tests build in memory
@@ -148,7 +152,7 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/admin/semantic_definition.lua` | same | `SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME` |
 | `lua/semantic_layer/agent/runtime.lua` | `006_create_semantic_agent_views.sql` | `SEMANTIC_ADMIN.AGENT_RUNTIME` |
 | `lua/semantic_layer/admin/validator.lua` | `003_create_semantic_admin_scripts.sql` | `SEMANTIC_ADMIN.VALIDATOR_RUNTIME`, imported by `VALIDATE_MODEL` |
-| `lua/semantic_layer/scripts/<name>.lua` | the file holding its signature (`003`–`006`) | the body of `SEMANTIC_ADMIN.<NAME>` |
+| `lua/semantic_layer/scripts/<name>.lua` | wherever a source installs it (`003`–`006`) | `SEMANTIC_ADMIN.<NAME>`, its statement generated from the annotations |
 
 `package_lua_scripts.py` builds each runtime script from the `lua/` sources
 listed for it in `RUNTIMES`, and puts it where a source file's
@@ -531,7 +535,7 @@ the six names.
 | `lua/semantic_layer/agent/runtime.lua` | Agent search, glossary, feedback, explain scripts |
 | `sql/install/003_create_semantic_admin_scripts.sql` | Signatures of the admin scripts and runtime wrappers; placeholders for the runtimes |
 | `sql/install/006_create_semantic_agent_views.sql` | SEMANTIC_AGENT views and agent script signatures; placeholder for the agent runtime |
-| `lua/semantic_layer/scripts/` | The body of every script, one file each, named after it |
+| `lua/semantic_layer/scripts/` | Every script, one file each, named after it: annotated signature and body |
 | `sql/examples/sales_model_seed.sql` | Reference model definition (canonical example) |
 | `sql/install/001b_create_semantic_source_views.sql` | Principal-scoped catalog views; the per-table ones are generated from the compiler's reads |
 | `tools/package_lua_scripts.py` | Builds `build/install/` from `sql/install/` and `lua/` |

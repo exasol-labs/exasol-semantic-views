@@ -1,3 +1,9 @@
+--- Records a role grant for a model, grants SELECT on its published schema and SEMANTIC_USER; returns one row with the status.
+-- @script SEMANTIC_ADMIN.GRANT_MODEL_ROLE
+-- @param MODEL_NAME
+-- @param ROLE_NAME Database role to grant to (identifier, upper-cased); repeat grants report ALREADY_GRANTED.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

@@ -1,3 +1,11 @@
+--- Sets the fusion strategy for a dimension or fact, restoring if a published model fails validation; returns one row.
+-- @script SEMANTIC_ADMIN.SET_ATTRIBUTE_FUSION_POLICY
+-- @param MODEL_NAME
+-- @param ATTRIBUTE_TYPE DIMENSION or FACT (case-insensitive).
+-- @param ATTRIBUTE_NAME Active dimension or fact to configure; must exist.
+-- @param FUSION_STRATEGY PREFER, COALESCE or RECONCILE (case-insensitive).
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

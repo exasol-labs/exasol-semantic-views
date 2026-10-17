@@ -1,3 +1,14 @@
+--- Inserts or replaces the key column pair at one ordinal of a relationship's join mapping; returns nothing.
+-- @script SEMANTIC_ADMIN.ADD_RELATIONSHIP_KEY_MAPPING
+-- @param MODEL_NAME
+-- @param RELATIONSHIP_NAME Active relationship to map. Required.
+-- @param FROM_COLUMN_NAME Column on the relationship's from side. Required, since expressions are refused.
+-- @param FROM_EXPRESSION Must be NULL; expression mappings are refused with SEMANTIC_ADMIN_043.
+-- @param TO_COLUMN_NAME Column on the relationship's to side. Required, since expressions are refused.
+-- @param TO_EXPRESSION Must be NULL; expression mappings are refused with SEMANTIC_ADMIN_043.
+-- @param ORDINAL_POSITION Positive integer position of the pair; an existing pair at this position is updated.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

@@ -1,3 +1,9 @@
+--- Sets a model's governance mode and clears its source trust and compile cache; returns nothing.
+-- @script SEMANTIC_ADMIN.SET_MODEL_GOVERNANCE_MODE
+-- @param MODEL_NAME
+-- @param GOVERNANCE_MODE OPEN or GOVERNED.
+-- @returns nothing
+
 -- The one declared input to the trust boundary. Everything else about it --
 -- which relations are governed, which materializations carry their policy -- is
 -- derived by VALIDATE_MODEL from what the database says, never declared twice.

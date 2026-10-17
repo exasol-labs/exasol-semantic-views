@@ -1,3 +1,8 @@
+--- Validates a model and records the run; returns one row per issue with severity, rule code and message.
+-- @script SEMANTIC_ADMIN.VALIDATE_MODEL
+-- @param MODEL_NAME
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.VALIDATOR_RUNTIME", "validator")
 
 local issues = validator.validate_model(MODEL_NAME)

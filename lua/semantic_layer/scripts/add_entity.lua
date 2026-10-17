@@ -1,3 +1,15 @@
+--- Registers an entity over a source table or view and creates its PRIMARY representation; returns nothing.
+-- @script SEMANTIC_ADMIN.ADD_ENTITY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME New entity name (identifier: letter, then letters, digits, _); required, unique in the model.
+-- @param SOURCE_SCHEMA Schema of the source relation; required identifier. A virtual schema makes the primary VIRTUAL_SCHEMA.
+-- @param SOURCE_OBJECT Source table or view name; required identifier.
+-- @param SOURCE_ALIAS Alias used in expressions; required identifier, unique in the model, not an Exasol reserved word.
+-- @param PRIMARY_KEY_EXPR Optional primary-key expression stored as text; NULL leaves it unset.
+-- @param GRAIN_DESCRIPTION Optional text describing one row of the entity; NULL leaves it unset.
+-- @param DESCRIPTION Optional entity description; NULL leaves it unset.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

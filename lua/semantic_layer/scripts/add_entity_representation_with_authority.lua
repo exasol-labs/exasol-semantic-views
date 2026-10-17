@@ -1,3 +1,16 @@
+--- Adds an alternate entity representation and sets its authority role, undoing both if either fails; returns one row.
+-- @script SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_AUTHORITY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that receives the alternate representation.
+-- @param REPRESENTATION_NAME Name of the new representation; must be unique for the entity.
+-- @param SOURCE_KIND
+-- @param SOURCE_SCHEMA Schema of the source relation. Required.
+-- @param SOURCE_OBJECT Table or view backing the representation. Required.
+-- @param PRIORITY Positive integer priority; NULL defaults to 100.
+-- @param FRESHNESS_POLICY Optional free-text freshness policy; NULL stores NULL.
+-- @param AUTHORITY_ROLE Authority role: AUTHORITATIVE, PREFER or SUPPLEMENTAL (case-insensitive).
+-- @returns TABLE
+
 -- Register an alternate representation and declare its authority in one step.
 --
 -- F4 needs both: a representation with no authority declaration defaults to

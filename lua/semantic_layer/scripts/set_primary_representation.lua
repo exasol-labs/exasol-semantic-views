@@ -1,3 +1,10 @@
+--- Promotes an active representation to the entity's primary after validation checks; returns one row with any warnings.
+-- @script SEMANTIC_ADMIN.SET_PRIMARY_REPRESENTATION
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity whose primary representation changes. Required.
+-- @param REPRESENTATION_NAME Active representation to promote; its alias must match the entity alias. Required.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

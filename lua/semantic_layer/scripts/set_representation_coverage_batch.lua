@@ -1,3 +1,10 @@
+--- Sets coverage predicates and bounds for every active representation of an entity at once; returns one row per representation.
+-- @script SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE_BATCH
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity in the model's active version.
+-- @param COVERAGE_JSON Array covering every active representation: {representation_name, coverage_predicate, valid_from, valid_to}.
+-- @returns TABLE
+
 local JSON_NULL = {}
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""

@@ -1,3 +1,15 @@
+--- Adds a relationship between two entities, rolling back if it adds validation errors on a published model; returns nothing.
+-- @script SEMANTIC_ADMIN.ADD_RELATIONSHIP
+-- @param MODEL_NAME
+-- @param RELATIONSHIP_NAME New relationship name, unique among active relationships.
+-- @param FROM_ENTITY_NAME Entity on the from side of the join.
+-- @param TO_ENTITY_NAME Entity on the to side of the join.
+-- @param JOIN_CONDITION Required SQL join condition between the two entities' aliases.
+-- @param CARDINALITY ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE or MANY_TO_MANY.
+-- @param JOIN_TYPE INNER or LEFT; NULL defaults to LEFT.
+-- @param FANOUT_POLICY ALLOCATE, DEDUPLICATE or REFERENCE_ONLY; NULL stores no policy.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

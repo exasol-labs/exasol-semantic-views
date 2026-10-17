@@ -1,3 +1,14 @@
+--- Binds a dimension or fact to an entity representation, refusing bindings that add validation errors; returns one row for the binding.
+-- @script SEMANTIC_ADMIN.ADD_ATTRIBUTE_BINDING
+-- @param MODEL_NAME
+-- @param ATTRIBUTE_TYPE Kind of attribute to bind: DIMENSION or FACT (case-insensitive). Required.
+-- @param ATTRIBUTE_NAME Name of the active dimension or fact to bind. Required.
+-- @param REPRESENTATION_NAME Active representation of the attribute's entity to bind to. Required.
+-- @param SOURCE_EXPRESSION SQL expression that yields the attribute from this representation. Required.
+-- @param BINDING_ROLE Binding role: PREFER or FALLBACK (case-insensitive). Required.
+-- @param BINDING_PRIORITY Binding priority; must be a positive integer.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or string.match(tostring(value), "^%s*$") ~= nil
 end

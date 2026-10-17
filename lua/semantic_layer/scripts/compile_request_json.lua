@@ -1,3 +1,8 @@
+--- Compiles a structured JSON semantic request into SQL; returns one 9-column row with status, generated SQL and plan.
+-- @script SEMANTIC_ADMIN.COMPILE_REQUEST_JSON
+-- @param REQUEST_JSON JSON request object: model, object, and arrays metrics, dimensions, filters, having, order_by, plus options.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
 
 local result = compiler.compile_request_json(REQUEST_JSON)

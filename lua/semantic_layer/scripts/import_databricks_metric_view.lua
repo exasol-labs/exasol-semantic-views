@@ -1,3 +1,11 @@
+--- Translates a Databricks metric view YAML into Semantic DDL and optionally applies it; returns one status row.
+-- @script SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW
+-- @param YAML_TEXT Databricks Unity Catalog metric view definition as YAML text.
+-- @param MODEL_NAME
+-- @param PUBLISHED_SCHEMA Schema for the published views; NULL defaults to SEMANTIC_<MODEL_NAME>.
+-- @param APPLY_IMPORT TRUE, 'true', 'TRUE' or '1' applies the translation; anything else only translates.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 
 local rows = semantic_definition.import_databricks_metric_view(

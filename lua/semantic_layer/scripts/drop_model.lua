@@ -1,3 +1,8 @@
+--- Deletes a model and all its catalog rows, dropping its published schema if no other model uses it; returns one row.
+-- @script SEMANTIC_ADMIN.DROP_MODEL
+-- @param MODEL_NAME
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

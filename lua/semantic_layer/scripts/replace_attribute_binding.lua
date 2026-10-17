@@ -1,3 +1,14 @@
+--- Replaces an existing attribute binding's expression, role and priority, restoring on validation error; returns one row.
+-- @script SEMANTIC_ADMIN.REPLACE_ATTRIBUTE_BINDING
+-- @param MODEL_NAME
+-- @param ATTRIBUTE_TYPE DIMENSION or FACT (case-insensitive); required.
+-- @param ATTRIBUTE_NAME Dimension or fact whose binding is replaced; required.
+-- @param REPRESENTATION_NAME Representation the binding belongs to; required, binding must exist.
+-- @param SOURCE_EXPRESSION New SQL expression over that representation; required.
+-- @param BINDING_ROLE PREFER or FALLBACK (case-insensitive); required.
+-- @param BINDING_PRIORITY Positive integer priority; required.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or string.match(tostring(value), "^%s*$") ~= nil
 end

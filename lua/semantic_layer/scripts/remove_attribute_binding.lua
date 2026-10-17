@@ -1,3 +1,11 @@
+--- Removes a dimension or fact binding from a representation, restoring it on a published model if validation fails; one row.
+-- @script SEMANTIC_ADMIN.REMOVE_ATTRIBUTE_BINDING
+-- @param MODEL_NAME
+-- @param ATTRIBUTE_TYPE DIMENSION or FACT (case-insensitive).
+-- @param ATTRIBUTE_NAME Dimension or fact whose binding is removed.
+-- @param REPRESENTATION_NAME Representation the active binding points to.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would
 -- render an address and report it back in the "not found" errors below.
 local function trim(value)

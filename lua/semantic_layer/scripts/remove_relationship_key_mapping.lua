@@ -1,3 +1,10 @@
+--- Removes the key mapping at one ordinal of a relationship, restoring it on a published model if validation fails; one row.
+-- @script SEMANTIC_ADMIN.REMOVE_RELATIONSHIP_KEY_MAPPING
+-- @param MODEL_NAME
+-- @param RELATIONSHIP_NAME Active relationship whose mapping is removed. Required.
+-- @param ORDINAL_POSITION Positive integer position of the key mapping to remove.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

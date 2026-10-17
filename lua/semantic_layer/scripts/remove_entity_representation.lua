@@ -1,3 +1,10 @@
+--- Removes a non-primary representation and its bindings, restoring on new validation errors if published; returns one row.
+-- @script SEMANTIC_ADMIN.REMOVE_ENTITY_REPRESENTATION
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity in the model's active version.
+-- @param REPRESENTATION_NAME Active representation to remove; PRIMARY or one with active identity bindings is refused.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

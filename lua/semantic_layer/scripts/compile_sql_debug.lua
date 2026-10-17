@@ -1,3 +1,9 @@
+--- Compiles a Semantic SQL statement and logs it to the query log; returns one row ending in QUERY_LOG_ID.
+-- @script SEMANTIC_ADMIN.COMPILE_SQL_DEBUG
+-- @param ORIGINAL_SQL Semantic SQL statement to compile.
+-- @param CLIENT_NAME Client label stored as CLIENT_NAME in SYS_SEMANTIC.QUERY_LOG.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
 
 local result = compiler.compile_sql_debug(ORIGINAL_SQL, CLIENT_NAME)

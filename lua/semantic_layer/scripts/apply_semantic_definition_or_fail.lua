@@ -1,3 +1,9 @@
+--- Applies a Semantic DDL statement like APPLY_SEMANTIC_DEFINITION but raises on refusal; returns one status row.
+-- @script SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION_OR_FAIL
+-- @param DEFINITION_SQL One ALTER SEMANTIC VIEW statement in an accepted form (REPLACE/ADD OR REPLACE/DROP/RENAME ...).
+-- @param DRY_RUN TRUE, 'true', 'TRUE' or '1' validates and then restores the catalog; anything else commits.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 
 local rows = semantic_definition.apply_semantic_definition(DEFINITION_SQL, DRY_RUN)

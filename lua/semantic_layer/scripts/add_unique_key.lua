@@ -1,3 +1,13 @@
+--- Adds a unique key to an entity, or updates the existing key of that name; returns one row with the key and WAS_UPDATE.
+-- @script SEMANTIC_ADMIN.ADD_UNIQUE_KEY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity in the model's active version.
+-- @param KEY_NAME Key name (identifier); an existing key of this name on the entity is updated.
+-- @param KEY_KIND PRIMARY, UNIQUE or ALTERNATE; NULL defaults to UNIQUE.
+-- @param DESCRIPTION Optional description; NULL stores none.
+-- @param SOURCE_FORMAT Free-text source format, upper-cased; NULL defaults to OSI.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

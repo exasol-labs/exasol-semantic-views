@@ -1,3 +1,17 @@
+--- Creates or updates a dimension on a semantic object and validates the model, rolling back on error; returns one row with its id.
+-- @script SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION
+-- @param MODEL_NAME
+-- @param OBJECT_NAME Semantic object that exposes the dimension; required, must exist.
+-- @param ENTITY_NAME Entity the dimension expression reads from; required, must exist.
+-- @param DIMENSION_NAME Dimension name; required identifier. An existing name is updated, a new one inserted.
+-- @param EXPRESSION SQL expression over the entity alias; required. Also written to the default primary binding.
+-- @param DATA_TYPE SQL data type of the dimension; required.
+-- @param DISPLAY_NAME Optional display label; NULL clears it.
+-- @param DESCRIPTION Optional description; NULL clears it.
+-- @param FORMAT_HINT Optional format hint for clients; NULL clears it.
+-- @param IS_CERTIFIED
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

@@ -1,3 +1,11 @@
+--- Sets a representation's authority role, restoring the prior role if a published model then fails validation; one row.
+-- @script SEMANTIC_ADMIN.SET_REPRESENTATION_AUTHORITY
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that owns the representation. Required.
+-- @param REPRESENTATION_NAME Active representation to set. Required.
+-- @param AUTHORITY_ROLE AUTHORITATIVE, PREFER or SUPPLEMENTAL (case-insensitive).
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

@@ -1,3 +1,13 @@
+--- Updates an active relationship's join condition, cardinality, join type or fan-out policy; returns one row with the new values.
+-- @script SEMANTIC_ADMIN.SET_RELATIONSHIP
+-- @param MODEL_NAME
+-- @param RELATIONSHIP_NAME Active relationship to update.
+-- @param JOIN_CONDITION New SQL join condition; NULL keeps the current one.
+-- @param CARDINALITY ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE or MANY_TO_MANY; NULL keeps the current one.
+-- @param JOIN_TYPE INNER or LEFT; NULL keeps the current one.
+-- @param FANOUT_POLICY ALLOCATE, DEDUPLICATE, REFERENCE_ONLY, or NONE to clear; NULL keeps the current one.
+-- @returns TABLE
+
 -- Update one relationship in place. Without this, correcting a cardinality or
 -- a fanout policy took four steps -- remove the key mappings in descending
 -- ordinal order, remove the relationship, add it back, re-add the mappings --

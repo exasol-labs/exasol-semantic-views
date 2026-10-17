@@ -1,3 +1,12 @@
+--- Creates or updates the identity binding of a semantic identity on a representation; returns one row for the binding.
+-- @script SEMANTIC_ADMIN.ADD_IDENTITY_BINDING
+-- @param MODEL_NAME
+-- @param IDENTITY_NAME Active semantic identity to bind.
+-- @param REPRESENTATION_NAME Active representation of the identity's entity.
+-- @param SOURCE_EXPRESSION SQL expression yielding the identity value from the representation. Required.
+-- @param BINDING_KIND DIRECT or MAPPED (case-insensitive); DIRECT deletes any existing mapping relations of the binding.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

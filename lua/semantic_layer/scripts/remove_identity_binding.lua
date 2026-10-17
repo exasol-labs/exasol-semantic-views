@@ -1,3 +1,10 @@
+--- Removes an identity's binding on a representation if it has no active mapping relation; returns one row.
+-- @script SEMANTIC_ADMIN.REMOVE_IDENTITY_BINDING
+-- @param MODEL_NAME
+-- @param IDENTITY_NAME Active semantic identity whose binding is removed. Required.
+-- @param REPRESENTATION_NAME Active representation the binding points to. Required.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

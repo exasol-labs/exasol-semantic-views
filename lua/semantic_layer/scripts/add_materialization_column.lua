@@ -1,3 +1,13 @@
+--- Maps a dimension or metric to a physical column of a registered materialization and clears the compile cache; returns nothing.
+-- @script SEMANTIC_ADMIN.ADD_MATERIALIZATION_COLUMN
+-- @param MODEL_NAME
+-- @param MATERIALIZATION_NAME Materialization already registered in the model's active version.
+-- @param OBJECT_TYPE DIMENSION or METRIC.
+-- @param OBJECT_NAME Name of the dimension or metric being mapped.
+-- @param PHYSICAL_COLUMN Column in the materialization's physical object (identifier).
+-- @param ROLLUP_POLICY DIRECT, NONE, SUM, MIN, MAX or COUNT; NULL defaults to DIRECT.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

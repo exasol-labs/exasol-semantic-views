@@ -947,16 +947,19 @@ normalized around ids and do not repeat every convenience column such as
 
 ## Calling Admin Scripts
 
-Every callable `SEMANTIC_ADMIN` script publishes its signature:
+Every callable `SEMANTIC_ADMIN` script publishes its signature, with what the
+script does and what each parameter means:
 
 ```sql
-SELECT ORDINAL_POSITION, PARAMETER_NAME, CALL_TEMPLATE
+SELECT ORDINAL_POSITION, PARAMETER_NAME, PARAMETER_DESCRIPTION, SCRIPT_DESCRIPTION, CALL_TEMPLATE
 FROM SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS
 WHERE SCRIPT_NAME = 'ADD_SYNONYM' ORDER BY ORDINAL_POSITION;
 ```
 
-The rows are generated from the install SQL itself, so they cannot drift from
-the scripts they describe, and `CALL_TEMPLATE` is a ready-made call shape.
+The rows are generated from the annotation block of each script's file in
+`lua/semantic_layer/scripts/` — the same block the build turns into the
+`CREATE SCRIPT` statement — so they cannot drift from the scripts they describe,
+and `CALL_TEMPLATE` is a ready-made call shape.
 
 "Cannot drift" is enforced rather than intended: packaging fails if a declared
 `SEMANTIC_ADMIN` script publishes no signature and is not on the explicit

@@ -1,3 +1,9 @@
+--- Marks a relationship REMOVED, restoring it if a published model gains validation errors; returns one row.
+-- @script SEMANTIC_ADMIN.REMOVE_RELATIONSHIP
+-- @param MODEL_NAME
+-- @param RELATIONSHIP_NAME Active relationship to remove; refused while it still has key mappings.
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `value or ""` would render
 -- it as an address and defeat the required-parameter check below.
 local function trim(value)

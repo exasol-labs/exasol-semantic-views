@@ -1,3 +1,8 @@
+--- Re-validates a published model and reports the outcome; returns one row with model status and validation status.
+-- @script SEMANTIC_ADMIN.RECERTIFY_MODEL_IF_PUBLISHED
+-- @param MODEL_NAME
+-- @returns TABLE
+
 -- NULL arrives as userdata, and userdata is truthy: `MODEL_NAME or ""`
 -- would render an address and sail past the check below.
 local model_name = (MODEL_NAME == nil or MODEL_NAME == null) and ""

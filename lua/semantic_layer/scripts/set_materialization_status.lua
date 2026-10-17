@@ -1,3 +1,10 @@
+--- Sets a materialization's status and clears the compile cache and source trust for the model; returns nothing.
+-- @script SEMANTIC_ADMIN.SET_MATERIALIZATION_STATUS
+-- @param MODEL_NAME
+-- @param MATERIALIZATION_NAME Existing materialization to update. Required.
+-- @param STATUS New status: ACTIVE, INACTIVE or STALE (case-insensitive). Required.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

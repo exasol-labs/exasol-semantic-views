@@ -1,3 +1,11 @@
+--- Renames an active entity representation without changing its role or bindings; returns one row saying whether it changed.
+-- @script SEMANTIC_ADMIN.RENAME_ENTITY_REPRESENTATION
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity that owns the representation. Required.
+-- @param REPRESENTATION_NAME Current name of the active representation. Required.
+-- @param NEW_REPRESENTATION_NAME New name; must be unused for the entity. Same as current name is a no-op.
+-- @returns TABLE
+
 -- The rename SEMANTIC_ADMIN_221 has been telling callers to perform.
 --
 -- ADD_ENTITY mints the name 'primary' for an entity's first representation and

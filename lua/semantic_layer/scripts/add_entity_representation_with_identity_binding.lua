@@ -1,3 +1,19 @@
+--- Adds an alternate representation with default attribute bindings and an identity binding, plus optional mapping; returns one row.
+-- @script SEMANTIC_ADMIN.ADD_ENTITY_REPRESENTATION_WITH_IDENTITY_BINDING
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity with an active primary representation and the named identity. Required.
+-- @param REPRESENTATION_NAME Name of the new alternate representation; must be unique for the entity.
+-- @param SOURCE_KIND
+-- @param SOURCE_SCHEMA Schema of the source relation. Required; must be a simple identifier.
+-- @param SOURCE_OBJECT Table or view backing the representation. Required; must be a simple identifier.
+-- @param PRIORITY Positive integer priority; NULL defaults to 100.
+-- @param FRESHNESS_POLICY Optional free-text freshness policy; NULL stores NULL.
+-- @param IDENTITY_NAME Active semantic identity of the entity to bind. Required.
+-- @param SOURCE_EXPRESSION SQL expression yielding the identity value from this representation. Required.
+-- @param BINDING_KIND Identity binding kind: DIRECT or MAPPED (case-insensitive).
+-- @param MAPPING_JSON MAPPED only, NULL for DIRECT: {source_schema, source_object, source_local_column, semantic_key_column, certification_status}; the status must be CERTIFIED.
+-- @returns TABLE
+
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""

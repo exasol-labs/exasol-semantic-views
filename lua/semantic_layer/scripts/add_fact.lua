@@ -1,3 +1,17 @@
+--- Adds a fact to an entity, binds it to the entity's representations and validates the model; returns one row with the fact id.
+-- @script SEMANTIC_ADMIN.ADD_FACT
+-- @param MODEL_NAME
+-- @param ENTITY_NAME Entity the fact is declared on; required, must exist.
+-- @param FACT_NAME New fact name; required identifier, unique in the model.
+-- @param EXPRESSION SQL expression over the entity alias; required.
+-- @param DATA_TYPE SQL data type of the fact; required.
+-- @param ADDITIVE_POLICY Required: ADDITIVE, SEMI_ADDITIVE or NON_ADDITIVE (case-insensitive).
+-- @param DISPLAY_NAME Optional display label; NULL leaves it unset.
+-- @param DESCRIPTION Optional description; NULL leaves it unset.
+-- @param IS_PRIVATE
+-- @param IS_CERTIFIED
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

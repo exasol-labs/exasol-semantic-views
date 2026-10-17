@@ -1,3 +1,9 @@
+--- Marks a role's model grant REVOKED and revokes SELECT on the published schema from it; returns one row.
+-- @script SEMANTIC_ADMIN.REVOKE_MODEL_ROLE
+-- @param MODEL_NAME
+-- @param ROLE_NAME Database role to revoke (required); must match ^[A-Za-z][A-Za-z0-9_]*$, upper-cased.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

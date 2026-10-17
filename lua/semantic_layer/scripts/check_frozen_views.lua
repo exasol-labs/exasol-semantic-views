@@ -1,3 +1,8 @@
+--- Recompiles each view frozen from a model and compares it to its recorded SQL; one row per view (CURRENT/STALE/DROPPED/UNKNOWN).
+-- @script SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS
+-- @param MODEL_NAME
+-- @returns TABLE
+
 -- Which views compiled from this model no longer match what it would compile.
 --
 -- This is the exact question, and it needs the compiler to answer, which is why

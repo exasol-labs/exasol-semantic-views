@@ -1,3 +1,8 @@
+--- Validates a model and publishes a guarded view per semantic object in its published schema; returns one row per view.
+-- @script SEMANTIC_ADMIN.PUBLISH_MODEL
+-- @param MODEL_NAME
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

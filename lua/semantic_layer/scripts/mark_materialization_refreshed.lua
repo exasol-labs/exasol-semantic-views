@@ -1,3 +1,11 @@
+--- Records a materialization refresh time, current row count and snapshot, and clears the compile cache; returns one row.
+-- @script SEMANTIC_ADMIN.MARK_MATERIALIZATION_REFRESHED
+-- @param MODEL_NAME
+-- @param MATERIALIZATION_NAME Materialization to mark; required, must exist in the active version.
+-- @param REFRESHED_AT Timestamp of the refresh; must parse and not be in the future. NULL means now.
+-- @param SOURCE_SNAPSHOT Optional source snapshot label stored as text; NULL clears it.
+-- @returns TABLE
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end

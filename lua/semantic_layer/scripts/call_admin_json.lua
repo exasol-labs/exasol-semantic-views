@@ -1,3 +1,9 @@
+--- Calls a SEMANTIC_ADMIN script with named arguments from a JSON object; returns one row with the result rows as JSON.
+-- @script SEMANTIC_ADMIN.CALL_ADMIN_JSON
+-- @param SCRIPT_NAME Admin script to call, as listed in SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS; CALL_ADMIN_JSON itself is refused.
+-- @param ARGS_JSON Object of parameter name to value; omitted keys pass NULL, unknown keys are refused. NULL passes all NULLs.
+-- @returns TABLE
+
 -- Call any SEMANTIC_ADMIN script with a JSON object instead of positional
 -- arguments.
 --

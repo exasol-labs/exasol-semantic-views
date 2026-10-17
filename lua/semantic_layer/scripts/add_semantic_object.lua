@@ -1,3 +1,11 @@
+--- Adds a semantic object (semantic view) rooted at an entity to a model; returns nothing.
+-- @script SEMANTIC_ADMIN.ADD_SEMANTIC_OBJECT
+-- @param MODEL_NAME
+-- @param OBJECT_NAME New semantic object name; must be unique in the model.
+-- @param ROOT_ENTITY_NAME Existing entity the object is rooted at. Required.
+-- @param DESCRIPTION Optional description; NULL stores NULL.
+-- @returns nothing
+
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
