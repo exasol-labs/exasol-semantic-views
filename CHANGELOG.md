@@ -6,6 +6,21 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-17
+
+A source-layout release: the install SQL is built from hand-written sources
+instead of being checked in, every script is one annotated `.lua` file whose
+signature and parameter descriptions are generated, and the largest runtimes
+are split into smaller modules with their 200-local headroom measured rather
+than estimated. What the install creates is unchanged apart from the new
+parameter descriptions and the fusion-label wording below.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from
+the release bundle. **The files in `sql/install/` are no longer runnable on
+their own**: they hold placeholders that the build fills in.
+`SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS` gains `PARAMETER_DESCRIPTION` and
+`SCRIPT_DESCRIPTION`.
+
 ### Changed
 
 #### The install SQL is built, not checked in
