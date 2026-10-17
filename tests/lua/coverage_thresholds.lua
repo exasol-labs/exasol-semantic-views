@@ -107,6 +107,16 @@
 -- and both governance modes are exercised without a 200-line SQL fixture.
 -- materializations.lua 92.2 -> 94.2 on 2026-09-24, when a MAX_AGE policy began
 -- to be checked against LAST_REFRESHED_AT (BUG-27).
+-- semantic_definition.lua 79.1 -> 77.5 on 2026-10-17 is a move too: the
+-- Databricks importer became admin/databricks_import.lua (83.7), and its
+-- `sql_bool` shared/rows.lua. The two files cover 1889 of 2386 active lines
+-- (79.2), the figure the one file was held to.
+-- request_json.lua 91.5 -> 91.1 on 2026-10-17 is a move, not a loss: its
+-- token-level Semantic SQL helpers became compiler/semantic_sql_syntax.lua
+-- (96.2) and its refusal record compiler/compile_result.lua (100). Those were
+-- among its best-tested lines, so what stays reads lower; the three files
+-- together cover 2964 of 3231 active lines (91.7), above the 91.5 the one file
+-- was held to.
 -- request_json.lua 90.9 -> 91.5 on 2026-09-29, when MIN/MAX over a metric began
 -- to be lowered where each group is one row (GitHub #8).
 -- request_json.lua 90.7 -> 90.9 on 2026-09-24, when a grain-widening WHERE
@@ -178,10 +188,13 @@ return {
         ["lua/semantic_layer/compiler/metric_plan.lua"] = 94.0,
         ["lua/semantic_layer/compiler/physical_plan.lua"] = 86.6,
         ["lua/semantic_layer/compiler/grain_sql.lua"] = 98.5,
-        ["lua/semantic_layer/compiler/request_json.lua"] = 91.5,
+        ["lua/semantic_layer/compiler/request_json.lua"] = 91.1,
+        ["lua/semantic_layer/compiler/compile_result.lua"] = 100,
+        ["lua/semantic_layer/compiler/semantic_sql_syntax.lua"] = 96.2,
         ["lua/semantic_layer/admin/validator.lua"] = 95.1,
         ["lua/semantic_layer/compiler/materializations.lua"] = 94.2,
-        ["lua/semantic_layer/admin/semantic_definition.lua"] = 79.1,
+        ["lua/semantic_layer/admin/semantic_definition.lua"] = 77.5,
+        ["lua/semantic_layer/admin/databricks_import.lua"] = 83.7,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,
         ["lua/semantic_layer/agent/runtime.lua"] = 95.78,
     },

@@ -92,19 +92,11 @@ local function boolish(value)
     return value == true or tostring(value) == "true" or tostring(value) == "TRUE" or tostring(value) == "1"
 end
 
-local function error_result(code, message, clarification)
-    return {
-        status = clarification and "NEEDS_CLARIFICATION" or "ERROR",
-        error_code = code,
-        error_message = message,
-        generated_sql = nil,
-        plan_json = nil,
-        clarification_json = clarification and json.encode(clarification) or nil,
-        validation_run_id = nil,
-        agent_request_id = nil,
-        query_log_id = nil,
-    }
-end
+-- The refusal record; one owner, shared with the Semantic SQL syntax layer.
+local error_result = assert(ESV_COMPILE_RESULT, "compile result runtime is required").error
+
+-- The token-level half of the Semantic SQL lane (semantic_sql_syntax.lua).
+local syntax = assert(ESV_SEMANTIC_SQL_SYNTAX, "Semantic SQL syntax runtime is required")
 
 -- Response shaping and the compile cache, behind two namespaces in a `do` block.
 --
@@ -3714,53 +3706,6 @@ local function compile_internal(request_json)
     return compile_request_table(request, {validate = false, error_prefix = "SEMANTIC_REQUEST"})
 end
 
-local function token_identifier_value(token)
-    if token == nil then
-        return nil
-    end
-    if token.kind == "identifier" or token.kind == "word" then
-        return token.value or token.text
-    end
-    return nil
-end
-
-local function split_top_level(tokens, start_index, end_index, separator)
-    local parts = {}
-    local current = {}
-    local depth = 0
-    for i = start_index, end_index do
-        local token = tokens[i]
-        if token.text == "(" then
-            depth = depth + 1
-        elseif token.text == ")" then
-            depth = depth - 1
-        end
-        if depth == 0 and token.text == separator then
-            parts[#parts + 1] = current
-            current = {}
-        else
-            current[#current + 1] = token
-        end
-    end
-    if #current > 0 then
-        parts[#parts + 1] = current
-    end
-    return parts
-end
-
--- Databricks metric views wrap measures in MEASURE(...) (or its agg() synonym)
--- in SELECT / HAVING / ORDER BY. Unwrap that call to the bare semantic field name
--- so the rest of the parser treats it like any other metric reference. Returns the
--- (possibly rewritten) token list and whether a wrapper was actually removed.
--- Wrappers a select item may put around a metric. MEASURE/AGG say "give me this
--- metric" and carry no aggregation of their own. A named aggregate is accepted
--- only when it is the one the metric declares -- see the select-list loop -- so
--- that SUM(a_ratio) refuses instead of quietly returning the ratio.
-local METRIC_WRAPPERS = {
-    MEASURE = true, AGG = true,
-    SUM = true, COUNT = true, MIN = true, MAX = true, AVG = true,
-}
-
 -- Is this `WRAPPER(field)` one the layer refuses, and why?
 --
 -- On the module table rather than as a local because both lanes need it and the
@@ -3793,7 +3738,7 @@ end
 -- accepted and returned as a lowering, so the caller can record it. COUNT still
 -- is not: it counts the value rather than selecting it.
 function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared, one_row_per_group)
-    if wrapper == nil or not METRIC_WRAPPERS[wrapper] then
+    if wrapper == nil or not syntax.METRIC_WRAPPERS[wrapper] then
         return nil
     end
     if upper(tostring(field_kind or "")) ~= "METRIC" then
@@ -3828,409 +3773,6 @@ function M.aggregate_wrapper_refusal(wrapper, field_name, field_kind, declared, 
             .. ". Use MEASURE(" .. tostring(field_name) .. ") to select it as defined.")
 end
 
-local function unwrap_measure_part(part)
-    if part == nil or #part < 4 then
-        return part, false, nil
-    end
-    local head = sql_text.token_upper(part[1])
-    if not METRIC_WRAPPERS[head] or part[2].text ~= "(" then
-        return part, false, nil
-    end
-    local depth = 0
-    local close_index = nil
-    for i = 2, #part do
-        local text = part[i].text
-        if text == "(" then
-            depth = depth + 1
-        elseif text == ")" then
-            depth = depth - 1
-            if depth == 0 then
-                close_index = i
-                break
-            end
-        end
-    end
-    -- Require a non-empty argument and a matching close paren.
-    if close_index == nil or close_index <= 3 then
-        return part, false, nil
-    end
-    local rewritten = {}
-    for i = 3, close_index - 1 do
-        rewritten[#rewritten + 1] = part[i]
-    end
-    for i = close_index + 1, #part do
-        rewritten[#rewritten + 1] = part[i]
-    end
-    return rewritten, true, head
-end
-
-local function identifier_from_part(part)
-    part = unwrap_measure_part(part)
-    if #part == 0 then
-        return nil
-    end
-    local end_index = #part
-    for i, token in ipairs(part) do
-        if sql_text.token_upper(token) == "AS" then
-            end_index = i - 1
-            break
-        end
-    end
-    if end_index >= 3 and part[end_index - 1].text == "." then
-        return token_identifier_value(part[end_index])
-    end
-    if end_index == 1 then
-        return token_identifier_value(part[1])
-    end
-    if end_index >= 1 and (part[1].kind == "word" or part[1].kind == "identifier") then
-        if end_index == 2 and (part[2].kind == "word" or part[2].kind == "identifier") then
-            return token_identifier_value(part[1])
-        end
-    end
-    return nil
-end
-
--- The output name a select item asks for, as Exasol would name the column: an
--- unquoted alias folds to upper case, a quoted one is kept exactly. Emitting
--- `AS r` as "r" named the column in lower case, which a statement wrapping the
--- compiled SQL then could not find as r (GitHub #15).
-local function alias_from_select_part(part)
-    local alias
-    for i, token in ipairs(part) do
-        if sql_text.token_upper(token) == "AS" and part[i + 1] ~= nil then
-            alias = part[i + 1]
-            break
-        end
-    end
-    if alias == nil and #part == 2 and (part[1].kind == "word" or part[1].kind == "identifier")
-        and (part[2].kind == "word" or part[2].kind == "identifier") then
-        alias = part[2]
-    end
-    if alias == nil or token_identifier_value(alias) == nil then return nil end
-    return alias.kind == "word" and upper(token_identifier_value(alias))
-        or token_identifier_value(alias)
-end
-
-local function literal_from_tokens(tokens)
-    if #tokens == 1 then
-        local token = tokens[1]
-        if token.kind == "literal" then
-            local raw = string.sub(token.text, 2, -2)
-            return string.gsub(raw, "''", "'")
-        elseif token.kind == "number" then
-            return tonumber(token.text) or token.text
-        elseif token.kind == "word" then
-            return token.value
-        end
-    elseif #tokens == 2 and sql_text.token_upper(tokens[1]) == "DATE" and tokens[2].kind == "literal" then
-        local raw = string.sub(tokens[2].text, 2, -2)
-        return string.gsub(raw, "''", "'")
-    elseif #tokens == 2 and sql_text.token_upper(tokens[1]) == "TIMESTAMP" and tokens[2].kind == "literal" then
-        local raw = string.sub(tokens[2].text, 2, -2)
-        return string.gsub(raw, "''", "'")
-    end
-    return nil
-end
-
-local function find_top_level_clauses(tokens)
-    local clauses = {}
-    local depth = 0
-    for i, token in ipairs(tokens) do
-        if token.text == "(" then
-            depth = depth + 1
-        elseif token.text == ")" then
-            depth = depth - 1
-        elseif depth == 0 then
-            local u = sql_text.token_upper(token)
-            if u == "FROM" or u == "WHERE" or u == "LIMIT" or u == "HAVING" then
-                clauses[u] = clauses[u] or i
-            elseif u == "GROUP" and sql_text.token_upper(tokens[i + 1]) == "BY" then
-                clauses.GROUP_BY = clauses.GROUP_BY or i
-            elseif u == "ORDER" and sql_text.token_upper(tokens[i + 1]) == "BY" then
-                clauses.ORDER_BY = clauses.ORDER_BY or i
-            end
-        end
-    end
-    return clauses
-end
-
-local function clause_end(tokens, clauses, current_name)
-    local start_index = clauses[current_name]
-    local best = #tokens + 1
-    for _, candidate in ipairs({"FROM", "WHERE", "GROUP_BY", "HAVING", "ORDER_BY", "LIMIT"}) do
-        local pos = clauses[candidate]
-        if pos ~= nil and pos > start_index and pos < best then
-            best = pos
-        end
-    end
-    return best - 1
-end
-
-local function token_slice(tokens, first, last)
-    local out = {}
-    for i = first, last do
-        out[#out + 1] = tokens[i]
-    end
-    return out
-end
-
-local function render_token_slice(tokens)
-    local parts = {}
-    for _, token in ipairs(tokens or {}) do
-        parts[#parts + 1] = token.text
-    end
-    return table.concat(parts, " ")
-end
-
-local binary_predicate_operators = {
-    ["IN"] = true, ["BETWEEN"] = true, ["LIKE"] = true,
-    ["="] = true, ["!="] = true, ["<>"] = true,
-    [">"] = true, [">="] = true, ["<"] = true, ["<="] = true,
-}
-
-local function predicate_operator_at(tokens, index)
-    local current = sql_text.token_upper(tokens[index])
-    if current == "IS" then
-        if sql_text.token_upper(tokens[index + 1]) == "NULL" then
-            return "IS NULL"
-        end
-        if sql_text.token_upper(tokens[index + 1]) == "NOT"
-            and sql_text.token_upper(tokens[index + 2]) == "NULL" then
-            return "IS NOT NULL"
-        end
-        return "IS"
-    end
-    if binary_predicate_operators[current] then
-        return current
-    end
-    return nil
-end
-
--- Strip parentheses that wrap a whole predicate. BI tools emit
--- `WHERE ("t"."STATUS" = 'X')`, and without this the trailing `)` was carried
--- into the predicate's value and rendered straight into the generated SQL,
--- producing a statement Exasol will not parse. It went unnoticed because those
--- queries were refused earlier, for using SUM() around a metric, before the
--- renderer ever saw them.
-local function strip_outer_parens(tokens, first, last)
-    while first < last and tokens[first].text == "(" do
-        local depth = 0
-        local match = nil
-        for i = first, last do
-            local text = tokens[i].text
-            if text == "(" then
-                depth = depth + 1
-            elseif text == ")" then
-                depth = depth - 1
-                if depth == 0 then
-                    match = i
-                    break
-                end
-            end
-        end
-        if match ~= last then
-            return first, last
-        end
-        first, last = first + 1, last - 1
-    end
-    return first, last
-end
-
--- Evaluate `<number> <op> <number>`, the only predicate shape that names no
--- field. Returns true/false for a constant comparison and nil for anything else,
--- so a real predicate falls through untouched.
-local function constant_comparison(tokens, first, last, op_index, op)
-    local left = token_slice(tokens, first, op_index - 1)
-    local right = token_slice(tokens, op_index + 1, last)
-    if #left ~= 1 or #right ~= 1 then return nil end
-    if left[1].kind ~= "number" or right[1].kind ~= "number" then return nil end
-    local a, b = tonumber(left[1].text), tonumber(right[1].text)
-    if a == nil or b == nil then return nil end
-    if op == "=" then return a == b end
-    if op == "!=" or op == "<>" then return a ~= b end
-    if op == ">" then return a > b end
-    if op == ">=" then return a >= b end
-    if op == "<" then return a < b end
-    if op == "<=" then return a <= b end
-    return nil
-end
-
--- One predicate parser for both WHERE and HAVING.
---
--- These were two ~110-line functions whose diff was 72 lines of 123, and almost
--- all of it was the clause noun in three messages. The top-level AND split that
--- skips BETWEEN's own AND, the operator scan, IS NULL / IS NOT NULL / IN /
--- BETWEEN, the literal-or-raw-SQL fallback -- all of it was written twice, so a
--- predicate form added to one and forgotten in the other passed every test.
---
--- The real differences are two, and they are what `clause` carries: HAVING
--- resolves the field and refuses anything that is not a metric, and stores the
--- resolved name where WHERE stores what the author typed.
-local function parse_predicates(ctx, tokens, start_index, end_index, clause)
-    local filters = {}
-    local empty_result = false
-    local chunks = {}
-    -- Split on top-level AND conjunctions, but skip the AND that belongs to a
-    -- BETWEEN...AND range (e.g. "field BETWEEN v1 AND v2").
-    -- `WHERE (a = 1 AND b = 2)` wraps the whole clause; unwrap before splitting
-    -- so the conjunction is still seen at the top level.
-    start_index, end_index = strip_outer_parens(tokens, start_index, end_index)
-    local current_start = start_index
-    local depth = 0
-    local after_between = false
-    local i = start_index
-    while i <= end_index do
-        local token = tokens[i]
-        if token.text == "(" then
-            depth = depth + 1
-        elseif token.text == ")" then
-            depth = depth - 1
-        elseif depth == 0 then
-            local u = sql_text.token_upper(token)
-            if u == "BETWEEN" then
-                after_between = true
-            elseif u == "AND" then
-                if after_between then
-                    after_between = false
-                else
-                    chunks[#chunks + 1] = {current_start, i - 1}
-                    current_start = i + 1
-                end
-            end
-        end
-        i = i + 1
-    end
-    chunks[#chunks + 1] = {current_start, end_index}
-
-    for _, chunk in ipairs(chunks) do
-        -- and `(a = 1) AND (b = 2)` wraps each conjunct separately.
-        local first, last = strip_outer_parens(tokens, chunk[1], chunk[2])
-        -- A conjunct carrying its own SELECT is a subquery predicate -- `EXISTS
-        -- (...)`, `IN (SELECT ...)` -- which this lane does not model. It used
-        -- to find the `=` *inside* the subquery, treat the whole thing as one
-        -- comparison, and emit `WHERE c.region = t0 . CUSTOMER_REGION )`: SQL
-        -- that does not parse, reported to the caller as a syntax error at a
-        -- line of text they never wrote. Refusing here hands the statement to
-        -- reference expansion, which leaves the subquery to Exasol.
-        local conjunct_depth = tokens[first] ~= nil and tokens[first].depth or 0
-        for idx = first, last do
-            if tokens[idx].kind == "word" and sql_text.token_upper(tokens[idx]) == "SELECT" then
-                return nil, error_result("SEMANTIC_QUERY_030", clause.unsupported)
-            end
-        end
-        local op_index = nil
-        local op = nil
-        for idx = first, last do
-            -- At the conjunct's own depth: an operator nested inside parentheses
-            -- belongs to something this predicate is not.
-            if tokens[idx].depth == conjunct_depth then
-                local candidate = predicate_operator_at(tokens, idx)
-                if candidate ~= nil then
-                    op_index = idx
-                    op = candidate
-                    break
-                end
-            end
-        end
-        if op_index == nil then
-            return nil, error_result("SEMANTIC_QUERY_030", clause.unsupported)
-        end
-        -- `WHERE 1 = 0` is how JDBC/ODBC drivers ask for a result's shape
-        -- without its rows, and `WHERE 1 = 1` is how some tools spell "no
-        -- filter". Neither names a field, so evaluate the comparison rather than
-        -- refusing it for having no subject. A false one makes the whole
-        -- conjunction empty, which LIMIT 0 expresses exactly.
-        local constant = constant_comparison(tokens, first, last, op_index, op)
-        if constant ~= nil then
-            if constant == false then
-                empty_result = true
-            end
-            goto continue_chunk
-        end
-        local field = identifier_from_part(token_slice(tokens, first, op_index - 1))
-        if field == nil then
-            return nil, error_result("SEMANTIC_QUERY_031", clause.subject_required)
-        end
-        -- WHERE keeps the author's spelling and resolves later, against the
-        -- dimensions actually selected; HAVING has to resolve here, because a
-        -- non-metric predicate is a different refusal rather than a lookup miss.
-        if clause.resolve ~= nil then
-            local resolved, resolve_error = clause.resolve(ctx, field)
-            if resolve_error ~= nil then return nil, resolve_error end
-            field = resolved
-        end
-        if op == "IS NULL" or op == "IS NOT NULL" then
-            local expected_last = op_index + (op == "IS NULL" and 1 or 2)
-            if last ~= expected_last then
-                return nil, error_result("SEMANTIC_QUERY_036",
-                    "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
-            end
-            filters[#filters + 1] = {field = field, op = op}
-        elseif op == "IS" then
-            return nil, error_result("SEMANTIC_QUERY_036",
-                "Null predicate requires exactly 'field IS NULL' or 'field IS NOT NULL'.")
-        elseif op == "IN" then
-            if tokens[op_index + 1] == nil or tokens[op_index + 1].text ~= "("
-                or tokens[last].text ~= ")" then
-                return nil, error_result("SEMANTIC_QUERY_032",
-                    "IN predicate requires a literal list.")
-            end
-            local values = {}
-            for _, part in ipairs(split_top_level(tokens, op_index + 2, last - 1, ",")) do
-                local value = literal_from_tokens(part)
-                if value == nil then
-                    return nil, error_result("SEMANTIC_QUERY_033",
-                        "IN predicate supports literal values only.")
-                end
-                values[#values + 1] = value
-            end
-            filters[#filters + 1] = {field = field, op = "IN", value = values}
-        elseif op == "BETWEEN" then
-            local and_index = nil
-            for idx = op_index + 1, last do
-                if sql_text.token_upper(tokens[idx]) == "AND" then
-                    and_index = idx
-                    break
-                end
-            end
-            if and_index == nil then
-                return nil, error_result("SEMANTIC_QUERY_034",
-                    "BETWEEN predicate requires 'field BETWEEN value1 AND value2'.")
-            end
-            local v1 = literal_from_tokens(token_slice(tokens, op_index + 1, and_index - 1))
-            local v2 = literal_from_tokens(token_slice(tokens, and_index + 1, last))
-            if v1 == nil or v2 == nil then
-                return nil, error_result("SEMANTIC_QUERY_035",
-                    "BETWEEN predicate requires two literal values.")
-            end
-            filters[#filters + 1] = {field = field, op = "BETWEEN", value = {v1, v2}}
-        else
-            local value_tokens = token_slice(tokens, op_index + 1, last)
-            local value = literal_from_tokens(value_tokens)
-            if value == nil then
-                local value_sql = trim(render_token_slice(value_tokens))
-                if value_sql == "" then
-                    return nil, error_result("SEMANTIC_QUERY_033", clause.missing_value)
-                end
-                filters[#filters + 1] = {field = field, op = op, value = null,
-                    value_sql = value_sql}
-            else
-                filters[#filters + 1] = {field = field, op = op, value = value}
-            end
-        end
-        ::continue_chunk::
-    end
-    return filters, nil, empty_result
-end
-
--- The whole difference between the two clauses, in one place. It used to be
--- three interpolated nouns scattered through two copies of the same 110 lines.
-local WHERE_CLAUSE = {
-    unsupported = "Unsupported WHERE predicate.",
-    subject_required = "WHERE predicate must start with a semantic dimension.",
-    missing_value = "WHERE predicate requires a right-hand value.",
-}
-
 local HAVING_CLAUSE = {
     unsupported = "Unsupported HAVING predicate.",
     subject_required = "HAVING predicate must start with a semantic metric.",
@@ -4248,63 +3790,8 @@ local HAVING_CLAUSE = {
     end,
 }
 
-local function parse_where_filters(tokens, start_index, end_index)
-    return parse_predicates(nil, tokens, start_index, end_index, WHERE_CLAUSE)
-end
-
 local function parse_having_filters(ctx, tokens, start_index, end_index)
-    return parse_predicates(ctx, tokens, start_index, end_index, HAVING_CLAUSE)
-end
-
-local function parse_order_by(tokens, start_index, end_index, select_aliases, selected_output)
-    local order_by = {}
-    for _, part in ipairs(split_top_level(tokens, start_index, end_index, ",")) do
-        -- `<item> [ASC|DESC] [NULLS FIRST|LAST]`, read from the end. The null
-        -- placement used to stop an ordinal being recognised at all, so
-        -- Tableau's `ORDER BY 1 ASC NULLS FIRST` was refused (GitHub #14).
-        local nulls
-        if #part > 2 and sql_text.token_upper(part[#part - 1]) == "NULLS" then
-            local placement = sql_text.token_upper(part[#part])
-            if placement ~= "FIRST" and placement ~= "LAST" then
-                return nil, error_result("SEMANTIC_QUERY_060",
-                    "ORDER BY supports selected semantic fields only.")
-            end
-            nulls = placement
-            table.remove(part, #part)
-            table.remove(part, #part)
-        end
-        local direction = "ASC"
-        if #part > 1 then
-            local last = sql_text.token_upper(part[#part])
-            if last == "ASC" or last == "DESC" then
-                direction = last
-                table.remove(part, #part)
-            end
-        end
-        local field = identifier_from_part(part)
-        -- An ordinal names a select item: positive, whole, and within the list.
-        local negative = #part == 2 and part[1].text == "-" and part[2].kind == "number"
-        if field == nil and ((#part == 1 and part[1].kind == "number") or negative) then
-            local ordinal = tonumber(part[#part].text)
-            local count = selected_output ~= nil and #selected_output or 0
-            if negative or ordinal == nil or ordinal < 1 or ordinal % 1 ~= 0 or ordinal > count then
-                return nil, error_result("SEMANTIC_QUERY_064",
-                    "ORDER BY " .. (negative and "-" or "") .. tostring(part[#part].text)
-                        .. " is not a position in the SELECT list, which has " .. tostring(count)
-                        .. " item" .. (count == 1 and "" or "s") .. ". Use 1 to "
-                        .. tostring(count) .. ", or name the field.")
-            end
-            field = selected_output[ordinal]
-        end
-        if field == nil then
-            return nil, error_result("SEMANTIC_QUERY_060", "ORDER BY supports selected semantic fields only.")
-        end
-        if select_aliases ~= nil and select_aliases[upper(field)] ~= nil then
-            field = select_aliases[upper(field)]
-        end
-        order_by[#order_by + 1] = {field = field, direction = direction, nulls = nulls}
-    end
-    return order_by, nil
+    return syntax.parse_predicates(ctx, tokens, start_index, end_index, HAVING_CLAUSE)
 end
 
 local function parse_semantic_sql(statement_text, options)
@@ -4322,26 +3809,26 @@ local function parse_semantic_sql(statement_text, options)
         end
         return nil, error_result("SEMANTIC_QUERY_009", "Only top-level SELECT semantic SQL is supported.")
     end
-    local clauses = find_top_level_clauses(tokens)
+    local clauses = syntax.find_top_level_clauses(tokens)
     if clauses.FROM == nil then
         return nil, error_result("SEMANTIC_QUERY_002", "Semantic SQL requires a FROM clause.")
     end
     local select_end = clauses.FROM - 1
-    local from_end = clause_end(tokens, clauses, "FROM")
+    local from_end = syntax.clause_end(tokens, clauses, "FROM")
     -- `EXA_DB.schema.object` is `schema.object` (GitHub #9).
     local from_first = clauses.FROM + 1
     if sql_text.is_catalog_qualifier(tokens, from_first) then
         from_first = from_first + 2
     end
-    local from_tokens = token_slice(tokens, from_first, from_end)
+    local from_tokens = syntax.token_slice(tokens, from_first, from_end)
     if #from_tokens < 3 or from_tokens[2].text ~= "." then
         if options.unchanged_unknown_schema then
             return envelope.unchanged_result(statement_text), nil, nil
         end
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
-    local published_schema = token_identifier_value(from_tokens[1])
-    local object_name = token_identifier_value(from_tokens[3])
+    local published_schema = syntax.token_identifier_value(from_tokens[1])
+    local object_name = syntax.token_identifier_value(from_tokens[3])
     if published_schema == nil or object_name == nil then
         if options.unchanged_unknown_schema then
             return envelope.unchanged_result(statement_text), nil, nil
@@ -4374,8 +3861,8 @@ local function parse_semantic_sql(statement_text, options)
         return envelope.unchanged_result(statement_text), nil, model
     end
     if #from_tokens > 3 then
-        local alias_ok = #from_tokens == 4 and token_identifier_value(from_tokens[4]) ~= nil
-        local as_alias_ok = #from_tokens == 5 and sql_text.token_upper(from_tokens[4]) == "AS" and token_identifier_value(from_tokens[5]) ~= nil
+        local alias_ok = #from_tokens == 4 and syntax.token_identifier_value(from_tokens[4]) ~= nil
+        local as_alias_ok = #from_tokens == 5 and sql_text.token_upper(from_tokens[4]) == "AS" and syntax.token_identifier_value(from_tokens[5]) ~= nil
         if not alias_ok and not as_alias_ok then
             return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
         end
@@ -4421,7 +3908,7 @@ local function parse_semantic_sql(statement_text, options)
     local select_aliases = {}
     local selected_dimension_seen = {}
     local selected_metric_seen = {}
-    local select_parts = split_top_level(tokens, 2, select_end, ",")
+    local select_parts = syntax.split_top_level(tokens, 2, select_end, ",")
     local wildcard_select = #select_parts == 1 and #select_parts[1] == 1 and select_parts[1][1].text == "*"
     -- The names and order the caller asked for. The planner orders columns its
     -- own way and names them after the semantic field; a SQL client needs its
@@ -4450,7 +3937,7 @@ local function parse_semantic_sql(statement_text, options)
     end
     local row_counted = false
     for _, part in ipairs(wildcard_select and {} or select_parts) do
-        local _, measure_wrapped, wrapper = unwrap_measure_part(part)
+        local _, measure_wrapped, wrapper = syntax.unwrap_measure_part(part)
         -- COUNT(*) or COUNT(<number>) counts rows of the result, and this lane
         -- compiles at exactly the selected dimensions, so each group is one row:
         -- the count is 1. Power BI sends this to list a filter's values
@@ -4460,10 +3947,10 @@ local function parse_semantic_sql(statement_text, options)
             and (part[3].text == "*" or part[3].kind == "number") then
             row_counted = true
             output_columns[#output_columns + 1] = {value = "CAST(1 AS DECIMAL(18,0))",
-                output = alias_from_select_part(part) or "COUNT(" .. part[3].text .. ")"}
+                output = syntax.alias_from_select_part(part) or "COUNT(" .. part[3].text .. ")"}
             goto next_select_part
         end
-        local field_name = identifier_from_part(part)
+        local field_name = syntax.identifier_from_part(part)
         if field_name == nil then
             return nil, error_result("SEMANTIC_QUERY_005", "SELECT supports semantic field names, MEASURE(metric), or *.")
         end
@@ -4471,7 +3958,7 @@ local function parse_semantic_sql(statement_text, options)
         if bind_err ~= nil then
             return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
-        local output_alias = alias_from_select_part(part)
+        local output_alias = syntax.alias_from_select_part(part)
         if measure_wrapped then
             -- This lane compiles the statement at exactly its selected
             -- dimensions -- an explicit GROUP BY must cover them and nothing
@@ -4516,7 +4003,7 @@ local function parse_semantic_sql(statement_text, options)
     end
 
     if clauses.WHERE ~= nil then
-        local raw_filters, filter_err, where_empty = parse_where_filters(tokens, clauses.WHERE + 1, clause_end(tokens, clauses, "WHERE"))
+        local raw_filters, filter_err, where_empty = syntax.parse_where_filters(tokens, clauses.WHERE + 1, syntax.clause_end(tokens, clauses, "WHERE"))
         if filter_err ~= nil then
             return nil, filter_err
         end
@@ -4542,7 +4029,7 @@ local function parse_semantic_sql(statement_text, options)
     local is_group_by_all = false
     if clauses.GROUP_BY ~= nil then
         local gb_start = clauses.GROUP_BY + 2
-        local gb_end = clause_end(tokens, clauses, "GROUP_BY")
+        local gb_end = syntax.clause_end(tokens, clauses, "GROUP_BY")
         is_group_by_all = (gb_end == gb_start) and sql_text.token_upper(tokens[gb_start]) == "ALL"
     end
 
@@ -4553,8 +4040,8 @@ local function parse_semantic_sql(statement_text, options)
         -- GROUP BY ALL or exactly cover the selected dimensions.
         if clauses.GROUP_BY ~= nil and not is_group_by_all then
             local grouped = {}
-            for _, part in ipairs(split_top_level(tokens, clauses.GROUP_BY + 2, clause_end(tokens, clauses, "GROUP_BY"), ",")) do
-                local field_name = identifier_from_part(part)
+            for _, part in ipairs(syntax.split_top_level(tokens, clauses.GROUP_BY + 2, syntax.clause_end(tokens, clauses, "GROUP_BY"), ",")) do
+                local field_name = syntax.identifier_from_part(part)
                 if field_name == nil and #part == 1 and part[1].kind == "number" then
                     local ordinal = tonumber(part[1].text)
                     field_name = selected_output[ordinal]
@@ -4586,7 +4073,7 @@ local function parse_semantic_sql(statement_text, options)
     end
 
     if clauses.HAVING ~= nil then
-        local having_filters, having_err, having_empty = parse_having_filters(ctx, tokens, clauses.HAVING + 1, clause_end(tokens, clauses, "HAVING"))
+        local having_filters, having_err, having_empty = parse_having_filters(ctx, tokens, clauses.HAVING + 1, syntax.clause_end(tokens, clauses, "HAVING"))
         if having_empty then
             request.limit = 0
         end
@@ -4599,7 +4086,7 @@ local function parse_semantic_sql(statement_text, options)
     end
 
     if clauses.ORDER_BY ~= nil then
-        local order_by, order_err = parse_order_by(tokens, clauses.ORDER_BY + 2, clause_end(tokens, clauses, "ORDER_BY"), select_aliases, selected_output)
+        local order_by, order_err = syntax.parse_order_by(tokens, clauses.ORDER_BY + 2, syntax.clause_end(tokens, clauses, "ORDER_BY"), select_aliases, selected_output)
         if order_err ~= nil then
             return nil, order_err
         end
@@ -4608,7 +4095,7 @@ local function parse_semantic_sql(statement_text, options)
 
     if clauses.LIMIT ~= nil then
         local limit_start = clauses.LIMIT + 1
-        local limit_end = clause_end(tokens, clauses, "LIMIT")
+        local limit_end = syntax.clause_end(tokens, clauses, "LIMIT")
         if limit_start ~= limit_end or tokens[limit_start].kind ~= "number" then
             return nil, error_result("SEMANTIC_QUERY_050", "LIMIT must be a non-negative integer literal.")
         end
@@ -4882,8 +4369,8 @@ do
             if intro.kind == "word" and RELATION_INTRO[sql_text.token_upper(intro)] then
                 local head, dot, tail = tokens[index + 1 + skip], tokens[index + 2 + skip],
                     tokens[index + 3 + skip]
-                local head_name = token_identifier_value(head)
-                local tail_name = token_identifier_value(tail)
+                local head_name = syntax.token_identifier_value(head)
+                local tail_name = syntax.token_identifier_value(tail)
                 if head_name ~= nil and tail_name ~= nil
                     and dot.kind == "symbol" and dot.text == "." then
                     local reference = {
@@ -4900,14 +4387,14 @@ do
                     -- same reference no longer resolves against.
                     if after ~= nil and sql_text.token_upper(after) == "AS" then
                         after = tokens[index + 5 + skip]
-                        if after ~= nil and token_identifier_value(after) ~= nil then
-                            reference.alias = token_identifier_value(after)
+                        if after ~= nil and syntax.token_identifier_value(after) ~= nil then
+                            reference.alias = syntax.token_identifier_value(after)
                             reference.alias_text = after.text
                             reference.last = index + 5 + skip
                         end
                     elseif after ~= nil and (after.kind == "word" or after.kind == "identifier")
                         and not NOT_AN_ALIAS[sql_text.token_upper(after)] then
-                        reference.alias = token_identifier_value(after)
+                        reference.alias = syntax.token_identifier_value(after)
                         reference.alias_text = after.text
                         reference.last = index + 4 + skip
                     end
@@ -4995,7 +4482,7 @@ do
             if (token.kind == "word" or token.kind == "identifier")
                 and following ~= nil and following.kind == "symbol"
                 and following.text == "(" then
-                local wrapper = upper(token_identifier_value(token) or "")
+                local wrapper = upper(syntax.token_identifier_value(token) or "")
                 -- `WRAPPER ( name )` or `WRAPPER ( alias . name )` -- anything
                 -- else is an expression this lane has no opinion about. The
                 -- qualified form used to be skipped, so `SUM(t0.ratio)` inside a
@@ -5008,10 +4495,10 @@ do
                     qualifier, argument, closing = argument, tokens[index + 4], tokens[index + 5]
                 end
                 local ours = qualifier == nil or (reference.alias ~= nil
-                    and upper(token_identifier_value(qualifier) or "") == upper(reference.alias))
-                if METRIC_WRAPPERS[wrapper] and ours and argument ~= nil and closing ~= nil
+                    and upper(syntax.token_identifier_value(qualifier) or "") == upper(reference.alias))
+                if syntax.METRIC_WRAPPERS[wrapper] and ours and argument ~= nil and closing ~= nil
                     and closing.kind == "symbol" and closing.text == ")" then
-                    local name = token_identifier_value(argument)
+                    local name = syntax.token_identifier_value(argument)
                     local column = name ~= nil and by_name[upper(name)] or nil
                     if column ~= nil then
                         local refusal, lowering = M.aggregate_wrapper_refusal(
@@ -5058,9 +4545,9 @@ do
             group_last = index
         end
         if group_first == nil then return #dimensions == 0 end
-        local items = split_top_level(tokens, first, last, ",")
+        local items = syntax.split_top_level(tokens, first, last, ",")
         local grouped = {}
-        for _, item in ipairs(split_top_level(tokens, group_first, group_last, ",")) do
+        for _, item in ipairs(syntax.split_top_level(tokens, group_first, group_last, ",")) do
             if #item == 1 and item[1].kind == "number" then
                 item = items[tonumber(item[1].text)] or {}
             end
@@ -5106,7 +4593,7 @@ do
             -- `r`, refusing a valid statement.
             local previous_is_operand = previous ~= nil
                 and ((previous.kind == "word"
-                      and not STATEMENT_WORDS[upper(token_identifier_value(previous) or "")])
+                      and not STATEMENT_WORDS[upper(syntax.token_identifier_value(previous) or "")])
                      or previous.kind == "identifier"
                      or previous.kind == "number"
                      or previous.kind == "string"
@@ -5116,7 +4603,7 @@ do
                 is_bare_word = false
             end
             if is_bare_word then
-                local text = token_identifier_value(token) or ""
+                local text = syntax.token_identifier_value(token) or ""
                 local normalized = string.lower(text)
                 if text ~= "" and not STATEMENT_WORDS[upper(text)]
                     and by_name[upper(text)] == nil and not seen[normalized] then
@@ -5168,7 +4655,7 @@ do
             local following = tokens[index + 1]
             local qualified_by_us = alias_upper ~= nil
                 and (token.kind == "word" or token.kind == "identifier")
-                and upper(token_identifier_value(token) or "") == alias_upper
+                and upper(syntax.token_identifier_value(token) or "") == alias_upper
                 and following ~= nil and following.kind == "symbol" and following.text == "."
 
             if token.kind == "symbol" and token.text == "*" then
@@ -5194,7 +4681,7 @@ do
                 if named ~= nil and named.kind == "symbol" and named.text == "*" then
                     take_all()
                 else
-                    local column_name = token_identifier_value(named)
+                    local column_name = syntax.token_identifier_value(named)
                     if column_name ~= nil then
                         local column = by_name[upper(column_name)]
                         if column == nil then
@@ -5210,7 +4697,7 @@ do
             elseif (token.kind == "word" or token.kind == "identifier")
                 and (previous == nil or previous.kind ~= "symbol" or previous.text ~= ".")
                 and (following == nil or following.kind ~= "symbol" or following.text ~= ".") then
-                local column = by_name[upper(token_identifier_value(token) or "")]
+                local column = by_name[upper(syntax.token_identifier_value(token) or "")]
                 if column ~= nil and not seen[upper(column.name)] then
                     seen[upper(column.name)] = true
                     wanted[#wanted + 1] = column.name
@@ -5386,7 +4873,7 @@ do
             local previous, following = expression_tokens[index - 1], expression_tokens[index + 1]
             if token.kind == "word" or token.kind == "identifier" then
                 if following ~= nil and following.text == "(" then return false end
-                if not bi_expansion.summable(metrics, token_identifier_value(token), seen) then
+                if not bi_expansion.summable(metrics, syntax.token_identifier_value(token), seen) then
                     return false
                 end
             elseif token.text == "*" then
@@ -5409,23 +4896,23 @@ do
         local body, output = item, nil
         local count = #item
         if count >= 3 and sql_text.token_upper(item[count - 1]) == "AS" then
-            body, output = {table.unpack(item, 1, count - 2)}, token_identifier_value(item[count])
+            body, output = {table.unpack(item, 1, count - 2)}, syntax.token_identifier_value(item[count])
         elseif count >= 2 and (item[count].kind == "word" or item[count].kind == "identifier")
             and item[count - 1].text ~= "." then
-            body, output = {table.unpack(item, 1, count - 1)}, token_identifier_value(item[count])
+            body, output = {table.unpack(item, 1, count - 1)}, syntax.token_identifier_value(item[count])
         end
         -- MEASURE(x) / AGG(x) select the field as defined; SUM(x) AS "C1" and
         -- the other wrappers a compiled block accepts expose x under that name.
         local wrapper = sql_text.token_upper(body[1])
-        if METRIC_WRAPPERS[wrapper or ""] and body[2] ~= nil
+        if syntax.METRIC_WRAPPERS[wrapper or ""] and body[2] ~= nil
             and body[2].text == "(" and body[#body].text == ")" then
             body = {table.unpack(body, 3, #body - 1)}
         end
         local name
         if #body == 1 then
-            name = token_identifier_value(body[1])
+            name = syntax.token_identifier_value(body[1])
         elseif #body == 3 and body[2].text == "." then
-            name = token_identifier_value(body[3])
+            name = syntax.token_identifier_value(body[3])
         end
         local column = name ~= nil and by_name[upper(name)] or nil
         if column == nil then return nil, nil end
@@ -5442,18 +4929,18 @@ do
             local alias = after
             if sql_text.token_upper(alias) == "AS" then alias = tokens[close_index + 2] end
             if alias ~= nil and (alias.kind == "word" or alias.kind == "identifier") then
-                qualifiers[upper(token_identifier_value(alias))] = true
+                qualifiers[upper(syntax.token_identifier_value(alias))] = true
             end
             return {{anchor = open_index, qualifiers = qualifiers}}
         end
         -- `WITH name AS (...)` or `, name AS (...)`.
         local name_token = tokens[open_index - 2]
         local lead = sql_text.token_upper(tokens[open_index - 3])
-        if word_before ~= "AS" or token_identifier_value(name_token) == nil
+        if word_before ~= "AS" or syntax.token_identifier_value(name_token) == nil
             or not (lead == "WITH" or (tokens[open_index - 3] and tokens[open_index - 3].text == ",")) then
             return {}
         end
-        local cte = upper(token_identifier_value(name_token))
+        local cte = upper(syntax.token_identifier_value(name_token))
         local blocks = {}
         for index = close_index + 1, #tokens - 1 do
             local intro = tokens[index]
@@ -5461,15 +4948,15 @@ do
             local target = tokens[index + 1]
             local following = tokens[index + 2]
             if (word == "FROM" or word == "JOIN" or intro.text == ",")
-                and token_identifier_value(target) ~= nil
-                and upper(token_identifier_value(target)) == cte
+                and syntax.token_identifier_value(target) ~= nil
+                and upper(syntax.token_identifier_value(target)) == cte
                 and not (following ~= nil and (following.text == "." or following.text == "(")) then
                 local qualifiers = {[cte] = true}
                 local alias = following
                 if sql_text.token_upper(alias) == "AS" then alias = tokens[index + 3] end
                 if alias ~= nil and (alias.kind == "word" or alias.kind == "identifier")
                     and not STATEMENT_WORDS[sql_text.token_upper(alias)] then
-                    qualifiers[upper(token_identifier_value(alias))] = true
+                    qualifiers[upper(syntax.token_identifier_value(alias))] = true
                 end
                 blocks[#blocks + 1] = {anchor = index + 1, qualifiers = qualifiers}
             end
@@ -5504,7 +4991,7 @@ do
         end
 
         local outputs, dimensions = {}, {}
-        for _, item in ipairs(split_top_level(tokens, first, last, ",")) do
+        for _, item in ipairs(syntax.split_top_level(tokens, first, last, ",")) do
             local star = (#item == 1 and item[1].text == "*")
                 or (#item == 3 and item[2].text == "." and item[3].text == "*")
             if star then
@@ -5552,7 +5039,7 @@ do
                     end
                 end
                 if from_index ~= nil then
-                    block_items = split_top_level(tokens, block_start + 1, from_index - 1, ",")
+                    block_items = syntax.split_top_level(tokens, block_start + 1, from_index - 1, ",")
                 end
                 for index = block_start + 1, block_end - 1 do
                     if tokens[index].depth == depth and sql_text.token_upper(tokens[index]) == "GROUP"
@@ -5566,13 +5053,13 @@ do
                                 break
                             end
                         end
-                        for _, item in ipairs(split_top_level(tokens, index + 2, stop, ",")) do
+                        for _, item in ipairs(syntax.split_top_level(tokens, index + 2, stop, ",")) do
                             if #item == 1 and item[1].kind == "number" and block_items ~= nil then
                                 item = block_items[tonumber(item[1].text)] or {}
                             end
                             local named = item[#item]
-                            if named ~= nil and token_identifier_value(named) ~= nil then
-                                grouped[upper(token_identifier_value(named))] = true
+                            if named ~= nil and syntax.token_identifier_value(named) ~= nil then
+                                grouped[upper(syntax.token_identifier_value(named))] = true
                             end
                         end
                         break
@@ -5618,10 +5105,10 @@ do
                             argument = argument + 2
                         end
                         local closing, over = tokens[argument + 1], tokens[argument + 2]
-                        local name = token_identifier_value(name_token)
+                        local name = syntax.token_identifier_value(name_token)
                         local column = name ~= nil and outputs[upper(name)] or nil
                         local qualified_here = qualifier == nil
-                            or block.qualifiers[upper(token_identifier_value(qualifier) or "")]
+                            or block.qualifiers[upper(syntax.token_identifier_value(qualifier) or "")]
                         if column ~= nil and qualified_here and upper(column.kind) == "METRIC"
                             and closing ~= nil and closing.text == ")"
                             and sql_text.token_upper(over) ~= "OVER"
@@ -5797,7 +5284,7 @@ do
         for index = first, last do
             local following = tokens[index + 1]
             if not aggregating and tokens[index].depth == reference.depth
-                and METRIC_WRAPPERS[sql_text.token_upper(tokens[index]) or ""]
+                and syntax.METRIC_WRAPPERS[sql_text.token_upper(tokens[index]) or ""]
                 and following ~= nil and following.text == "(" then
                 aggregating = true
             end
@@ -5935,13 +5422,13 @@ do
             and sql_text.token_upper(tokens[index + 2]) == "EXISTS" then
             index = index + 3
         end
-        local first = token_identifier_value(tokens[index])
+        local first = syntax.token_identifier_value(tokens[index])
         if first == nil then
             return nil
         end
         if tokens[index + 1] ~= nil and tokens[index + 1].text == "."
-            and token_identifier_value(tokens[index + 2]) ~= nil then
-            return first, token_identifier_value(tokens[index + 2])
+            and syntax.token_identifier_value(tokens[index + 2]) ~= nil then
+            return first, syntax.token_identifier_value(tokens[index + 2])
         end
         -- An unqualified view lands in whatever schema the session has open,
         -- which the preprocessor cannot see. Recorded with an empty schema
@@ -6629,16 +6116,16 @@ if rawget(_G, "ESV_TEST_MODE") then
         build_sql = build_sql,
         build_materialized_sql = build_materialized_sql,
         sql_tokens = function(text) return sql_text.tokenize(text, SEMANTIC_SQL_LEXER) end,
-        split_top_level = split_top_level,
-        unwrap_measure_part = unwrap_measure_part,
-        identifier_from_part = identifier_from_part,
-        alias_from_select_part = alias_from_select_part,
-        literal_from_tokens = literal_from_tokens,
-        find_top_level_clauses = find_top_level_clauses,
-        render_token_slice = render_token_slice,
-        parse_where_filters = parse_where_filters,
+        split_top_level = syntax.split_top_level,
+        unwrap_measure_part = syntax.unwrap_measure_part,
+        identifier_from_part = syntax.identifier_from_part,
+        alias_from_select_part = syntax.alias_from_select_part,
+        literal_from_tokens = syntax.literal_from_tokens,
+        find_top_level_clauses = syntax.find_top_level_clauses,
+        render_token_slice = syntax.render_token_slice,
+        parse_where_filters = syntax.parse_where_filters,
         parse_having_filters = parse_having_filters,
-        parse_order_by = parse_order_by,
+        parse_order_by = syntax.parse_order_by,
         collision_error = collision_error,
         typed_failure_message = envelope.typed_failure_message,
     }

@@ -44,8 +44,18 @@ import re
 import unittest
 from pathlib import Path
 
+import built_install  # the install SQL as the build assembles it
+
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The runtime modules: what the validator, compiler and agent runtimes are
+# concatenated from. The script bodies under lua/semantic_layer/scripts/ are
+# Lua too, but each is one script's main chunk rather than a module, so the
+# module rules below do not apply to them; ScriptHelpersAreCopied pins theirs.
+SCRIPT_BODIES_DIR = ROOT / "lua/semantic_layer/scripts"
+RUNTIME_LUA_SOURCES = sorted(path for path in (ROOT / "lua").rglob("*.lua")
+                             if SCRIPT_BODIES_DIR not in path.parents)
 INTEGRATION = ROOT / "tests" / "integration"
 
 
@@ -156,7 +166,7 @@ SEVERITY_PREFIXED_CODE = re.compile(r"SEMANTIC_[A-Z]+_[A-Z]\d+")
 def codes_everywhere() -> set[str]:
     text = "\n".join(
         [path.read_text(encoding="utf-8") for path in sorted((ROOT / "lua").rglob("*.lua"))]
-        + [path.read_text(encoding="utf-8").partition("-- BEGIN GENERATED")[0]
+        + [path.read_text(encoding="utf-8")
            for path in sorted((ROOT / "sql/install").glob("*.sql"))])
     # Comments explain the retired spelling, so they must not count as uses.
     lines = [line for line in text.split("\n") if not line.lstrip().startswith("--")]
@@ -169,7 +179,7 @@ class OneConditionOneRuleCode(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         messages: dict[str, set[str]] = collections.defaultdict(set)
-        for path in sorted((ROOT / "lua").rglob("*.lua")):
+        for path in RUNTIME_LUA_SOURCES:
             text = path.read_text(encoding="utf-8")
             for pattern in CODE_WITH_MESSAGE:
                 for code, message in pattern.findall(text):
@@ -224,8 +234,7 @@ class OneConditionOneRuleCode(unittest.TestCase):
 
     def test_the_advisory_pair_kept_its_meaning_after_renumbering(self):
         """The rename had to move numbers, so pin where they landed."""
-        admin = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-            encoding="utf-8")
+        admin = built_install.text("003_create_semantic_admin_scripts.sql")
         for code in ("SEMANTIC_ADMIN_220", "SEMANTIC_ADMIN_221"):
             self.assertIn(f'"{code}: representation', admin, code)
         self.assertNotIn("SEMANTIC_ADMIN_W06", admin.replace(
@@ -408,8 +417,7 @@ class SkillsMatchTheSurface(unittest.TestCase):
 # 3. Derive a surface, do not restate it
 # ---------------------------------------------------------------------------
 
-CATALOG_VIEWS = (ROOT / "sql/install/002_create_semantic_catalog_views.sql").read_text(
-    encoding="utf-8")
+CATALOG_VIEWS = built_install.text("002_create_semantic_catalog_views.sql")
 
 
 class DerivedNotDeclared(unittest.TestCase):
@@ -448,7 +456,7 @@ class DerivedNotDeclared(unittest.TestCase):
             "out of `discriminated`, which is the one place they are declared")
 
     def test_the_library_exclusion_list_is_declared_once(self):
-        """`NON_CALLABLE_SCRIPTS` lives in the packager and is read, not copied.
+        """The non-callable scripts are derived in the packager and read, not copied.
 
         `tests/integration/verify_named_admin_api.py` used to carry a second copy with a
         comment claiming the two "cannot drift apart silently". They then did:
@@ -457,7 +465,7 @@ class DerivedNotDeclared(unittest.TestCase):
         """
         verifier = (INTEGRATION / "verify_named_admin_api.py").read_text(
             encoding="utf-8")
-        self.assertIn("_PACKAGER.NON_CALLABLE_SCRIPTS", verifier)
+        self.assertIn("_PACKAGER.non_callable_scripts()", verifier)
         for library in ("COMPILER_RUNTIME", "VALIDATOR_RUNTIME", "FUSION_RUNTIME"):
             self.assertNotIn(
                 f'"{library}",', verifier,
@@ -506,7 +514,7 @@ class DerivedNotDeclared(unittest.TestCase):
 # This ratchet is the comparison. A body identical in two modules is pinned with
 # the modules it appears in; the pin may shrink and may not grow.
 
-LUA_SOURCES = sorted((ROOT / "lua").rglob("*.lua"))
+LUA_SOURCES = RUNTIME_LUA_SOURCES
 
 # A body has to be substantial enough that sharing it is worth a module: two
 # statements is a spelling, not a routine.
@@ -549,32 +557,68 @@ SQL_TEXT_PRIVATE_NAMES = re.compile(
     r"|decode_quoted_identifier)\b", re.MULTILINE)
 
 
-def _lua_function_bodies():
+def _lua_function_bodies(paths=None):
     """(name, module) grouped by the exact text of the body.
 
     Comments and blank lines are dropped and each line is stripped, so a copy
     that was only re-indented or re-commented still counts as a copy.
+
+    A function at any indentation counts, closed by the `end` at its own: the
+    modules keep their helpers inside a `do` block to spend one main-chunk local
+    (CLAUDE.md, "The 200-Local Ceiling"), and a column-0 scan cannot see them.
     """
-    opener = re.compile(r"^local function ([\w.]+)|^function ([\w.]+)")
+    opener = re.compile(r"^(\s*)(?:local )?function ([\w.:]+)")
     bodies = collections.defaultdict(set)
-    for path in LUA_SOURCES:
+    for path in LUA_SOURCES if paths is None else paths:
         lines = path.read_text(encoding="utf-8").splitlines()
-        index = 0
-        while index < len(lines):
-            match = opener.match(lines[index])
+        for index, line in enumerate(lines):
+            match = opener.match(line)
             if not match:
-                index += 1
                 continue
-            name = match.group(1) or match.group(2)
+            indent, name = match.groups()
             close = index
-            while close < len(lines) and lines[close] != "end":
+            while close < len(lines) and lines[close] != indent + "end":
                 close += 1
             body = [line.strip() for line in lines[index + 1:close]
                     if line.strip() and not line.strip().startswith("--")]
             if len(body) >= MIN_DUPLICATE_BODY_LINES:
                 bodies["\n".join(body)].add((name, path.name))
-            index = close
     return bodies
+
+
+# Copies of one helper across script bodies: each repeat of a byte-identical
+# function in a second, third, ... script. Measured when the bodies moved out of
+# the install SQL (2026-10-16), where nothing could compare them: 103, with
+# normalize_name alone in 24 scripts. 77 since `scalar` moved to the shared
+# SCRIPT_SUPPORT_RUNTIME, which a script imports instead of copying. 87 on
+# 2026-10-17 is the same code measured better, not ten new copies: the scan
+# began to see helpers nested inside a function or a `do` block, and ten copies
+# were already there. Fold the next one the same way and lower the pin. It only
+# shrinks.
+SCRIPT_HELPER_COPIES = 87
+
+
+class ScriptHelpersAreCopied(unittest.TestCase):
+    """The helper copies in script bodies are counted, and the count shrinks."""
+
+    def test_scalar_is_imported_not_copied(self):
+        """The 31 private copies of `scalar` are one routine in SCRIPT_SUPPORT_RUNTIME."""
+        copies = [path.name for path in sorted(SCRIPT_BODIES_DIR.glob("*.lua"))
+                  if re.search(r"^local function scalar\(", path.read_text(encoding="utf-8"), re.M)]
+        self.assertEqual([], copies, "import SCRIPT_SUPPORT_RUNTIME and bind ESV_ROWS.scalar")
+        importers = [path.name for path in SCRIPT_BODIES_DIR.glob("*.lua")
+                     if "script_support.ESV_ROWS.scalar" in path.read_text(encoding="utf-8")]
+        self.assertGreaterEqual(len(importers), 31)
+
+    def test_no_helper_gains_a_copy(self):
+        bodies = sorted(SCRIPT_BODIES_DIR.glob("*.lua"))
+        self.assertGreater(len(bodies), 80, "the script bodies were not found")
+        copies = sum(len({module for _, module in occurrences}) - 1
+                     for occurrences in _lua_function_bodies(bodies).values())
+        self.assertEqual(
+            SCRIPT_HELPER_COPIES, copies,
+            "a helper was copied into another script, or a copy was folded away "
+            "without lowering SCRIPT_HELPER_COPIES")
 
 
 class RoutinesAreWrittenOnce(unittest.TestCase):
@@ -674,9 +718,9 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
             r"^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)"
             r"[^\n]*\n(.*?)^/$", re.S | re.M)
         consumers, providers = set(), set()
-        for generated in (ROOT / "sql/install/003_create_semantic_admin_scripts.sql",
-                          ROOT / "sql/install/006_create_semantic_agent_views.sql"):
-            for match in script.finditer(generated.read_text(encoding="utf-8")):
+        for generated in ("003_create_semantic_admin_scripts.sql",
+                          "006_create_semantic_agent_views.sql"):
+            for match in script.finditer(built_install.text(generated)):
                 name, body = match.group(1), match.group(2)
                 for global_name in ("ESV_JSON", "ESV_SQL_TEXT"):
                     if global_name not in body:
@@ -789,6 +833,43 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
             LEGACY_SCRIPTS, len(legacy),
             f"the pin is stale — lower LEGACY_SCRIPTS to {len(legacy)}")
 
+
+
+class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
+    """tests/lua/run.lua loads every source the packager assembles, in its order.
+
+    The RUNTIMES manifest in tools/package_lua_scripts.py decides what each
+    installed runtime is made of; the Lua suite keeps its own list because plain
+    Lua cannot read the manifest. A module added to one and not the other is
+    either installed untested or tested and never installed, and a module loaded
+    before one it reads would pass here and fail in Exasol.
+    """
+
+    def test_every_runtime_source_is_loaded_in_manifest_order(self):
+        runner = (ROOT / "tests/lua/run.lua").read_text(encoding="utf-8")
+        loaded = re.findall(r'load_runtime\("([^"]+)"', runner)
+        packager = built_install.PACKAGER
+        for runtime, sources in packager.RUNTIMES.items():
+            paths = [str(getattr(packager, source).relative_to(ROOT))
+                     for source in sources if source != "BUILD_STAMP"]
+            missing = [path for path in paths if path not in loaded]
+            self.assertEqual([], missing, f"{runtime}: add these to tests/lua/run.lua")
+            positions = [loaded.index(path) for path in paths]
+            self.assertEqual(sorted(positions), positions,
+                             f"{runtime}: tests/lua/run.lua loads its sources in another order")
+
+    def test_every_runtime_source_has_a_coverage_threshold(self):
+        """The coverage gate measures only the files it names, so a module split
+        out of a gated one would be ungated -- and its lines would leave the old
+        file's figure without arriving anywhere."""
+        thresholds = (ROOT / "tests/lua/coverage_thresholds.lua").read_text(encoding="utf-8")
+        gated = set(re.findall(r'\["(lua/[^"]+\.lua)"\]', thresholds))
+        packager = built_install.PACKAGER
+        sources = {str(getattr(packager, source).relative_to(ROOT))
+                   for runtime in packager.RUNTIMES.values()
+                   for source in runtime if source != "BUILD_STAMP"}
+        self.assertEqual([], sorted(sources - gated),
+                         "add these to tests/lua/coverage_thresholds.lua")
 
 
 class LuaSpecsAreAllRun(unittest.TestCase):
@@ -953,6 +1034,8 @@ class TermsAreDefinedOnce(unittest.TestCase):
         representation coverage".
         """
         offenders = []
+        # Every Lua file, script bodies included: a script's refusal reaches the
+        # same reader as a runtime's.
         for path in (ROOT / "lua").rglob("*.lua"):
             for number, line in enumerate(
                     path.read_text(encoding="utf-8").splitlines(), 1):

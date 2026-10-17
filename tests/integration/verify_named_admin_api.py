@@ -49,7 +49,7 @@ _PACKAGER_SPEC = importlib.util.spec_from_file_location(
     "esv_packager", Path(__file__).resolve().parents[2] / "tools" / "package_lua_scripts.py")
 _PACKAGER = importlib.util.module_from_spec(_PACKAGER_SPEC)  # type: ignore[arg-type]
 _PACKAGER_SPEC.loader.exec_module(_PACKAGER)  # type: ignore[union-attr]
-NON_CALLABLE = set(_PACKAGER.NON_CALLABLE_SCRIPTS)
+NON_CALLABLE = set(_PACKAGER.non_callable_scripts())
 
 # The nine BUG-G02 omitted, all declared `) AS`.
 SILENT_MUTATORS = [

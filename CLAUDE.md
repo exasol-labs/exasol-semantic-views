@@ -81,9 +81,10 @@ grows; do not lower one to merge.
 ```sh
 sh tools/run_static_checks.sh
 ```
-Luacheck covers `lua/`, `tests/lua/`, and — through `tools/dev/lint_embedded_lua.py`
-— every script body embedded in `sql/install/`, which is where most of the admin
-Lua lives. Exasol's globals and the `ESV_*` namespaces are declared in
+Luacheck covers `lua/` and `tests/lua/`. The script bodies in
+`lua/semantic_layer/scripts/` take their parameters as globals, so
+`tools/dev/lint_script_bodies.py` lints each with the parameters its annotation
+block declares. Exasol's globals and the `ESV_*` namespaces are declared in
 `.luacheckrc`; Python rules and the gradually-typed module list are in
 `pyproject.toml`. Add a module to mypy's `files` once it is clean. The tools are
 pinned in `tools/requirements-static.txt` (plus `luarocks install luacheck 1.2.0`).
@@ -101,11 +102,23 @@ python3 tests/integration/verify_semantic_sql_phase1.py   # ORDER BY ordinals, B
 python3 tests/integration/verify_semantic_sql_phase2.py   # HAVING, metric WHERE predicates
 ```
 
-**After editing any Lua source file, regenerate the install SQL before testing:**
+**The install SQL is built, not checked in:**
 ```sh
-python3 tools/package_lua_scripts.py
+python3 tools/package_lua_scripts.py      # writes build/install/
 ```
-This is mandatory — the install SQL files contain embedded Lua. The source files under `lua/` are canonical; `sql/install/003_create_semantic_admin_scripts.sql` and `sql/install/006_create_semantic_agent_views.sql` are generated. Never edit the generated SQL directly.
+Everything under `sql/install/` and `lua/` is hand-written; edit it directly.
+SQL holds no Lua: each script is `lua/semantic_layer/scripts/<script_name>.lua`,
+installed where a source has the line `-- @lua <path>`. The file opens with an
+annotation block (`--- summary`, `@script`, `@param NAME [description]`,
+`@returns`) from which the build generates the `CREATE SCRIPT` statement and the
+described signatures in `SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS`; a parameter
+that means the same everywhere is described once, in
+`lua/semantic_layer/scripts/PARAMETERS.md`. A source file marks each generated part
+with a one-line `-- @generated <NAME>` placeholder, and the build writes the complete files to `build/install/`
+(gitignored), which is what the installer runs and the release ships.
+`tools/install.py` builds first, and the unit tests build in memory
+(`tests/unit/built_install.py`), so there is no step to forget after a Lua
+edit. See `sql/install/README.md`.
 
 **Connection defaults** (all tools read these env vars):
 ```sh
@@ -127,6 +140,8 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/compiler/metric_plan.lua` | same | imported compiler module |
 | `lua/semantic_layer/compiler/physical_plan.lua` | same | imported compiler module |
 | `lua/semantic_layer/compiler/grain_sql.lua` | same | imported compiler module |
+| `lua/semantic_layer/compiler/compile_result.lua` | same | the ERROR / NEEDS_CLARIFICATION envelope |
+| `lua/semantic_layer/compiler/semantic_sql_syntax.lua` | same | token-level Semantic SQL parsing (clauses, predicates, ORDER BY) |
 | `lua/semantic_layer/compiler/materializations.lua` | same | `SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME` |
 | `lua/semantic_layer/shared/grain_graph.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/shared/json.lua` | same, plus `006_…` | shared codec, embedded in every runtime |
@@ -136,12 +151,16 @@ The runtime is split into focused Lua modules:
 | `lua/semantic_layer/shared/identity_join.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/shared/source_columns.lua` | same | shared validator/compiler module |
 | `lua/semantic_layer/admin/fusion_declaration.lua` | same | `SEMANTIC_ADMIN.FUSION_RUNTIME` |
+| `lua/semantic_layer/admin/databricks_import.lua` | same | Databricks UCMV importer, loaded first in `SEMANTIC_DEFINITION_RUNTIME` |
 | `lua/semantic_layer/admin/semantic_definition.lua` | same | `SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME` |
 | `lua/semantic_layer/agent/runtime.lua` | `006_create_semantic_agent_views.sql` | `SEMANTIC_ADMIN.AGENT_RUNTIME` |
-| `lua/semantic_layer/admin/validator.lua` | `003_create_semantic_admin_scripts.sql` | inline in `VALIDATE_MODEL` |
+| `lua/semantic_layer/admin/validator.lua` | `003_create_semantic_admin_scripts.sql` | `SEMANTIC_ADMIN.VALIDATOR_RUNTIME`, imported by `VALIDATE_MODEL` |
+| `lua/semantic_layer/scripts/<name>.lua` | wherever a source installs it (`003`–`006`) | `SEMANTIC_ADMIN.<NAME>`, its statement generated from the annotations |
 
-`package_lua_scripts.py` replaces `-- BEGIN GENERATED … / -- END GENERATED …` marker blocks in the install SQL files. It also generates
-`001b_create_semantic_source_views.sql` by scanning the compiler modules for
+`package_lua_scripts.py` builds each runtime script from the `lua/` sources
+listed for it in `RUNTIMES`, and puts it where a source file's
+`-- @generated SEMANTIC_ADMIN.<NAME>` placeholder stands. It also generates the
+views in `001b_create_semantic_source_views.sql` by scanning the compiler modules for
 `SEMANTIC_SOURCE.<TABLE>` references: the compiler's own reads decide which
 scoped views exist, so adding a catalog read without a view fails the build
 rather than failing at runtime for a non-`SYS` caller. The public TABLE-returning scripts (`COMPILE_REQUEST_JSON`, `COMPILE_SQL`, etc.) are thin wrappers that `import(...)` the runtime library and call one function.
@@ -409,8 +428,12 @@ SQL NULL. Two tests hold the line: `NullNormalisationTest` in
 
 Exasol caps a Lua function at 200 local variables, and a generated runtime
 script is **one chunk** holding several concatenated source files. So the
-ceiling applies to the *sum* of their top-level locals. `COMPILER_RUNTIME` is
-nine sources and sits at 188/200; `request_json.lua` alone declares 106 of them.
+ceiling applies to the *sum* of the locals active at once — the top-level ones
+plus whatever a top-level `do` block holds while it runs. `COMPILER_RUNTIME` is
+eleven sources and peaks at 181/200, nine of them inside the `bi_expansion`
+block of `request_json.lua`; before `compile_result.lua` and
+`semantic_sql_syntax.lua` were split out it counted 188 and actually peaked at
+197.
 
 The consequence is the part that is easy to get wrong: **splitting a file into
 two files buys no headroom.** Both halves land in the same chunk and declare the
@@ -429,16 +452,22 @@ wall. It is also why a shared module is worth more than its line count suggests
 — `shared/json.lua` replaced five top-level locals in each of three runtimes
 with two.
 
-`tools/package_lua_scripts.py` counts per generated script, fails the build with
-the script name and the sources it was assembled from, and prints the remaining
-headroom from 190 up. Exceeding it without that check fails at *install* time
+A column-0 count misses the `do`-block locals, so
+`tools/package_lua_scripts.py` *measures* the peak: it compiles each generated
+script body with a Lua interpreter (`LUA_BIN`, `lua5.4` or `lua`), padded with
+extra locals until it stops compiling. It fails the build with the script name
+and the sources it was assembled from, and prints the remaining headroom from
+190 up; without an interpreter it falls back to the count and says so. The
+runtimes and their source order are the `RUNTIMES` manifest in the packager, and
+`tests/unit/test_conventions.py` checks `tests/lua/run.lua` loads the same
+sources in the same order. Exceeding the limit without that check fails at *install* time
 with `too many local variables (limit is 200) in main function` and a line
 number in a 29 000-line generated file.
 
 **Every runtime that uses a shared module must embed it.** The chunks share no
-globals, so a `shared/` file that one block in the packager forgets leaves that
+globals, so a `shared/` file that one `RUNTIMES` entry in the packager omits leaves that
 runtime asserting on a nil global at install time. `tests/unit/test_conventions.py`
-derives this from the generated SQL: any script referencing `ESV_JSON` must also
+derives this from the built SQL: any script referencing `ESV_JSON` must also
 contain its definition.
 
 ## Conventions
@@ -496,9 +525,13 @@ JSON codec was the same story without a bug report, four private copies whose
 null sentinel is a bare table with no meaning beyond its identity, so a null
 decoded by one module was an anonymous empty table to the others. Nothing failed,
 because nothing compared the copies. Put a shared routine in
-`lua/semantic_layer/shared/` and add it to every packager block that needs it —
+`lua/semantic_layer/shared/` and add it to every `RUNTIMES` entry that needs it —
 `json.lua`, `rows.lua`, `sql_text.lua`, `catalog_rollback.lua`,
-`identity_join.lua` and `grain_graph.lua` are the worked examples.
+`identity_join.lua` and `grain_graph.lua` are the worked examples. A script body
+shares the same way at run time: it imports `SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME`
+and binds what it needs (`local scalar = script_support.ESV_ROWS.scalar`) rather
+than defining a private copy. `SCRIPT_HELPER_COPIES` pins the copies still left
+in script bodies; it only shrinks.
 
 **Derive a surface, do not restate it.** `CATALOG_COLUMNS`,
 `ADMIN_SCRIPT_PARAMETERS` and `CATALOG_RELATIONSHIPS` read `EXA_ALL_*`, so they
@@ -517,17 +550,18 @@ the six names.
 | `lua/semantic_layer/admin/validator.lua` | Model validation, dependency extraction, compatibility matrix |
 | `lua/semantic_layer/admin/semantic_definition.lua` | Semantic DDL parser and admin operations |
 | `lua/semantic_layer/agent/runtime.lua` | Agent search, glossary, feedback, explain scripts |
-| `sql/install/003_create_semantic_admin_scripts.sql` | Generated — wraps compiler + validator Lua into Exasol scripts |
-| `sql/install/006_create_semantic_agent_views.sql` | Generated — wraps agent runtime + all SEMANTIC_AGENT views |
+| `sql/install/003_create_semantic_admin_scripts.sql` | Signatures of the admin scripts and runtime wrappers; placeholders for the runtimes |
+| `sql/install/006_create_semantic_agent_views.sql` | SEMANTIC_AGENT views and agent script signatures; placeholder for the agent runtime |
+| `lua/semantic_layer/scripts/` | Every script, one file each, named after it: annotated signature and body |
 | `sql/examples/sales_model_seed.sql` | Reference model definition (canonical example) |
-| `sql/install/001b_create_semantic_source_views.sql` | Generated — principal-scoped catalog views the compiler reads |
-| `tools/package_lua_scripts.py` | Regenerates install SQL from Lua source |
-| `tools/install.py` | Full installer: package → connect → reset? → run SQL files |
+| `sql/install/001b_create_semantic_source_views.sql` | Principal-scoped catalog views; the per-table ones are generated from the compiler's reads |
+| `tools/package_lua_scripts.py` | Builds `build/install/` from `sql/install/` and `lua/` |
+| `tools/install.py` | Full installer: build → connect → reset? → run `build/install/` |
 | `tools/import_databricks.py` | Host helper: reads a Databricks UCMV YAML file and calls the in-DB importer |
 | `tools/run_smoke.sh` | Full smoke suite |
 | `tests/README.md` | The test lanes: which directory, what it needs, how it runs |
 
-The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) and its YAML parser/translator live in `semantic_definition.lua`; the MEASURE()/`GROUP BY ALL` query surface lives in `request_json.lua`. See `docs/databricks-metric-views.md`.
+The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) and its YAML parser/translator live in `admin/databricks_import.lua`; the MEASURE()/`GROUP BY ALL` query surface lives in `request_json.lua`. See `docs/databricks-metric-views.md`.
 
 ## Known Issues
 

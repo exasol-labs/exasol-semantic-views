@@ -584,8 +584,9 @@ not have it, prefix with your virtualenv Python:
 PYTHON_BIN=.venv/bin/python $PYTHON_BIN tools/install.py --example
 ```
 
-Pass `--skip-package` to skip the Lua packaging step and use the already-generated
-`sql/install/` files — useful in CI after a prior packaging run.
+The installer builds the install SQL into `build/install/` from `sql/install/`
+and `lua/` before it runs it. Pass `--skip-package` to install `build/install/`
+as it stands, for example from a release bundle, which ships it built.
 
 ## Project Docs
 

@@ -154,9 +154,9 @@ compilation, explanation, feedback, and evolution review. These scripts are the
 transaction and policy boundary around catalog writes.
 
 The canonical implementation is under [`lua/semantic_layer`](../lua/semantic_layer).
-[`package_lua_scripts.py`](../tools/package_lua_scripts.py) packages those modules
-into installable Exasol Lua scripts. The generated SQL bundle is not a separate
-implementation.
+[`package_lua_scripts.py`](../tools/package_lua_scripts.py) concatenates those
+modules into installable Exasol Lua scripts in `build/install/`. The built SQL is
+not a separate implementation and is not checked in.
 
 ### Published schemas
 

@@ -34,10 +34,18 @@ jobs:
         run: |
           mkdir -p dist
           bundle="exasol-semantic-views-${GITHUB_REF_NAME}.zip"
+          prefix="exasol-semantic-views-${GITHUB_REF_NAME}"
           python tools/release_notes.py "${GITHUB_REF_NAME#v}" > release-notes.md
+          # The install SQL is built, not checked in; ship it built so the
+          # bundle installs without Python (sql/install/README.md).
+          python tools/package_lua_scripts.py
+          built=()
+          for file in build/install/*.sql; do built+=("--add-file=${file}"); done
+          # --add-file takes the --prefix given before it, the tree the last one.
           git archive \
             --format=zip \
-            --prefix="exasol-semantic-views-${GITHUB_REF_NAME}/" \
+            --prefix="${prefix}/build/install/" "${built[@]}" \
+            --prefix="${prefix}/" \
             --output="dist/${bundle}" \
             HEAD
           cd dist

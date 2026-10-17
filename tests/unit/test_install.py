@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import tempfile
 import unittest
 from pathlib import Path
+
+import built_install  # the install SQL as the build assembles it
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -68,11 +71,19 @@ class BuildProvenanceTest(unittest.TestCase):
         self.assertEqual(INSTALL.display_version("0.1", "RELEASED"), "0.1")
 
     def test_runtime_checksum_tracks_the_installed_sql(self):
-        first = INSTALL.runtime_checksum(INSTALL.INSTALL_FILES)
-        self.assertEqual(first, INSTALL.runtime_checksum(INSTALL.INSTALL_FILES))
-        self.assertEqual(len(first), 64)
-        # A different file set must not collide with the real one.
-        self.assertNotEqual(first, INSTALL.runtime_checksum(INSTALL.INSTALL_FILES[:-1]))
+        # The built files, written where a test can read them: build/install/
+        # may not exist yet, and a test must not depend on an earlier build.
+        with tempfile.TemporaryDirectory() as scratch:
+            files = []
+            for path in INSTALL.INSTALL_FILES:
+                target = Path(scratch) / path.name
+                target.write_text(built_install.text(path.name), encoding="utf-8")
+                files.append(target)
+            first = INSTALL.runtime_checksum(files)
+            self.assertEqual(first, INSTALL.runtime_checksum(files))
+            self.assertEqual(len(first), 64)
+            # A different file set must not collide with the real one.
+            self.assertNotEqual(first, INSTALL.runtime_checksum(files[:-1]))
 
     def test_git_provenance_reports_clean_dirty_and_unknown(self):
         def runner(argv, **kwargs):
@@ -121,9 +132,7 @@ class BuildProvenanceTest(unittest.TestCase):
         catalog = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(
             encoding="utf-8"
         )
-        views = (ROOT / "sql/install/002_create_semantic_catalog_views.sql").read_text(
-            encoding="utf-8"
-        )
+        views = built_install.text("002_create_semantic_catalog_views.sql")
         self.assertIn("CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.PRODUCT_INSTALLATIONS", catalog)
         self.assertIn("CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_VERSION", views)
         self.assertIn("CREATE OR REPLACE VIEW SEMANTIC_CATALOG.PRODUCT_INSTALL_HISTORY", views)
@@ -181,9 +190,7 @@ class InstallerResetTest(unittest.TestCase):
         allowed = set(re.findall(r"^\s+([A-Z_]+) = true,$", allow_list, re.MULTILINE))
 
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/006_create_semantic_agent_views.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("006_create_semantic_agent_views.sql")
         )
         discovery = next(
             sql
@@ -201,9 +208,7 @@ class InstallerResetTest(unittest.TestCase):
         )
 
     def test_admin_validation_gates_block_session_preconditions(self):
-        admin_sql = (
-            ROOT / "sql/install/003_create_semantic_admin_scripts.sql"
-        ).read_text(encoding="utf-8")
+        admin_sql = built_install.text("003_create_semantic_admin_scripts.sql")
         hand_authored = admin_sql.split("-- BEGIN GENERATED VALIDATOR_RUNTIME", 1)[0]
         error_only_checks = (
             'if tostring(row_value(validation_row, "SEVERITY", 1)) == "ERROR" then',
@@ -218,9 +223,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_agent_readiness_always_exposes_published_session_instructions(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/006_create_semantic_agent_views.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("006_create_semantic_agent_views.sql")
         )
         models = next(
             sql
@@ -260,7 +263,7 @@ class InstallerResetTest(unittest.TestCase):
     def test_f7_model_evolution_surface_is_installable(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:
-            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+            statements.extend(INSTALL.split_exasol_sql(built_install.text(path.name)))
         expected_fragments = {
             "SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS",
             "SYS_SEMANTIC.MODEL_EVOLUTION_TARGETS",
@@ -276,7 +279,7 @@ class InstallerResetTest(unittest.TestCase):
     def test_f2_binding_install_surface_is_split_into_statements(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:
-            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+            statements.extend(INSTALL.split_exasol_sql(built_install.text(path.name)))
         expected_fragments = {
             "SYS_SEMANTIC.ATTRIBUTE_BINDINGS",
             "SEMANTIC_CATALOG.ATTRIBUTE_BINDINGS",
@@ -315,9 +318,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_representation_promotion_preserves_explicit_binding_precedence(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         promotion = next(
             sql
@@ -346,9 +347,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_f3_coverage_admin_surface_is_installable(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         coverage = next(
             sql
@@ -401,9 +400,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_f3_attribute_creation_seeds_every_partition(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         scripts = {
             name: next(
@@ -429,9 +426,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_heterogeneous_attributes_can_be_created_with_all_bindings_atomically(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         scripts = {
             sql.split("SEMANTIC_ADMIN.", 1)[1].split("(", 1)[0]: sql
@@ -460,7 +455,7 @@ class InstallerResetTest(unittest.TestCase):
         self.assertIn("binding_role = primary_role", runtime)
         self.assertIn("binding_priority = primary_priority", runtime)
         self.assertNotIn("'PREFER', 1, TRUE, 'ACTIVE'", runtime)
-        self.assertIn("names the F3", runtime)
+        self.assertIn("names the temporal", runtime)
         self.assertIn("every partition's binding.", runtime)
         self.assertIn("coverage_predicate", runtime)
         self.assertIn("for _, partition in ipairs(partitions) do", runtime)
@@ -499,9 +494,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_relationship_mappings_accept_quoted_physical_columns(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         add_mapping = next(
             sql
@@ -515,9 +508,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_published_structural_mutations_are_prospective_and_reversible(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         scripts = {
             name: next(
@@ -594,9 +585,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_stale_mutators_recertify_and_managed_lifecycles_are_exercised(self):
         statements = INSTALL.split_exasol_sql(
-            (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-                encoding="utf-8"
-            )
+            built_install.text("003_create_semantic_admin_scripts.sql")
         )
         scripts = {
             sql.split("SEMANTIC_ADMIN.", 1)[1].split("(", 1)[0]: sql
@@ -715,7 +704,7 @@ class InstallerResetTest(unittest.TestCase):
     def test_f4_authority_and_reconciliation_surfaces_are_installable(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:
-            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+            statements.extend(INSTALL.split_exasol_sql(built_install.text(path.name)))
         expected_fragments = {
             "SYS_SEMANTIC.REPRESENTATION_AUTHORITIES",
             "SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES",
@@ -730,7 +719,7 @@ class InstallerResetTest(unittest.TestCase):
     def test_f5_identity_graph_surfaces_are_installable(self):
         statements = []
         for path in INSTALL.INSTALL_FILES:
-            statements.extend(INSTALL.split_exasol_sql(path.read_text(encoding="utf-8")))
+            statements.extend(INSTALL.split_exasol_sql(built_install.text(path.name)))
         expected_fragments = {
             "SYS_SEMANTIC.SEMANTIC_IDENTITIES",
             "SYS_SEMANTIC.IDENTITY_BINDINGS",
@@ -976,7 +965,7 @@ class InstallerResetTest(unittest.TestCase):
 
     def test_every_baseline_role_is_granted_something_by_007(self):
         """A role nothing grants to is a role that does nothing."""
-        source = (INSTALL.ROOT / "sql/install/001b_create_semantic_source_views.sql").read_text()
+        source = built_install.text("001b_create_semantic_source_views.sql")
         for role in INSTALL.BASELINE_ROLES:
             self.assertIn(f"TO {role};", source, role)
 
@@ -1017,28 +1006,27 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.declared: set[str] = set()
-        self.published: set[str] = set()
-        for path in sorted((ROOT / "sql/install").glob("*.sql"),
-                           key=lambda candidate: candidate.name):
-            if path.name.startswith("002_"):
+        for name, text in sorted(built_install.files().items()):
+            if name.startswith("002_"):
                 continue
-            text = path.read_text(encoding="utf-8")
             self.declared.update(PACKAGER.ANY_SCRIPT_DECLARATION.findall(text))
-            self.published.update(
-                match.group(1) for match in PACKAGER.SCRIPT_SIGNATURE.finditer(text))
+        self.published = set(re.findall(r"^  \('(\w+)',", PACKAGER.admin_script_parameters_block(),
+                                        re.M))
+        self.excluded = PACKAGER.non_callable_scripts()
 
-    def test_every_declared_script_is_published_or_explicitly_excluded(self):
-        unaccounted = self.declared - self.published - PACKAGER.NON_CALLABLE_SCRIPTS
-        self.assertEqual(
-            set(), unaccounted,
-            "declared but unreachable through CALL_ADMIN_JSON; add to "
-            "NON_CALLABLE_SCRIPTS if it is a runtime library")
+    def test_every_declared_script_is_published_or_excluded(self):
+        self.assertEqual(set(), self.declared - self.published - self.excluded,
+                         "declared but unreachable through CALL_ADMIN_JSON")
 
     def test_exclusions_are_all_real_scripts(self):
         """A stale exclusion would silently hide a future script of that name."""
+        self.assertEqual(set(), self.excluded - self.declared)
+
+    def test_the_exclusions_are_derived_not_listed(self):
+        """The runtime libraries and the UDF-kind scripts, and nothing else."""
         self.assertEqual(
-            set(), PACKAGER.NON_CALLABLE_SCRIPTS - self.declared,
-            "NON_CALLABLE_SCRIPTS lists scripts that no longer exist")
+            set(PACKAGER.RUNTIMES) | {"SEMANTIC_GUARD", "SEMANTIC_PREPROCESSOR"}, self.excluded)
+        self.assertEqual(set(), self.excluded & self.published)
 
     def test_row_returning_and_silent_mutators_are_both_published(self):
         """The distinction that used to decide visibility must not matter."""
@@ -1055,7 +1043,7 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
     def test_runtime_libraries_are_not_published(self):
         """Publishing one would advertise an uncallable script as an API."""
         block = PACKAGER.admin_script_parameters_block()
-        for library in PACKAGER.NON_CALLABLE_SCRIPTS:
+        for library in PACKAGER.non_callable_scripts():
             self.assertNotIn(f"  ('{library}',", block, library)
 
     def test_generated_block_carries_the_bootstrap_arity(self):
@@ -1101,12 +1089,13 @@ class NullNormalisationTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.hand_written: dict[str, list[tuple[int, str]]] = {}
-        for path in sorted((ROOT / "sql/install").glob("*.sql")):
-            # Generated blocks come from `lua/`, which the Lua suite covers and
-            # which does not receive Exasol script parameters.
-            head, _, _ = path.read_text(encoding="utf-8").partition("-- BEGIN GENERATED")
+        # The script bodies: every script written by hand, each receiving its
+        # parameters from Exasol. The runtime modules elsewhere in `lua/` are
+        # covered by the Lua suite and receive no script parameters.
+        for path in sorted((ROOT / "lua/semantic_layer/scripts").glob("*.lua")):
             self.hand_written[path.name] = [
-                (number, line) for number, line in enumerate(head.split("\n"), 1)
+                (number, line) for number, line
+                in enumerate(path.read_text(encoding="utf-8").split("\n"), 1)
                 if not line.lstrip().startswith("--")]
 
     def test_no_hand_written_script_normalises_null_by_truthiness(self):
@@ -1127,11 +1116,11 @@ class NullNormalisationTest(unittest.TestCase):
 
     def test_the_replacement_names_null_where_it_is_used(self):
         """Avoiding the idiom is not enough; the guard has to test for `null`."""
-        for name in ("003_create_semantic_admin_scripts.sql",
-                     "005_create_semantic_surface_helpers.sql"):
-            text = "\n".join(line for _, line in self.hand_written[name])
-            self.assertIn('if value == nil or value == null then return "" end', text,
-                          f"{name} has no null-guarded normaliser left")
+        guard = 'if value == nil or value == null then return "" end'
+        guarded = [name for name, lines in self.hand_written.items()
+                   if guard in "\n".join(line for _, line in lines)]
+        self.assertIn("publish_model.lua", guarded)
+        self.assertGreater(len(guarded), 1, "no null-guarded normaliser left")
 
 
 class PackagerOutputFormattingTest(unittest.TestCase):
@@ -1146,7 +1135,7 @@ class PackagerOutputFormattingTest(unittest.TestCase):
 
     def test_a_status_line_puts_the_file_name_first(self):
         formatted = INSTALL.format_packager_line(
-            "unchanged sql/install/003_create_semantic_admin_scripts.sql")
+            "unchanged build/install/003_create_semantic_admin_scripts.sql")
         self.assertIn("003_create_semantic_admin_scripts.sql", formatted)
         self.assertTrue(formatted.startswith("      "))
         # The status is the first word of the input and must not become the label.
@@ -1223,10 +1212,110 @@ class RuntimeBuildStampTest(unittest.TestCase):
                 stamp + "\n" + PACKAGER.COMPILER_SOURCE.read_text(encoding="utf-8")),
             before, "the stamp must not spend one of the 200 chunk locals")
 
-    def test_shipped_install_sql_matches_the_current_sources(self) -> None:
-        text = PACKAGER.INSTALL_SQL.read_text(encoding="utf-8")
-        self.assertIn(f'ESV_RUNTIME_BUILD = "{PACKAGER.runtime_build_id()}"', text,
-                      "run tools/package_lua_scripts.py after editing Lua sources")
+    def test_the_build_stamps_the_current_sources(self) -> None:
+        text = built_install.text("003_create_semantic_admin_scripts.sql")
+        self.assertIn(f'ESV_RUNTIME_BUILD = "{PACKAGER.runtime_build_id()}"', text)
+
+
+class SourcesAreHandWrittenTest(unittest.TestCase):
+    """sql/install/ holds only what people write; build/install/ holds the rest.
+
+    003 used to be 36 000 lines, 26 000 of them runtime Lua spliced in between
+    markers, around 10 000 lines of admin scripts that could only be edited
+    there. A one-line Lua change was a 26 000-line review diff, and "generated,
+    do not edit" was true of three quarters of a file people had to edit.
+    """
+
+    def test_no_source_contains_generated_text(self):
+        for path in sorted((ROOT / "sql/install").glob("*.sql")):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("-- BEGIN GENERATED", text, path.name)
+            self.assertNotIn("ESV_RUNTIME_BUILD", text, path.name)
+
+    def test_every_runtime_is_placed_once_and_nothing_is_left_unexpanded(self):
+        placed = [match.group(1)
+                  for path in sorted((ROOT / "sql/install").glob("*.sql"))
+                  for match in PACKAGER.PLACEHOLDER.finditer(path.read_text(encoding="utf-8"))]
+        expected = [f"SEMANTIC_ADMIN.{name}" for name in PACKAGER.RUNTIMES] + [
+            "SEMANTIC_SOURCE_VIEWS", "ADMIN_SCRIPT_PARAMETERS"]
+        self.assertEqual(sorted(expected), sorted(placed))
+        for name, text in built_install.files().items():
+            self.assertIsNone(PACKAGER.PLACEHOLDER.search(text), name)
+
+    def test_the_build_is_the_sources_with_placeholders_filled(self):
+        """Outside a placeholder, the build is the source, byte for byte."""
+        for path in sorted((ROOT / "sql/install").glob("*.sql")):
+            source = PACKAGER.LUA_BODY.sub("-- @generated BODY", path.read_text(encoding="utf-8"))
+            pieces = PACKAGER.PLACEHOLDER.split(source)
+            built = built_install.text(path.name)
+            position = 0
+            for literal in pieces[::2]:
+                found = built.find(literal, position)
+                self.assertGreaterEqual(found, 0, f"{path.name}: source text missing")
+                position = found + len(literal)
+
+    def test_no_source_declares_a_script(self):
+        """A script is its file: the SQL places it with one `-- @lua <path>` line."""
+        placed = []
+        for path in sorted((ROOT / "sql/install").glob("*.sql")):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"(?m)^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT\b",
+                                f"{path.name} declares a script; annotate its .lua file instead")
+            placed += PACKAGER.LUA_BODY.findall(text)
+        files = sorted(f"lua/semantic_layer/scripts/{path.name}"
+                       for path in (ROOT / "lua/semantic_layer/scripts").glob("*.lua"))
+        self.assertEqual(files, sorted(placed))
+
+    def test_the_installer_runs_the_build(self):
+        self.assertTrue(all(path.parent == ROOT / "build/install"
+                            for path in INSTALL.INSTALL_FILES))
+        self.assertEqual(sorted(path.name for path in INSTALL.INSTALL_FILES),
+                         sorted(built_install.files()))
+
+
+class ScriptAnnotationTest(unittest.TestCase):
+    """The annotation block is the script's signature; the build refuses a bad one."""
+
+    def parse(self, text: str, name: str = "probe_script"):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        path = Path(scratch.name) / f"{name}.lua"
+        path.write_text(text, encoding="utf-8")
+        return PACKAGER.parse_script(path, {"MODEL_NAME": "the model"})
+
+    def refused(self, text: str, fragment: str, name: str = "probe_script"):
+        with self.assertRaises(SystemExit) as raised:
+            self.parse(text, name)
+        self.assertIn(fragment, str(raised.exception))
+
+    GOOD = ("--- Probes.\n-- @script SEMANTIC_ADMIN.PROBE_SCRIPT\n-- @param MODEL_NAME\n"
+            "-- @param LIMIT_ROWS How many.\n-- @returns TABLE\n\nexit({{MODEL_NAME, LIMIT_ROWS}})\n")
+
+    def test_a_complete_block_becomes_the_statement(self):
+        script = self.parse(self.GOOD)
+        self.assertEqual(script.params, (("MODEL_NAME", "the model"), ("LIMIT_ROWS", "How many.")))
+        statement = script.statement()
+        self.assertTrue(statement.startswith(
+            "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE_SCRIPT(\n  MODEL_NAME,\n  LIMIT_ROWS\n)\n"
+            "RETURNS TABLE AS\n--- Probes."))
+        self.assertTrue(statement.endswith("exit({{MODEL_NAME, LIMIT_ROWS}})\n/"))
+
+    def test_each_omission_is_refused_by_name(self):
+        self.refused(self.GOOD.replace("--- Probes.\n", ""), "--- <summary>")
+        self.refused(self.GOOD.replace("PROBE_SCRIPT\n", "OTHER\n"), "the file name says")
+        self.refused(self.GOOD.replace("-- @returns TABLE\n", ""), "exactly one @returns")
+        self.refused(self.GOOD.replace("LIMIT_ROWS How many.", "LIMIT_ROWS"), "has no description")
+        self.refused(self.GOOD.replace("{{MODEL_NAME, LIMIT_ROWS}}", "{{MODEL_NAME}}"),
+                     "never reads it")
+        self.refused(self.GOOD.replace("-- @returns TABLE", "-- @return TABLE"), "unknown annotation")
+        self.refused(self.GOOD.replace("@returns TABLE", "@returns VARCHAR(10)"), "returns TABLE")
+
+    def test_every_published_signature_is_described(self):
+        block = PACKAGER.admin_script_parameters_block()
+        rows = [line for line in block.splitlines() if line.startswith("  ('")]
+        self.assertGreater(len(rows), 300)
+        for row in rows:
+            self.assertFalse(row.endswith(", NULL, NULL)") or row.endswith(", NULL)"), row)
 
 
 class MainChunkLocalCeilingTest(unittest.TestCase):
@@ -1283,15 +1372,49 @@ class MainChunkLocalCeilingTest(unittest.TestCase):
 
     def test_the_committed_tree_installs(self):
         """Every generated script in the tree is within the ceiling."""
-        for name in ("sql/install/003_create_semantic_admin_scripts.sql",
-                     "sql/install/006_create_semantic_agent_views.sql"):
-            path = ROOT / name
-            PACKAGER.check_main_chunk_locals(path, path.read_text(encoding="utf-8"))
+        for name in ("003_create_semantic_admin_scripts.sql",
+                     "006_create_semantic_agent_views.sql"):
+            PACKAGER.check_main_chunk_locals(Path(name), built_install.text(name))
+
+    def test_the_peak_is_measured_by_the_lua_compiler(self):
+        """What Lua limits is locals active at once, which a column-0 count cannot see.
+
+        A top-level `do` block's locals are active on top of every top-level local
+        before it. COMPILER_RUNTIME was counted at 188 while its real peak was
+        197. The tests run where CI runs them, with an interpreter, so the
+        measurement -- not the count -- is what they hold the tree to.
+        """
+        self.assertIsNotNone(PACKAGER.lua_interpreter(),
+                             "install lua5.4 (or set LUA_BIN): the peak is measured with it")
+        bodies = {match.group(1): match.group(2)
+                  for text in built_install.files().values()
+                  for match in PACKAGER.SCRIPT_BODY.finditer(text)}
+        peaks = PACKAGER.measured_local_peaks(bodies)
+        self.assertEqual(sorted(bodies), sorted(peaks), "every script compiles and is measured")
+        self.assertTrue(all(peak <= PACKAGER.MAIN_CHUNK_LOCAL_LIMIT for peak in peaks.values()))
+        compiler = bodies["COMPILER_RUNTIME"]
+        self.assertGreater(peaks["COMPILER_RUNTIME"], PACKAGER.main_chunk_local_count(compiler),
+                           "the do blocks' locals must be part of the peak")
+
+    def test_a_do_block_that_crosses_the_limit_fails_although_the_count_does_not(self):
+        top = "".join(f"local top_{index} = {index}\n" for index in range(190))
+        block = "do\n" + "".join(f"    local inner_{index} = {index}\n" for index in range(15)) + "end\n"
+        text = f"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE_RUNTIME AS\n{top}{block}/\n"
+        self.assertEqual(190, PACKAGER.main_chunk_local_count(top + block))
+        with self.assertRaises(SystemExit) as raised:
+            PACKAGER.check_main_chunk_locals(Path("probe.sql"), text)
+        self.assertIn("more than 200 (190 declared at the top level) main-chunk locals", str(raised.exception))
+
+    def test_the_body_starts_after_the_headers_as(self):
+        """A script with parameters lists them before `AS`; they are not body."""
+        text = ("CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE(\n  MODEL_NAME,\n  OBJECT_NAME\n)\n"
+                "RETURNS TABLE AS\nlocal answer = MODEL_NAME\n/\n")
+        match = PACKAGER.SCRIPT_BODY.search(text)
+        self.assertEqual(("PROBE", "local answer = MODEL_NAME\n"), match.groups())
 
     def test_the_compiler_runtime_is_measured_at_all(self):
         """Guard the parser: a regex that stops matching would pass silently."""
-        text = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text(
-            encoding="utf-8")
+        text = built_install.text("003_create_semantic_admin_scripts.sql")
         counts = {match.group(1): PACKAGER.main_chunk_local_count(match.group(2))
                   for match in PACKAGER.SCRIPT_BODY.finditer(text)}
         self.assertIn("COMPILER_RUNTIME", counts)

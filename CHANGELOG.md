@@ -6,6 +6,124 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-17
+
+A source-layout release: the install SQL is built from hand-written sources
+instead of being checked in, every script is one annotated `.lua` file whose
+signature and parameter descriptions are generated, and the largest runtimes
+are split into smaller modules with their 200-local headroom measured rather
+than estimated. What the install creates is unchanged apart from the new
+parameter descriptions and the fusion-label wording below.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from
+the release bundle. **The files in `sql/install/` are no longer runnable on
+their own**: they hold placeholders that the build fills in.
+`SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS` gains `PARAMETER_DESCRIPTION` and
+`SCRIPT_DESCRIPTION`.
+
+### Changed
+
+#### The install SQL is built, not checked in
+
+- `sql/install/` now holds only hand-written source. Each generated part — the
+  six runtime libraries concatenated from `lua/`, the `SEMANTIC_SOURCE` views and
+  `ADMIN_SCRIPT_PARAMETERS` — is a one-line `-- @generated <NAME>` placeholder,
+  and `tools/package_lua_scripts.py` writes the complete files to
+  `build/install/`. 003 went from 36 335 lines, 26 000 of them generated, to
+  783 lines of signatures.
+- SQL holds no Lua. The body of every script — 93 of them — is
+  `lua/semantic_layer/scripts/<script_name>.lua`; its signature stays in
+  `sql/install/` with a one-line `-- @lua <path>` in place of the body. Luacheck
+  now lints the files people edit, and the wrappers that call a runtime
+  (`COMPILE_REQUEST_JSON`, the agent scripts, …) are no longer Python strings in
+  the packager.
+- `ENABLE_SEMANTIC_SQL` and `DISABLE_SEMANTIC_SQL` were each defined twice, in 003
+  and in 005; 005's definitions, the ones that were installed, are now the only
+  ones, and `ADMIN_SCRIPT_PARAMETERS` no longer lists them twice. The build
+  refuses a script defined twice.
+- `tools/install.py` builds and runs `build/install/`; the installed statements
+  are unchanged. Release bundles ship `build/install/` built. **If you ran the
+  files in `sql/install/` by hand, run them from `build/install/` instead.**
+
+#### Each script is one annotated file, and its parameters are described
+
+- A script's signature moved out of the SQL into its `.lua` file, as an
+  annotation block — `--- summary`, `@script`, `@param NAME [description]`,
+  `@returns` — and the build generates the `CREATE SCRIPT` statement from it.
+  A source installs a script with one line, `-- @lua <path>`.
+- `SEMANTIC_CATALOG.ADMIN_SCRIPT_PARAMETERS` gains `PARAMETER_DESCRIPTION` and
+  `SCRIPT_DESCRIPTION`: every one of the 93 scripts and 412 parameters is
+  described. A parameter that means the same everywhere (`MODEL_NAME`,
+  `IS_CERTIFIED`, …) is described once, in
+  `lua/semantic_layer/scripts/PARAMETERS.md`.
+- The build refuses a parameter without a description and one the body never
+  reads.
+- `ADMIN_SCRIPT_PARAMETERS` is generated from those annotation blocks directly,
+  rather than by reading the generated SQL headers back, and the scripts it
+  leaves out — the runtime libraries, `SEMANTIC_GUARD`, `SEMANTIC_PREPROCESSOR`
+  — are derived from `RUNTIMES` and `@kind` instead of a hand-kept list.
+
+#### Script bodies share `scalar` instead of copying it
+
+- 31 scripts carried a private `scalar(sql_text, params)`, in five slightly
+  different spellings. They now import `SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME`
+  (the shared `json.lua` and `rows.lua`) and bind `ESV_ROWS.scalar`, about 2.7 ms
+  per call including the query. Every call site reads one column, so the result
+  is unchanged. `SCRIPT_HELPER_COPIES` drops from 103 to 77.
+- Exasol's built-in `cjson` was evaluated as a replacement for `shared/json.lua`
+  and rejected: it emits keys in hash order, encodes a SQL NULL as invalid JSON
+  without an error, and rounds numbers to 14 digits. The reasons are recorded in
+  the module's header.
+
+#### A stalled database fails a test run instead of hanging it
+
+- Every live test now has a wall-clock limit: 600 seconds per pytest item
+  (`pytest-timeout`, `timeout` in `pyproject.toml`) and 120 seconds per fuzz case
+  (`FUZZ_CASE_TIMEOUT`). A database that stops serving sessions still answers
+  WebSocket pings, which reset pyexasol's socket timeout, so a run used to wait
+  for an hour; it now fails within the limit with a message saying why.
+  `docs/runtime-testing.md` lists the two known causes on Exasol Personal: the
+  Mac sleeping, and a protocol channel registry that fills after about 510 SQL
+  processes.
+
+#### The build measures the main-chunk local peak instead of counting it
+
+- Exasol's 200-local limit counts the locals active at once, including those a
+  top-level `do` block holds while it runs, and the packager only counted
+  column-0 declarations. `COMPILER_RUNTIME` counted 188 but peaked at 197. The
+  packager now compiles every generated script body with a Lua interpreter and
+  reports the measured peak; without one it falls back to the count and says so.
+  The count also used to include a multi-line script header's parameter lines.
+- The Semantic SQL token parser (19 helpers: clause splitting, predicates,
+  `WHERE`, `ORDER BY`, measure wrappers) moved from `request_json.lua` to
+  `compiler/semantic_sql_syntax.lua`, and the error envelope to
+  `compiler/compile_result.lua`. `request_json.lua` is 513 lines shorter and
+  `COMPILER_RUNTIME` now peaks at 181.
+- The Databricks UCMV importer moved from `semantic_definition.lua` to
+  `admin/databricks_import.lua`, which only calls the public admin scripts;
+  `sql_bool` moved to `shared/rows.lua` so neither file keeps a copy.
+  `semantic_definition.lua` is 988 lines shorter and
+  `SEMANTIC_DEFINITION_RUNTIME` peaks at 107 instead of 133.
+- A test checks that `tests/lua/run.lua` loads every runtime's sources in the
+  packager's `RUNTIMES` order, so the Lua suite tests the chunks as installed,
+  and another that every source has a coverage threshold, so a split-out module
+  is not left ungated.
+- The duplicate-routine check now sees functions inside a `do` block or another
+  function, where the modules keep most of their helpers. It found no copies
+  between modules and ten that were already in script bodies, so
+  `SCRIPT_HELPER_COPIES` is 87, not 77.
+
+### Fixed
+
+#### Three admin messages still used bare fusion labels
+
+- A published column's comment said `Fused across N temporal partitions (F3
+  UNION).`; it now says `(UNION)`, like every other fusion strategy.
+- `SEMANTIC_ADMIN_215` and `SEMANTIC_ADMIN_213` name temporal coverage, semantic
+  identity and the temporal partition instead of `F3` and `F5`. The rule against
+  bare labels in messages now covers the script bodies too, which it could not
+  see while they were inside the install SQL.
+
 ## [0.4.0] - 2026-10-16
 
 Power BI's remaining refusals are gone: its table visual's `SUM` around a ratio

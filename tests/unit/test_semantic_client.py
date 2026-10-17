@@ -22,9 +22,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import built_install  # the install SQL as the build assembles it
+
 ROOT = Path(__file__).resolve().parents[2]
-ADMIN_SQL = (ROOT / "sql/install/003_create_semantic_admin_scripts.sql").read_text()
-AGENT_SQL = (ROOT / "sql/install/006_create_semantic_agent_views.sql").read_text()
+ADMIN_SQL = built_install.text("003_create_semantic_admin_scripts.sql")
+AGENT_SQL = built_install.text("006_create_semantic_agent_views.sql")
 
 COMPILE_ENTRYPOINTS = ("COMPILE_REQUEST_JSON", "COMPILE_SQL", "COMPILE_SQL_DEBUG")
 

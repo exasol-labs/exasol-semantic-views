@@ -59,7 +59,6 @@ jobs:
         # under coverage.py and enforces the per-file thresholds in
         # tests/unit/python_coverage_thresholds.py.
         run: PYTHON_BIN=python sh tools/run_python_tests.sh
-      - name: Verify generated install scripts
-        run: |
-          python tools/package_lua_scripts.py
-          git diff --exit-code
+      - name: Build the install SQL
+        # Nothing generated is checked in; this proves the sources assemble.
+        run: python tools/package_lua_scripts.py

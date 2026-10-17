@@ -79,6 +79,12 @@ end)
 load_runtime("lua/semantic_layer/compiler/grain_sql.lua", function()
     return {ESV_GRAIN_SQL}
 end)
+load_runtime("lua/semantic_layer/compiler/compile_result.lua", function()
+    return {ESV_COMPILE_RESULT}
+end)
+load_runtime("lua/semantic_layer/compiler/semantic_sql_syntax.lua", function()
+    return {ESV_SEMANTIC_SQL_SYNTAX}
+end)
 load_runtime("lua/semantic_layer/compiler/request_json.lua", function()
     return {compile_request_json, compile_sql, compile_sql_debug,
         compile_sql_for_preprocessor, suggest_grain_metadata,
@@ -89,6 +95,9 @@ load_runtime("lua/semantic_layer/admin/validator.lua", function()
 end)
 load_runtime("lua/semantic_layer/compiler/materializations.lua", function()
     return {select_materialization, ESV_MATERIALIZATION_TEST_API}
+end)
+load_runtime("lua/semantic_layer/admin/databricks_import.lua", function()
+    return {ESV_DATABRICKS_IMPORT}
 end)
 load_runtime("lua/semantic_layer/admin/semantic_definition.lua", function()
     return {apply_semantic_definition, apply_normalized_osi_import,
