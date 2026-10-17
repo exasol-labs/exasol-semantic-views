@@ -961,23 +961,23 @@ The rows are generated from the annotation block of each script's file in
 `CREATE SCRIPT` statement — so they cannot drift from the scripts they describe,
 and `CALL_TEMPLATE` is a ready-made call shape.
 
-"Cannot drift" is enforced rather than intended: packaging fails if a declared
-`SEMANTIC_ADMIN` script publishes no signature and is not on the explicit
-runtime-library exclusion list in `tools/package_lua_scripts.py`
-(`NON_CALLABLE_SCRIPTS`), and fails again if that list names a script that no
-longer exists. The seven runtime libraries — the `*_RUNTIME` modules that other
-scripts `import`, plus `SEMANTIC_GUARD` and `SEMANTIC_PREPROCESSOR`, which Exasol
-invokes itself — are the only scripts absent, because they are not callable.
+"Cannot drift" is enforced rather than intended. The rows and the `CREATE
+SCRIPT` statements are generated from one annotation block per script, so they
+cannot disagree, and packaging fails if any `SEMANTIC_ADMIN` script in the build
+publishes no signature without being one of the scripts that are not callable.
+Those are derived, not listed: the six `*_RUNTIME` libraries that other scripts
+`import`, and the scripts whose annotation declares a non-scripting `@kind` —
+`SEMANTIC_GUARD` and `SEMANTIC_PREPROCESSOR`, which Exasol invokes itself.
 
-This mattered: the generator used to require a `RETURNS` clause, so the nine
-mutators declared `) AS` because they complete without returning rows
-(`CREATE_MODEL`, `ADD_ENTITY`, `ADD_SEMANTIC_OBJECT`, `ADD_RELATIONSHIP`,
-`ADD_RELATIONSHIP_KEY_MAPPING`, `CREATE_SEMANTIC_OBJECT`,
-`REGISTER_MATERIALIZATION`, `SET_MATERIALIZATION_STATUS`,
-`ADD_MATERIALIZATION_COLUMN`) published nothing — and since `CALL_ADMIN_JSON`
-resolves names from this view and nothing else, the named path could not perform
-a single step of a model bootstrap while working normally on every script that
-did return a table.
+This mattered: when the rows were read out of the SQL headers, the pattern
+required a `RETURNS` clause, so the nine mutators declared `) AS` because they
+complete without returning rows (`CREATE_MODEL`, `ADD_ENTITY`,
+`ADD_SEMANTIC_OBJECT`, `ADD_RELATIONSHIP`, `ADD_RELATIONSHIP_KEY_MAPPING`,
+`CREATE_SEMANTIC_OBJECT`, `REGISTER_MATERIALIZATION`,
+`SET_MATERIALIZATION_STATUS`, `ADD_MATERIALIZATION_COLUMN`) published nothing —
+and since `CALL_ADMIN_JSON` resolves names from this view and nothing else, the
+named path could not perform a single step of a model bootstrap while working
+normally on every script that did return a table.
 
 Positional calls are still the primary form, but Exasol checks parameter arity
 in the SQL layer — *before* a script body runs — so a miscount can only ever

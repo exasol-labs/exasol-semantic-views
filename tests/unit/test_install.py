@@ -1006,26 +1006,27 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.declared: set[str] = set()
-        self.published: set[str] = set()
         for name, text in sorted(built_install.files().items()):
             if name.startswith("002_"):
                 continue
             self.declared.update(PACKAGER.ANY_SCRIPT_DECLARATION.findall(text))
-            self.published.update(
-                match.group(1) for match in PACKAGER.SCRIPT_SIGNATURE.finditer(text))
+        self.published = set(re.findall(r"^  \('(\w+)',", PACKAGER.admin_script_parameters_block(),
+                                        re.M))
+        self.excluded = PACKAGER.non_callable_scripts()
 
-    def test_every_declared_script_is_published_or_explicitly_excluded(self):
-        unaccounted = self.declared - self.published - PACKAGER.NON_CALLABLE_SCRIPTS
-        self.assertEqual(
-            set(), unaccounted,
-            "declared but unreachable through CALL_ADMIN_JSON; add to "
-            "NON_CALLABLE_SCRIPTS if it is a runtime library")
+    def test_every_declared_script_is_published_or_excluded(self):
+        self.assertEqual(set(), self.declared - self.published - self.excluded,
+                         "declared but unreachable through CALL_ADMIN_JSON")
 
     def test_exclusions_are_all_real_scripts(self):
         """A stale exclusion would silently hide a future script of that name."""
+        self.assertEqual(set(), self.excluded - self.declared)
+
+    def test_the_exclusions_are_derived_not_listed(self):
+        """The runtime libraries and the UDF-kind scripts, and nothing else."""
         self.assertEqual(
-            set(), PACKAGER.NON_CALLABLE_SCRIPTS - self.declared,
-            "NON_CALLABLE_SCRIPTS lists scripts that no longer exist")
+            set(PACKAGER.RUNTIMES) | {"SEMANTIC_GUARD", "SEMANTIC_PREPROCESSOR"}, self.excluded)
+        self.assertEqual(set(), self.excluded & self.published)
 
     def test_row_returning_and_silent_mutators_are_both_published(self):
         """The distinction that used to decide visibility must not matter."""
@@ -1042,7 +1043,7 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
     def test_runtime_libraries_are_not_published(self):
         """Publishing one would advertise an uncallable script as an API."""
         block = PACKAGER.admin_script_parameters_block()
-        for library in PACKAGER.NON_CALLABLE_SCRIPTS:
+        for library in PACKAGER.non_callable_scripts():
             self.assertNotIn(f"  ('{library}',", block, library)
 
     def test_generated_block_carries_the_bootstrap_arity(self):

@@ -187,46 +187,27 @@ UNION ALL
 SELECT VERSION_ID, 'IDENTITY_MAPPING', SOURCE_SCHEMA, SOURCE_OBJECT
   FROM SEMANTIC_SOURCE.IDENTITY_MAPPING_RELATIONS WHERE STATUS = 'ACTIVE';
 {SOURCE_VIEWS_END}"""
-# A callable admin script, with or without a RETURNS clause.
-#
-# Requiring `RETURNS` used to be the whole bug: the mutators that "complete
-# without returning rows" (CREATE_MODEL, ADD_ENTITY, ADD_RELATIONSHIP, ...) are
-# declared `) AS`, so nine callable APIs were silently absent from the published
-# signatures -- and CALL_ADMIN_JSON resolves names from nothing else, so the
-# named-call path could not perform the first five steps of the documented
-# bootstrap. The exclusion was systematic rather than incidental, which is why it
-# went unnoticed: every script it hit was one that returns no rows.
-SCRIPT_SIGNATURE = re.compile(
-    r"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)\s*"
-    r"(?:\(([^)]*)\))?\s*(?:\nRETURNS\s+\w+\s*)?\bAS\b",
-    re.M,
-)
-
-# Every script declaration form, for the drift assertion below. Deliberately
-# broader than SCRIPT_SIGNATURE: it has to see the scripts that must *not* be
+# Every script declaration form, for the drift assertion in
+# admin_script_parameters_block: it has to see the scripts that must *not* be
 # published as well as the ones that must.
 ANY_SCRIPT_DECLARATION = re.compile(
     r"CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)",
     re.M,
 )
 
-# Scripts that exist in SEMANTIC_ADMIN but are not callable APIs, so they carry
-# no published signature. Imported as libraries (`import(...)`) or invoked by
-# Exasol itself, never by a caller through CALL_ADMIN_JSON.
-#
-# This list is the reason the assertion below can be strict. A new runtime
-# library has to be added here on purpose; anything else that stops being
-# published fails packaging instead of going quiet.
-NON_CALLABLE_SCRIPTS = frozenset({
-    "AGENT_RUNTIME",
-    "COMPILER_RUNTIME",
-    "MATERIALIZATION_RUNTIME",
-    "FUSION_RUNTIME",
-    "SEMANTIC_DEFINITION_RUNTIME",
-    "SEMANTIC_GUARD",          # LUA SCALAR, called from generated view SQL
-    "SEMANTIC_PREPROCESSOR",   # LUA PREPROCESSOR, invoked by the session
-    "VALIDATOR_RUNTIME",
-})
+
+def non_callable_scripts() -> frozenset[str]:
+    """Scripts in SEMANTIC_ADMIN that are not callable APIs, so publish no signature.
+
+    Derived, not listed: the runtime libraries other scripts `import`, and every
+    script whose annotation declares a `@kind` other than a scripting script --
+    the UDF called from generated view SQL and the preprocessor the session
+    invokes. A hand-kept list had to be edited for each new runtime and could
+    name a script that no longer existed.
+    """
+    udfs = {script.name for script in script_registry().values() if script.kind != "scripting"}
+    return frozenset(RUNTIMES) | udfs
+
 
 # Exasol's Lua caps a single function at 200 local variables, and a generated
 # runtime script is one `CREATE ... AS` chunk holding several concatenated source
@@ -317,71 +298,63 @@ def admin_script_parameters_block(built: dict[str, str] | None = None) -> str:
     Exasol checks parameter arity in the SQL layer, before a script body runs,
     so a wrong call count can only ever produce `expected N script parameters
     but got M` -- no script name, no parameter name. The signatures are
-    therefore published as data, generated from the install SQL itself so they
-    cannot drift from the scripts they describe. It reads the built files, not
-    the sources: a runtime library exists in a source only as its placeholder.
+    therefore published as data, generated from the same annotation blocks the
+    CREATE SCRIPT statements are generated from, so the two cannot disagree. The
+    built files are read only to check that nothing was declared another way.
     """
     if built is None:
         built = assemble_without_parameters()
     registry = script_registry()
+    excluded = non_callable_scripts()
+    # In installation order: the order the sources' `-- @lua` lines install them.
+    installed = [Path(path).stem.upper()
+                 for source in sorted(SOURCE_DIR.glob("*.sql"))
+                 for path in LUA_BODY.findall(source.read_text(encoding="utf-8"))]
     rows: list[str] = []
     published: set[str] = set()
-    declared: set[str] = set()
-    for name in sorted(built):
-        if name.startswith("002_"):
+    declared = {script for name, text in built.items() if not name.startswith("002_")
+                for script in ANY_SCRIPT_DECLARATION.findall(text)}
+    for script_name in installed:
+        if script_name in excluded:
             continue
-        text = built[name]
-        declared.update(ANY_SCRIPT_DECLARATION.findall(text))
-        for match in SCRIPT_SIGNATURE.finditer(text):
-            script_name = match.group(1)
-            if script_name in NON_CALLABLE_SCRIPTS:
-                continue
-            published.add(script_name)
-            parameters = [
-                parameter.strip()
-                for parameter in (match.group(2) or "").split(",")
-                if parameter.strip()
-            ]
-            script = registry[script_name]
-            if [name for name, _ in script.params] != parameters:
-                raise SystemExit(f"package_lua_scripts: {script_name}'s signature and its "
-                                 "@param annotations disagree")
-            summary = sql_text_literal(script.summary)
-            if not parameters:
-                rows.append(
-                    f"  ('{script_name}', 0, NULL, NULL, "
-                    f"'EXECUTE SCRIPT SEMANTIC_ADMIN.{script_name}()', NULL, {summary})"
-                )
-                continue
-            template = "EXECUTE SCRIPT SEMANTIC_ADMIN.{}({})".format(
-                script_name, ", ".join(f"<{name.lower()}>" for name in parameters)
+        published.add(script_name)
+        script = registry[script_name]
+        parameters = [name for name, _ in script.params]
+        summary = sql_text_literal(script.summary)
+        if not parameters:
+            rows.append(
+                f"  ('{script_name}', 0, NULL, NULL, "
+                f"'EXECUTE SCRIPT SEMANTIC_ADMIN.{script_name}()', NULL, {summary})"
             )
-            escaped_template = template.replace("'", "''")
-            for ordinal, (parameter, description) in enumerate(script.params, start=1):
-                rows.append(
-                    f"  ('{script_name}', {len(parameters)}, {ordinal}, "
-                    f"'{parameter}', '{escaped_template}', "
-                    f"{sql_text_literal(description)}, {summary})"
-                )
+            continue
+        template = "EXECUTE SCRIPT SEMANTIC_ADMIN.{}({})".format(
+            script_name, ", ".join(f"<{name.lower()}>" for name in parameters)
+        )
+        escaped_template = template.replace("'", "''")
+        for ordinal, (parameter, description) in enumerate(script.params, start=1):
+            rows.append(
+                f"  ('{script_name}', {len(parameters)}, {ordinal}, "
+                f"'{parameter}', '{escaped_template}', "
+                f"{sql_text_literal(description)}, {summary})"
+            )
     # Enforce the "cannot drift" claim instead of intending it. A callable script
     # that the signature pattern fails to match is invisible to CALL_ADMIN_JSON
     # and to anyone reading the catalog, and the failure is a clean
     # SEMANTIC_ADMIN_100 that looks like the script does not exist.
-    unpublished = sorted(declared - published - NON_CALLABLE_SCRIPTS)
+    unpublished = sorted(declared - published - excluded)
     if unpublished:
         raise SystemExit(
             "package_lua_scripts: these SEMANTIC_ADMIN scripts are declared but "
             "publish no signature, so CALL_ADMIN_JSON cannot reach them: "
             + ", ".join(unpublished)
-            + ". Either the declaration does not match SCRIPT_SIGNATURE, or the "
-            "script is a runtime library and belongs in NON_CALLABLE_SCRIPTS."
+            + ". A script is published from its annotation block, so this one was "
+            "declared some other way."
         )
-    stale = sorted(NON_CALLABLE_SCRIPTS - declared)
+    stale = sorted(excluded - declared)
     if stale:
         raise SystemExit(
-            "package_lua_scripts: NON_CALLABLE_SCRIPTS lists scripts that no "
-            "longer exist: " + ", ".join(stale) + ". Remove them so the list "
-            "cannot hide a future script of the same name."
+            "package_lua_scripts: these runtime libraries or UDFs are not "
+            "installed: " + ", ".join(stale)
         )
 
     body = ",\n".join(rows)

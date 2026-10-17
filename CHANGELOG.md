@@ -43,6 +43,10 @@ All notable changes to Exasol Semantic Views are documented here.
   `lua/semantic_layer/scripts/PARAMETERS.md`.
 - The build refuses a parameter without a description and one the body never
   reads.
+- `ADMIN_SCRIPT_PARAMETERS` is generated from those annotation blocks directly,
+  rather than by reading the generated SQL headers back, and the scripts it
+  leaves out — the runtime libraries, `SEMANTIC_GUARD`, `SEMANTIC_PREPROCESSOR`
+  — are derived from `RUNTIMES` and `@kind` instead of a hand-kept list.
 
 ### Fixed
 

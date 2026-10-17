@@ -456,7 +456,7 @@ class DerivedNotDeclared(unittest.TestCase):
             "out of `discriminated`, which is the one place they are declared")
 
     def test_the_library_exclusion_list_is_declared_once(self):
-        """`NON_CALLABLE_SCRIPTS` lives in the packager and is read, not copied.
+        """The non-callable scripts are derived in the packager and read, not copied.
 
         `tests/integration/verify_named_admin_api.py` used to carry a second copy with a
         comment claiming the two "cannot drift apart silently". They then did:
@@ -465,7 +465,7 @@ class DerivedNotDeclared(unittest.TestCase):
         """
         verifier = (INTEGRATION / "verify_named_admin_api.py").read_text(
             encoding="utf-8")
-        self.assertIn("_PACKAGER.NON_CALLABLE_SCRIPTS", verifier)
+        self.assertIn("_PACKAGER.non_callable_scripts()", verifier)
         for library in ("COMPILER_RUNTIME", "VALIDATOR_RUNTIME", "FUSION_RUNTIME"):
             self.assertNotIn(
                 f'"{library}",', verifier,
