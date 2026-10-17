@@ -31,6 +31,14 @@
 -- SEMANTIC_MODEL validation of user-supplied extension JSON, where "looks close
 -- enough" is the wrong answer. tests/lua/json_unit_test.lua pins each input the
 -- two disagree about.
+--
+-- Why not Exasol's built-in `cjson`: it loads in a scripting script, but
+-- measured there (2026-10-17) it breaks each property callers rely on. It emits
+-- object keys in hash order ({"a":2,"c":3,"b":1}), so exports and compile-cache
+-- keys would stop being deterministic; it encodes a SQL NULL as `{"x":}`, invalid
+-- JSON, without an error; it rounds numbers to 14 significant digits
+-- (12345678901234567 becomes 1.2345678901235e+16); and it decodes `null` to its
+-- own sentinel, not M.NULL. Wrapping it to fix all four is this module again.
 
 local M = {}
 

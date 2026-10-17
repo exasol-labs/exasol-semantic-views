@@ -514,7 +514,11 @@ decoded by one module was an anonymous empty table to the others. Nothing failed
 because nothing compared the copies. Put a shared routine in
 `lua/semantic_layer/shared/` and add it to every `RUNTIMES` entry that needs it —
 `json.lua`, `rows.lua`, `sql_text.lua`, `catalog_rollback.lua`,
-`identity_join.lua` and `grain_graph.lua` are the worked examples.
+`identity_join.lua` and `grain_graph.lua` are the worked examples. A script body
+shares the same way at run time: it imports `SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME`
+and binds what it needs (`local scalar = script_support.ESV_ROWS.scalar`) rather
+than defining a private copy. `SCRIPT_HELPER_COPIES` pins the copies still left
+in script bodies; it only shrinks.
 
 **Derive a surface, do not restate it.** `CATALOG_COLUMNS`,
 `ADMIN_SCRIPT_PARAMETERS` and `CATALOG_RELATIONSHIPS` read `EXA_ALL_*`, so they

@@ -1,3 +1,6 @@
+-- Shared by the script bodies below, which import it rather than carry a copy.
+-- @generated SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME
+
 -- @lua lua/semantic_layer/scripts/create_model.lua
 
 -- @lua lua/semantic_layer/scripts/drop_model.lua

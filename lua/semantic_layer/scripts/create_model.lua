@@ -32,13 +32,8 @@ local function optional_text(value)
     return tostring(value)
 end
 
-local function scalar(sql_text, params)
-    local rows = query(sql_text, params or {})
-    if rows == nil or #rows == 0 then
-        return nil
-    end
-    return rows[1][1]
-end
+import("SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME", "script_support")
+local scalar = script_support.ESV_ROWS.scalar
 
 local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local published_schema = normalize_name(PUBLISHED_SCHEMA, "PUBLISHED_SCHEMA")

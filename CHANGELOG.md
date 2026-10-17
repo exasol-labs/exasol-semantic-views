@@ -48,6 +48,18 @@ All notable changes to Exasol Semantic Views are documented here.
   leaves out — the runtime libraries, `SEMANTIC_GUARD`, `SEMANTIC_PREPROCESSOR`
   — are derived from `RUNTIMES` and `@kind` instead of a hand-kept list.
 
+#### Script bodies share `scalar` instead of copying it
+
+- 31 scripts carried a private `scalar(sql_text, params)`, in five slightly
+  different spellings. They now import `SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME`
+  (the shared `json.lua` and `rows.lua`) and bind `ESV_ROWS.scalar`, about 2.7 ms
+  per call including the query. Every call site reads one column, so the result
+  is unchanged. `SCRIPT_HELPER_COPIES` drops from 103 to 77.
+- Exasol's built-in `cjson` was evaluated as a replacement for `shared/json.lua`
+  and rejected: it emits keys in hash order, encodes a SQL NULL as invalid JSON
+  without an error, and rounds numbers to 14 digits. The reasons are recorded in
+  the module's header.
+
 ### Fixed
 
 #### Three admin messages still used bare fusion labels

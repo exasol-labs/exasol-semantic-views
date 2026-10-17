@@ -587,14 +587,24 @@ def _lua_function_bodies(paths=None):
 
 # Copies of one helper across script bodies: each repeat of a byte-identical
 # function in a second, third, ... script. Measured when the bodies moved out of
-# the install SQL (2026-10-16), where nothing could compare them: normalize_name
-# alone is in 24 scripts. A script can share a helper by importing a runtime;
-# fold one and lower the pin. It only shrinks.
-SCRIPT_HELPER_COPIES = 103
+# the install SQL (2026-10-16), where nothing could compare them: 103, with
+# normalize_name alone in 24 scripts. 77 since `scalar` moved to the shared
+# SCRIPT_SUPPORT_RUNTIME, which a script imports instead of copying. Fold the
+# next one the same way and lower the pin. It only shrinks.
+SCRIPT_HELPER_COPIES = 77
 
 
 class ScriptHelpersAreCopied(unittest.TestCase):
     """The helper copies in script bodies are counted, and the count shrinks."""
+
+    def test_scalar_is_imported_not_copied(self):
+        """The 31 private copies of `scalar` are one routine in SCRIPT_SUPPORT_RUNTIME."""
+        copies = [path.name for path in sorted(SCRIPT_BODIES_DIR.glob("*.lua"))
+                  if re.search(r"^local function scalar\(", path.read_text(encoding="utf-8"), re.M)]
+        self.assertEqual([], copies, "import SCRIPT_SUPPORT_RUNTIME and bind ESV_ROWS.scalar")
+        importers = [path.name for path in SCRIPT_BODIES_DIR.glob("*.lua")
+                     if "script_support.ESV_ROWS.scalar" in path.read_text(encoding="utf-8")]
+        self.assertGreaterEqual(len(importers), 31)
 
     def test_no_helper_gains_a_copy(self):
         bodies = sorted(SCRIPT_BODIES_DIR.glob("*.lua"))
