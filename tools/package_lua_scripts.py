@@ -21,7 +21,11 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import typing
 from pathlib import Path
 
@@ -44,6 +48,9 @@ CATALOG_SNAPSHOT_SOURCE = ROOT / "lua/semantic_layer/compiler/catalog_snapshot.l
 METRIC_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/metric_plan.lua"
 PHYSICAL_PLAN_SOURCE = ROOT / "lua/semantic_layer/compiler/physical_plan.lua"
 GRAIN_SQL_SOURCE = ROOT / "lua/semantic_layer/compiler/grain_sql.lua"
+COMPILE_RESULT_SOURCE = ROOT / "lua/semantic_layer/compiler/compile_result.lua"
+SEMANTIC_SQL_SYNTAX_SOURCE = ROOT / "lua/semantic_layer/compiler/semantic_sql_syntax.lua"
+DATABRICKS_IMPORT_SOURCE = ROOT / "lua/semantic_layer/admin/databricks_import.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
 FUSION_DECLARATION_SOURCE = ROOT / "lua/semantic_layer/admin/fusion_declaration.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
@@ -228,8 +235,10 @@ MAIN_CHUNK_LOCAL_LIMIT = 200
 # top-level local, which is worth knowing before writing one rather than after.
 MAIN_CHUNK_LOCAL_WARN_AT = 190
 
+# The body starts after the header's `AS`, not after its first line: a script
+# with parameters declares them one per line before `RETURNS ... AS`.
 SCRIPT_BODY = re.compile(
-    r"^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)[^\n]*\n"
+    r"^CREATE OR REPLACE (?:[A-Z]+ )*SCRIPT SEMANTIC_ADMIN\.([A-Z_0-9]+)\b[^/]*?\bAS\n"
     r"(.*?)^/$",
     re.S | re.M,
 )
@@ -260,21 +269,103 @@ def main_chunk_local_count(body: str) -> int:
     return total
 
 
+# The count above sees declarations at column 0 only, so it misses what Lua
+# actually limits: locals *active at once*. A top-level `do` block's locals are
+# active on top of every top-level local declared before it, and code run
+# directly in such a block adds its own. COMPILER_RUNTIME was counted at 188
+# while its true peak was 197 -- three to spare, not twelve. So where a Lua
+# interpreter is available the peak is measured by the compiler itself: prepend
+# N unused locals and find the largest N that still compiles; the peak is the
+# limit minus N. One interpreter process measures every script of a file.
+LUA_PEAK_PROBE = r"""
+local limit = tonumber(arg[1])
+for path in io.lines(arg[2]) do
+    local file = assert(io.open(path))
+    local body = file:read("a")
+    file:close()
+    local function compiles(extra)
+        local fn, err = load(string.rep("local _ = 0\n", extra) .. body)
+        return fn ~= nil, err
+    end
+    local ok, err = compiles(0)
+    if not ok and tostring(err):find("too many local variables", 1, true) then
+        io.write(path, "\tover\n")  -- already past the limit
+    elseif not ok then
+        io.write(path, "\t?\n")  -- does not compile here for another reason
+    else
+        local lo, hi = 0, limit
+        while lo < hi do
+            local mid = (lo + hi + 1) // 2
+            if compiles(mid) then lo = mid else hi = mid - 1 end
+        end
+        io.write(path, "\t", limit - lo, "\n")
+    end
+end
+"""
+
+
+def lua_interpreter() -> str | None:
+    """The interpreter to measure with: LUA_BIN, else lua5.4, else lua."""
+    for candidate in (os.environ.get("LUA_BIN"), "lua5.4", "lua"):
+        if candidate and shutil.which(candidate):
+            return candidate
+    return None
+
+
+def measured_local_peaks(bodies: dict[str, str]) -> dict[str, int]:
+    """Peak active main-chunk locals per script, as the Lua compiler sees them.
+
+    Empty when no interpreter is installed; a script that does not compile under
+    the local interpreter (Exasol runs Lua 5.4) is left out, so the caller falls
+    back to the count for it.
+    """
+    interpreter = lua_interpreter()
+    if interpreter is None or not bodies:
+        return {}
+    with tempfile.TemporaryDirectory() as scratch:
+        paths = {}
+        for index, (name, body) in enumerate(bodies.items()):
+            target = Path(scratch) / f"{index}.lua"
+            target.write_text(body, encoding="utf-8")
+            paths[str(target)] = name
+        listing = Path(scratch) / "bodies.txt"
+        listing.write_text("\n".join(paths) + "\n", encoding="utf-8")
+        probe = Path(scratch) / "probe.lua"
+        probe.write_text(LUA_PEAK_PROBE, encoding="utf-8")
+        result = subprocess.run([interpreter, str(probe), str(MAIN_CHUNK_LOCAL_LIMIT), str(listing)],
+                                capture_output=True, text=True, check=False)
+    peaks = {}
+    for line in result.stdout.splitlines():
+        path, _, value = line.partition("\t")
+        if value.isdigit():
+            peaks[paths[path]] = int(value)
+        elif value == "over":
+            peaks[paths[path]] = MAIN_CHUNK_LOCAL_LIMIT + 1
+    return peaks
+
+
 def check_main_chunk_locals(path: Path, text: str) -> None:
     over: list[str] = []
-    for match in SCRIPT_BODY.finditer(text):
-        name, body = match.group(1), match.group(2)
-        count = main_chunk_local_count(body)
+    bodies = {match.group(1): match.group(2) for match in SCRIPT_BODY.finditer(text)}
+    measured = measured_local_peaks(bodies)
+    for name, body in bodies.items():
+        count = measured.get(name)
+        how = "peak active, measured"
+        if count is None:
+            count = main_chunk_local_count(body)
+            how = "counted; install a Lua interpreter to measure the peak"
         if count > MAIN_CHUNK_LOCAL_LIMIT:
+            needs = (f"more than {MAIN_CHUNK_LOCAL_LIMIT} ({main_chunk_local_count(body)}"
+                     " declared at the top level)") if name in measured else str(count)
             over.append(
-                f"{name} declares {count} main-chunk locals"
-                f" (limit {MAIN_CHUNK_LOCAL_LIMIT})"
+                f"{name} needs {needs} main-chunk locals active at once"
+                f" (limit {MAIN_CHUNK_LOCAL_LIMIT}; {how})"
             )
         elif count >= MAIN_CHUNK_LOCAL_WARN_AT:
             headroom = MAIN_CHUNK_LOCAL_LIMIT - count
             print(
                 f"      {name}: {count}/{MAIN_CHUNK_LOCAL_LIMIT} main-chunk locals,"
-                f" {headroom} left"
+                f" {headroom} left ({how})"
             )
     if over:
         raise SystemExit(
@@ -382,7 +473,8 @@ COMPILE_RELEVANT_SOURCES = (
     "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE", "GRAIN_GRAPH_SOURCE",
     "SOURCE_COLUMNS_SOURCE", "IDENTITY_JOIN_SOURCE", "QUERY_SPEC_SOURCE",
     "CATALOG_SNAPSHOT_SOURCE", "METRIC_PLAN_SOURCE", "PHYSICAL_PLAN_SOURCE",
-    "GRAIN_SQL_SOURCE", "COMPILER_SOURCE", "MATERIALIZATIONS_SOURCE",
+    "GRAIN_SQL_SOURCE", "COMPILE_RESULT_SOURCE", "SEMANTIC_SQL_SYNTAX_SOURCE",
+    "COMPILER_SOURCE", "MATERIALIZATIONS_SOURCE",
 )
 
 
@@ -435,10 +527,11 @@ RUNTIMES: dict[str, tuple[str, ...]] = {
         "BUILD_STAMP", "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE",
         "GRAIN_GRAPH_SOURCE", "SOURCE_COLUMNS_SOURCE", "IDENTITY_JOIN_SOURCE",
         "QUERY_SPEC_SOURCE", "CATALOG_SNAPSHOT_SOURCE", "METRIC_PLAN_SOURCE",
-        "PHYSICAL_PLAN_SOURCE", "GRAIN_SQL_SOURCE", "COMPILER_SOURCE"),
+        "PHYSICAL_PLAN_SOURCE", "GRAIN_SQL_SOURCE", "COMPILE_RESULT_SOURCE",
+        "SEMANTIC_SQL_SYNTAX_SOURCE", "COMPILER_SOURCE"),
     "SEMANTIC_DEFINITION_RUNTIME": (
         "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE", "CATALOG_ROLLBACK_SOURCE",
-        "SEMANTIC_DEFINITION_SOURCE"),
+        "DATABRICKS_IMPORT_SOURCE", "SEMANTIC_DEFINITION_SOURCE"),
     "FUSION_RUNTIME": (
         "JSON_SOURCE", "ROWS_SOURCE", "CATALOG_ROLLBACK_SOURCE",
         "FUSION_DECLARATION_SOURCE"),

@@ -71,6 +71,33 @@ All notable changes to Exasol Semantic Views are documented here.
   Mac sleeping, and a protocol channel registry that fills after about 510 SQL
   processes.
 
+#### The build measures the main-chunk local peak instead of counting it
+
+- Exasol's 200-local limit counts the locals active at once, including those a
+  top-level `do` block holds while it runs, and the packager only counted
+  column-0 declarations. `COMPILER_RUNTIME` counted 188 but peaked at 197. The
+  packager now compiles every generated script body with a Lua interpreter and
+  reports the measured peak; without one it falls back to the count and says so.
+  The count also used to include a multi-line script header's parameter lines.
+- The Semantic SQL token parser (19 helpers: clause splitting, predicates,
+  `WHERE`, `ORDER BY`, measure wrappers) moved from `request_json.lua` to
+  `compiler/semantic_sql_syntax.lua`, and the error envelope to
+  `compiler/compile_result.lua`. `request_json.lua` is 513 lines shorter and
+  `COMPILER_RUNTIME` now peaks at 181.
+- The Databricks UCMV importer moved from `semantic_definition.lua` to
+  `admin/databricks_import.lua`, which only calls the public admin scripts;
+  `sql_bool` moved to `shared/rows.lua` so neither file keeps a copy.
+  `semantic_definition.lua` is 988 lines shorter and
+  `SEMANTIC_DEFINITION_RUNTIME` peaks at 107 instead of 133.
+- A test checks that `tests/lua/run.lua` loads every runtime's sources in the
+  packager's `RUNTIMES` order, so the Lua suite tests the chunks as installed,
+  and another that every source has a coverage threshold, so a split-out module
+  is not left ungated.
+- The duplicate-routine check now sees functions inside a `do` block or another
+  function, where the modules keep most of their helpers. It found no copies
+  between modules and ten that were already in script bodies, so
+  `SCRIPT_HELPER_COPIES` is 87, not 77.
+
 ### Fixed
 
 #### Three admin messages still used bare fusion labels

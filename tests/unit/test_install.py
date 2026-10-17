@@ -1376,6 +1376,42 @@ class MainChunkLocalCeilingTest(unittest.TestCase):
                      "006_create_semantic_agent_views.sql"):
             PACKAGER.check_main_chunk_locals(Path(name), built_install.text(name))
 
+    def test_the_peak_is_measured_by_the_lua_compiler(self):
+        """What Lua limits is locals active at once, which a column-0 count cannot see.
+
+        A top-level `do` block's locals are active on top of every top-level local
+        before it. COMPILER_RUNTIME was counted at 188 while its real peak was
+        197. The tests run where CI runs them, with an interpreter, so the
+        measurement -- not the count -- is what they hold the tree to.
+        """
+        self.assertIsNotNone(PACKAGER.lua_interpreter(),
+                             "install lua5.4 (or set LUA_BIN): the peak is measured with it")
+        bodies = {match.group(1): match.group(2)
+                  for text in built_install.files().values()
+                  for match in PACKAGER.SCRIPT_BODY.finditer(text)}
+        peaks = PACKAGER.measured_local_peaks(bodies)
+        self.assertEqual(sorted(bodies), sorted(peaks), "every script compiles and is measured")
+        self.assertTrue(all(peak <= PACKAGER.MAIN_CHUNK_LOCAL_LIMIT for peak in peaks.values()))
+        compiler = bodies["COMPILER_RUNTIME"]
+        self.assertGreater(peaks["COMPILER_RUNTIME"], PACKAGER.main_chunk_local_count(compiler),
+                           "the do blocks' locals must be part of the peak")
+
+    def test_a_do_block_that_crosses_the_limit_fails_although_the_count_does_not(self):
+        top = "".join(f"local top_{index} = {index}\n" for index in range(190))
+        block = "do\n" + "".join(f"    local inner_{index} = {index}\n" for index in range(15)) + "end\n"
+        text = f"CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE_RUNTIME AS\n{top}{block}/\n"
+        self.assertEqual(190, PACKAGER.main_chunk_local_count(top + block))
+        with self.assertRaises(SystemExit) as raised:
+            PACKAGER.check_main_chunk_locals(Path("probe.sql"), text)
+        self.assertIn("more than 200 (190 declared at the top level) main-chunk locals", str(raised.exception))
+
+    def test_the_body_starts_after_the_headers_as(self):
+        """A script with parameters lists them before `AS`; they are not body."""
+        text = ("CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.PROBE(\n  MODEL_NAME,\n  OBJECT_NAME\n)\n"
+                "RETURNS TABLE AS\nlocal answer = MODEL_NAME\n/\n")
+        match = PACKAGER.SCRIPT_BODY.search(text)
+        self.assertEqual(("PROBE", "local answer = MODEL_NAME\n"), match.groups())
+
     def test_the_compiler_runtime_is_measured_at_all(self):
         """Guard the parser: a regex that stops matching would pass silently."""
         text = built_install.text("003_create_semantic_admin_scripts.sql")

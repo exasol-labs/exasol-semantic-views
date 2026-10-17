@@ -52,6 +52,16 @@ do
         return value
     end
 
+    -- A boolean script argument as the callers spell it: TRUE, or the text
+    -- 'true', 'TRUE' or '1' that CALL_ADMIN_JSON and hand-written calls pass.
+    -- Anything else, SQL NULL included, is false.
+    function M.sql_bool(value)
+        if value == true or tostring(value) == "true" or tostring(value) == "TRUE" or tostring(value) == "1" then
+            return true
+        end
+        return false
+    end
+
     -- Does this row know its own column names?
     --
     -- A named row has at least one string key. A positional row has only integers.

@@ -562,26 +562,27 @@ def _lua_function_bodies(paths=None):
 
     Comments and blank lines are dropped and each line is stripped, so a copy
     that was only re-indented or re-commented still counts as a copy.
+
+    A function at any indentation counts, closed by the `end` at its own: the
+    modules keep their helpers inside a `do` block to spend one main-chunk local
+    (CLAUDE.md, "The 200-Local Ceiling"), and a column-0 scan cannot see them.
     """
-    opener = re.compile(r"^local function ([\w.]+)|^function ([\w.]+)")
+    opener = re.compile(r"^(\s*)(?:local )?function ([\w.:]+)")
     bodies = collections.defaultdict(set)
     for path in LUA_SOURCES if paths is None else paths:
         lines = path.read_text(encoding="utf-8").splitlines()
-        index = 0
-        while index < len(lines):
-            match = opener.match(lines[index])
+        for index, line in enumerate(lines):
+            match = opener.match(line)
             if not match:
-                index += 1
                 continue
-            name = match.group(1) or match.group(2)
+            indent, name = match.groups()
             close = index
-            while close < len(lines) and lines[close] != "end":
+            while close < len(lines) and lines[close] != indent + "end":
                 close += 1
             body = [line.strip() for line in lines[index + 1:close]
                     if line.strip() and not line.strip().startswith("--")]
             if len(body) >= MIN_DUPLICATE_BODY_LINES:
                 bodies["\n".join(body)].add((name, path.name))
-            index = close
     return bodies
 
 
@@ -589,9 +590,12 @@ def _lua_function_bodies(paths=None):
 # function in a second, third, ... script. Measured when the bodies moved out of
 # the install SQL (2026-10-16), where nothing could compare them: 103, with
 # normalize_name alone in 24 scripts. 77 since `scalar` moved to the shared
-# SCRIPT_SUPPORT_RUNTIME, which a script imports instead of copying. Fold the
-# next one the same way and lower the pin. It only shrinks.
-SCRIPT_HELPER_COPIES = 77
+# SCRIPT_SUPPORT_RUNTIME, which a script imports instead of copying. 87 on
+# 2026-10-17 is the same code measured better, not ten new copies: the scan
+# began to see helpers nested inside a function or a `do` block, and ten copies
+# were already there. Fold the next one the same way and lower the pin. It only
+# shrinks.
+SCRIPT_HELPER_COPIES = 87
 
 
 class ScriptHelpersAreCopied(unittest.TestCase):
@@ -829,6 +833,43 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
             LEGACY_SCRIPTS, len(legacy),
             f"the pin is stale — lower LEGACY_SCRIPTS to {len(legacy)}")
 
+
+
+class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
+    """tests/lua/run.lua loads every source the packager assembles, in its order.
+
+    The RUNTIMES manifest in tools/package_lua_scripts.py decides what each
+    installed runtime is made of; the Lua suite keeps its own list because plain
+    Lua cannot read the manifest. A module added to one and not the other is
+    either installed untested or tested and never installed, and a module loaded
+    before one it reads would pass here and fail in Exasol.
+    """
+
+    def test_every_runtime_source_is_loaded_in_manifest_order(self):
+        runner = (ROOT / "tests/lua/run.lua").read_text(encoding="utf-8")
+        loaded = re.findall(r'load_runtime\("([^"]+)"', runner)
+        packager = built_install.PACKAGER
+        for runtime, sources in packager.RUNTIMES.items():
+            paths = [str(getattr(packager, source).relative_to(ROOT))
+                     for source in sources if source != "BUILD_STAMP"]
+            missing = [path for path in paths if path not in loaded]
+            self.assertEqual([], missing, f"{runtime}: add these to tests/lua/run.lua")
+            positions = [loaded.index(path) for path in paths]
+            self.assertEqual(sorted(positions), positions,
+                             f"{runtime}: tests/lua/run.lua loads its sources in another order")
+
+    def test_every_runtime_source_has_a_coverage_threshold(self):
+        """The coverage gate measures only the files it names, so a module split
+        out of a gated one would be ungated -- and its lines would leave the old
+        file's figure without arriving anywhere."""
+        thresholds = (ROOT / "tests/lua/coverage_thresholds.lua").read_text(encoding="utf-8")
+        gated = set(re.findall(r'\["(lua/[^"]+\.lua)"\]', thresholds))
+        packager = built_install.PACKAGER
+        sources = {str(getattr(packager, source).relative_to(ROOT))
+                   for runtime in packager.RUNTIMES.values()
+                   for source in runtime if source != "BUILD_STAMP"}
+        self.assertEqual([], sorted(sources - gated),
+                         "add these to tests/lua/coverage_thresholds.lua")
 
 
 class LuaSpecsAreAllRun(unittest.TestCase):
