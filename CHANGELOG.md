@@ -60,6 +60,17 @@ All notable changes to Exasol Semantic Views are documented here.
   without an error, and rounds numbers to 14 digits. The reasons are recorded in
   the module's header.
 
+#### A stalled database fails a test run instead of hanging it
+
+- Every live test now has a wall-clock limit: 600 seconds per pytest item
+  (`pytest-timeout`, `timeout` in `pyproject.toml`) and 120 seconds per fuzz case
+  (`FUZZ_CASE_TIMEOUT`). A database that stops serving sessions still answers
+  WebSocket pings, which reset pyexasol's socket timeout, so a run used to wait
+  for an hour; it now fails within the limit with a message saying why.
+  `docs/runtime-testing.md` lists the two known causes on Exasol Personal: the
+  Mac sleeping, and a protocol channel registry that fills after about 510 SQL
+  processes.
+
 ### Fixed
 
 #### Three admin messages still used bare fusion labels

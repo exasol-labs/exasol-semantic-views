@@ -35,3 +35,9 @@ ignore_missing_imports = true
 # The database-free tests are unittest modules run by tools/run_python_tests.sh.
 testpaths = ["tests/integration"]
 addopts = "-ra --durations=15"
+# Wall-clock limit per test, the same as a legacy verifier's (VERIFIER_TIMEOUT
+# in tests/integration/conftest.py). A socket timeout cannot do this job: a
+# database that has stopped serving a session still answers WebSocket pings, and
+# each ping resets the client's wait, so a test hung for an hour. The slowest
+# test takes seconds; override with --timeout.
+timeout = 600

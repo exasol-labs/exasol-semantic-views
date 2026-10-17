@@ -31,6 +31,7 @@ import argparse
 import json
 import os
 import random
+import signal
 import ssl
 import sys
 from dataclasses import dataclass, field
@@ -478,6 +479,20 @@ def _tlp_run(con, spec: Spec) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+# Wall-clock limit per case. A database that stops serving a session still
+# answers WebSocket pings, which reset pyexasol's socket timeout, so a stalled
+# case would otherwise wait forever; a case takes well under a second.
+CASE_TIMEOUT = int(os.environ.get("FUZZ_CASE_TIMEOUT", "120"))
+
+
+class CaseTimeout(Exception):
+    pass
+
+
+def _case_timed_out(signum, frame):
+    raise CaseTimeout
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -489,6 +504,7 @@ def main() -> int:
 
     rng = random.Random(args.seed)
     con = connect()
+    stalled = False
 
     try:
         # ensure the sales model is published (idempotent — no rows if already)
@@ -499,13 +515,23 @@ def main() -> int:
         failures: list[CaseResult] = []
         good = ("match", "both-error")
 
+        signal.signal(signal.SIGALRM, _case_timed_out)
         for i in range(args.cases):
-            if args.oracle == "differential":
-                spec = gen_spec(rng)
-                result = run_case(con, i, spec, args.verbose)
-            else:
-                case = gen_tlp_case(rng)
-                result = run_tlp_case(con, i, case, args.verbose)
+            signal.alarm(CASE_TIMEOUT)
+            try:
+                if args.oracle == "differential":
+                    spec = gen_spec(rng)
+                    result = run_case(con, i, spec, args.verbose)
+                else:
+                    case = gen_tlp_case(rng)
+                    result = run_tlp_case(con, i, case, args.verbose)
+            except CaseTimeout:
+                stalled = True
+                print(f"FAIL [{i:03d}] no answer from the database within {CASE_TIMEOUT}s; "
+                      "it has probably stopped serving sessions (see docs/runtime-testing.md)")
+                return 2
+            finally:
+                signal.alarm(0)
             counts[result.verdict] += 1
             marker = "ok " if result.verdict in good else "FAIL"
             print(f"{marker} [{i:03d}] {result.verdict:16s} {result.detail}")
@@ -530,7 +556,9 @@ def main() -> int:
         print(f"\nAll {args.cases} cases equivalent under seed={args.seed}, oracle={args.oracle}.")
         return 0
     finally:
-        con.close()
+        # A stalled connection is mid-request: the disconnect handshake would
+        # fail on it and bury the message above.
+        con.close(disconnect=not stalled)
 
 
 if __name__ == "__main__":

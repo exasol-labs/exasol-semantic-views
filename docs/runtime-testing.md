@@ -172,6 +172,31 @@ CONCURRENT_P95_MAX_MS=5000 \
 python3 tests/integration/verify_concurrent_compile.py
 ```
 
+### When a test times out
+
+Every live test has a wall-clock limit, so a database that stops answering
+fails the run instead of hanging it: 600 seconds per pytest item
+(`timeout` in `pyproject.toml`, override with `--timeout`; a legacy verifier's
+own limit is `VERIFIER_TIMEOUT`) and 120 seconds per fuzz case
+(`FUZZ_CASE_TIMEOUT`). The slowest test takes seconds, so hitting a limit
+means the database has stopped serving sessions, not that a test is slow. A
+socket timeout cannot catch this: a stalled server still answers WebSocket
+pings, and each ping resets the client's wait.
+
+On a local Exasol Personal deployment there are two known causes:
+
+- **The Mac sleeps.** The VM is frozen with it; a run started before a closed
+  lid or an idle sleep advances only during the brief maintenance wakes, and the
+  guest clock falls behind by the time slept. Keep the machine awake for a long
+  run (`caffeinate -i sh tools/run_smoke.sh`).
+- **The deployment has served about 510 SQL processes since it started**
+  (seen on `2026.2.0-nano.3`). Its protocol channel registry holds 1 024 entries
+  and does not free them, so from then on a session logs in and never gets an
+  answer. The database logs say `[ProtocolChannelRegistry] ERROR: Registry
+  full!` (under `~/.exasol/personal/deployments/<name>/local/runtime/vm-shared/exa/logs`).
+  A full smoke run uses over a hundred, so this arrives after four or five runs.
+  `exasol stop && exasol start` clears it.
+
 ## 3. Runtime Performance And Scale Probe
 
 After installing and publishing at least one model:
