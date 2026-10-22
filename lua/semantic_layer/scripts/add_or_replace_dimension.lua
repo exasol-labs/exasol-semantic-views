@@ -277,6 +277,14 @@ query([[
     entity_id = entity_id_value, dimension_id = dimension_id,
     expression = tostring(EXPRESSION)})
 
+-- Metric filters that name this dimension follow its new definition; see
+-- reresolve_dimension_filters in the semantic definition runtime.
+-- Imported only here: an insert has no filters to follow it.
+if was_update then
+    import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+    semantic_definition.reresolve_dimension_filters_for(model_name, dimension_name)
+end
+
 local validation_rows = query("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)", {model_name = model_name})
 local validation_error = validation_error_summary(validation_rows)
 if validation_error ~= nil then

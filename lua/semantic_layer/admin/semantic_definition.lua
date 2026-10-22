@@ -1196,6 +1196,47 @@ local function identifiers_in_expression(expression)
     return identifiers
 end
 
+-- Re-resolve the metric filters that name a dimension, after that dimension
+-- has been redefined.
+--
+-- A filter is stored twice: as written (`order_status <> 'CANCELLED'`) and
+-- resolved to the dimension's physical expression at the time
+-- (`o.order_status <> 'CANCELLED'`), which is what the compiler and the
+-- validator read. Redefining the dimension left the resolved copy behind. After
+-- a source column was renamed, the repair -- `ADD OR REPLACE DIMENSION
+-- order_status AS o.status_code` -- was refused (SEMANTIC_MODEL_017) because a
+-- filter still read the old column, and nothing in the model could be changed
+-- to fix it. The written form is the definition; the resolved form follows it.
+-- Only metrics with a written form can be re-resolved: a filter given as raw
+-- SQL through ADD_METRIC has nothing to resolve from.
+local function reresolve_dimension_filters(model, dimension_name)
+    for _, row in ipairs(query([[
+        SELECT METRIC_ID, SEMANTIC_FILTER_EXPR
+        FROM SYS_SEMANTIC.METRICS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE' AND SEMANTIC_FILTER_EXPR IS NOT NULL
+    ]], {model_id = model.model_id, version_id = model.version_id}) or {}) do
+        local written = row_value(row, "SEMANTIC_FILTER_EXPR", 2)
+        local names_dimension = false
+        for _, identifier in ipairs(identifiers_in_expression(written)) do
+            if upper(identifier) == upper(dimension_name) then names_dimension = true end
+        end
+        if names_dimension then
+            local resolved = replace_semantic_identifiers(model, written)
+            local metric_id = row_value(row, "METRIC_ID", 1)
+            query([[
+                UPDATE SYS_SEMANTIC.METRICS
+                SET FILTER_EXPR = :resolved, SQL_FILTER_EXPR = :resolved
+                WHERE METRIC_ID = :metric_id
+            ]], {resolved = resolved, metric_id = metric_id})
+            query([[
+                UPDATE SYS_SEMANTIC.METRIC_FILTERS SET RESOLVED_SQL_EXPR = :resolved
+                WHERE METRIC_ID = :metric_id AND FILTER_KIND = 'SEMANTIC_SQL'
+            ]], {resolved = resolved, metric_id = metric_id})
+        end
+    end
+end
+
 local AGGREGATE_FUNCTIONS = {
     SUM = true, COUNT = true, AVG = true, MIN = true, MAX = true,
 }
@@ -1826,6 +1867,7 @@ local function apply_definition_changes(definition, model, object_id_value, defi
         -- here changes a published column order downstream.
         for _, dimension in ipairs(definition.dimensions) do
             upsert_dimension(model, object_id_value, dimension)
+            reresolve_dimension_filters(model, dimension.name)
         end
         for _, fact in ipairs(definition.facts) do
             upsert_fact(model, object_id_value, fact)
@@ -3149,6 +3191,12 @@ function M.decode_json(json_text)
 end
 
 apply_semantic_definition = M.apply_semantic_definition
+
+-- For ADD_OR_REPLACE_DIMENSION, which redefines a dimension outside the DDL.
+function M.reresolve_dimension_filters(model_name, dimension_name)
+    reresolve_dimension_filters(load_model(model_name), dimension_name)
+end
+reresolve_dimension_filters_for = M.reresolve_dimension_filters
 apply_normalized_osi_import = M.apply_normalized_osi_import
 import_databricks_metric_view = M.import_databricks_metric_view
 describe_semantic_metric = M.describe_semantic_metric
@@ -3184,6 +3232,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_definition_model = validate_definition_model,
         upsert_metric = upsert_metric,
         upsert_dimension = upsert_dimension,
+        reresolve_dimension_filters = reresolve_dimension_filters,
         snapshot_model_state = snapshot_model_state,
         batch_call = batch_call,
         restore_model_state = restore_model_state,

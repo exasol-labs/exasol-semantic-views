@@ -223,6 +223,34 @@ test("semantic definition carries dimensions and metrics in one statement", func
     assert_equal(api.definition_operation_count(definition), 2)
 end)
 
+test("a redefined dimension re-resolves only the metric filters that name it", function()
+    -- The written filter is the definition; the resolved copy the compiler reads
+    -- follows the dimension's current expression. A filter on another dimension
+    -- is left alone.
+    local metric_updates, filter_updates = {}, {}
+    with_query(function(sql, params)
+        local text = tostring(sql)
+        if text:find("SEMANTIC_FILTER_EXPR IS NOT NULL", 1, true) then
+            return {{1, "order_status = 'COMPLETE'"}, {2, "ship_mode = 'AIR'"}}
+        elseif text:find("FROM SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            if string.upper(params.name) == "ORDER_STATUS" then return {{9, 20, "o.status_code"}} end
+            return {}
+        elseif text:find("UPDATE SYS_SEMANTIC.METRICS", 1, true) then
+            metric_updates[#metric_updates + 1] = params
+        elseif text:find("UPDATE SYS_SEMANTIC.METRIC_FILTERS", 1, true) then
+            filter_updates[#filter_updates + 1] = params
+        end
+        return {}
+    end, function()
+        api.reresolve_dimension_filters({model_id = 1, version_id = 2}, "order_status")
+    end)
+    assert_equal(#metric_updates, 1)
+    assert_equal(metric_updates[1].metric_id, 1)
+    assert_equal(metric_updates[1].resolved, "o.status_code = 'COMPLETE'")
+    assert_equal(#filter_updates, 1)
+    assert_equal(filter_updates[1].resolved, "o.status_code = 'COMPLETE'")
+end)
+
 test("dimension upsert writes the catalog columns DIMENSIONS actually has", function()
     -- FORMAT_HINT rather than ADDITIVE_POLICY, IS_HIDDEN rather than IS_PRIVATE,
     -- and a *visible* object column because a dimension is something to group by.

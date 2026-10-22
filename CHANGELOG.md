@@ -60,6 +60,15 @@ All notable changes to Exasol Semantic Views are documented here.
   measured with the compiler's own fused expression. Counts only; it writes
   nothing.
 
+#### Redefining a dimension carries the metric filters that name it
+
+- A metric filter is stored as written and resolved to the dimension's physical
+  expression at definition time. After a source column was renamed, the repair
+  -- redefining the dimension over the new column -- was refused with
+  `SEMANTIC_MODEL_017` because a filter still read the old column. `ADD OR
+  REPLACE DIMENSION` / `REPLACE DIMENSIONS` and `ADD_OR_REPLACE_DIMENSION` now
+  re-resolve the filters that name the dimension from their written form.
+
 #### Semantic DDL refreshes a published model's views
 
 - A published view declares the model's columns, and BI tools read them from
