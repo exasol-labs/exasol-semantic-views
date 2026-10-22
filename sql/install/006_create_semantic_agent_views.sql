@@ -408,7 +408,16 @@ JOIN SEMANTIC_AGENT.FIELDS_FOR_AGENT df
  AND df.FIELD_KIND = 'DIMENSION'
  AND df.FIELD_ID = mdm.DIMENSION_ID;
 
-CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT AS
+-- Every finding of each model's latest validation run, warnings included.
+--
+-- The errors view was the only validation surface an agent had, so a model
+-- reporting VALIDATION_STATUS = WARNING showed zero rows there and the warnings
+-- themselves were reachable only through SEMANTIC_CATALOG. An agent cannot act
+-- on, or tell a user about, a warning it cannot read -- "this metric's source
+-- has rows outside every coverage window" is exactly the kind of thing a
+-- consumer should surface. VALIDATION_ERRORS_FOR_AGENT is this view filtered
+-- to what blocks.
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT AS
 SELECT
   m.MODEL_ID,
   m.MODEL_NAME,
@@ -425,8 +434,12 @@ FROM SEMANTIC_AGENT.MODELS_FOR_AGENT m
 JOIN SEMANTIC_SOURCE.VALIDATION_RUNS vr
   ON vr.VALIDATION_RUN_ID = m.LATEST_VALIDATION_RUN_ID
 JOIN SEMANTIC_SOURCE.VALIDATION_RESULTS res
-  ON res.VALIDATION_RUN_ID = vr.VALIDATION_RUN_ID
-WHERE res.SEVERITY IN ('ERROR', 'PRECONDITION');
+  ON res.VALIDATION_RUN_ID = vr.VALIDATION_RUN_ID;
+
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT AS
+SELECT *
+FROM SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT
+WHERE SEVERITY IN ('ERROR', 'PRECONDITION');
 
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT AS
 SELECT 'ABS' AS FUNCTION_NAME, 'NUMERIC' AS FUNCTION_CATEGORY

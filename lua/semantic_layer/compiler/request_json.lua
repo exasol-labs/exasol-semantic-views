@@ -1536,6 +1536,74 @@ local function near_field_names(normalized, candidates)
     return near
 end
 
+-- A field the caller named that this model no longer has, because it was
+-- dropped: the refusal says so instead of guessing. Shared by both lanes, like
+-- near_field_names, so a redundant wrapper cannot change the diagnosis.
+--
+-- Guessing was the dangerous answer. After `DROP METRIC gross_margin_pct` the
+-- name was simply unknown, the nearest name was `gross_margin` -- a currency
+-- metric -- and the one-token fix, `gross_margin AS gross_margin_pct`, shipped
+-- a dashboard showing "Gross Margin % 123000.0%". A dropped field has no
+-- near-miss worth suggesting; the caller needs to know it is gone.
+--
+-- Read only on the refusal path. On the module table because the chunk is at
+-- its 200-local ceiling.
+function M.dropped_field_refusal(error_prefix, model, field_name)
+    if model == nil or missing(model.version_id) or missing(field_name) then
+        return nil
+    end
+    local ok, rows = pcall(query, [[
+        SELECT 'metric' AS FIELD_KIND FROM SEMANTIC_SOURCE.METRICS
+         WHERE VERSION_ID = :version_id AND STATUS = 'INACTIVE'
+           AND UPPER(METRIC_NAME) = UPPER(:field_name)
+        UNION ALL
+        SELECT 'dimension' FROM SEMANTIC_SOURCE.DIMENSIONS
+         WHERE VERSION_ID = :version_id AND STATUS = 'INACTIVE'
+           AND UPPER(DIMENSION_NAME) = UPPER(:field_name)
+    ]], {version_id = model.version_id, field_name = trim(field_name)})
+    if not ok or rows == nil or #rows == 0 then
+        return nil
+    end
+    local kind = tostring(row_value(rows[1], "FIELD_KIND", 1))
+    return error_result(error_prefix .. "_029",
+        "The " .. kind .. " " .. tostring(field_name) .. " was dropped from model "
+        .. tostring(model.model_name) .. " and is no longer available. It was not"
+        .. " renamed -- a renamed field still answers to its old name -- so no"
+        .. " other field stands in for it; ask the model's owner what replaces it."
+        .. " SEMANTIC_CATALOG.METRIC_OVERVIEW lists dropped metrics as INACTIVE.")
+end
+
+-- The format hint of each suggested field, for CLARIFICATION_JSON: a near name
+-- can be a different kind of number -- `gross_margin` is currency,
+-- `gross_margin_pct` a fraction -- and a caller choosing between them should
+-- see that before it picks one. Read only on the refusal path.
+function M.candidate_formats(model, names)
+    local formats = {}
+    if model == nil or missing(model.version_id) or #names == 0 then
+        return formats
+    end
+    local ok, rows = pcall(query, [[
+        SELECT METRIC_NAME AS FIELD_NAME, FORMAT_HINT FROM SEMANTIC_SOURCE.METRICS
+         WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+        UNION ALL
+        SELECT DIMENSION_NAME, FORMAT_HINT FROM SEMANTIC_SOURCE.DIMENSIONS
+         WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+    ]], {version_id = model.version_id})
+    if not ok then
+        return formats
+    end
+    local wanted = {}
+    for _, name in ipairs(names) do wanted[upper(name)] = name end
+    for _, row in ipairs(rows or {}) do
+        local name = wanted[upper(tostring(row_value(row, "FIELD_NAME", 1)))]
+        local hint = row_value(row, "FORMAT_HINT", 2)
+        if name ~= nil and not missing(hint) then
+            formats[name] = tostring(hint)
+        end
+    end
+    return formats
+end
+
 local function resolve_field(ctx, field_name, expected_kind)
     if missing(field_name) then
         return nil, error_result("SEMANTIC_REQUEST_020", "Field name is required.")
@@ -1582,6 +1650,11 @@ local function resolve_field(ctx, field_name, expected_kind)
             candidates = names,
             clarification_question = "Which field did you mean for " .. tostring(field_name) .. "?",
         })
+    end
+
+    local dropped = M.dropped_field_refusal("SEMANTIC_REQUEST", ctx.model, field_name)
+    if dropped ~= nil then
+        return nil, dropped
     end
 
     -- An unknown field is the most common thing an agent gets wrong, and it is
@@ -1651,6 +1724,7 @@ local function resolve_field(ctx, field_name, expected_kind)
             field = tostring(field_name),
             object = ctx.object ~= nil and tostring(ctx.object.name) or nil,
             candidates = near,
+            candidate_formats = M.candidate_formats(ctx.model, near),
             available_in_objects = elsewhere,
             clarification_question = question,
         })
@@ -4389,6 +4463,8 @@ refusal_rules.expansion_wins_when_unjudged = {
     -- lanes see it, they now produce the same code, which is what
     -- verify_sql_lane_parity.py holds.
     SEMANTIC_QUERY_020 = true,
+    -- And a dropped field, for the same statements.
+    SEMANTIC_QUERY_029 = true,
     -- Re-aggregation, likewise. Where the other lane read the statement it says
     -- something sharper about the same mistake -- which dimensions an explicit
     -- GROUP BY failed to cover (`_008`), that HAVING needs a metric (`_026`),
@@ -4731,7 +4807,13 @@ do
             if is_bare_word then
                 local text = syntax.token_identifier_value(token) or ""
                 local normalized = string.lower(text)
-                if text ~= "" and not STATEMENT_WORDS[upper(text)]
+                local dropped = text ~= "" and not STATEMENT_WORDS[upper(text)]
+                    and by_name[upper(text)] == nil and not seen[normalized]
+                    and M.dropped_field_refusal("SEMANTIC_QUERY", reference.model, text)
+                if dropped then
+                    seen[normalized] = true
+                    found[#found + 1] = dropped
+                elseif text ~= "" and not STATEMENT_WORDS[upper(text)]
                     and by_name[upper(text)] == nil and not seen[normalized] then
                     seen[normalized] = true
                     local near = near_field_names(normalized, candidates)
@@ -4747,6 +4829,7 @@ do
                             field = text,
                             object = tostring(reference.object_name),
                             candidates = near,
+                            candidate_formats = M.candidate_formats(reference.model, near),
                             clarification_question = "Which field did you mean instead of "
                                 .. text .. "?",
                         }

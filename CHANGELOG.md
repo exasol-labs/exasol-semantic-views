@@ -38,7 +38,27 @@ All notable changes to Exasol Semantic Views are documented here.
   agent's discovery. A cold compile pays about 0.1 s for the plan's hashes;
   a cached compile pays nothing.
 
+#### Warnings on the agent surface
+
+- `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT` lists every finding of each
+  model's latest validation run, warnings included. A model could report
+  `VALIDATION_STATUS = WARNING` while `VALIDATION_ERRORS_FOR_AGENT` showed
+  nothing, and the warnings were reachable only through `SEMANTIC_CATALOG`.
+  `VALIDATION_ERRORS_FOR_AGENT` is now that view filtered to what blocks.
+
 ### Changed
+
+#### A dropped field is reported as dropped
+
+- After `DROP METRIC gross_margin_pct`, asking for it answered `Unknown
+  semantic field ... Did you mean: gross_margin?`, a currency metric, and the
+  one-token fix shipped a dashboard showing a margin of 123000%. A field that
+  existed and was dropped is now refused with `SEMANTIC_REQUEST_029` /
+  `SEMANTIC_QUERY_029`, in every lane, with no suggestion.
+- When an unknown name does get suggestions, `CLARIFICATION_JSON` carries each
+  candidate's format hint in `candidate_formats`.
+
+#### Smaller changes
 
 - `COMPILE_RESULT_SCHEMA_FOR_AGENT` says, per entrypoint, how result columns are
   named: upper-case in the SQL lanes, the canonical field name in

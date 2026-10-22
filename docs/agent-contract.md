@@ -53,6 +53,7 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.BUSINESS_GLOSSARY_FOR_AGENT`
 - `SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT`
+- `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT`
 - `SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`
@@ -65,8 +66,18 @@ These views expose both canonical semantic names and published SQL surface names
 where relevant, so adapters do not need to infer Exasol identifier casing rules.
 `FIELDS_FOR_AGENT` exposes both `FIELD_KIND` and the compatibility alias
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions for filtered
-metrics. `VALIDATION_ERRORS_FOR_AGENT` exposes the latest role-visible blocking
-validation errors and session preconditions.
+metrics. `VALIDATION_ISSUES_FOR_AGENT` exposes every finding of each model's
+latest validation run, warnings included, so an agent can tell a user why a
+model reports `WARNING`. `VALIDATION_ERRORS_FOR_AGENT` is the same view
+filtered to what blocks: errors and session preconditions.
+
+An unknown field is refused with `SEMANTIC_REQUEST_020` (`SEMANTIC_QUERY_020`
+in SQL). When names are close enough to suggest, `CLARIFICATION_JSON` lists
+them in `candidates` and their format hints in `candidate_formats`. A near name
+can be a different kind of number, such as currency next to a fraction, so check
+the format before substituting one. A field that existed and was dropped is
+refused with `SEMANTIC_REQUEST_029` (`SEMANTIC_QUERY_029`) and no suggestions:
+nothing stands in for it, so ask the model's owner what replaces it.
 `EXPRESSION_FUNCTIONS_FOR_AGENT` enumerates the built-in functions accepted by
 static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted request keys, filter

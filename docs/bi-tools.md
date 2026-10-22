@@ -375,6 +375,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 | `SEMANTIC_QUERY_016` | an outer `SUM`/`AVG` over a metric that does not add up across groups (an average, a ratio): the result weights every group equally; select the metric at the grain you want |
 | `SEMANTIC_QUERY_017` | a filter on a dimension the statement does not select cannot run before aggregation (a subquery, another semantic object, a join); use literal values or select the dimension |
 | `SEMANTIC_QUERY_020` | a name in the select list is not a field of the object; the message says what it might have meant |
+| `SEMANTIC_QUERY_029` | the field existed and was dropped from the model; nothing is suggested in its place, because a near name is usually a different number |
 
 **The shape of your statement is not the reason.** A construct is accepted or
 refused the same way whether you reference the object bare or wrap it in a
