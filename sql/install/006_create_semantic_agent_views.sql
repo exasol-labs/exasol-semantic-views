@@ -353,6 +353,32 @@ JOIN SEMANTIC_SOURCE.FACTS f
 WHERE f.STATUS = 'ACTIVE'
   AND f.IS_PRIVATE = FALSE;
 
+-- What each model and field defines, as a hash a consumer can store and
+-- compare: on deploy, on rollback, in a health check. VERSION_ID never moves,
+-- because authoring mutates the one model version in place, and
+-- LATEST_VALIDATION_RUN_ID moves on a no-op validation; a definition hash
+-- moves exactly when a definition does. A field renamed but not redefined
+-- keeps its hash; the model hash moves.
+--
+-- Its own view rather than a column of MODELS_FOR_AGENT and FIELDS_FOR_AGENT:
+-- deriving the hashes costs a few tenths of a second, Exasol does not prune an
+-- unused join, and those two views are read by every agent's discovery and by
+-- each other. Only a caller that asks should pay. PLAN_JSON.definition_hashes
+-- carries the same values for the fields a compile selected.
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT AS
+SELECT m.MODEL_ID, m.MODEL_NAME, h.VERSION_ID,
+       'MODEL' AS FIELD_KIND, CAST(NULL AS DECIMAL(18,0)) AS FIELD_ID,
+       CAST(NULL AS VARCHAR(256)) AS FIELD_NAME, h.DEFINITION_HASH
+  FROM SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES h
+  JOIN SEMANTIC_SOURCE.MODELS m
+    ON m.MODEL_ID = h.MODEL_ID AND m.ACTIVE_VERSION_ID = h.VERSION_ID
+UNION ALL
+SELECT m.MODEL_ID, m.MODEL_NAME, h.VERSION_ID, h.FIELD_KIND, h.FIELD_ID, h.FIELD_NAME,
+       h.DEFINITION_HASH
+  FROM SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+  JOIN SEMANTIC_SOURCE.MODELS m
+    ON m.MODEL_ID = h.MODEL_ID AND m.ACTIVE_VERSION_ID = h.VERSION_ID;
+
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT AS
 SELECT
   mf.MODEL_ID,

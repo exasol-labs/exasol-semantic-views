@@ -3471,6 +3471,8 @@ local function compile_request_table(request, options)
         for _, dimension in ipairs(selected_dimensions) do
             plan.dimensions[#plan.dimensions + 1] = dimension.name
         end
+        plan.definition_hashes = M.definition_hashes(model, selected_dimensions,
+            selected_metrics)
         local representation_entity_ids = {}
         for entity_id, _ in pairs(needed_entities) do
             representation_entity_ids[#representation_entity_ids + 1] = entity_id
@@ -3712,6 +3714,38 @@ local function compile_request_table(request, options)
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
     return result, request, model
+end
+
+-- The definition hash of each selected field, from the view FIELDS_FOR_AGENT
+-- reads, so a consumer can store what this SQL was compiled against and
+-- compare it later; see SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES. Read on a
+-- cold compile only: a cache hit returns the plan stored with its SQL, and any
+-- change that moves a hash also invalidates the cache. The model hash is left
+-- to MODELS_FOR_AGENT -- reading it here would double the cost of the read.
+--
+-- On the module table because the chunk is at its 200-local ceiling.
+function M.definition_hashes(model, dimensions, metrics)
+    local wanted = {DIMENSION = {}, METRIC = {}}
+    for _, field in ipairs(dimensions) do wanted.DIMENSION[key(field.id)] = field.name end
+    for _, field in ipairs(metrics) do wanted.METRIC[key(field.id)] = field.name end
+    local ok, rows = pcall(query, [[
+        SELECT FIELD_KIND, FIELD_ID, DEFINITION_HASH
+          FROM SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES
+         WHERE VERSION_ID = :version_id AND FIELD_KIND IN ('DIMENSION', 'METRIC')
+    ]], {version_id = model.version_id})
+    if not ok then
+        return nil
+    end
+    local hashes = {dimensions = {}, metrics = {}}
+    for _, row in ipairs(rows or {}) do
+        local kind = tostring(row_value(row, "FIELD_KIND", 1))
+        local name = wanted[kind] and wanted[kind][key(row_value(row, "FIELD_ID", 2))]
+        if name ~= nil then
+            local bucket = kind == "DIMENSION" and hashes.dimensions or hashes.metrics
+            bucket[name] = tostring(row_value(row, "DEFINITION_HASH", 3))
+        end
+    end
+    return hashes
 end
 
 -- A structured request names each output column after the field it asked

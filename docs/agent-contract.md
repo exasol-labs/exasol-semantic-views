@@ -58,6 +58,7 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.FUSION_FOR_AGENT`
 - `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`
+- `SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT`
 - `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`
 
 These views expose both canonical semantic names and published SQL surface names
@@ -86,6 +87,18 @@ is named. Where a caller must index positionally, take the index from
 `QUERY_LOG_ID` for `COMPILE_SQL_DEBUG`.
 `REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the compatibility
 alias `REQUEST_TIME`.
+
+`DEFINITION_HASHES_FOR_AGENT` gives every model (`FIELD_KIND = 'MODEL'`) and
+every dimension, fact and metric a `DEFINITION_HASH` that moves exactly when its
+definition does. Store it next to anything built on a field and compare it
+later; `VERSION_ID` never moves, because authoring changes the one model version
+in place, and `LATEST_VALIDATION_RUN_ID` also moves on a no-op validation.
+A field hash covers what the field computes, including everything it is built
+from and its entity's representations, coverage, authority and identity. It
+leaves out the name and presentation, so a field that was renamed but not
+redefined keeps its hash. The model hash adds names, object membership and
+synonyms. `PLAN_JSON.definition_hashes` carries the same values for the
+fields a compile selected, so the record and the SQL come from one compile.
 
 Every published model contributes system `SAFETY` and `PRECONDITION` rows to
 `INSTRUCTIONS_FOR_AGENT`, even when no manual instructions were authored.

@@ -124,7 +124,26 @@ rights. Broad privileges such as `SELECT ANY TABLE` let the user set the
 preprocessor but not run a semantic query. The full table is in
 [BI tools: Who needs what](bi-tools.md#who-needs-what).
 
-## 7. Noticing a breaking change
+## 7. Recording what a panel was built against
+
+Store each field's definition hash with the panel that uses it, and compare
+on deploy, on rollback and in a health check:
+
+```sql
+SELECT FIELD_KIND, FIELD_NAME, DEFINITION_HASH
+FROM SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT
+WHERE MODEL_NAME = 'sales';
+```
+
+A field's hash moves when what it computes does: its expression or filter,
+anything it is built from, or its entity's sources, coverage or authority. It
+does not move for a validation run, a republish, a new label, or a rename. A
+compile per request gets the same values for its fields in
+`PLAN_JSON.definition_hashes`. A rollback that restores old SQL and a stored
+hash that no longer matches is the "every check green, wrong number" case
+this exists to catch.
+
+## 8. Noticing a breaking change
 
 When a metric is dropped or renamed, the history shows who is now failing.
 `REQUEST_HISTORY_FOR_AGENT` shows each user their own requests, and `SYS` all

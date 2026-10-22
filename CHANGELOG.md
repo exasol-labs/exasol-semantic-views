@@ -18,6 +18,26 @@ All notable changes to Exasol Semantic Views are documented here.
   stored compile misses later metric fixes and, on a fused model, coverage
   moves, and nothing can find it afterwards. `agent-contract.md` now says so too.
 
+#### Definition hashes: what a model and each field define, comparably
+
+- A model has one version that authoring mutates in place, so a consumer could
+  not record which definition it was built against or notice that it had
+  changed. `SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT` gives every model and
+  every dimension, fact and metric a `DEFINITION_HASH` that moves exactly when
+  its definition does. A validation run, a republish, a label or a rename
+  leaves a field's hash alone.
+- A field hash covers its expression and filters, everything it is built from
+  (transitively), and its entity's representations, coverage, authority, keys
+  and identity. The model hash adds names, object membership and synonyms.
+- Derived from the catalog on every read, never stored, so it cannot lag
+  authoring. `SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES` and
+  `MODEL_DEFINITION_HASHES` hold the recipe; `PLAN_JSON.definition_hashes`
+  carries the values for the fields a compile selected.
+- Its own view, not columns on `MODELS_FOR_AGENT` and `FIELDS_FOR_AGENT`:
+  deriving it costs a few tenths of a second, and those views are read by every
+  agent's discovery. A cold compile pays about 0.1 s for the plan's hashes;
+  a cached compile pays nothing.
+
 ### Changed
 
 - `COMPILE_RESULT_SCHEMA_FOR_AGENT` says, per entrypoint, how result columns are

@@ -222,7 +222,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS('sales');
 script rather than a validation rule because answering exactly needs the
 compiler. There is deliberately **no version comparison**: ESV creates one model
 version per model and authoring mutates it in place, so a version check could
-never fire.
+never fire. To notice that a definition changed without recompiling anything,
+compare definition hashes (`SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT`); they
+move exactly when a definition does.
 
 `VALIDATE_MODEL` reports the part the catalog can settle, which is the dangerous
 part — `SEMANTIC_MODEL_068`, a frozen view reading a relation the model no longer

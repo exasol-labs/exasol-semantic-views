@@ -266,3 +266,279 @@ FROM SYS_SEMANTIC.MODELS m
 LEFT JOIN trust t ON t.MODEL_ID = m.MODEL_ID
 LEFT JOIN frozen f ON f.MODEL_ID = m.MODEL_ID
 LEFT JOIN SEMANTIC_SOURCE.AUTHORIZED_MODELS a ON a.MODEL_ID = m.MODEL_ID;
+
+-- What each field computes, as a hash a consumer can store and compare.
+--
+-- A model has one version that authoring mutates in place, so VERSION_ID and
+-- VERSION_NUMBER never move, and LATEST_VALIDATION_RUN_ID moves on a no-op
+-- validation. A dashboard therefore could not record which definition it was
+-- built against, or notice that it had changed: rolling one back silently
+-- restored a pre-fix number with every check green. This is that record.
+--
+-- Derived from the catalog on every read, never stored, so it cannot lag
+-- authoring. FIELDS_FOR_AGENT, MODELS_FOR_AGENT and the compiler's PLAN_JSON
+-- all read these two views, so the three can never disagree.
+--
+-- They read SYS_SEMANTIC, as GOVERNANCE_FOR_MODEL does, and filter the result
+-- to AUTHORIZED_MODELS once at the end. Reading through SEMANTIC_SOURCE applied
+-- the authorization filter in every one of some twenty references and tripled
+-- the cost. Nothing leaks: every join stays inside one model, and only an
+-- authorized model's rows come out.
+--
+-- What a field hash covers is what the field computes, not what it is called
+-- or how it is shown:
+--
+-- * a dimension or fact: its expression and type, its bindings and fusion
+--   policy, and its entity -- representations, coverage, authority, unique
+--   keys and identity bindings;
+-- * a metric: its own definition, filters and inputs, its base entity, and the
+--   hash of everything it is built from, transitively, so changing a fact's
+--   expression changes every metric over it;
+-- * every field: the model's relationship graph. That over-reports a graph
+--   edit, which is rare, and never misses one.
+--
+-- Its own name, display name, description, format, unit and certification are
+-- left out: a rename keeps the hash, so a consumer can tell "renamed" from
+-- "redefined". The model hash adds the names, which object exposes which field,
+-- and synonyms. Materializations are left out of both: substituting one is
+-- proven not to change the answer.
+--
+-- Rows are hashed as tuples with multi-argument HASH_SHA256, which separates
+-- its arguments and distinguishes NULL; sets are hashed in hash order, so they
+-- do not depend on ids or insertion order. The leading 'esv-definition-1' names
+-- the recipe: changing what is covered changes it, and every hash with it.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES AS
+WITH
+key_columns AS (
+  SELECT UNIQUE_KEY_ID,
+         GROUP_CONCAT(HASH_SHA256('key_column', TO_CHAR(ORDINAL_POSITION), COLUMN_NAME, EXPRESSION)
+                      ORDER BY ORDINAL_POSITION SEPARATOR ',') AS COLUMNS_HASHES
+    FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS
+   GROUP BY UNIQUE_KEY_ID
+),
+entity_parts AS (
+  SELECT r.ENTITY_ID,
+         HASH_SHA256('representation', r.REPRESENTATION_NAME, r.SOURCE_KIND, r.SOURCE_SCHEMA,
+                     r.SOURCE_OBJECT, r.SOURCE_ALIAS, r.REPRESENTATION_ROLE, TO_CHAR(r.PRIORITY),
+                     r.FRESHNESS_POLICY, r.COVERAGE_PREDICATE,
+                     TO_CHAR(r.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6'),
+                     TO_CHAR(r.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6'), a.AUTHORITY_ROLE) AS PART_HASH
+    FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS r
+    LEFT JOIN SYS_SEMANTIC.REPRESENTATION_AUTHORITIES a
+      ON a.REPRESENTATION_ID = r.REPRESENTATION_ID AND a.STATUS = 'ACTIVE'
+   WHERE r.STATUS = 'ACTIVE'
+  UNION ALL
+  SELECT k.ENTITY_ID,
+         HASH_SHA256('unique_key', k.KEY_NAME, k.KEY_KIND, c.COLUMNS_HASHES)
+    FROM SYS_SEMANTIC.UNIQUE_KEYS k
+    LEFT JOIN key_columns c ON c.UNIQUE_KEY_ID = k.UNIQUE_KEY_ID
+   WHERE k.STATUS = 'ACTIVE'
+  UNION ALL
+  SELECT b.ENTITY_ID,
+         HASH_SHA256('identity_binding', i.IDENTITY_NAME, i.IDENTITY_KIND, i.DATA_TYPE,
+                     r.REPRESENTATION_NAME, b.SOURCE_EXPRESSION, b.BINDING_KIND,
+                     m.SOURCE_SCHEMA, m.SOURCE_OBJECT, m.SOURCE_LOCAL_COLUMN,
+                     m.SEMANTIC_KEY_COLUMN, m.CERTIFICATION_STATUS)
+    FROM SYS_SEMANTIC.IDENTITY_BINDINGS b
+    JOIN SYS_SEMANTIC.SEMANTIC_IDENTITIES i ON i.IDENTITY_ID = b.IDENTITY_ID
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS r ON r.REPRESENTATION_ID = b.REPRESENTATION_ID
+    LEFT JOIN SYS_SEMANTIC.IDENTITY_MAPPING_RELATIONS m
+      ON m.IDENTITY_BINDING_ID = b.IDENTITY_BINDING_ID AND m.STATUS = 'ACTIVE'
+   WHERE b.STATUS = 'ACTIVE' AND i.STATUS = 'ACTIVE'
+),
+entity_hashes AS (
+  SELECT e.ENTITY_ID, e.ENTITY_NAME,
+         HASH_SHA256('entity', e.PRIMARY_KEY_EXPR,
+                     GROUP_CONCAT(p.PART_HASH ORDER BY p.PART_HASH SEPARATOR ',')) AS ENTITY_HASH
+    FROM SYS_SEMANTIC.ENTITIES e
+    LEFT JOIN entity_parts p ON p.ENTITY_ID = e.ENTITY_ID
+   WHERE e.STATUS = 'ACTIVE'
+   GROUP BY e.ENTITY_ID, e.ENTITY_NAME, e.PRIMARY_KEY_EXPR
+),
+key_mappings AS (
+  SELECT RELATIONSHIP_ID,
+         GROUP_CONCAT(HASH_SHA256('key_mapping', TO_CHAR(ORDINAL_POSITION), FROM_COLUMN_NAME,
+                                  FROM_EXPRESSION, TO_COLUMN_NAME, TO_EXPRESSION)
+                      ORDER BY ORDINAL_POSITION SEPARATOR ',') AS MAPPING_HASHES
+    FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS
+   GROUP BY RELATIONSHIP_ID
+),
+relationship_rows AS (
+  SELECT r.VERSION_ID,
+         HASH_SHA256('relationship', r.RELATIONSHIP_NAME, fe.ENTITY_NAME, te.ENTITY_NAME,
+                     r.JOIN_CONDITION, r.RELATIONSHIP_CARDINALITY, r.JOIN_TYPE,
+                     CASE WHEN r.IS_REQUIRED THEN 'Y' ELSE 'N' END, r.FANOUT_POLICY,
+                     TO_CHAR(r.PATH_PRIORITY), km.MAPPING_HASHES) AS ROW_HASH
+    FROM SYS_SEMANTIC.RELATIONSHIPS r
+    LEFT JOIN SYS_SEMANTIC.ENTITIES fe ON fe.ENTITY_ID = r.FROM_ENTITY_ID
+    LEFT JOIN SYS_SEMANTIC.ENTITIES te ON te.ENTITY_ID = r.TO_ENTITY_ID
+    LEFT JOIN key_mappings km ON km.RELATIONSHIP_ID = r.RELATIONSHIP_ID
+   WHERE r.STATUS = 'ACTIVE'
+),
+graph_hashes AS (
+  SELECT v.MODEL_ID, v.VERSION_ID,
+         HASH_SHA256('graph', GROUP_CONCAT(rr.ROW_HASH ORDER BY rr.ROW_HASH SEPARATOR ','))
+           AS GRAPH_HASH
+    FROM SYS_SEMANTIC.MODEL_VERSIONS v
+    LEFT JOIN relationship_rows rr ON rr.VERSION_ID = v.VERSION_ID
+   GROUP BY v.MODEL_ID, v.VERSION_ID
+),
+binding_rows AS (
+  SELECT b.ATTRIBUTE_TYPE, b.ATTRIBUTE_ID,
+         HASH_SHA256('binding', r.REPRESENTATION_NAME, b.SOURCE_EXPRESSION, b.BINDING_ROLE,
+                     TO_CHAR(b.BINDING_PRIORITY),
+                     CASE WHEN b.IS_DEFAULT THEN 'Y' ELSE 'N' END) AS ROW_HASH
+    FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS b
+    JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS r ON r.REPRESENTATION_ID = b.REPRESENTATION_ID
+   WHERE b.STATUS = 'ACTIVE'
+),
+bindings AS (
+  SELECT ATTRIBUTE_TYPE, ATTRIBUTE_ID,
+         GROUP_CONCAT(ROW_HASH ORDER BY ROW_HASH SEPARATOR ',') AS BINDING_HASHES
+    FROM binding_rows
+   GROUP BY ATTRIBUTE_TYPE, ATTRIBUTE_ID
+),
+attributes AS (
+  SELECT 'DIMENSION' AS FIELD_KIND, d.DIMENSION_ID AS FIELD_ID, d.MODEL_ID, d.VERSION_ID,
+         d.DIMENSION_NAME AS FIELD_NAME,
+         HASH_SHA256('dimension', eh.ENTITY_NAME, eh.ENTITY_HASH, d.EXPRESSION, d.DATA_TYPE,
+                     b.BINDING_HASHES, fp.FUSION_STRATEGY, g.GRAPH_HASH) AS OWN_HASH
+    FROM SYS_SEMANTIC.DIMENSIONS d
+    JOIN entity_hashes eh ON eh.ENTITY_ID = d.ENTITY_ID
+    JOIN graph_hashes g ON g.VERSION_ID = d.VERSION_ID
+    LEFT JOIN bindings b ON b.ATTRIBUTE_TYPE = 'DIMENSION' AND b.ATTRIBUTE_ID = d.DIMENSION_ID
+    LEFT JOIN SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES fp
+      ON fp.ATTRIBUTE_TYPE = 'DIMENSION' AND fp.ATTRIBUTE_ID = d.DIMENSION_ID
+     AND fp.STATUS = 'ACTIVE'
+   WHERE d.STATUS = 'ACTIVE'
+  UNION ALL
+  SELECT 'FACT', f.FACT_ID, f.MODEL_ID, f.VERSION_ID, f.FACT_NAME,
+         HASH_SHA256('fact', eh.ENTITY_NAME, eh.ENTITY_HASH, f.EXPRESSION, f.DATA_TYPE,
+                     f.ADDITIVE_POLICY, b.BINDING_HASHES, fp.FUSION_STRATEGY, g.GRAPH_HASH)
+    FROM SYS_SEMANTIC.FACTS f
+    JOIN entity_hashes eh ON eh.ENTITY_ID = f.ENTITY_ID
+    JOIN graph_hashes g ON g.VERSION_ID = f.VERSION_ID
+    LEFT JOIN bindings b ON b.ATTRIBUTE_TYPE = 'FACT' AND b.ATTRIBUTE_ID = f.FACT_ID
+    LEFT JOIN SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES fp
+      ON fp.ATTRIBUTE_TYPE = 'FACT' AND fp.ATTRIBUTE_ID = f.FACT_ID AND fp.STATUS = 'ACTIVE'
+   WHERE f.STATUS = 'ACTIVE'
+),
+metric_part_rows AS (
+  SELECT mf.METRIC_ID, 'FILTER' AS PART,
+         HASH_SHA256('metric_filter', mf.FILTER_KIND, mf.FILTER_EXPR, mf.RESOLVED_SQL_EXPR,
+                     d.DIMENSION_NAME, e.ENTITY_NAME, TO_CHAR(mf.ORDINAL_POSITION)) AS ROW_HASH
+    FROM SYS_SEMANTIC.METRIC_FILTERS mf
+    LEFT JOIN SYS_SEMANTIC.DIMENSIONS d ON d.DIMENSION_ID = mf.REQUIRED_DIMENSION_ID
+    LEFT JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = mf.REQUIRED_ENTITY_ID
+  UNION ALL
+  SELECT mi.METRIC_ID, 'INPUT',
+         HASH_SHA256('metric_input', mi.INPUT_ROLE, mi.INPUT_OBJECT_TYPE,
+                     COALESCE(f.FACT_NAME, m.METRIC_NAME), mi.EXPRESSION_ALIAS,
+                     mi.OFFSET_WINDOW, mi.FILTER_EXPR, TO_CHAR(mi.ORDINAL_POSITION))
+    FROM SYS_SEMANTIC.METRIC_INPUTS mi
+    LEFT JOIN SYS_SEMANTIC.FACTS f
+      ON mi.INPUT_OBJECT_TYPE = 'FACT' AND f.FACT_ID = mi.INPUT_OBJECT_ID
+    LEFT JOIN SYS_SEMANTIC.METRICS m
+      ON mi.INPUT_OBJECT_TYPE = 'METRIC' AND m.METRIC_ID = mi.INPUT_OBJECT_ID
+),
+metric_parts AS (
+  SELECT METRIC_ID,
+         GROUP_CONCAT(ROW_HASH ORDER BY ROW_HASH SEPARATOR ',') AS PART_HASHES
+    FROM metric_part_rows
+   GROUP BY METRIC_ID
+),
+metric_own AS (
+  SELECT m.METRIC_ID, m.MODEL_ID, m.VERSION_ID, m.METRIC_NAME,
+         HASH_SHA256('metric', m.EXPRESSION, m.FILTER_EXPR, m.METRIC_TYPE, m.METRIC_KIND,
+                     m.DATA_TYPE, m.AGGREGATION_FUNCTION, m.MEASURE_EXPR,
+                     m.SEMANTIC_FILTER_EXPR, m.SQL_FILTER_EXPR, m.DISTINCT_KEY_EXPR,
+                     m.WINDOW_SPEC_JSON, m.TYPE_PARAMS_JSON, nd.DIMENSION_NAME,
+                     be.ENTITY_NAME, be.ENTITY_HASH, mp.PART_HASHES, g.GRAPH_HASH) AS OWN_HASH
+    FROM SYS_SEMANTIC.METRICS m
+    JOIN graph_hashes g ON g.VERSION_ID = m.VERSION_ID
+    LEFT JOIN entity_hashes be ON be.ENTITY_ID = m.BASE_ENTITY_ID
+    LEFT JOIN SYS_SEMANTIC.DIMENSIONS nd ON nd.DIMENSION_ID = m.NON_ADDITIVE_DIMENSION_ID
+    LEFT JOIN metric_parts mp ON mp.METRIC_ID = m.METRIC_ID
+   WHERE m.STATUS = 'ACTIVE'
+),
+-- What a metric is built from: the edges VALIDATE_MODEL derives from its
+-- expression, and the inputs the Semantic DDL declares. The compiler reads the
+-- same two tables to plan it.
+metric_edges AS (
+  SELECT METRIC_ID, DEPENDS_ON_OBJECT_TYPE AS OBJECT_TYPE, DEPENDS_ON_OBJECT_ID AS OBJECT_ID
+    FROM SYS_SEMANTIC.METRIC_DEPENDENCIES
+  UNION
+  SELECT METRIC_ID, INPUT_OBJECT_TYPE, INPUT_OBJECT_ID
+    FROM SYS_SEMANTIC.METRIC_INPUTS
+   WHERE INPUT_OBJECT_ID IS NOT NULL
+),
+metric_closure AS (
+  SELECT CONNECT_BY_ROOT METRIC_ID AS METRIC_ID, OBJECT_TYPE, OBJECT_ID
+    FROM metric_edges
+ CONNECT BY NOCYCLE PRIOR OBJECT_ID = METRIC_ID AND PRIOR OBJECT_TYPE = 'METRIC'
+),
+metric_hashes AS (
+  SELECT o.METRIC_ID, o.MODEL_ID, o.VERSION_ID, o.METRIC_NAME,
+         HASH_SHA256('metric_closure', o.OWN_HASH,
+                     GROUP_CONCAT(DISTINCT COALESCE(a.OWN_HASH, dm.OWN_HASH)
+                                  ORDER BY COALESCE(a.OWN_HASH, dm.OWN_HASH) SEPARATOR ','))
+           AS DEFINITION_HASH
+    FROM metric_own o
+    LEFT JOIN metric_closure c ON c.METRIC_ID = o.METRIC_ID
+    LEFT JOIN attributes a ON a.FIELD_KIND = c.OBJECT_TYPE AND a.FIELD_ID = c.OBJECT_ID
+    LEFT JOIN metric_own dm ON c.OBJECT_TYPE = 'METRIC' AND dm.METRIC_ID = c.OBJECT_ID
+   GROUP BY o.METRIC_ID, o.MODEL_ID, o.VERSION_ID, o.METRIC_NAME, o.OWN_HASH
+)
+SELECT MODEL_ID, VERSION_ID, FIELD_KIND, FIELD_ID, FIELD_NAME, DEFINITION_HASH
+  FROM (
+    SELECT MODEL_ID, VERSION_ID, FIELD_KIND, FIELD_ID, FIELD_NAME,
+           HASH_SHA256('esv-definition-1', OWN_HASH) AS DEFINITION_HASH
+      FROM attributes
+    UNION ALL
+    SELECT MODEL_ID, VERSION_ID, 'METRIC', METRIC_ID, METRIC_NAME,
+           HASH_SHA256('esv-definition-1', DEFINITION_HASH)
+      FROM metric_hashes
+  )
+ WHERE MODEL_ID IN (SELECT MODEL_ID FROM SEMANTIC_SOURCE.AUTHORIZED_MODELS);
+
+-- The model as a whole: what each semantic object exposes -- its name, root
+-- entity, and each column's name, kind, position, visibility and definition
+-- hash -- plus synonyms. Unexposed facts and private metrics reach it through
+-- the metrics built on them. Any change a consumer could observe in the
+-- model's definitions moves it; a validation run, a republish or a
+-- presentation edit does not.
+--
+-- FIELD_DEFINITION_HASHES is read once: Exasol expands a view at every
+-- reference, so a second read would compute every field hash twice.
+CREATE OR REPLACE VIEW SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES AS
+WITH
+parts AS (
+  SELECT so.VERSION_ID,
+         HASH_SHA256('object_column', so.OBJECT_NAME, re.ENTITY_NAME, oc.COLUMN_KIND,
+                     oc.COLUMN_NAME, TO_CHAR(oc.ORDINAL_POSITION),
+                     CASE WHEN oc.IS_VISIBLE THEN 'Y' ELSE 'N' END, h.FIELD_NAME,
+                     h.DEFINITION_HASH) AS PART_HASH
+    FROM SYS_SEMANTIC.SEMANTIC_OBJECTS so
+    LEFT JOIN SYS_SEMANTIC.ENTITIES re ON re.ENTITY_ID = so.ROOT_ENTITY_ID
+    LEFT JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc ON oc.OBJECT_ID = so.OBJECT_ID
+    LEFT JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+      ON h.FIELD_KIND = oc.COLUMN_KIND AND h.FIELD_ID = oc.OBJECT_REF_ID
+   WHERE so.STATUS = 'ACTIVE'
+  UNION ALL
+  SELECT s.VERSION_ID,
+         HASH_SHA256('synonym', s.OBJECT_TYPE,
+                     COALESCE(d.DIMENSION_NAME, mt.METRIC_NAME), s.SYNONYM)
+    FROM SYS_SEMANTIC.SYNONYMS s
+    LEFT JOIN SYS_SEMANTIC.DIMENSIONS d
+      ON s.OBJECT_TYPE = 'DIMENSION' AND d.DIMENSION_ID = s.OBJECT_ID
+    LEFT JOIN SYS_SEMANTIC.METRICS mt
+      ON s.OBJECT_TYPE = 'METRIC' AND mt.METRIC_ID = s.OBJECT_ID
+)
+SELECT v.MODEL_ID, v.VERSION_ID,
+       HASH_SHA256('esv-definition-1', 'model',
+                   GROUP_CONCAT(p.PART_HASH ORDER BY p.PART_HASH SEPARATOR ','))
+         AS DEFINITION_HASH
+  FROM SYS_SEMANTIC.MODEL_VERSIONS v
+  LEFT JOIN parts p ON p.VERSION_ID = v.VERSION_ID
+ WHERE v.MODEL_ID IN (SELECT MODEL_ID FROM SEMANTIC_SOURCE.AUTHORIZED_MODELS)
+ GROUP BY v.MODEL_ID, v.VERSION_ID;
