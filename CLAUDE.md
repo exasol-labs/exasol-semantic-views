@@ -575,6 +575,8 @@ Known issues and their current status are tracked in the checked-in `docs/known-
 - `docs/creating-metrics.md` — how to define metrics; mental model for entity → fact → metric
 - `docs/bi-tools.md` — connecting Tableau, Power BI and generic SQL clients; which
   statement shapes compile, and the one that is refused
+- `docs/hosted-apps.md` — apps and dashboards that query from their own code:
+  per-session setup, lane choice, and why `GENERATED_SQL` is never persisted
 - `docs/governance.md` — what the layer enforces, what it only reports, and where
   it stops. Read §"The one rule everything else follows from" before adding a
   control: the compiler runs with the caller's rights, so policy that only the

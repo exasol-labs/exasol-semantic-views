@@ -27,6 +27,14 @@ requests, but adapters that accept SQL should compile SQL explicitly and execute
 the returned generated SQL. They should not depend on a session preprocessor
 being active unless they are intentionally emulating a BI session.
 
+Compile **per request** and run the result straight away. **Never store
+`GENERATED_SQL`** in an application, a dashboard definition or a saved
+query: it is the model as it was when compiled, including, on a fused model,
+the coverage boundaries and authority order. A later metric fix or coverage
+move does not reach it, `COMPILE_SQL` leaves no log row, and
+`CHECK_FROZEN_VIEWS` cannot see text stored outside the database. See
+[Hosted dashboards and applications](hosted-apps.md).
+
 The database must validate, compile, explain, and log requests
 deterministically. It must not call an LLM.
 

@@ -530,11 +530,20 @@ WITH ENTRYPOINTS AS (
     'COMPILE_REQUEST_JSON' AS SCRIPT_NAME,
     'AGENT_REQUEST_ID' AS HANDLE_COLUMN,
     'AGENT_REQUEST' AS HANDLE_TYPE,
-    FALSE AS ECHOES_ORIGINAL_SQL
+    FALSE AS ECHOES_ORIGINAL_SQL,
+    -- Result column names differ by lane, and a consumer that switches lanes
+    -- loses every lookup by name unless it is told.
+    CAST('Its result columns are named after the canonical field ("total_revenue"), '
+      || 'or after the synonym as written when the request used one.'
+      AS VARCHAR(300)) AS OUTPUT_NAMING
   UNION ALL
-  SELECT 'COMPILE_SQL', 'AGENT_REQUEST_ID', 'AGENT_REQUEST', TRUE
+  SELECT 'COMPILE_SQL', 'AGENT_REQUEST_ID', 'AGENT_REQUEST', TRUE,
+    'Its result columns are named as SQL names them: an alias as written, '
+      || 'anything else upper-cased: TOTAL_REVENUE.'
   UNION ALL
-  SELECT 'COMPILE_SQL_DEBUG', 'QUERY_LOG_ID', 'QUERY_LOG', TRUE
+  SELECT 'COMPILE_SQL_DEBUG', 'QUERY_LOG_ID', 'QUERY_LOG', TRUE,
+    'Its result columns are named as SQL names them: an alias as written, '
+      || 'anything else upper-cased: TOTAL_REVENUE.'
 ),
 LAYOUT AS (
   SELECT
@@ -586,7 +595,10 @@ SELECT
         || 'positional indices line up with the other entrypoints.'
     ELSE l.NULL_WHEN
   END AS NULL_WHEN,
-  l.DESCRIPTION
+  CASE
+    WHEN l.COLUMN_NAME = 'GENERATED_SQL' THEN l.DESCRIPTION || ' ' || e.OUTPUT_NAMING
+    ELSE l.DESCRIPTION
+  END AS DESCRIPTION
 FROM ENTRYPOINTS e
 CROSS JOIN LAYOUT l
 UNION ALL

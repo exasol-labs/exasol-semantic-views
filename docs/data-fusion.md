@@ -225,8 +225,15 @@ not:
   fails on the incomplete representation rather than on itself, and the
   bindings will not be seeded to the new partition.
 
-Sequential single-representation coverage calls cannot initialize a
-partition set; the batch call is what validates the set as a whole.
+Single-representation `SET_REPRESENTATION_COVERAGE` calls follow the same
+rule as registering separately. On a draft nothing is validated between
+calls, so declaring each partition's coverage in turn works, provided it all
+happens before a dimension or fact is added to the entity
+(`tests/integration/verify_fusion_f3.py` does exactly this). On a published
+model each call is validated as a candidate on its own, and the first one
+leaves the set incomplete, so it is rejected and restored
+(`SEMANTIC_ADMIN_059`). There the batch call is the only way: it validates
+the set as a whole.
 
 ### Attribute Reconciliation
 

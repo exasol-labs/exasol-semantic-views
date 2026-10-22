@@ -6,6 +6,32 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Added
+
+#### A guide for hosted dashboards and applications
+
+- `docs/hosted-apps.md` covers apps that query from their own code with no
+  connect hook: setting up every pooled session, which setup statement fits a
+  helper that does or does not expect a result set, live Semantic SQL versus
+  per-request compiles, governed labels from `FIELDS_FOR_AGENT`, a provenance
+  panel, and grants. Its first rule is **never persist `GENERATED_SQL`**: a
+  stored compile misses later metric fixes and, on a fused model, coverage
+  moves, and nothing can find it afterwards. `agent-contract.md` now says so too.
+
+### Changed
+
+- `COMPILE_RESULT_SCHEMA_FOR_AGENT` says, per entrypoint, how result columns are
+  named: upper-case in the SQL lanes, the canonical field name in
+  `COMPILE_REQUEST_JSON`.
+- `SEMANTIC_ADMIN_019` points to `ADD_OR_REPLACE_DIMENSION` for changing an
+  existing dimension's definition.
+- Docs: `mcp-server-integration.md` names the `GRANT_MODEL_ROLE` grant and says
+  that exasol-mcp-server 2.2.0 resets the session after any failed query
+  (exasol/mcp-server#309); `creating-metrics.md` says a `percentage` value is a
+  fraction and a `currency` metric names its currency in `UNIT`;
+  `data-fusion.md` no longer says sequential coverage calls can never build a
+  partition set — they can on a draft, not on a published model.
+
 ### Fixed
 
 #### GOVERNED mode refused every request through an F5 identity mapping

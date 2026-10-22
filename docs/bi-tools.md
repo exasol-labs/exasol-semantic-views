@@ -425,6 +425,8 @@ reports as not found.
 ## 7. MCP and agent clients
 
 An MCP client reaches the same surface. See
-[Exasol MCP Server integration](mcp-server-integration.md); for the structured
+[Exasol MCP Server integration](mcp-server-integration.md). An application that
+queries from its own code, with no connect hook, is covered in
+[Hosted dashboards and applications](hosted-apps.md); for the structured
 compile, explain and feedback contracts an agent should prefer over raw SQL, see
 the [agent contract](agent-contract.md).

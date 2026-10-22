@@ -52,9 +52,23 @@ FROM SEMANTIC_AGENT.DEPLOYMENT_IDENTITY_FOR_AGENT;
 installed build; `MODELS_FOR_AGENT` carries the same two columns, so an agent
 already reading that view can check without a second query.
 
-The connecting database user must be able to see the published semantic model,
-set the session preprocessor, and read the physical objects used by the compiled
-query. The preprocessor does not bypass Exasol privileges.
+The connecting database user needs two grants, and broad read privileges are
+not a substitute for the first:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.GRANT_MODEL_ROLE('sales', 'MCP_READER');  -- the model
+GRANT SELECT ON SCHEMA MART TO MCP_READER;                              -- its sources
+```
+
+`GRANT_MODEL_ROLE` carries the `SEMANTIC_USER` baseline that running the
+preprocessor and reading the catalog need. A user holding only `SELECT ANY
+TABLE` and `USE ANY SCHEMA` can *set* the preprocessor — `ALTER SESSION` is
+open to everyone — but every semantic query is then refused. The `GROUP BY`
+form fails worse: Exasol's own parser rejects it with `not a valid GROUP BY
+expression` before the layer can say what is missing. The compiled SQL reads
+the physical sources with the caller's rights, so the second grant is needed
+too; the preprocessor does not bypass Exasol privileges. The full table is in
+[BI tools: Who needs what](bi-tools.md#who-needs-what).
 
 ## User Workflow
 
@@ -121,15 +135,20 @@ When only the official MCP tools are available, an autonomous agent should:
    metric/dimension combinations.
 6. Include a SQL `LIMIT` when a bounded result is required; omit MCP
    `row_limit`.
-7. If a communication error, authentication refresh, server restart, or other
-   reconnect may have occurred, verify `current_preprocessor` and set it again
-   before retrying.
+7. After **any** failed query, and after a communication error,
+   authentication refresh, server restart or other reconnect, verify
+   `current_preprocessor` and set it again before retrying. In
+   exasol-mcp-server 2.2.0 a query that raises does not return its pooled
+   connection, so the next call gets a fresh session without the preprocessor
+   ([exasol/mcp-server#309](https://github.com/exasol/mcp-server/issues/309)).
+   A refused semantic query is a failed query, so this is the common case, not
+   the rare one.
 8. Stop with an actionable error rather than falling back to physical-table SQL.
 
-The official server normally preserves the setting because it pools a database
-connection per effective user. Its tool contract correctly warns that a
-database reconnect can silently reset session state, so verification is part
-of the agent loop rather than a one-time installation step.
+The official server pools a database connection per effective user, which
+preserves the setting between successful queries. A reconnect resets it, and
+until mcp-server#309 is fixed so does every failed query, so verification is
+part of the agent loop rather than a one-time installation step.
 
 ## Capability Boundary
 
@@ -157,9 +176,12 @@ handles, explanations, or feedback.
   disabled by default.
 - **Published views are missing from discovery:** enable `views.enable`, or
   query `SEMANTIC_<MODEL>.SEMANTIC_DISCOVERY` and the named agent views.
-- **A semantic query fails before compilation:** verify
-  `current_preprocessor`, then set it again. A reconnect creates a new database
-  session without the previous session setting.
+- **A semantic query fails before compilation**, typically with `not a valid
+  GROUP BY expression` right after another query failed: verify
+  `current_preprocessor`, then set it again. A reconnect, and in
+  exasol-mcp-server 2.2.0 any failed query (mcp-server#309), leaves a new
+  database session without the setting. If it is set and the error persists,
+  check the user's grants (above).
 - **A query succeeds without `row_limit` but fails with it:** put `LIMIT` in the
   semantic SQL and omit the tool argument.
 - **The client needs structured requests or provenance:** use a dedicated

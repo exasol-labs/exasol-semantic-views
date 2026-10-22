@@ -595,6 +595,7 @@ as it stands, for example from a release bundle, which ships it built.
 - Usage
   - [Creating metrics](docs/creating-metrics.md)
   - [BI tools and generic SQL interfaces](docs/bi-tools.md) — Tableau, Power BI, JDBC/ODBC
+  - [Hosted dashboards and applications](docs/hosted-apps.md) — session setup, lane choice, why compiled SQL is never stored
   - [Governance](docs/governance.md) — what is enforced, what is reported, where it stops
   - [Exasol MCP Server integration](docs/mcp-server-integration.md)
   - [Admin setup for database-wide Semantic SQL](docs/admin-db-wide-setup.md)

@@ -204,6 +204,8 @@ SEMANTIC_ADMIN_019: duplicate dimension: ship_mode. Dimension names are unique
 per model, not per semantic view, so this name is taken. It is defined on entity
 'order' and exposed by semantic view(s): SALES. Choose a distinct name for this
 view's column; there is no operation that shares one dimension between views.
+To change this dimension's own definition instead, call
+SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION, which updates it in place.
 ```
 
 Give the second view's column a distinct name (`header_ship_mode`), or model the
@@ -457,6 +459,14 @@ The important fields are:
   `WINDOW`, or `DERIVED`.
 - `BASE_ENTITY_NAME`: the entity grain where the metric starts.
 - `FORMAT_HINT`: a display hint such as `currency`, `percentage`, or `count`.
+  It describes the value; the layer never scales or converts one. A
+  `percentage` metric returns a fraction — `0.25` means 25%, as
+  `gross_margin_pct` does in the sales model — so a dashboard multiplies by 100
+  to display it. Write a ratio that way rather than multiplying in the
+  expression, so every consumer can rely on the convention. A `currency`
+  metric says which currency in its unit hint (`UNIT 'EUR'` in Semantic DDL,
+  `UNIT_HINT` in `FIELDS_FOR_AGENT`); without one a consumer can only print the
+  number.
 
 `ADD_METRIC` returns a confirmation row with the metric id, model, object,
 metric name, privacy/certification flags, and whether the semantic object
