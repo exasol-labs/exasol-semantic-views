@@ -119,6 +119,8 @@
 
 -- @lua lua/semantic_layer/scripts/check_partition_coverage.lua
 
+-- @lua lua/semantic_layer/scripts/check_fusion_health.lua
+
 -- @lua lua/semantic_layer/scripts/set_model_derived_composition.lua
 
 -- @lua lua/semantic_layer/scripts/set_materialization_status.lua

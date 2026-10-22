@@ -101,7 +101,7 @@ messages — it may fall, and it may not rise.
 | `SEMANTIC_MODEL_043` | error | Once a model has active metrics, coverage partitions an entity that is the base of none of them and therefore can only use the unsupported partitioned joined-dimension path. |
 | `SEMANTIC_MODEL_044` | error | F4 authority or attribute-fusion metadata is malformed, lacks a physical unique key/complete semantic identity, or conflicts with F3 partition fusion. The two contributor-counting conditions it used to carry are now `SEMANTIC_MODEL_070` and `SEMANTIC_MODEL_071`. |
 | `SEMANTIC_MODEL_045` | error | `COALESCE` contributors have conflicting non-null values for one or more overlapping entity keys. |
-| `SEMANTIC_MODEL_046` | warning | `RECONCILE` observed conflicting non-null values and deterministically selected the declared `AUTHORITATIVE` representation. |
+| `SEMANTIC_MODEL_046` | warning | `RECONCILE` observed conflicting non-null values and deterministically selected the declared `AUTHORITATIVE` representation. It counts conflicts only: `CHECK_FUSION_HEALTH` counts the keys another source fills and the keys no source answers. |
 | `SEMANTIC_MODEL_047` | error | F5 semantic identity or source-local binding metadata is malformed, ambiguous, incomplete, or uses an unsupported expression. Covers the identity's own declaration and each binding's expression; a representation with *no* binding at all is `SEMANTIC_MODEL_060`. |
 | `SEMANTIC_MODEL_048` | error | A `DIRECT` binding incorrectly has a mapping, or a `MAPPED` binding lacks one visible `CERTIFIED` mapping relation. |
 | `SEMANTIC_MODEL_049` | error | F5 data probes could not prove local uniqueness, mapping totality and bijection, or exact canonical semantic-key equivalence. |

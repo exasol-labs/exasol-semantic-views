@@ -248,6 +248,17 @@ with no stranded keys are copies an archive job leaves between its copy and its
 delete. Move the boundary with `SET_REPRESENTATION_COVERAGE_BATCH` in the same
 job that moves the rows.
 
+**How a reconciled attribute is answered is counted too.** Validation reports
+conflicting values (`SEMANTIC_MODEL_046`) and nothing else, yet the two cases
+that change what a viewer sees are different. A key the first-ranked source
+leaves NULL is filled from another source, and a key no source answers lands in
+a NULL group. `EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FUSION_HEALTH('model')`
+returns, per `COALESCE` or `RECONCILE` attribute, `TOTAL_KEYS`,
+`FROM_FIRST_SOURCE`, `FILLED` and `UNRESOLVED`. They are measured over the
+primary representation's keys with the compiler's own fused expression, so
+they describe what a query returns. It returns counts only, never key values,
+and writes nothing.
+
 ### Attribute Reconciliation
 
 This is where fusion starts *changing the answer* rather than just the

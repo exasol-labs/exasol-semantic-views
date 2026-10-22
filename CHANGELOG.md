@@ -50,6 +50,16 @@ All notable changes to Exasol Semantic Views are documented here.
   recording a validation run or touching the compile cache, and returns
   `OUTSIDE_ROWS` and `STRANDED_KEYS` per partition, so a dashboard can poll it.
 
+#### Reconciled attributes report fills and unresolved keys
+
+- Validation counted only conflicting values for a `COALESCE` or `RECONCILE`
+  attribute. A key the first-ranked source left NULL was silently filled from a
+  supplemental source, and a key no source answered landed in a NULL group, with
+  no count anywhere. `SEMANTIC_ADMIN.CHECK_FUSION_HEALTH(model)` returns, per
+  fused attribute, `TOTAL_KEYS`, `FROM_FIRST_SOURCE`, `FILLED` and `UNRESOLVED`,
+  measured with the compiler's own fused expression. Counts only; it writes
+  nothing.
+
 #### Warnings on the agent surface
 
 - `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT` lists every finding of each

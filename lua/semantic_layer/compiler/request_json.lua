@@ -2113,7 +2113,10 @@ local function fused_attribute_expression(ctx, entity, base_representation,
         return nil, nil, "Fusion strategy " .. tostring(strategy) .. " for attribute '"
             .. tostring(attribute_key) .. "' has fewer than two active contributors."
     end
-    return "COALESCE(" .. table.concat(expressions, ", ") .. ")", contributors, nil
+    -- The contributor expressions in rank order, last: CHECK_FUSION_HEALTH
+    -- counts what the first one answers on its own.
+    return "COALESCE(" .. table.concat(expressions, ", ") .. ")", contributors, nil,
+        expressions
 end
 
 local function select_attribute_bindings(ctx, dimensions, metrics, needed_entities)
@@ -6161,6 +6164,94 @@ function M.compile_request_json(request_json)
     return result
 end
 
+-- How a COALESCE or RECONCILE attribute is actually being answered: over the
+-- keys of the entity's primary representation, how many the first-ranked
+-- source answers, how many another source fills, and how many no source
+-- answers at all. Validation reported only conflicts, so a key the
+-- authoritative source left NULL was silently filled from a supplemental one,
+-- and a key nobody covered moved its revenue into a NULL segment, with no
+-- count anywhere.
+--
+-- Measured with the compiler's own fused expression and joins
+-- (fused_attribute_expression), so the counts describe exactly what a query
+-- returns. Counts only: no key values leave the probe, because this runs with
+-- the caller's rights and an agent-facing surface must not carry row values.
+function M.fusion_health(model_name)
+    local model = load_model(normalize_name(model_name, "model"))
+    if model == nil then
+        error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name))
+    end
+    local object_name = scalar([[
+        SELECT MIN(OBJECT_NAME) FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS
+         WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+    ]], {version_id = model.version_id})
+    if missing(object_name) then return {} end
+    -- Any object will do: entities, bindings and fusion policies load model-wide.
+    local ctx, _, load_message = load_catalog(model, object_name)
+    if ctx == nil then error(tostring(load_message)) end
+    local names = {}
+    for _, row in ipairs(query([[
+        SELECT 'DIMENSION' AS KIND, DIMENSION_ID AS ID, DIMENSION_NAME AS NAME
+          FROM SEMANTIC_SOURCE.DIMENSIONS WHERE VERSION_ID = :version_id
+        UNION ALL
+        SELECT 'FACT', FACT_ID, FACT_NAME
+          FROM SEMANTIC_SOURCE.FACTS WHERE VERSION_ID = :version_id
+    ]], {version_id = model.version_id}) or {}) do
+        names[tostring(row_value(row, "KIND", 1)) .. ":" .. key(row_value(row, "ID", 2))] =
+            tostring(row_value(row, "NAME", 3))
+    end
+    local rows = {}
+    for attribute_key, policy in pairs(ctx.fusion_policy_by_attribute or {}) do
+        local strategy = upper(policy.strategy or "PREFER")
+        local binding = (ctx.bindings_by_attribute[attribute_key] or {})[1]
+        local entity = binding and ctx.entity_by_id[key(binding.entity_id)]
+        if (strategy == "COALESCE" or strategy == "RECONCILE") and entity ~= nil then
+            local attribute_type = string.match(attribute_key, "^([^:]+):")
+            local finding = {entity = entity.name, attribute_type = attribute_type,
+                             attribute = names[attribute_key] or attribute_key,
+                             strategy = strategy}
+            -- A view of the entity, so the joins the expression registers do
+            -- not stay on the catalog's own entity.
+            local probe_entity = setmetatable({}, {__index = entity})
+            local base = entity.primary_representation
+            local fused, contributors, fusion_error, expressions =
+                fused_attribute_expression(ctx, probe_entity, base, attribute_key, strategy)
+            if fused == nil then
+                finding.error = fusion_error
+            else
+                finding.first_source = contributors[1].representation_name
+                local joins = {}
+                for _, join in ipairs(probe_entity.fusion_joins or {}) do
+                    joins[#joins + 1] = " LEFT JOIN " .. join.source_sql .. " " .. join.alias
+                        .. " ON " .. table.concat(join.predicates, " AND ")
+                end
+                local ok, counted = pcall(query,
+                    "SELECT COUNT(*) AS TOTAL_KEYS, COUNT(" .. expressions[1] .. ") AS FIRST_SOURCE,"
+                    .. " COUNT(" .. fused .. ") AS RESOLVED FROM "
+                    .. sql_text.quote_qualified(base.source_schema, base.source_object)
+                    .. " " .. tostring(base.alias) .. table.concat(joins))
+                if not ok or counted == nil or #counted == 0 then
+                    finding.error = tostring(counted)
+                else
+                    local total = tonumber(row_value(counted[1], "TOTAL_KEYS", 1)) or 0
+                    local first = tonumber(row_value(counted[1], "FIRST_SOURCE", 2)) or 0
+                    local resolved = tonumber(row_value(counted[1], "RESOLVED", 3)) or 0
+                    finding.total_keys = total
+                    finding.from_first_source = first
+                    finding.filled = resolved - first
+                    finding.unresolved = total - resolved
+                end
+            end
+            rows[#rows + 1] = finding
+        end
+    end
+    table.sort(rows, function(left, right)
+        return tostring(left.entity) .. "." .. tostring(left.attribute)
+            < tostring(right.entity) .. "." .. tostring(right.attribute)
+    end)
+    return rows
+end
+
 -- Dry-run migration assistance for legacy primary-key and equality-join
 -- metadata. Suggestions are deliberately limited to unambiguous column forms.
 function M.suggest_grain_metadata(model_name)
@@ -6279,6 +6370,7 @@ compile_sql = M.compile_sql
 compile_sql_debug = M.compile_sql_debug
 compile_sql_for_preprocessor = M.compile_sql_for_preprocessor
 suggest_grain_metadata = M.suggest_grain_metadata
+fusion_health = M.fusion_health
 
 -- Database-free tests opt into this deliberately small pure-function surface.
 -- Exasol never defines ESV_TEST_MODE, so the installed runtime's public API is

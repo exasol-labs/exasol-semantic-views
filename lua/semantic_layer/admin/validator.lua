@@ -3615,7 +3615,9 @@ local function validate_fusion_conflicts(ctx)
             elseif conflict_count > 0 then
                 add_issue(ctx, "WARNING", "ATTRIBUTE_FUSION_POLICY", attribute.name,
                     "SEMANTIC_MODEL_046", "RECONCILE resolved " .. tostring(conflict_count)
-                        .. " overlapping key value conflict(s) using the AUTHORITATIVE representation.")
+                        .. " overlapping key value conflict(s) using the AUTHORITATIVE representation."
+                        .. " SEMANTIC_ADMIN.CHECK_FUSION_HEALTH counts the keys another source"
+                        .. " fills and the ones no source answers.")
             end
         end
     end
