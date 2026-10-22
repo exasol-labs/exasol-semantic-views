@@ -3134,6 +3134,19 @@ local function compile_request_table(request, options)
         return nil
     end
 
+    -- The name each output field was requested by, when that was a synonym
+    -- rather than the field's own name; see M.with_requested_names.
+    local requested_names = {}
+    local function note_requested(field, written)
+        local field_key = field.kind .. ":" .. key(field.id)
+        if requested_names[field_key] == nil then
+            requested_names[field_key] = tostring(written)
+            if upper(tostring(written)) ~= upper(field.name) then
+                requested_names.renamed = true
+            end
+        end
+    end
+
     local selected_dimensions = {}
     local selected_dimension_seen = {}
     for _, dimension_name in ipairs(as_array(request.dimensions, "dimensions")) do
@@ -3145,6 +3158,7 @@ local function compile_request_table(request, options)
         if masked ~= nil then
             return masked
         end
+        note_requested(field, dimension_name)
         add_unique(selected_dimensions, selected_dimension_seen, field)
     end
 
@@ -3159,6 +3173,7 @@ local function compile_request_table(request, options)
         if masked ~= nil then
             return masked
         end
+        note_requested(field, metric_name)
         add_unique(selected_metrics, selected_metric_seen, field)
     end
     -- Dimension-only discovery (BUG-D-003): allow an empty metrics list as long
@@ -3613,8 +3628,9 @@ local function compile_request_table(request, options)
         if governance_refusal ~= nil then
             return governance_refusal, request, model
         end
-        local result = envelope.attach_planning_runtime(
-            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
+        local result = M.with_requested_names(envelope.attach_planning_runtime(
+            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms),
+            ctx, request, requested_names, selected_dimensions, selected_metrics)
         if cache_key ~= nil then
             compile_cache.cache_store(model.version_id, cache_key, result)
         end
@@ -3689,12 +3705,48 @@ local function compile_request_table(request, options)
     if governance_refusal ~= nil then
         return governance_refusal, request, model
     end
-    local result = envelope.attach_planning_runtime(
-        envelope.ok_result(statement_sql, plan, validation_run_id), planning_started_ms)
+    local result = M.with_requested_names(envelope.attach_planning_runtime(
+        envelope.ok_result(statement_sql, plan, validation_run_id), planning_started_ms),
+        ctx, request, requested_names, selected_dimensions, selected_metrics)
     if cache_key ~= nil then
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
     return result, request, model
+end
+
+-- A structured request names each output column after the field it asked
+-- for, as written, when that was a synonym. The planner names columns after
+-- the canonical field, so after `RENAME METRIC` a request still asking for the
+-- old name got a column under the new one, and a consumer reading results by
+-- name lost the value. The Semantic SQL lane names its columns itself
+-- (compile_sql_internal), so it is left alone here.
+--
+-- Only a request that used a synonym is re-projected: everything else keeps
+-- the planner's SQL exactly. The result is cached re-projected, which is safe
+-- because the cache key is the request as written.
+--
+-- On the module table because the chunk is at its 200-local ceiling.
+function M.with_requested_names(result, ctx, request, requested_names, dimensions, metrics)
+    if not requested_names.renamed or request.source == "SEMANTIC_SQL" then
+        return result
+    end
+    local columns = {}
+    for _, fields in ipairs({dimensions, metrics}) do
+        for _, field in ipairs(fields) do
+            columns[#columns + 1] = {source = field.name,
+                output = requested_names[field.kind .. ":" .. key(field.id)] or field.name}
+        end
+    end
+    local order_by = {}
+    for _, item in ipairs(request.order_by or {}) do
+        local field = resolve_field(ctx, item.field, nil)
+        -- A JSON null decodes to a truthy sentinel, not to nil.
+        order_by[#order_by + 1] = {field = field and field.name or item.field,
+            direction = not missing(item.direction) and item.direction or nil,
+            nulls = not missing(item.nulls) and item.nulls or nil}
+    end
+    result.generated_sql = sql_text.output_projection(result.generated_sql, columns, order_by)
+    return result
 end
 
 local function compile_internal(request_json)

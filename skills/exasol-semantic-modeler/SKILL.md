@@ -859,10 +859,9 @@ RENAME METRIC <old_name> TO <new_name>;
 metric when no other object uses it. It is rejected and rolled back when active
 metrics still depend on it. `RENAME METRIC` preserves the metric ID, rewrites
 dependent metric expressions, and retains the old name as a synonym, so verified
-requests and Semantic SQL that selects the old name keep working; an unaliased
-column is named after what the statement wrote. Two things do change: a
-structured request's output column takes the new canonical name, and the
-published view keeps its old column list until `PUBLISH_MODEL` runs again.
+requests, structured requests and Semantic SQL that ask for the old name keep
+working, and their output column keeps the name they asked for. The published
+view keeps its old column list until `PUBLISH_MODEL` runs again.
 
 ## Fusion Declaration Document
 

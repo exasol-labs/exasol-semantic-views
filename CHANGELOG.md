@@ -31,7 +31,10 @@ All notable changes to Exasol Semantic Views are documented here.
 - `RENAME METRIC` keeps the old name as a synonym, but Semantic SQL selecting it
   returned a column named after the new one, so a consumer reading by name lost
   the value. An unaliased column is now named after what the statement wrote,
-  as SQL names a column reference. Structured requests are unchanged.
+  as SQL names a column reference.
+- A structured request that asks for a field by a synonym gets a column named
+  as it asked, too. Its SQL is re-projected only when a synonym was used;
+  every other request compiles exactly as before.
 
 #### The Semantic SQL ORDER BY sat inside a derived table
 
