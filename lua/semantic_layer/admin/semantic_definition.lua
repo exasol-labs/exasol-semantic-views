@@ -746,14 +746,15 @@ end
 
 local function load_model(model_name)
     local rows = query([[
-        SELECT MODEL_ID, ACTIVE_VERSION_ID
+        SELECT MODEL_ID, ACTIVE_VERSION_ID, STATUS
         FROM SYS_SEMANTIC.MODELS
         WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
     ]], {model_name = model_name})
     if rows == nil or #rows == 0 then
         error("SEMANTIC_DDL_040: model not found: " .. tostring(model_name))
     end
-    return {model_id = row_value(rows[1], "MODEL_ID", 1), version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2), model_name = model_name}
+    return {model_id = row_value(rows[1], "MODEL_ID", 1), version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2),
+            status = row_value(rows[1], "STATUS", 3), model_name = model_name}
 end
 
 local function object_id(model, object_name)
@@ -2551,7 +2552,24 @@ function M.apply_semantic_definition(definition_sql, dry_run)
             return {{"ERROR", "SEMANTIC_DDL_090", "Definition rejected; validation failed: "
                 .. validation_details .. ". Catalog state was restored.", normalized_json, operation_count, validation_run_id}}
         end
-        return {{"OK", nil, "Semantic definition applied.", normalized_json, operation_count, validation_run_id}}
+        -- A published model's views declare its columns, and BI tools read them
+        -- from EXA_ALL_COLUMNS. Left alone, a RENAME METRIC kept advertising the
+        -- old column and a new metric was missing from the view, while the
+        -- model said PUBLISHED. The change is valid by now, so a refresh that
+        -- fails is reported rather than undoing it.
+        local message = "Semantic definition applied."
+        if tostring(model.status or "") == "PUBLISHED" then
+            local refreshed, refresh_error = pcall(query,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL(:model_name)",
+                {model_name = definition.model_name})
+            message = refreshed
+                and message .. " The published views were refreshed to match."
+                or message .. " The published views could not be refreshed and still show"
+                    .. " the previous definition: " .. tostring(refresh_error)
+                    .. ". Run EXECUTE SCRIPT SEMANTIC_ADMIN.REFRESH_SEMANTIC_SURFACE("
+                    .. sql_string(definition.model_name) .. ")."
+        end
+        return {{"OK", nil, message, normalized_json, operation_count, validation_run_id}}
     end)
     if ok then
         return result

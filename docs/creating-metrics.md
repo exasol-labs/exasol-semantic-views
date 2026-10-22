@@ -177,8 +177,10 @@ DROP METRIC obsolete_revenue;
 Rename preserves the metric ID, updates dependent metric expressions, and
 keeps the old name as a synonym. Semantic SQL or a structured request that
 still asks for the old name gets a column named after what it wrote, so a
-client reading results by name keeps working. The published view's columns do
-not change until the model is published again. Drop removes the named object's membership and
+client reading results by name keeps working. On a published model, a
+successful apply republishes, so the published view's columns match the new
+definition; if the refresh fails, the result message says so and how to retry.
+Drop removes the named object's membership and
 deactivates the metric after its final membership is removed. Both operations
 validate atomically and roll back when they would leave an invalid model.
 

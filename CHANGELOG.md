@@ -60,6 +60,16 @@ All notable changes to Exasol Semantic Views are documented here.
   measured with the compiler's own fused expression. Counts only; it writes
   nothing.
 
+#### Semantic DDL refreshes a published model's views
+
+- A published view declares the model's columns, and BI tools read them from
+  `EXA_ALL_COLUMNS`. After `RENAME METRIC` the view still declared the old
+  column, and a metric added by DDL was missing from it, while the model said
+  `PUBLISHED`. `APPLY_SEMANTIC_DEFINITION` (and `ALTER SEMANTIC VIEW` through
+  the preprocessor) now republishes a published model once the change has
+  validated. A refresh that fails does not undo the change; the result message
+  says so and names `REFRESH_SEMANTIC_SURFACE`.
+
 #### Warnings on the agent surface
 
 - `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT` lists every finding of each
