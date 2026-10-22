@@ -235,6 +235,19 @@ leaves the set incomplete, so it is rejected and restored
 (`SEMANTIC_ADMIN_059`). There the batch call is the only way: it validates
 the set as a whole.
 
+**Coverage is trusted as declared, and checked against the data.** The
+compiler reads each partition through its coverage predicate, so a row sitting
+in a partition outside that partition's window is left out of every answer
+unless the partition that does cover its time holds it too. That is how moving
+rows to the archive *before* moving the boundary silently drops them.
+`VALIDATE_MODEL` reports such rows as `SEMANTIC_MODEL_074`.
+`EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE('model')` runs the same
+check without recording a validation run, so a dashboard can poll it. It
+returns `OUTSIDE_ROWS` and `STRANDED_KEYS` per partition; rows outside a window
+with no stranded keys are copies an archive job leaves between its copy and its
+delete. Move the boundary with `SET_REPRESENTATION_COVERAGE_BATCH` in the same
+job that moves the rows.
+
 ### Attribute Reconciliation
 
 This is where fusion starts *changing the answer* rather than just the

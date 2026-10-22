@@ -1467,6 +1467,53 @@ test("validator proves partition grain without requiring equal key sets", functi
     assert_equal(minus_count, 0)
 end)
 
+-- A partitioned entity whose two partitions answer the probes with `counts`:
+-- the out-of-window row count, then the stranded-key count.
+local function partition_coverage_ctx(with_key)
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local archive = {id = 1, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "LAKE", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'"}
+    local hot = {id = 2, entity_id = 1, name = "hot", alias = "o",
+        source_schema = "MART", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00'"}
+    entity.primary_representation = hot
+    local unique_key = {id = 10, entity_id = 1, name = "order_pk",
+        columns = {{ordinal_position = 1, column_name = "ORDER_ID"}}}
+    return validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {archive, hot}},
+        unique_keys_by_entity = {["1"] = with_key and {unique_key} or {}},
+    })
+end
+
+test("validator reports partition rows no coverage window answers for", function()
+    each({
+        {name = "stranded rows warn", outside = 2, stranded = 1, rule = "SEMANTIC_MODEL_074"},
+        {name = "copies inside the covering window do not", outside = 2, stranded = 0},
+        {name = "no rows outside reports nothing", outside = 0, stranded = 0},
+        {name = "a failing probe is its own warning", fails = true, rule = "SEMANTIC_MODEL_075"},
+        {name = "an unresolvable key column is too", outside = 1, no_column = true,
+         rule = "SEMANTIC_MODEL_075"},
+        {name = "no declared key is too", outside = 1, no_key = true,
+         rule = "SEMANTIC_MODEL_075"},
+    }, function(case)
+        local ctx = partition_coverage_ctx(not case.no_key)
+        with_query(function(sql)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+                return columns_response(case.no_column and {} or {"ORDER_ID"})
+            end
+            if case.fails then error("probe timed out") end
+            if contains(sql, " MINUS ") then return {{case.stranded}} end
+            return {{case.outside}}
+        end, function() api.validate_partition_data_coverage(ctx) end)
+        local rules = {}
+        for _, issue in ipairs(ctx.issues) do rules[#rules + 1] = issue.rule_code end
+        assert_equal(table.concat(rules, ","), case.rule and (case.rule .. "," .. case.rule)
+            or "", case.name)
+    end)
+end)
+
 test("validator skips F1 source probes after a local validation error", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

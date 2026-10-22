@@ -38,6 +38,18 @@ All notable changes to Exasol Semantic Views are documented here.
   agent's discovery. A cold compile pays about 0.1 s for the plan's hashes;
   a cached compile pays nothing.
 
+#### Partition coverage is checked against the data
+
+- Coverage was trusted as declared, so rows a temporal partition held outside
+  its own window were left out of every answer with no signal. An archive job
+  that moved rows before moving the boundary took a governed total from 28,000
+  to 9,250 while validation reported nothing new. `VALIDATE_MODEL` now reports
+  out-of-window rows that no other partition covers as `SEMANTIC_MODEL_074`
+  (a probe that cannot run is `SEMANTIC_MODEL_075`).
+- `SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE(model)` runs the same check without
+  recording a validation run or touching the compile cache, and returns
+  `OUTSIDE_ROWS` and `STRANDED_KEYS` per partition, so a dashboard can poll it.
+
 #### Warnings on the agent surface
 
 - `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT` lists every finding of each

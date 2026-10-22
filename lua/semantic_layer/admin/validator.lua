@@ -2093,7 +2093,9 @@ local function resolved_source_column_name(representation, column_name)
         representation.source_object, column_name)
 end
 
-local function representation_key_query(representation, unique_key)
+-- The distinct values of a declared key in one representation, optionally
+-- restricted to rows matching `where_sql`.
+local function representation_key_query(representation, unique_key, where_sql)
     local expressions = {}
     for _, column in ipairs(unique_key.columns or {}) do
         if not missing(column.column_name) then
@@ -2111,6 +2113,7 @@ local function representation_key_query(representation, unique_key)
         representation.source_object) .. " " .. tostring(representation.alias)
     return "SELECT " .. table.concat(expressions, ", ")
         .. " FROM " .. source
+        .. (where_sql and (" WHERE " .. where_sql) or "")
         .. " GROUP BY " .. table.concat(expressions, ", "), nil
 end
 
@@ -2401,6 +2404,93 @@ local function relationship_mapping_side(relationship, entity, ref)
 end
 
 local MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS = 60
+
+-- Rows a temporal partition holds outside its own coverage window.
+--
+-- Coverage is trusted as declared: the compiler reads each partition through
+-- its predicate, so a row outside its partition's window is filtered out of
+-- every answer. That is harmless while the partition that does cover the row's
+-- time holds a copy -- an archive job between its copy and its delete -- and
+-- silent data loss when it does not. An archive job that moved July-September
+-- from the hot table before the boundary moved took the governed answer from
+-- 28,000 to 9,250 while VALIDATE_MODEL reported the same warnings as before.
+-- A row whose partition key is NULL is covered by no window, so it is always
+-- stranded.
+--
+-- Windows are contiguous and open-ended (SEMANTIC_MODEL_042), so a row outside
+-- one partition's window is inside exactly one other's. Stranded keys are the
+-- out-of-window keys found inside no other partition's window. One finding per
+-- partition with rows outside it; each probe is a full scan, bounded by the
+-- session QUERY_TIMEOUT like the other data probes.
+local function partition_coverage_findings(ctx)
+    local findings = {}
+    for _, entity in ipairs(ctx.entities or {}) do
+        if entity_uses_partition_fusion(ctx, entity) then
+            local partitions = representations_for_entity(ctx, entity)
+            local unique_key = (ctx.unique_keys_by_entity[key(entity.id)] or {})[1]
+            for _, partition in ipairs(partitions) do
+                local finding = {entity = entity, representation = partition,
+                                 outside_rows = 0, stranded_keys = 0}
+                local outside = "CASE WHEN (" .. tostring(partition.coverage_predicate)
+                    .. ") THEN FALSE ELSE TRUE END"
+                finding.outside_rows, finding.error = probe_count(
+                    "SELECT COUNT(*) AS PROBE_COUNT FROM "
+                    .. sql_text.quote_qualified(partition.source_schema, partition.source_object)
+                    .. " " .. tostring(partition.alias) .. " WHERE " .. outside)
+                if finding.error == nil and (finding.outside_rows or 0) > 0 then
+                    if unique_key == nil then
+                        finding.error = "the entity declares no unique key to match rows by"
+                    else
+                        local outside_keys, build_error =
+                            representation_key_query(partition, unique_key, outside)
+                        local covered = {}
+                        for _, other in ipairs(partitions) do
+                            if key(other.id) ~= key(partition.id) and build_error == nil then
+                                local other_keys
+                                other_keys, build_error = representation_key_query(
+                                    other, unique_key, "(" .. tostring(other.coverage_predicate) .. ")")
+                                covered[#covered + 1] = other_keys
+                            end
+                        end
+                        if build_error ~= nil then
+                            finding.error = build_error
+                        else
+                            finding.stranded_keys, finding.error = probe_count(
+                                "SELECT COUNT(*) AS PROBE_COUNT FROM (" .. outside_keys
+                                .. " MINUS (" .. table.concat(covered, " UNION ")
+                                .. ")) stranded_keys")
+                        end
+                    end
+                end
+                if finding.error ~= nil or (finding.outside_rows or 0) > 0 then
+                    findings[#findings + 1] = finding
+                end
+            end
+        end
+    end
+    return findings
+end
+
+local function validate_partition_data_coverage(ctx)
+    for _, finding in ipairs(partition_coverage_findings(ctx)) do
+        local name = tostring(finding.entity.name) .. "." .. tostring(finding.representation.name)
+        if finding.error ~= nil then
+            add_issue(ctx, "WARNING", "ENTITY_REPRESENTATION", name, "SEMANTIC_MODEL_075",
+                "Could not check partition '" .. name .. "' against its coverage window: "
+                    .. tostring(finding.error) .. ".")
+        elseif (finding.stranded_keys or 0) > 0 then
+            add_issue(ctx, "WARNING", "ENTITY_REPRESENTATION", name, "SEMANTIC_MODEL_074",
+                "Partition '" .. name .. "' holds " .. tostring(finding.outside_rows)
+                    .. " row(s) outside its coverage window ("
+                    .. tostring(finding.representation.coverage_predicate) .. "), and "
+                    .. tostring(finding.stranded_keys) .. " of their keys are in no other"
+                    .. " partition's window, so every query leaves them out. Move the"
+                    .. " coverage boundary with SET_REPRESENTATION_COVERAGE_BATCH, or move"
+                    .. " the rows to the partition that covers them."
+                    .. " SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE re-checks without validating.")
+        end
+    end
+end
 
 local function validate_representation_probe_timeout(ctx)
     local has_multi_representation_probe = false
@@ -4793,6 +4883,7 @@ function M.validate_model(model_name_arg)
             validate_representation_data_equivalence(ctx)
             validate_semantic_identity_data(ctx)
             validate_fusion_conflicts(ctx)
+            validate_partition_data_coverage(ctx)
         end
         -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
         -- VALIDATE_MODEL after mutating the catalog. Invalidating compile-cache
@@ -4811,6 +4902,34 @@ function M.validate_model(model_name_arg)
 end
 
 validate_model = M.validate_model
+
+-- The partition coverage check on its own, reading data and writing nothing:
+-- a dashboard can poll it, where VALIDATE_MODEL records a run and
+-- invalidates the compile cache. One row per partition holding rows outside
+-- its window.
+function M.check_partition_coverage(model_name_arg)
+    reset_source_column_cache()
+    local ctx = {issues = {}, issue_seen = {}, error_count = 0,
+                 precondition_count = 0, warning_count = 0}
+    if not load_model(ctx, model_name_arg) then
+        error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name_arg))
+    end
+    load_catalog(ctx)
+    local rows = {}
+    for _, finding in ipairs(partition_coverage_findings(ctx)) do
+        rows[#rows + 1] = {
+            entity = tostring(finding.entity.name),
+            representation = tostring(finding.representation.name),
+            coverage_predicate = finding.representation.coverage_predicate,
+            outside_rows = finding.outside_rows,
+            stranded_keys = finding.error == nil and finding.stranded_keys or nil,
+            error = finding.error,
+        }
+    end
+    return rows
+end
+
+check_partition_coverage = M.check_partition_coverage
 
 -- Test-only pure helpers. See the equivalent compiler block for why this is
 -- gated instead of becoming part of the installed runtime contract.
@@ -4834,6 +4953,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_catalog_integrity = validate_catalog_integrity,
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
+        validate_partition_data_coverage = validate_partition_data_coverage,
         parse_partition_predicate = parse_partition_predicate,
         validate_partition_attribute_bindings = validate_partition_attribute_bindings,
         entity_has_base_metric = entity_has_base_metric,

@@ -191,7 +191,7 @@ return {
         ["lua/semantic_layer/compiler/request_json.lua"] = 91.1,
         ["lua/semantic_layer/compiler/compile_result.lua"] = 100,
         ["lua/semantic_layer/compiler/semantic_sql_syntax.lua"] = 96.2,
-        ["lua/semantic_layer/admin/validator.lua"] = 95.1,
+        ["lua/semantic_layer/admin/validator.lua"] = 95.2,
         ["lua/semantic_layer/compiler/materializations.lua"] = 94.2,
         ["lua/semantic_layer/admin/semantic_definition.lua"] = 77.5,
         ["lua/semantic_layer/admin/databricks_import.lua"] = 83.7,
