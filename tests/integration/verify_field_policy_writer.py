@@ -129,8 +129,13 @@ def main() -> int:
               row.get("sensitivity_label"), "confidential")
 
         stored = con.execute(
-            "SELECT DISPLAY_POLICY, SENSITIVITY_LABEL FROM SYS_SEMANTIC.DIMENSIONS"
-            f" WHERE DIMENSION_NAME = '{DIMENSION}'").fetchone()
+            # Scoped to the model: other models (the OSI copies of sales, for one)
+            # carry a dimension of the same name, and an unscoped fetchone()
+            # read whichever came first.
+            "SELECT d.DISPLAY_POLICY, d.SENSITIVITY_LABEL FROM SYS_SEMANTIC.DIMENSIONS d"
+            " JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = d.MODEL_ID"
+            f" AND m.ACTIVE_VERSION_ID = d.VERSION_ID"
+            f" WHERE m.MODEL_NAME = '{MODEL}' AND d.DIMENSION_NAME = '{DIMENSION}'").fetchone()
         check("the catalog carries both columns", tuple(stored),
               ("MASK", "confidential"))
 

@@ -242,6 +242,17 @@ def compile_request(con, request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def blocking_validation_rows(con: Any) -> list[tuple[Any, ...]]:
+    """VALIDATE_MODEL('sales') rows that block: ERROR and PRECONDITION.
+
+    Not every row. A warning is not a failure to validate, and sales can carry
+    one this verifier did not cause -- a frozen view somebody else created
+    reports SEMANTIC_MODEL_067 for as long as it exists.
+    """
+    rows = fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
+    return [row for row in rows if str(row[0]).upper() in {"ERROR", "PRECONDITION"}]
+
+
 def assert_equal(name: str, actual: Any, expected: Any) -> None:
     if actual != expected:
         raise AssertionError(f"{name}: expected {expected!r}, got {actual!r}")
@@ -522,8 +533,7 @@ REPLACE METRICS (
 )""",
             "SEMANTIC_ADMIN_090",
         )
-        validation_rows = fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")
-        assert_equal("invalid add metric no validation errors", len(validation_rows), 0)
+        assert_equal("invalid add metric no validation errors", blocking_validation_rows(con), [])
         assert_equal(
             "invalid add metric no orphan metric",
             scalar(con, "SELECT COUNT(*) FROM SEMANTIC_CATALOG.METRICS WHERE MODEL_NAME = 'sales' AND METRIC_NAME = 'invalid_metric_probe'"),
@@ -704,8 +714,8 @@ REPLACE METRICS (
         assert_equal("rename metric apply", apply_definition(con, rename_ddl, False)["status"], "OK")
         assert_equal(
             "renamed metric validates with verified query using old synonym",
-            len(fetchall(con, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('sales')")),
-            0,
+            blocking_validation_rows(con),
+            [],
         )
         assert_equal(
             "rename preserves metric id",
