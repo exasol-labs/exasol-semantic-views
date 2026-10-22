@@ -277,6 +277,25 @@ test("output projection returns the caller's select list, named and ordered", fu
         sql_text.output_projection(inner, {{source = "a", output = "b"}}) == inner, false)
 end)
 
+test("output projection repeats the ORDER BY outside the wrapper, by ordinal", function()
+    -- SQL does not promise a derived table's order survives the query around
+    -- it, so the order is restated outside. By ordinal: with `a AS b, b AS a`
+    -- the name `a` would sort by the other column.
+    local inner = 'SELECT 1 AS "a", 2 AS "b" FROM t ORDER BY "a" DESC LIMIT 2'
+    local swapped = {{source = "a", output = "b"}, {source = "b", output = "a"}}
+    local ordered = sql_text.output_projection(inner, swapped,
+        {{field = "A", direction = "desc", nulls = "first"}, {field = "b"}})
+    assert_contains(ordered, inner .. "\n)\nORDER BY 1 DESC NULLS FIRST, 2 ASC")
+
+    -- A key that is not a projected column cannot be restated; a partial
+    -- order would be a different order, so the inner one stands alone.
+    local unmapped = sql_text.output_projection(inner, swapped,
+        {{field = "b"}, {field = "c"}})
+    assert_equal(unmapped:find("\nORDER BY", #inner + 1, true), nil)
+    assert_equal(sql_text.output_projection(inner, swapped, {}),
+        sql_text.output_projection(inner, swapped))
+end)
+
 test("shared sql text recognises only EXA_DB as a catalog qualifier", function()
     -- GitHub #9: Power BI writes "EXA_DB"."SEMANTIC_SALES"."ORDER_HEADER", and
     -- both SQL lanes read the first two parts as schema.object.

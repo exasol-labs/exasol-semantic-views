@@ -6,6 +6,39 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+#### GOVERNED mode refused every request through an F5 identity mapping
+
+- The trust derivation classified the relations representations and
+  materializations read, and not the mapping relation an F5 `MAPPED` binding
+  joins through. That relation was `NOT_CLASSIFIED`, so a `GOVERNED` model
+  refused every request that used the mapping with `SEMANTIC_REQUEST_028`.
+  `SOURCE_TRUST` now carries it with `RELATION_KIND = 'IDENTITY_MAPPING'`.
+- `PLAN_JSON.governance.sources` lists each relation once; a relation referenced
+  twice in the SQL used to appear twice.
+
+#### Refusals were logged without their model or client
+
+- Most refusal paths dropped the request and model the compile had resolved, so
+  `AGENT_REQUEST_LOG` and `QUERY_LOG` recorded `MODEL_ID` NULL, and
+  `AGENT_REQUEST_LOG` lost `CLIENT_NAME`. `REQUEST_HISTORY_FOR_AGENT`, filtered
+  by model or client, showed what worked and not what had started failing.
+  A model the caller cannot see is still recorded as NULL.
+
+#### A column selected by a synonym came back under the canonical name
+
+- `RENAME METRIC` keeps the old name as a synonym, but Semantic SQL selecting it
+  returned a column named after the new one, so a consumer reading by name lost
+  the value. An unaliased column is now named after what the statement wrote,
+  as SQL names a column reference. Structured requests are unchanged.
+
+#### The Semantic SQL ORDER BY sat inside a derived table
+
+- The lane wraps the compiled SQL to return the caller's select list, and the
+  ORDER BY stayed inside the wrapper, where SQL does not promise it survives.
+  It is now restated outside, by ordinal.
+
 ## [0.4.1] - 2026-10-17
 
 A source-layout release: the install SQL is built from hand-written sources

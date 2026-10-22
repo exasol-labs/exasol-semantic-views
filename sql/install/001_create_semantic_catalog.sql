@@ -618,9 +618,9 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MATERIALIZATIONS (
 --
 -- Derived by VALIDATE_MODEL, never declared: TRUST_CLASS and BASE_RELATIONS are
 -- resolved from SYS.EXA_ALL_DEPENDENCIES. RELATION_ID is a discriminated
--- reference -- a REPRESENTATION_ID or a MATERIALIZATION_ID according to
--- RELATION_KIND -- so it carries no foreign key; always join on the
--- discriminator too.
+-- reference -- a REPRESENTATION_ID, a MATERIALIZATION_ID or an
+-- IDENTITY_MAPPING_ID according to RELATION_KIND -- so it carries no foreign
+-- key; always join on the discriminator too.
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.FROZEN_VIEWS (
   FROZEN_VIEW_ID    DECIMAL(18,0) IDENTITY PRIMARY KEY,
   MODEL_ID          DECIMAL(18,0) NOT NULL,
@@ -653,8 +653,8 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.SOURCE_TRUST (
 );
 
 COMMENT ON TABLE SYS_SEMANTIC.SOURCE_TRUST (
-  RELATION_KIND IS 'Which kind of physical relation this row classifies: REPRESENTATION or MATERIALIZATION.',
-  RELATION_ID IS 'Discriminated reference -- a REPRESENTATION_ID or a MATERIALIZATION_ID according to RELATION_KIND. Join on the discriminator too, or rows of different kinds sharing an id will mix.',
+  RELATION_KIND IS 'Which kind of physical relation this row classifies: REPRESENTATION, MATERIALIZATION or IDENTITY_MAPPING (an F5 mapping relation).',
+  RELATION_ID IS 'Discriminated reference -- a REPRESENTATION_ID, MATERIALIZATION_ID or IDENTITY_MAPPING_ID according to RELATION_KIND. Join on the discriminator too, or rows of different kinds sharing an id will mix.',
   TRUST_CLASS IS 'GOVERNED (a view stands between the caller and the base tables), RAW (the relation is a base table), DIVERGENT (a materialization whose base relations differ from the representations it can replace, so it does not carry their policy), or UNKNOWN (dependencies could not be resolved).',
   BASE_RELATIONS IS 'The resolved transitive base tables, sorted and comma-separated. What DIVERGENT is decided by.'
 );

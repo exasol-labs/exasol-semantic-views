@@ -235,12 +235,17 @@ do
             classified[tostring(row_value(row, "RELATION_NAME", 1))] =
                 tostring(row_value(row, "TRUST_CLASS", 2))
         end
-        local sources, unvouched = {}, {}
+        -- One entry per relation: the SQL names a relation once per reference,
+        -- and an F5 mapping is referenced once per mapped binding.
+        local sources, unvouched, seen = {}, {}, {}
         for _, relation in ipairs(relations) do
-            local trust_class = classified[relation] or "NOT_CLASSIFIED"
-            sources[#sources + 1] = {relation = relation, trust_class = trust_class}
-            if trust_class ~= "GOVERNED" and trust_class ~= "RAW" then
-                unvouched[#unvouched + 1] = relation
+            if not seen[relation] then
+                seen[relation] = true
+                local trust_class = classified[relation] or "NOT_CLASSIFIED"
+                sources[#sources + 1] = {relation = relation, trust_class = trust_class}
+                if trust_class ~= "GOVERNED" and trust_class ~= "RAW" then
+                    unvouched[#unvouched + 1] = relation
+                end
             end
         end
         local principal = scalar("SELECT CURRENT_USER")
@@ -3034,6 +3039,10 @@ local function compile_request_table(request, options)
             "Invalid canonical query specification: " .. tostring(query_spec_error) .. ".")
     end
     request = normalized_request
+    -- What a refusal is logged against. Most of the returns below hand back
+    -- the error alone, so the request and model are recorded on the caller's
+    -- options as soon as they are known rather than threaded through each.
+    options.resolved_request = request
     if request.proof_mode ~= "LEGACY_JOIN" and request.proof_mode ~= "STRICT_GRAIN" then
         return error_result(error_prefix .. "_071",
             "Unsupported proof_mode: " .. tostring(request.proof_mode) .. ".")
@@ -3049,6 +3058,7 @@ local function compile_request_table(request, options)
     end
 
     local model = options.model or load_model(model_name)
+    options.resolved_model = model
     if model == nil then
         -- The model is absent *from what this caller may see*, which is the
         -- same answer for a model that does not exist and one that exists but
@@ -3703,7 +3713,13 @@ local function compile_internal(request_json)
     -- PUBLISH_MODEL (and VALIDATE_MODEL) own the writes to VALIDATION_RUNS,
     -- METRIC_DEPENDENCIES, and METRIC_DIMENSION_MATRIX. Re-running them on every
     -- compile produced transaction collisions under concurrent load (BUG-001).
-    return compile_request_table(request, {validate = false, error_prefix = "SEMANTIC_REQUEST"})
+    local options = {validate = false, error_prefix = "SEMANTIC_REQUEST"}
+    local result, normalized, model = compile_request_table(request, options)
+    -- A refusal keeps its model and its client in AGENT_REQUEST_LOG. Both were
+    -- NULL, so REQUEST_HISTORY_FOR_AGENT filtered by either showed only what
+    -- had worked.
+    return result, normalized or options.resolved_request,
+        model or options.resolved_model
 end
 
 -- Is this `WRAPPER(field)` one the layer refuses, and why?
@@ -3836,6 +3852,9 @@ local function parse_semantic_sql(statement_text, options)
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
     local model = load_model_by_published_schema(published_schema, object_name)
+    -- Recorded on the caller's options so a refusal from any of the returns
+    -- below can still be logged against its model; see compile_sql_internal.
+    options.resolved_model = model
     if model == nil then
         if options.unchanged_unknown_schema then
             -- The preprocessor is active and declined, so the query falls
@@ -3912,8 +3931,9 @@ local function parse_semantic_sql(statement_text, options)
     local wildcard_select = #select_parts == 1 and #select_parts[1] == 1 and select_parts[1][1].text == "*"
     -- The names and order the caller asked for. The planner orders columns its
     -- own way and names them after the semantic field; a SQL client needs its
-    -- own select list back. Unaliased columns take the published SQL name, which
-    -- is what the view's metadata advertises.
+    -- own select list back. Unaliased columns take the name the caller wrote,
+    -- upper-cased as Exasol folds an unquoted identifier; `*` takes the
+    -- published SQL name.
     local output_columns = {}
     local function request_output(field, alias)
         output_columns[#output_columns + 1] = {
@@ -3958,7 +3978,13 @@ local function parse_semantic_sql(statement_text, options)
         if bind_err ~= nil then
             return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
+        -- An unaliased column is named after what the caller wrote, as SQL
+        -- names a column reference -- not after the field it resolved to. The
+        -- two differ only for a synonym, and the synonym a rename leaves behind
+        -- is there so existing statements keep working; a column that came
+        -- back under the new name broke every consumer reading it by name.
         local output_alias = syntax.alias_from_select_part(part)
+        local output_name = output_alias or upper(field_name)
         if measure_wrapped then
             -- This lane compiles the statement at exactly its selected
             -- dimensions -- an explicit GROUP BY must cover them and nothing
@@ -3970,13 +3996,13 @@ local function parse_semantic_sql(statement_text, options)
                 return nil, wrapper_refusal
             end
             if lowering ~= nil then
-                lowering.output = output_alias or upper(field.name)
+                lowering.output = output_name
                 meta.wrapper_lowerings = meta.wrapper_lowerings or {}
                 meta.wrapper_lowerings[#meta.wrapper_lowerings + 1] = lowering
             end
         end
         selected_output[#selected_output + 1] = field.name
-        request_output(field, output_alias)
+        request_output(field, output_name)
         if output_alias ~= nil then
             select_aliases[upper(output_alias)] = field.name
         end
@@ -4110,13 +4136,17 @@ end
 
 local function compile_sql_internal(statement_sql, options)
     options = options or {}
-    local request, parse_err, model, meta = parse_semantic_sql(statement_sql, {
+    local parse_options = {
         unchanged_nonsemantic = options.unchanged_nonsemantic,
         unchanged_unknown_schema = options.unchanged_unknown_schema,
         sql_cache = options.sql_cache,
-    })
+    }
+    local request, parse_err, model, meta = parse_semantic_sql(statement_sql, parse_options)
+    -- A refusal is logged against the model its FROM clause named. Without it
+    -- QUERY_LOG recorded MODEL_ID NULL, and after a breaking change the owner
+    -- could see who was still succeeding but not who had started failing.
     if parse_err ~= nil then
-        return parse_err, nil, nil
+        return parse_err, nil, parse_options.resolved_model
     end
     if meta ~= nil and meta.cached ~= nil then
         return meta.cached, nil, model
@@ -4124,16 +4154,25 @@ local function compile_sql_internal(statement_sql, options)
     if request ~= nil and request.status == "UNCHANGED" then
         return request, nil, nil
     end
-    local result, compiled_request, compiled_model = compile_request_table(request, {
+    local table_options = {
         model = model,
         ctx = meta and meta.ctx or nil,
         validate = options.validate,
         error_prefix = "SEMANTIC_QUERY",
         source = "SEMANTIC_SQL",
-    })
+    }
+    local result, compiled_request, compiled_model = compile_request_table(request, table_options)
     if result ~= nil and result.status == "OK" and meta ~= nil then
+        -- ORDER BY keys as the compiled SQL names them: a key may have been
+        -- written as a synonym, and the projection matches canonical names.
+        local order_by = {}
+        for _, item in ipairs(request.order_by or {}) do
+            local field = meta.ctx and resolve_field(meta.ctx, item.field, nil)
+            order_by[#order_by + 1] = {field = field and field.name or item.field,
+                direction = item.direction, nulls = item.nulls}
+        end
         result.generated_sql = sql_text.output_projection(result.generated_sql,
-                                                          meta.output_columns)
+                                                          meta.output_columns, order_by)
         -- A wrapper accepted because each group is one row is recorded, so the
         -- plan says the wrapper was lowered rather than applied (GitHub #8).
         if meta.wrapper_lowerings ~= nil then
@@ -4149,7 +4188,8 @@ local function compile_sql_internal(statement_sql, options)
     if result ~= nil and result.status ~= "OK" then
         envelope.recode_error_prefix(result, "SEMANTIC_QUERY")
     end
-    return result, compiled_request, compiled_model
+    return result, compiled_request or table_options.resolved_request,
+        compiled_model or model
 end
 
 local function collision_error(msg)

@@ -66,8 +66,10 @@ A model you cannot see resolves to *not found* rather than to a modelling error.
 ## 2. Which relations a model vouches for — reported, and enforced in `GOVERNED`
 
 `VALIDATE_MODEL` derives a **trust class** for every physical relation the
-planner may emit — representations *and* materializations, by one derivation:
-resolve transitive base relations through `EXA_ALL_DEPENDENCIES`.
+planner may emit — representations, materializations and F5 identity mapping
+relations, by one derivation: resolve transitive base relations through
+`EXA_ALL_DEPENDENCIES`. A mapping relation is never `DIVERGENT`: it reads
+different tables by nature.
 
 | class | meaning |
 |---|---|

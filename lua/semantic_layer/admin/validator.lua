@@ -3791,6 +3791,20 @@ local function derive_source_trust(ctx)
         end
     end
 
+    -- An F5 MAPPED binding puts its mapping relation into rendered SQL, so it
+    -- is classified like everything else the planner may emit. Left out, its
+    -- name was absent here, the plan reported it NOT_CLASSIFIED, and a GOVERNED
+    -- model refused every request that crossed the certified mapping.
+    -- It is not compared with the representations' bases the way a
+    -- materialization is: a mapping relation reads different tables by nature.
+    for _, binding in ipairs(ctx.identity_bindings or {}) do
+        local mapping = binding.mapping
+        if mapping then
+            classify("IDENTITY_MAPPING", mapping.id, mapping.source_object,
+                     mapping.source_schema, mapping.source_object)
+        end
+    end
+
     local materialization_rows = query([[
         SELECT MATERIALIZATION_ID, MATERIALIZATION_NAME, PHYSICAL_SCHEMA, PHYSICAL_OBJECT
         FROM SYS_SEMANTIC.MATERIALIZATIONS
@@ -3821,7 +3835,9 @@ local function derive_source_trust(ctx)
             entry.schema, entry.object, entry.class, table.concat(entry.bases, ","),
         }
 
-        local where = entry.kind == "REPRESENTATION" and "representation" or "materialization"
+        local where = ({REPRESENTATION = "representation",
+                        IDENTITY_MAPPING = "identity mapping relation"})[entry.kind]
+            or "materialization"
         local label = tostring(entry.name or entry.object)
         -- Divergence is always recorded, but it only costs something when there
         -- is policy to lose. A model whose representations read base tables
