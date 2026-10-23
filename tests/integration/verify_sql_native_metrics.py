@@ -76,7 +76,7 @@ REPLACE METRICS (
   METRIC gross_margin_pct
     AS gross_margin / NULLIF(total_revenue, 0)
     ON ENTITY order_line
-    RETURNS DECIMAL(18,6)
+    RETURNS DOUBLE
     FORMAT 'percentage'
     DISPLAY 'Gross Margin %'
     COMMENT 'Gross margin as a percentage of revenue'

@@ -7,9 +7,9 @@ import("SEMANTIC_ADMIN.VALIDATOR_RUNTIME", "validator")
 -- The compiler decides what type each metric returns, so validation asks it
 -- (SEMANTIC_MODEL_076). Imported only when the check runs: it is skipped for a
 -- draft model, which should not pay for loading the compiler.
-local function metric_result_types(model_name)
+local function metric_result_types(model_name, previous)
     import("SEMANTIC_ADMIN.COMPILER_RUNTIME", "compiler")
-    return compiler.metric_result_types(model_name)
+    return compiler.metric_result_types(model_name, previous)
 end
 
 local issues = validator.validate_model(MODEL_NAME, metric_result_types)

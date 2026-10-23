@@ -1516,26 +1516,44 @@ end)
 
 test("validator warns when a published metric compiles to a different kind of number", function()
     local rows = {
-        {metric = "gross_margin_pct", declared_type = "DECIMAL(18,6)",
-         compiled_type = "DOUBLE", compatible = false},
-        {metric = "total_revenue", declared_type = "DECIMAL(18,2)",
-         compiled_type = "DECIMAL(36,2)", compatible = true},
+        {metric = "gross_margin_pct", metric_id = 7, declared_type = "DECIMAL(18,6)",
+         compiled_type = "DOUBLE", compatible = false, observation_key = "k7", reused = false},
+        {metric = "total_revenue", metric_id = 8, declared_type = "DECIMAL(18,2)",
+         compiled_type = "DECIMAL(36,2)", compatible = true, observation_key = "k8", reused = true},
     }
-    local function probe() return rows end
+    local handed = nil
+    local function probe(_, previous) handed = previous; return rows end
     each({
-        {status = "PUBLISHED", probe = probe, expected = {"gross_margin_pct"}},
-        {status = "DRAFT", probe = probe, expected = {}},
-        {status = "PUBLISHED", probe = nil, expected = {}},
-        {status = "PUBLISHED", probe = function() error("compile failed") end, expected = {}},
+        {status = "PUBLISHED", probe = probe, expected = {"gross_margin_pct"}, recorded = 1},
+        {status = "DRAFT", probe = probe, expected = {}, recorded = 0},
+        {status = "PUBLISHED", probe = nil, expected = {}, recorded = 0},
+        {status = "PUBLISHED", probe = function() error("compile failed") end,
+         expected = {}, recorded = 0},
     }, function(case)
-        local ctx = validation_context({model_name = "sales", model_status = case.status})
-        api.validate_metric_result_types(ctx, case.probe)
+        local ctx = validation_context({model_name = "sales", model_status = case.status,
+                                        model_id = 1, version_id = 2})
+        local inserted = 0
+        handed = nil
+        with_query(function(sql)
+            if contains(sql, "SELECT METRIC_ID, OBSERVATION_KEY") then
+                return {{8, "k8", "DECIMAL(36,2)"}}
+            end
+            if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS") then
+                inserted = inserted + 1
+            end
+            return {}
+        end, function() api.validate_metric_result_types(ctx, case.probe) end)
         local flagged = {}
         for _, issue in ipairs(ctx.issues) do
             assert_equal(issue.rule_code, "SEMANTIC_MODEL_076")
             flagged[#flagged + 1] = issue.object_name
         end
         assert_equal(table.concat(flagged, ","), table.concat(case.expected, ","))
+        -- Only the freshly compiled observation is written back; the reused one stays.
+        assert_equal(inserted, case.recorded)
+        if case.probe == probe and case.status == "PUBLISHED" then
+            assert_equal(handed["8"].key, "k8")
+        end
     end)
 end)
 

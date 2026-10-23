@@ -89,9 +89,12 @@ All notable changes to Exasol Semantic Views are documented here.
   `SUM` widening the precision at the same scale is not reported.
   `SEMANTIC_ADMIN.CHECK_METRIC_TYPES(model)` lists declared against compiled
   types for any model. Results are not cast: the declaration is the author's to
-  fix. The check reads no data (`TYPEOF` under `WHERE FALSE`), but it compiles
-  each semantic object, so a published model's validation takes about half a
-  second longer per object; draft models are not checked.
+  fix. The check reads no data (`TYPEOF` under `WHERE FALSE`). It compiles a
+  semantic object only when a metric's definition hash, the column types of the
+  model's sources, or the compiler build changed since the last validation;
+  otherwise it reuses the type it observed (`SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS`),
+  so a validation that touches no metric costs a few reads, not a compile per
+  object. Draft models are not checked.
 - The sales example's `gross_margin_pct` now declares `RETURNS DOUBLE`, which
   is what it always returned, and the ratio examples in the docs do the same.
 

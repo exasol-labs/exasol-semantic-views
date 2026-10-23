@@ -2512,11 +2512,37 @@ end
 -- view advertises it, and the check compiles each object -- about half a second
 -- per object -- which a draft being authored one ADD_* call at a time should
 -- not pay on every call. CHECK_METRIC_TYPES answers for any model on demand.
+--
+-- What was observed last time is handed back in, so only an object with a
+-- metric whose definition, source column types or compiler build changed is
+-- compiled again (SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS); a validation after a
+-- change that touches no metric costs a few reads instead of a compile per
+-- object.
 local function validate_metric_result_types(ctx, metric_result_types)
     if (ctx.error_count or 0) > 0 or metric_result_types == nil
         or tostring(ctx.model_status or "") ~= "PUBLISHED" then return end
-    local ok, rows = pcall(metric_result_types, ctx.model_name)
+    local previous = {}
+    for _, row in ipairs(query([[
+        SELECT METRIC_ID, OBSERVATION_KEY, COMPILED_TYPE
+        FROM SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS WHERE VERSION_ID = :version_id
+    ]], {version_id = ctx.version_id}) or {}) do
+        previous[key(row_value(row, "METRIC_ID", 1))] = {
+            key = row_value(row, "OBSERVATION_KEY", 2),
+            compiled_type = row_value(row, "COMPILED_TYPE", 3)}
+    end
+    local ok, rows = pcall(metric_result_types, ctx.model_name, previous)
     if not ok then return end
+    local observed = {}
+    for _, row in ipairs(rows or {}) do
+        if not row.reused and row.observation_key ~= nil and row.compiled_type ~= nil then
+            query("DELETE FROM SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS WHERE METRIC_ID = :metric_id",
+                {metric_id = row.metric_id})
+            observed[#observed + 1] = {row.metric_id, ctx.model_id, ctx.version_id,
+                row.observation_key, row.compiled_type}
+        end
+    end
+    insert_rows("SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS",
+        {"METRIC_ID", "MODEL_ID", "VERSION_ID", "OBSERVATION_KEY", "COMPILED_TYPE"}, observed)
     for _, row in ipairs(rows or {}) do
         if row.compatible == false then
             add_issue(ctx, "WARNING", "METRIC", row.metric, "SEMANTIC_MODEL_076",

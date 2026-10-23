@@ -6195,18 +6195,39 @@ local function declared_type_compatible(declared, compiled)
     return true
 end
 
-function M.metric_result_types(model_name)
+--
+-- A compile costs about a third of a second whatever it asks for, and VALIDATE_MODEL
+-- runs after every mutation, so validation hands in what it observed last time
+-- (`previous`: metric id -> {key, compiled_type}) and only an object with a
+-- metric whose observation key moved is compiled again. The key is everything
+-- a compiled type depends on: the metric's definition hash (what it computes,
+-- transitively), the column types of every relation the model's SQL can read,
+-- and this compiler's build. CHECK_METRIC_TYPES passes nothing and always
+-- compiles.
+function M.metric_result_types(model_name, previous)
     local model = load_model(normalize_name(model_name, "model"))
     if model == nil then
         error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name))
     end
+    local source_hash = scalar([[
+        SELECT HASH_SHA256(GROUP_CONCAT(c.COLUMN_SCHEMA || '.' || c.COLUMN_TABLE || '.'
+                   || c.COLUMN_NAME || ' ' || c.COLUMN_TYPE
+                   ORDER BY c.COLUMN_SCHEMA, c.COLUMN_TABLE, c.COLUMN_NAME SEPARATOR ','))
+          FROM SYS.EXA_ALL_COLUMNS c
+          JOIN (SELECT DISTINCT UPPER(RELATION_SCHEMA) AS RELATION_SCHEMA,
+                       UPPER(RELATION_OBJECT) AS RELATION_OBJECT
+                  FROM SEMANTIC_SOURCE.MODEL_RELATIONS WHERE VERSION_ID = :version_id) r
+            ON c.COLUMN_SCHEMA = r.RELATION_SCHEMA AND c.COLUMN_TABLE = r.RELATION_OBJECT
+    ]], {version_id = model.version_id})
     local by_object, order = {}, {}
     for _, row in ipairs(query([[
-        SELECT so.OBJECT_NAME, mt.METRIC_NAME, mt.DATA_TYPE
+        SELECT so.OBJECT_NAME, mt.METRIC_NAME, mt.DATA_TYPE, mt.METRIC_ID, h.DEFINITION_HASH
           FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
           JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
           JOIN SEMANTIC_SOURCE.METRICS mt
             ON oc.COLUMN_KIND = 'METRIC' AND mt.METRIC_ID = oc.OBJECT_REF_ID
+          LEFT JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+            ON h.FIELD_KIND = 'METRIC' AND h.FIELD_ID = mt.METRIC_ID
          WHERE so.VERSION_ID = :version_id AND so.STATUS = 'ACTIVE'
            AND mt.STATUS = 'ACTIVE' AND oc.IS_VISIBLE = TRUE AND mt.IS_PRIVATE = FALSE
          ORDER BY so.OBJECT_NAME, oc.ORDINAL_POSITION
@@ -6216,41 +6237,59 @@ function M.metric_result_types(model_name)
             by_object[object_name] = {}
             order[#order + 1] = object_name
         end
+        local definition_hash = row_value(row, "DEFINITION_HASH", 5)
         local metrics = by_object[object_name]
         metrics[#metrics + 1] = {name = tostring(row_value(row, "METRIC_NAME", 2)),
-                                 declared = tostring(row_value(row, "DATA_TYPE", 3))}
+                                 declared = tostring(row_value(row, "DATA_TYPE", 3)),
+                                 id = row_value(row, "METRIC_ID", 4),
+                                 -- No hash, no key: such a metric is always compiled.
+                                 key = not missing(definition_hash) and not missing(source_hash)
+                                     and (tostring(definition_hash) .. "|" .. tostring(source_hash)
+                                          .. "|" .. compile_cache.runtime_build()) or nil}
     end
     local rows = {}
     for _, object_name in ipairs(order) do
         local metrics, names, probes = by_object[object_name], {}, {}
+        local reuse = previous ~= nil
         for index, metric in ipairs(metrics) do
             names[index] = metric.name
             probes[index] = "TYPEOF(MAX(" .. quote_alias(metric.name) .. ")) AS T" .. index
+            local seen = previous and previous[key(metric.id)]
+            if metric.key == nil or seen == nil or seen.key ~= metric.key then reuse = false end
         end
-        local compiled = compile_request_table({model = model.model_name,
-            object = object_name, metrics = names}, {validate = false, cache = false})
-        local types, probe_error = nil, nil
-        if compiled == nil or compiled.status ~= "OK" then
-            probe_error = compiled and compiled.error_message or "compile failed"
+        local types, probe_error = {}, nil
+        if reuse then
+            for index, metric in ipairs(metrics) do
+                types[index] = previous[key(metric.id)].compiled_type
+            end
         else
-            local ok, typed = pcall(query, "SELECT " .. table.concat(probes, ", ")
-                .. " FROM (" .. compiled.generated_sql .. ") WHERE FALSE")
-            if ok and typed ~= nil and #typed > 0 then
-                types = typed[1]
+            local compiled = compile_request_table({model = model.model_name,
+                object = object_name, metrics = names}, {validate = false, cache = false})
+            if compiled == nil or compiled.status ~= "OK" then
+                probe_error = compiled and compiled.error_message or "compile failed"
             else
-                probe_error = tostring(typed)
+                local ok, typed = pcall(query, "SELECT " .. table.concat(probes, ", ")
+                    .. " FROM (" .. compiled.generated_sql .. ") WHERE FALSE")
+                if ok and typed ~= nil and #typed > 0 then
+                    for index = 1, #metrics do
+                        types[index] = row_value(typed[1], "T" .. index, index)
+                    end
+                else
+                    probe_error = tostring(typed)
+                end
             end
         end
         for index, metric in ipairs(metrics) do
-            local compiled_type = types and row_value(types, "T" .. index, index) or nil
+            local compiled_type = types[index]
             local compatible = nil
             if not missing(compiled_type) then
                 compatible = declared_type_compatible(metric.declared, compiled_type)
             end
             rows[#rows + 1] = {
-                object = object_name, metric = metric.name, declared_type = metric.declared,
+                object = object_name, metric = metric.name, metric_id = metric.id,
+                declared_type = metric.declared,
                 compiled_type = not missing(compiled_type) and tostring(compiled_type) or nil,
-                compatible = compatible,
+                compatible = compatible, observation_key = metric.key, reused = reuse,
                 error = probe_error,
             }
         end

@@ -108,3 +108,38 @@ def test_declaring_the_compiled_type_clears_it(published: Any) -> None:
 
 def test_a_draft_model_is_not_checked_during_validation(draft: Any) -> None:
     assert type_warnings(draft) == []
+
+
+def observations(con: Any) -> dict[str, Any]:
+    return {name: observed for name, observed in con.execute(
+        "SELECT m.METRIC_NAME, o.OBSERVED_AT FROM SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS o"
+        " JOIN SYS_SEMANTIC.METRICS m ON m.METRIC_ID = o.METRIC_ID"
+        " JOIN SYS_SEMANTIC.MODELS md ON md.MODEL_ID = m.MODEL_ID"
+        f" WHERE md.MODEL_NAME = '{MODEL}'").fetchall()}
+
+
+def test_an_unchanged_model_reuses_what_it_observed(published: Any) -> None:
+    support.validate_model(published, MODEL)
+    first = observations(published)
+    assert set(first) == {"total_revenue", "total_cost", "margin_pct"}
+    assert type_warnings(published) == ["margin_pct"]
+    assert observations(published) == first
+
+
+def test_a_redefined_metric_is_compiled_again(published: Any) -> None:
+    support.validate_model(published, MODEL)
+    first = observations(published)
+    ddl(published, f"""ALTER SEMANTIC VIEW {MODEL}.SALES ADD OR REPLACE METRIC total_cost
+  AS SUM(cost) * 2 ON ENTITY orders RETURNS DECIMAL(18,2) FORMAT 'currency' UNIT 'EUR'
+  ADDITIVE PUBLIC""")
+    support.validate_model(published, MODEL)
+    assert observations(published)["total_cost"] != first["total_cost"]
+
+
+def test_a_source_column_type_change_is_compiled_again(published: Any) -> None:
+    support.validate_model(published, MODEL)
+    first = observations(published)
+    published.execute(f"ALTER TABLE {SRC}.ORDERS MODIFY COLUMN REVENUE DECIMAL(18,4)")
+    published.commit()
+    support.validate_model(published, MODEL)
+    assert observations(published)["total_revenue"] != first["total_revenue"]
