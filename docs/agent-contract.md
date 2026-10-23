@@ -27,6 +27,14 @@ requests, but adapters that accept SQL should compile SQL explicitly and execute
 the returned generated SQL. They should not depend on a session preprocessor
 being active unless they are intentionally emulating a BI session.
 
+Compile **per request** and run the result straight away. **Never store
+`GENERATED_SQL`** in an application, a dashboard definition or a saved
+query: it is the model as it was when compiled, including, on a fused model,
+the coverage boundaries and authority order. A later metric fix or coverage
+move does not reach it, `COMPILE_SQL` leaves no log row, and
+`CHECK_FROZEN_VIEWS` cannot see text stored outside the database. See
+[Hosted dashboards and applications](hosted-apps.md).
+
 The database must validate, compile, explain, and log requests
 deterministically. It must not call an LLM.
 
@@ -45,19 +53,31 @@ stop, not as a hint to generate SQL themselves.
 - `SEMANTIC_AGENT.INSTRUCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.BUSINESS_GLOSSARY_FOR_AGENT`
 - `SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT`
+- `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT`
 - `SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_REQUEST_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.COMPILE_RESULT_SCHEMA_FOR_AGENT`
 - `SEMANTIC_AGENT.FUSION_FOR_AGENT`
 - `SEMANTIC_AGENT.REQUEST_HISTORY_FOR_AGENT`
+- `SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT`
 - `SEMANTIC_AGENT.MODEL_EVOLUTION_REVIEW_QUEUE`
 
 These views expose both canonical semantic names and published SQL surface names
 where relevant, so adapters do not need to infer Exasol identifier casing rules.
 `FIELDS_FOR_AGENT` exposes both `FIELD_KIND` and the compatibility alias
 `FIELD_ROLE`, plus semantic and resolved SQL filter expressions for filtered
-metrics. `VALIDATION_ERRORS_FOR_AGENT` exposes the latest role-visible blocking
-validation errors and session preconditions.
+metrics. `VALIDATION_ISSUES_FOR_AGENT` exposes every finding of each model's
+latest validation run, warnings included, so an agent can tell a user why a
+model reports `WARNING`. `VALIDATION_ERRORS_FOR_AGENT` is the same view
+filtered to what blocks: errors and session preconditions.
+
+An unknown field is refused with `SEMANTIC_REQUEST_020` (`SEMANTIC_QUERY_020`
+in SQL). When names are close enough to suggest, `CLARIFICATION_JSON` lists
+them in `candidates` and their format hints in `candidate_formats`. A near name
+can be a different kind of number, such as currency next to a fraction, so check
+the format before substituting one. A field that existed and was dropped is
+refused with `SEMANTIC_REQUEST_029` (`SEMANTIC_QUERY_029`) and no suggestions:
+nothing stands in for it, so ask the model's owner what replaces it.
 `EXPRESSION_FUNCTIONS_FOR_AGENT` enumerates the built-in functions accepted by
 static expression validation, including binding expressions.
 `COMPILE_REQUEST_SCHEMA_FOR_AGENT` exposes the accepted request keys, filter
@@ -78,6 +98,18 @@ is named. Where a caller must index positionally, take the index from
 `QUERY_LOG_ID` for `COMPILE_SQL_DEBUG`.
 `REQUEST_HISTORY_FOR_AGENT` exposes both `STARTED_AT` and the compatibility
 alias `REQUEST_TIME`.
+
+`DEFINITION_HASHES_FOR_AGENT` gives every model (`FIELD_KIND = 'MODEL'`) and
+every dimension, fact and metric a `DEFINITION_HASH` that moves exactly when its
+definition does. Store it next to anything built on a field and compare it
+later; `VERSION_ID` never moves, because authoring changes the one model version
+in place, and `LATEST_VALIDATION_RUN_ID` also moves on a no-op validation.
+A field hash covers what the field computes, including everything it is built
+from and its entity's representations, coverage, authority and identity. It
+leaves out the name and presentation, so a field that was renamed but not
+redefined keeps its hash. The model hash adds names, object membership and
+synonyms. `PLAN_JSON.definition_hashes` carries the same values for the
+fields a compile selected, so the record and the SQL come from one compile.
 
 Every published model contributes system `SAFETY` and `PRECONDITION` rows to
 `INSTRUCTIONS_FOR_AGENT`, even when no manual instructions were authored.

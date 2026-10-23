@@ -169,6 +169,12 @@ def main() -> int:
     con = connect()
     try:
         cleanup_race_metrics(con)
+        # Runs before the storm are not this test's: a validation killed by a
+        # database restart stays RUNNING for good, and counting it here failed
+        # every later run of this test on that deployment.
+        first_run = int(con.execute(
+            "SELECT COALESCE(MAX(VALIDATION_RUN_ID), 0) + 1 FROM SYS_SEMANTIC.VALIDATION_RUNS"
+        ).fetchone()[0])
 
         # Roles are assigned round-robin across THREADS workers.
         results: list[dict[str, Any]] = []
@@ -216,10 +222,10 @@ def main() -> int:
         else:
             ok("post-storm compile", "OK")
 
-        # No validation run stuck in RUNNING.
+        # No validation run the storm started is stuck in RUNNING.
         stuck = con.execute(
             "SELECT COUNT(*) FROM SYS_SEMANTIC.VALIDATION_RUNS "
-            "WHERE STATUS = 'RUNNING'"
+            f"WHERE STATUS = 'RUNNING' AND VALIDATION_RUN_ID >= {first_run}"
         ).fetchone()[0]
         if int(stuck) != 0:
             fail("no stuck validation runs", f"{stuck} row(s) still RUNNING")

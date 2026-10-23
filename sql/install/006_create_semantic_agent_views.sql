@@ -353,6 +353,32 @@ JOIN SEMANTIC_SOURCE.FACTS f
 WHERE f.STATUS = 'ACTIVE'
   AND f.IS_PRIVATE = FALSE;
 
+-- What each model and field defines, as a hash a consumer can store and
+-- compare: on deploy, on rollback, in a health check. VERSION_ID never moves,
+-- because authoring mutates the one model version in place, and
+-- LATEST_VALIDATION_RUN_ID moves on a no-op validation; a definition hash
+-- moves exactly when a definition does. A field renamed but not redefined
+-- keeps its hash; the model hash moves.
+--
+-- Its own view rather than a column of MODELS_FOR_AGENT and FIELDS_FOR_AGENT:
+-- deriving the hashes costs a few tenths of a second, Exasol does not prune an
+-- unused join, and those two views are read by every agent's discovery and by
+-- each other. Only a caller that asks should pay. PLAN_JSON.definition_hashes
+-- carries the same values for the fields a compile selected.
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT AS
+SELECT m.MODEL_ID, m.MODEL_NAME, h.VERSION_ID,
+       'MODEL' AS FIELD_KIND, CAST(NULL AS DECIMAL(18,0)) AS FIELD_ID,
+       CAST(NULL AS VARCHAR(256)) AS FIELD_NAME, h.DEFINITION_HASH
+  FROM SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES h
+  JOIN SEMANTIC_SOURCE.MODELS m
+    ON m.MODEL_ID = h.MODEL_ID AND m.ACTIVE_VERSION_ID = h.VERSION_ID
+UNION ALL
+SELECT m.MODEL_ID, m.MODEL_NAME, h.VERSION_ID, h.FIELD_KIND, h.FIELD_ID, h.FIELD_NAME,
+       h.DEFINITION_HASH
+  FROM SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+  JOIN SEMANTIC_SOURCE.MODELS m
+    ON m.MODEL_ID = h.MODEL_ID AND m.ACTIVE_VERSION_ID = h.VERSION_ID;
+
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALID_COMBINATIONS_FOR_AGENT AS
 SELECT
   mf.MODEL_ID,
@@ -382,7 +408,16 @@ JOIN SEMANTIC_AGENT.FIELDS_FOR_AGENT df
  AND df.FIELD_KIND = 'DIMENSION'
  AND df.FIELD_ID = mdm.DIMENSION_ID;
 
-CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT AS
+-- Every finding of each model's latest validation run, warnings included.
+--
+-- The errors view was the only validation surface an agent had, so a model
+-- reporting VALIDATION_STATUS = WARNING showed zero rows there and the warnings
+-- themselves were reachable only through SEMANTIC_CATALOG. An agent cannot act
+-- on, or tell a user about, a warning it cannot read -- "this metric's source
+-- has rows outside every coverage window" is exactly the kind of thing a
+-- consumer should surface. VALIDATION_ERRORS_FOR_AGENT is this view filtered
+-- to what blocks.
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT AS
 SELECT
   m.MODEL_ID,
   m.MODEL_NAME,
@@ -399,8 +434,12 @@ FROM SEMANTIC_AGENT.MODELS_FOR_AGENT m
 JOIN SEMANTIC_SOURCE.VALIDATION_RUNS vr
   ON vr.VALIDATION_RUN_ID = m.LATEST_VALIDATION_RUN_ID
 JOIN SEMANTIC_SOURCE.VALIDATION_RESULTS res
-  ON res.VALIDATION_RUN_ID = vr.VALIDATION_RUN_ID
-WHERE res.SEVERITY IN ('ERROR', 'PRECONDITION');
+  ON res.VALIDATION_RUN_ID = vr.VALIDATION_RUN_ID;
+
+CREATE OR REPLACE VIEW SEMANTIC_AGENT.VALIDATION_ERRORS_FOR_AGENT AS
+SELECT *
+FROM SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT
+WHERE SEVERITY IN ('ERROR', 'PRECONDITION');
 
 CREATE OR REPLACE VIEW SEMANTIC_AGENT.EXPRESSION_FUNCTIONS_FOR_AGENT AS
 SELECT 'ABS' AS FUNCTION_NAME, 'NUMERIC' AS FUNCTION_CATEGORY
@@ -530,11 +569,20 @@ WITH ENTRYPOINTS AS (
     'COMPILE_REQUEST_JSON' AS SCRIPT_NAME,
     'AGENT_REQUEST_ID' AS HANDLE_COLUMN,
     'AGENT_REQUEST' AS HANDLE_TYPE,
-    FALSE AS ECHOES_ORIGINAL_SQL
+    FALSE AS ECHOES_ORIGINAL_SQL,
+    -- Result column names differ by lane, and a consumer that switches lanes
+    -- loses every lookup by name unless it is told.
+    CAST('Its result columns are named after the canonical field ("total_revenue"), '
+      || 'or after the synonym as written when the request used one.'
+      AS VARCHAR(300)) AS OUTPUT_NAMING
   UNION ALL
-  SELECT 'COMPILE_SQL', 'AGENT_REQUEST_ID', 'AGENT_REQUEST', TRUE
+  SELECT 'COMPILE_SQL', 'AGENT_REQUEST_ID', 'AGENT_REQUEST', TRUE,
+    'Its result columns are named as SQL names them: an alias as written, '
+      || 'anything else upper-cased: TOTAL_REVENUE.'
   UNION ALL
-  SELECT 'COMPILE_SQL_DEBUG', 'QUERY_LOG_ID', 'QUERY_LOG', TRUE
+  SELECT 'COMPILE_SQL_DEBUG', 'QUERY_LOG_ID', 'QUERY_LOG', TRUE,
+    'Its result columns are named as SQL names them: an alias as written, '
+      || 'anything else upper-cased: TOTAL_REVENUE.'
 ),
 LAYOUT AS (
   SELECT
@@ -586,7 +634,10 @@ SELECT
         || 'positional indices line up with the other entrypoints.'
     ELSE l.NULL_WHEN
   END AS NULL_WHEN,
-  l.DESCRIPTION
+  CASE
+    WHEN l.COLUMN_NAME = 'GENERATED_SQL' THEN l.DESCRIPTION || ' ' || e.OUTPUT_NAMING
+    ELSE l.DESCRIPTION
+  END AS DESCRIPTION
 FROM ENTRYPOINTS e
 CROSS JOIN LAYOUT l
 UNION ALL

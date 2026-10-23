@@ -6,6 +6,200 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-23
+
+A consumer-safety release, driven by a study of hosted dashboards built on the
+layer. A consumer can now record which definition a number was built against
+and notice when it changes. The owner of a model can see who started failing
+after a breaking change. Fusion reports what it used to hide: rows outside every
+coverage window, and keys a supplemental source filled or no source answered.
+Published views follow Semantic DDL, and a metric's declared type is checked
+against what the compiler returns.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from the
+release bundle. It adds `SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS`, four views and
+three `CHECK_*` scripts; nothing is migrated. Things an existing deployment may
+notice:
+
+- A published model can report `WARNING` after its next validation. The new
+  rules are `SEMANTIC_MODEL_074`/`075` (partition rows outside coverage) and
+  `SEMANTIC_MODEL_076` (a metric's declared type differs from its compiled
+  one). `076` fires for any ratio declared `DECIMAL`, including an existing
+  install of the sales example's `gross_margin_pct`: declare `RETURNS DOUBLE`.
+  The first validation of a published model after the upgrade compiles each
+  semantic object once.
+- A column selected by a synonym is named as written, in both lanes, where it
+  used to take the canonical name. A dropped field is refused with `_029`
+  instead of `_020`.
+- `ALTER SEMANTIC VIEW` on a published model republishes it.
+
+### Added
+
+#### A guide for hosted dashboards and applications
+
+- `docs/hosted-apps.md` covers apps that query from their own code with no
+  connect hook: setting up every pooled session, which setup statement fits a
+  helper that does or does not expect a result set, live Semantic SQL versus
+  per-request compiles, governed labels from `FIELDS_FOR_AGENT`, a provenance
+  panel, and grants. Its first rule is **never persist `GENERATED_SQL`**: a
+  stored compile misses later metric fixes and, on a fused model, coverage
+  moves, and nothing can find it afterwards. `agent-contract.md` now says so too.
+
+#### Definition hashes: what a model and each field define, comparably
+
+- A model has one version that authoring mutates in place, so a consumer could
+  not record which definition it was built against or notice that it had
+  changed. `SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT` gives every model and
+  every dimension, fact and metric a `DEFINITION_HASH` that moves exactly when
+  its definition does. A validation run, a republish, a label or a rename
+  leaves a field's hash alone.
+- A field hash covers its expression and filters, everything it is built from
+  (transitively), and its entity's representations, coverage, authority, keys
+  and identity. The model hash adds names, object membership and synonyms.
+- Derived from the catalog on every read, never stored, so it cannot lag
+  authoring. `SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES` and
+  `MODEL_DEFINITION_HASHES` hold the recipe; `PLAN_JSON.definition_hashes`
+  carries the values for the fields a compile selected.
+- Its own view, not columns on `MODELS_FOR_AGENT` and `FIELDS_FOR_AGENT`:
+  deriving it costs a few tenths of a second, and those views are read by every
+  agent's discovery. A cold compile pays about 0.1 s for the plan's hashes;
+  a cached compile pays nothing.
+
+#### Partition coverage is checked against the data
+
+- Coverage was trusted as declared, so rows a temporal partition held outside
+  its own window were left out of every answer with no signal. An archive job
+  that moved rows before moving the boundary took a governed total from 28,000
+  to 9,250 while validation reported nothing new. `VALIDATE_MODEL` now reports
+  out-of-window rows that no other partition covers as `SEMANTIC_MODEL_074`
+  (a probe that cannot run is `SEMANTIC_MODEL_075`).
+- `SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE(model)` runs the same check without
+  recording a validation run or touching the compile cache, and returns
+  `OUTSIDE_ROWS` and `STRANDED_KEYS` per partition, so a dashboard can poll it.
+
+#### Reconciled attributes report fills and unresolved keys
+
+- Validation counted only conflicting values for a `COALESCE` or `RECONCILE`
+  attribute. A key the first-ranked source left NULL was silently filled from a
+  supplemental source, and a key no source answered landed in a NULL group, with
+  no count anywhere. `SEMANTIC_ADMIN.CHECK_FUSION_HEALTH(model)` returns, per
+  fused attribute, `TOTAL_KEYS`, `FROM_FIRST_SOURCE`, `FILLED` and `UNRESOLVED`,
+  measured with the compiler's own fused expression. Counts only; it writes
+  nothing.
+
+#### Redefining a dimension carries the metric filters that name it
+
+- A metric filter is stored as written and resolved to the dimension's physical
+  expression at definition time. After a source column was renamed, the repair
+  -- redefining the dimension over the new column -- was refused with
+  `SEMANTIC_MODEL_017` because a filter still read the old column. `ADD OR
+  REPLACE DIMENSION` / `REPLACE DIMENSIONS` and `ADD_OR_REPLACE_DIMENSION` now
+  re-resolve the filters that name the dimension from their written form.
+
+#### Semantic DDL refreshes a published model's views
+
+- A published view declares the model's columns, and BI tools read them from
+  `EXA_ALL_COLUMNS`. After `RENAME METRIC` the view still declared the old
+  column, and a metric added by DDL was missing from it, while the model said
+  `PUBLISHED`. `APPLY_SEMANTIC_DEFINITION` (and `ALTER SEMANTIC VIEW` through
+  the preprocessor) now republishes a published model once the change has
+  validated. A refresh that fails does not undo the change; the result message
+  says so and names `REFRESH_SEMANTIC_SURFACE`.
+
+#### Declared metric types are checked against what the compiler returns
+
+- The published view declared `GROSS_MARGIN_PCT DECIMAL(18,6)` and a query
+  returned `DOUBLE`: a typed consumer got a float where a decimal was promised.
+  Validation of a published model now reports a metric whose compiled result is
+  a different kind of number from its declared type as `SEMANTIC_MODEL_076`.
+  That covers a different type family, or a `DECIMAL` scale that differs; a
+  `SUM` widening the precision at the same scale is not reported.
+  `SEMANTIC_ADMIN.CHECK_METRIC_TYPES(model)` lists declared against compiled
+  types for any model. Results are not cast: the declaration is the author's to
+  fix. The check reads no data (`TYPEOF` under `WHERE FALSE`). It compiles a
+  semantic object only when a metric's definition hash, the column types of the
+  model's sources, or the compiler build changed since the last validation;
+  otherwise it reuses the type it observed (`SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS`),
+  so a validation that touches no metric costs a few reads, not a compile per
+  object. Draft models are not checked.
+- The sales example's `gross_margin_pct` now declares `RETURNS DOUBLE`, which
+  is what it always returned, and the ratio examples in the docs do the same.
+
+#### Warnings on the agent surface
+
+- `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT` lists every finding of each
+  model's latest validation run, warnings included. A model could report
+  `VALIDATION_STATUS = WARNING` while `VALIDATION_ERRORS_FOR_AGENT` showed
+  nothing, and the warnings were reachable only through `SEMANTIC_CATALOG`.
+  `VALIDATION_ERRORS_FOR_AGENT` is now that view filtered to what blocks.
+
+### Changed
+
+#### A dropped field is reported as dropped
+
+- After `DROP METRIC gross_margin_pct`, asking for it answered `Unknown
+  semantic field ... Did you mean: gross_margin?`, a currency metric, and the
+  one-token fix shipped a dashboard showing a margin of 123000%. A field that
+  existed and was dropped is now refused with `SEMANTIC_REQUEST_029` /
+  `SEMANTIC_QUERY_029`, in every lane, with no suggestion.
+- When an unknown name does get suggestions, `CLARIFICATION_JSON` carries each
+  candidate's format hint in `candidate_formats`.
+
+#### Smaller changes
+
+- `COMPILE_RESULT_SCHEMA_FOR_AGENT` says, per entrypoint, how result columns are
+  named: upper-case in the SQL lanes, the canonical field name in
+  `COMPILE_REQUEST_JSON`.
+- `SEMANTIC_ADMIN_019` points to `ADD_OR_REPLACE_DIMENSION` for changing an
+  existing dimension's definition.
+- ruff is pinned at 0.17.2. pyexasol 3.0.1 is supported; the requirement stays
+  `>=3.0`, since its one fix is in the DB-API fetch mapper ESV does not use.
+- Four integration verifiers that passed on a fresh install and failed on any
+  later run against the same deployment no longer depend on earlier runs, and
+  `verify_concurrent_admin` counts only the validation runs it started.
+- Docs: `mcp-server-integration.md` names the `GRANT_MODEL_ROLE` grant and says
+  that exasol-mcp-server 2.2.0 resets the session after any failed query
+  (exasol/mcp-server#309); `creating-metrics.md` says a `percentage` value is a
+  fraction and a `currency` metric names its currency in `UNIT`;
+  `data-fusion.md` no longer says sequential coverage calls can never build a
+  partition set — they can on a draft, not on a published model.
+
+### Fixed
+
+#### GOVERNED mode refused every request through an F5 identity mapping
+
+- The trust derivation classified the relations representations and
+  materializations read, and not the mapping relation an F5 `MAPPED` binding
+  joins through. That relation was `NOT_CLASSIFIED`, so a `GOVERNED` model
+  refused every request that used the mapping with `SEMANTIC_REQUEST_028`.
+  `SOURCE_TRUST` now carries it with `RELATION_KIND = 'IDENTITY_MAPPING'`.
+- `PLAN_JSON.governance.sources` lists each relation once; a relation referenced
+  twice in the SQL used to appear twice.
+
+#### Refusals were logged without their model or client
+
+- Most refusal paths dropped the request and model the compile had resolved, so
+  `AGENT_REQUEST_LOG` and `QUERY_LOG` recorded `MODEL_ID` NULL, and
+  `AGENT_REQUEST_LOG` lost `CLIENT_NAME`. `REQUEST_HISTORY_FOR_AGENT`, filtered
+  by model or client, showed what worked and not what had started failing.
+  A model the caller cannot see is still recorded as NULL.
+
+#### A column selected by a synonym came back under the canonical name
+
+- `RENAME METRIC` keeps the old name as a synonym, but Semantic SQL selecting it
+  returned a column named after the new one, so a consumer reading by name lost
+  the value. An unaliased column is now named after what the statement wrote,
+  as SQL names a column reference.
+- A structured request that asks for a field by a synonym gets a column named
+  as it asked, too. Its SQL is re-projected only when a synonym was used;
+  every other request compiles exactly as before.
+
+#### The Semantic SQL ORDER BY sat inside a derived table
+
+- The lane wraps the compiled SQL to return the caller's select list, and the
+  ORDER BY stayed inside the wrapper, where SQL does not promise it survives.
+  It is now restated outside, by ordinal.
+
 ## [0.4.1] - 2026-10-17
 
 A source-layout release: the install SQL is built from hand-written sources
@@ -2770,7 +2964,7 @@ not select is refused. Each is called out below.
 
 ## Notes on versioning
 
-Version 0.4.0 is the fourth tagged release. Items above are tracked against the
+Version 0.5.0 is the seventh tagged release. Items above are tracked against the
 development baseline established by the user-study simulations run on
 2026-05-13. Phases 1 and 2 are complete, and the statements Phase 3 deferred --
 subqueries, CTEs and CAST around a semantic object -- compile as of 0.3 through

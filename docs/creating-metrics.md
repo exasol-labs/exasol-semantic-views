@@ -175,7 +175,12 @@ DROP METRIC obsolete_revenue;
 ```
 
 Rename preserves the metric ID, updates dependent metric expressions, and
-keeps the old name as a synonym. Drop removes the named object's membership and
+keeps the old name as a synonym. Semantic SQL or a structured request that
+still asks for the old name gets a column named after what it wrote, so a
+client reading results by name keeps working. On a published model, a
+successful apply republishes, so the published view's columns match the new
+definition; if the refresh fails, the result message says so and how to retry.
+Drop removes the named object's membership and
 deactivates the metric after its final membership is removed. Both operations
 validate atomically and roll back when they would leave an invalid model.
 
@@ -201,6 +206,8 @@ SEMANTIC_ADMIN_019: duplicate dimension: ship_mode. Dimension names are unique
 per model, not per semantic view, so this name is taken. It is defined on entity
 'order' and exposed by semantic view(s): SALES. Choose a distinct name for this
 view's column; there is no operation that shares one dimension between views.
+To change this dimension's own definition instead, call
+SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION, which updates it in place.
 ```
 
 Give the second view's column a distinct name (`header_ship_mode`), or model the
@@ -453,7 +460,22 @@ The important fields are:
 - `METRIC_TYPE`: one of `ADDITIVE`, `RATIO`, `DISTINCT`, `SEMI_ADDITIVE`,
   `WINDOW`, or `DERIVED`.
 - `BASE_ENTITY_NAME`: the entity grain where the metric starts.
+- `DATA_TYPE`: what the metric returns, which the published view declares. Make
+  it what the compiled SQL actually returns: a ratio of two aggregates divides
+  to `DOUBLE`, and a `SUM` over `DECIMAL(p,s)` returns a wider precision at the
+  same scale. On a published model, validation reports a declaration of a
+  different kind of number as `SEMANTIC_MODEL_076`, and
+  `SEMANTIC_ADMIN.CHECK_METRIC_TYPES('model')` lists declared against compiled
+  types on demand.
 - `FORMAT_HINT`: a display hint such as `currency`, `percentage`, or `count`.
+  It describes the value; the layer never scales or converts one. A
+  `percentage` metric returns a fraction — `0.25` means 25%, as
+  `gross_margin_pct` does in the sales model — so a dashboard multiplies by 100
+  to display it. Write a ratio that way rather than multiplying in the
+  expression, so every consumer can rely on the convention. A `currency`
+  metric says which currency in its unit hint (`UNIT 'EUR'` in Semantic DDL,
+  `UNIT_HINT` in `FIELDS_FOR_AGENT`); without one a consumer can only print the
+  number.
 
 `ADD_METRIC` returns a confirmation row with the metric id, model, object,
 metric name, privacy/certification flags, and whether the semantic object
@@ -540,7 +562,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC(
   NULL,
   'RATIO',
   'order_line',
-  'DECIMAL(18,6)',
+  'DOUBLE',
   'Gross Margin %',
   'Gross margin as a percentage of revenue',
   'percentage',

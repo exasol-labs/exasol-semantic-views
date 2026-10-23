@@ -816,7 +816,7 @@ ALTER SEMANTIC VIEW <model>.<object>
 ADD OR REPLACE METRIC <metric_name>
   AS <numerator_metric> / NULLIF(<denominator_metric>, 0)
   ON ENTITY <base_entity>
-  RETURNS DECIMAL(18,6)
+  RETURNS DOUBLE
   FORMAT 'percent'
   DISPLAY '<display_name>'
   COMMENT '<definition>'
@@ -858,8 +858,10 @@ RENAME METRIC <old_name> TO <new_name>;
 `DROP METRIC` removes membership from the named object and deactivates the
 metric when no other object uses it. It is rejected and rolled back when active
 metrics still depend on it. `RENAME METRIC` preserves the metric ID, rewrites
-dependent metric expressions, and retains the old name as a synonym so verified
-requests and existing clients can migrate without an immediate break.
+dependent metric expressions, and retains the old name as a synonym, so verified
+requests, structured requests and Semantic SQL that ask for the old name keep
+working, and their output column keeps the name they asked for. On a published
+model the apply republishes, so the published view lists the new column.
 
 ## Fusion Declaration Document
 

@@ -162,7 +162,7 @@ semantic_model:
     description: Gross margin as a percentage of revenue
     custom_extensions:
     - vendor_name: EXASOL
-      data: '{"data_type":"DECIMAL(18,6)","base_entity":"order_line","metric_type":"RATIO","metric_kind":"RATIO","type_params_json":"{\"metric_type\":\"RATIO\"}","format_hint":"percentage","display_name":"Gross
+      data: '{"data_type":"DOUBLE","base_entity":"order_line","metric_type":"RATIO","metric_kind":"RATIO","type_params_json":"{\"metric_type\":\"RATIO\"}","format_hint":"percentage","display_name":"Gross
         Margin %","is_private":false,"is_certified":true}'
   - name: completed_revenue
     expression:

@@ -681,7 +681,8 @@ local function load_model(ctx, model_name_arg)
           m.MODEL_ID,
           m.ACTIVE_VERSION_ID AS VERSION_ID,
           mv.VERSION_NUMBER,
-          m.GOVERNANCE_MODE
+          m.GOVERNANCE_MODE,
+          m.STATUS AS MODEL_STATUS
         FROM SYS_SEMANTIC.MODELS m
         LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -696,6 +697,7 @@ local function load_model(ctx, model_name_arg)
     ctx.model_id = row_value(rows[1], "MODEL_ID", 1)
     ctx.version_id = row_value(rows[1], "VERSION_ID", 2)
     ctx.governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 4)
+    ctx.model_status = row_value(rows[1], "MODEL_STATUS", 5)
     start_validation_run(ctx)
 
     if missing(ctx.version_id) then
@@ -2093,7 +2095,9 @@ local function resolved_source_column_name(representation, column_name)
         representation.source_object, column_name)
 end
 
-local function representation_key_query(representation, unique_key)
+-- The distinct values of a declared key in one representation, optionally
+-- restricted to rows matching `where_sql`.
+local function representation_key_query(representation, unique_key, where_sql)
     local expressions = {}
     for _, column in ipairs(unique_key.columns or {}) do
         if not missing(column.column_name) then
@@ -2111,6 +2115,7 @@ local function representation_key_query(representation, unique_key)
         representation.source_object) .. " " .. tostring(representation.alias)
     return "SELECT " .. table.concat(expressions, ", ")
         .. " FROM " .. source
+        .. (where_sql and (" WHERE " .. where_sql) or "")
         .. " GROUP BY " .. table.concat(expressions, ", "), nil
 end
 
@@ -2401,6 +2406,155 @@ local function relationship_mapping_side(relationship, entity, ref)
 end
 
 local MAX_REPRESENTATION_PROBE_TIMEOUT_SECONDS = 60
+
+-- Rows a temporal partition holds outside its own coverage window.
+--
+-- Coverage is trusted as declared: the compiler reads each partition through
+-- its predicate, so a row outside its partition's window is filtered out of
+-- every answer. That is harmless while the partition that does cover the row's
+-- time holds a copy -- an archive job between its copy and its delete -- and
+-- silent data loss when it does not. An archive job that moved July-September
+-- from the hot table before the boundary moved took the governed answer from
+-- 28,000 to 9,250 while VALIDATE_MODEL reported the same warnings as before.
+-- A row whose partition key is NULL is covered by no window, so it is always
+-- stranded.
+--
+-- Windows are contiguous and open-ended (SEMANTIC_MODEL_042), so a row outside
+-- one partition's window is inside exactly one other's. Stranded keys are the
+-- out-of-window keys found inside no other partition's window. One finding per
+-- partition with rows outside it; each probe is a full scan, bounded by the
+-- session QUERY_TIMEOUT like the other data probes.
+local function partition_coverage_findings(ctx)
+    local findings = {}
+    for _, entity in ipairs(ctx.entities or {}) do
+        if entity_uses_partition_fusion(ctx, entity) then
+            local partitions = representations_for_entity(ctx, entity)
+            local unique_key = (ctx.unique_keys_by_entity[key(entity.id)] or {})[1]
+            for _, partition in ipairs(partitions) do
+                local finding = {entity = entity, representation = partition,
+                                 outside_rows = 0, stranded_keys = 0}
+                local outside = "CASE WHEN (" .. tostring(partition.coverage_predicate)
+                    .. ") THEN FALSE ELSE TRUE END"
+                finding.outside_rows, finding.error = probe_count(
+                    "SELECT COUNT(*) AS PROBE_COUNT FROM "
+                    .. sql_text.quote_qualified(partition.source_schema, partition.source_object)
+                    .. " " .. tostring(partition.alias) .. " WHERE " .. outside)
+                if finding.error == nil and (finding.outside_rows or 0) > 0 then
+                    if unique_key == nil then
+                        finding.error = "the entity declares no unique key to match rows by"
+                    else
+                        local outside_keys, build_error =
+                            representation_key_query(partition, unique_key, outside)
+                        local covered = {}
+                        for _, other in ipairs(partitions) do
+                            if key(other.id) ~= key(partition.id) and build_error == nil then
+                                local other_keys
+                                other_keys, build_error = representation_key_query(
+                                    other, unique_key, "(" .. tostring(other.coverage_predicate) .. ")")
+                                covered[#covered + 1] = other_keys
+                            end
+                        end
+                        if build_error ~= nil then
+                            finding.error = build_error
+                        else
+                            finding.stranded_keys, finding.error = probe_count(
+                                "SELECT COUNT(*) AS PROBE_COUNT FROM (" .. outside_keys
+                                .. " MINUS (" .. table.concat(covered, " UNION ")
+                                .. ")) stranded_keys")
+                        end
+                    end
+                end
+                if finding.error ~= nil or (finding.outside_rows or 0) > 0 then
+                    findings[#findings + 1] = finding
+                end
+            end
+        end
+    end
+    return findings
+end
+
+local function validate_partition_data_coverage(ctx)
+    for _, finding in ipairs(partition_coverage_findings(ctx)) do
+        local name = tostring(finding.entity.name) .. "." .. tostring(finding.representation.name)
+        if finding.error ~= nil then
+            add_issue(ctx, "WARNING", "ENTITY_REPRESENTATION", name, "SEMANTIC_MODEL_075",
+                "Could not check partition '" .. name .. "' against its coverage window: "
+                    .. tostring(finding.error) .. ".")
+        elseif (finding.stranded_keys or 0) > 0 then
+            add_issue(ctx, "WARNING", "ENTITY_REPRESENTATION", name, "SEMANTIC_MODEL_074",
+                "Partition '" .. name .. "' holds " .. tostring(finding.outside_rows)
+                    .. " row(s) outside its coverage window ("
+                    .. tostring(finding.representation.coverage_predicate) .. "), and "
+                    .. tostring(finding.stranded_keys) .. " of their keys are in no other"
+                    .. " partition's window, so every query leaves them out. Move the"
+                    .. " coverage boundary with SET_REPRESENTATION_COVERAGE_BATCH, or move"
+                    .. " the rows to the partition that covers them."
+                    .. " SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE re-checks without validating.")
+        end
+    end
+end
+
+-- A metric whose compiled result is a different kind of number from the type
+-- it declares. The published view and FIELDS_FOR_AGENT advertise the declared
+-- type, so a ratio declared DECIMAL(18,6) and computed as DOUBLE gives a typed
+-- consumer a float where a decimal was promised, and metadata probes disagree
+-- with the result set. Reported, not corrected: casting would change results
+-- for everyone, and the declaration is the author's to fix.
+--
+-- The compiler decides the type, so it is asked: VALIDATE_MODEL passes in
+-- COMPILER_RUNTIME's metric_result_types, which compiles each semantic object's
+-- metrics once and reads TYPEOF under WHERE FALSE, scanning nothing. (Passed
+-- in because a library cannot import another one for itself.) Anything that
+-- stops the check -- a metric that does not compile yet -- leaves it silent;
+-- the compile itself reports that.
+--
+-- Published models only. The declared type becomes a contract when a published
+-- view advertises it, and the check compiles each object -- about half a second
+-- per object -- which a draft being authored one ADD_* call at a time should
+-- not pay on every call. CHECK_METRIC_TYPES answers for any model on demand.
+--
+-- What was observed last time is handed back in, so only an object with a
+-- metric whose definition, source column types or compiler build changed is
+-- compiled again (SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS); a validation after a
+-- change that touches no metric costs a few reads instead of a compile per
+-- object.
+local function validate_metric_result_types(ctx, metric_result_types)
+    if (ctx.error_count or 0) > 0 or metric_result_types == nil
+        or tostring(ctx.model_status or "") ~= "PUBLISHED" then return end
+    local previous = {}
+    for _, row in ipairs(query([[
+        SELECT METRIC_ID, OBSERVATION_KEY, COMPILED_TYPE
+        FROM SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS WHERE VERSION_ID = :version_id
+    ]], {version_id = ctx.version_id}) or {}) do
+        previous[key(row_value(row, "METRIC_ID", 1))] = {
+            key = row_value(row, "OBSERVATION_KEY", 2),
+            compiled_type = row_value(row, "COMPILED_TYPE", 3)}
+    end
+    local ok, rows = pcall(metric_result_types, ctx.model_name, previous)
+    if not ok then return end
+    local observed = {}
+    for _, row in ipairs(rows or {}) do
+        if not row.reused and row.observation_key ~= nil and row.compiled_type ~= nil then
+            query("DELETE FROM SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS WHERE METRIC_ID = :metric_id",
+                {metric_id = row.metric_id})
+            observed[#observed + 1] = {row.metric_id, ctx.model_id, ctx.version_id,
+                row.observation_key, row.compiled_type}
+        end
+    end
+    insert_rows("SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS",
+        {"METRIC_ID", "MODEL_ID", "VERSION_ID", "OBSERVATION_KEY", "COMPILED_TYPE"}, observed)
+    for _, row in ipairs(rows or {}) do
+        if row.compatible == false then
+            add_issue(ctx, "WARNING", "METRIC", row.metric, "SEMANTIC_MODEL_076",
+                "Metric '" .. tostring(row.metric) .. "' declares " .. tostring(row.declared_type)
+                    .. ", but its compiled result is " .. tostring(row.compiled_type)
+                    .. ". The published view and FIELDS_FOR_AGENT advertise the declared"
+                    .. " type, so a consumer that reads types gets a different one. Declare"
+                    .. " RETURNS " .. tostring(row.compiled_type) .. ", or CAST in the"
+                    .. " expression to the type you mean.")
+        end
+    end
+end
 
 local function validate_representation_probe_timeout(ctx)
     local has_multi_representation_probe = false
@@ -3525,7 +3679,9 @@ local function validate_fusion_conflicts(ctx)
             elseif conflict_count > 0 then
                 add_issue(ctx, "WARNING", "ATTRIBUTE_FUSION_POLICY", attribute.name,
                     "SEMANTIC_MODEL_046", "RECONCILE resolved " .. tostring(conflict_count)
-                        .. " overlapping key value conflict(s) using the AUTHORITATIVE representation.")
+                        .. " overlapping key value conflict(s) using the AUTHORITATIVE representation."
+                        .. " SEMANTIC_ADMIN.CHECK_FUSION_HEALTH counts the keys another source"
+                        .. " fills and the ones no source answers.")
             end
         end
     end
@@ -3791,6 +3947,20 @@ local function derive_source_trust(ctx)
         end
     end
 
+    -- An F5 MAPPED binding puts its mapping relation into rendered SQL, so it
+    -- is classified like everything else the planner may emit. Left out, its
+    -- name was absent here, the plan reported it NOT_CLASSIFIED, and a GOVERNED
+    -- model refused every request that crossed the certified mapping.
+    -- It is not compared with the representations' bases the way a
+    -- materialization is: a mapping relation reads different tables by nature.
+    for _, binding in ipairs(ctx.identity_bindings or {}) do
+        local mapping = binding.mapping
+        if mapping then
+            classify("IDENTITY_MAPPING", mapping.id, mapping.source_object,
+                     mapping.source_schema, mapping.source_object)
+        end
+    end
+
     local materialization_rows = query([[
         SELECT MATERIALIZATION_ID, MATERIALIZATION_NAME, PHYSICAL_SCHEMA, PHYSICAL_OBJECT
         FROM SYS_SEMANTIC.MATERIALIZATIONS
@@ -3821,7 +3991,9 @@ local function derive_source_trust(ctx)
             entry.schema, entry.object, entry.class, table.concat(entry.bases, ","),
         }
 
-        local where = entry.kind == "REPRESENTATION" and "representation" or "materialization"
+        local where = ({REPRESENTATION = "representation",
+                        IDENTITY_MAPPING = "identity mapping relation"})[entry.kind]
+            or "materialization"
         local label = tostring(entry.name or entry.object)
         -- Divergence is always recorded, but it only costs something when there
         -- is policy to lose. A model whose representations read base tables
@@ -4735,7 +4907,9 @@ local function order_root_cause_first(issues)
     return leading
 end
 
-function M.validate_model(model_name_arg)
+-- `metric_result_types` is COMPILER_RUNTIME's, from the VALIDATE_MODEL script;
+-- without it the declared-type check is skipped.
+function M.validate_model(model_name_arg, metric_result_types)
     reset_source_column_cache()
     local ctx = {
         issues = {},
@@ -4777,7 +4951,9 @@ function M.validate_model(model_name_arg)
             validate_representation_data_equivalence(ctx)
             validate_semantic_identity_data(ctx)
             validate_fusion_conflicts(ctx)
+            validate_partition_data_coverage(ctx)
         end
+        validate_metric_result_types(ctx, metric_result_types)
         -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
         -- VALIDATE_MODEL after mutating the catalog. Invalidating compile-cache
         -- entries here gives all those callers cache-coherent compile results
@@ -4795,6 +4971,34 @@ function M.validate_model(model_name_arg)
 end
 
 validate_model = M.validate_model
+
+-- The partition coverage check on its own, reading data and writing nothing:
+-- a dashboard can poll it, where VALIDATE_MODEL records a run and
+-- invalidates the compile cache. One row per partition holding rows outside
+-- its window.
+function M.check_partition_coverage(model_name_arg)
+    reset_source_column_cache()
+    local ctx = {issues = {}, issue_seen = {}, error_count = 0,
+                 precondition_count = 0, warning_count = 0}
+    if not load_model(ctx, model_name_arg) then
+        error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name_arg))
+    end
+    load_catalog(ctx)
+    local rows = {}
+    for _, finding in ipairs(partition_coverage_findings(ctx)) do
+        rows[#rows + 1] = {
+            entity = tostring(finding.entity.name),
+            representation = tostring(finding.representation.name),
+            coverage_predicate = finding.representation.coverage_predicate,
+            outside_rows = finding.outside_rows,
+            stranded_keys = finding.error == nil and finding.stranded_keys or nil,
+            error = finding.error,
+        }
+    end
+    return rows
+end
+
+check_partition_coverage = M.check_partition_coverage
 
 -- Test-only pure helpers. See the equivalent compiler block for why this is
 -- gated instead of becoming part of the installed runtime contract.
@@ -4818,6 +5022,8 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_catalog_integrity = validate_catalog_integrity,
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
+        validate_partition_data_coverage = validate_partition_data_coverage,
+        validate_metric_result_types = validate_metric_result_types,
         parse_partition_predicate = parse_partition_predicate,
         validate_partition_attribute_bindings = validate_partition_attribute_bindings,
         entity_has_base_metric = entity_has_base_metric,

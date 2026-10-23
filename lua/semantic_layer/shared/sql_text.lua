@@ -447,11 +447,17 @@ end
 -- output = <name to present>}, or {value = <SQL constant>, output = <name>}.
 -- Returns the SQL unchanged when the projection would be the identity, so the
 -- structured lane and `SELECT *` pay nothing.
-function M.output_projection(sql, columns)
+--
+-- `order_by` is the request's ORDER BY, {field, direction, nulls} per key, and
+-- is repeated outside the wrapper: SQL does not promise that a derived table's
+-- order survives the query around it. The outer keys are ordinals, because an
+-- output name can be another column's source name (`SELECT a AS b, b AS a`),
+-- and a name would then sort by the wrong column.
+function M.output_projection(sql, columns, order_by)
     if type(sql) ~= "string" or type(columns) ~= "table" or #columns == 0 then
         return sql
     end
-    local parts = {}
+    local parts, position = {}, {}
     for index, column in ipairs(columns) do
         local source = tostring(column.source or "")
         local output = tostring(column.output or source)
@@ -459,8 +465,23 @@ function M.output_projection(sql, columns)
             return sql
         end
         parts[index] = (column.value or M.quote_ident(source)) .. " AS " .. M.quote_ident(output)
+        if column.value == nil and position[string.upper(source)] == nil then
+            position[string.upper(source)] = index
+        end
     end
-    return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)"
+    local keys = {}
+    for _, item in ipairs(type(order_by) == "table" and order_by or {}) do
+        local ordinal = position[string.upper(tostring(item.field or ""))]
+        if ordinal == nil then
+            -- Not a projected column: the inner ORDER BY is all there is.
+            keys = {}
+            break
+        end
+        keys[#keys + 1] = tostring(ordinal) .. " " .. string.upper(tostring(item.direction or "ASC"))
+            .. (item.nulls and (" NULLS " .. string.upper(tostring(item.nulls))) or "")
+    end
+    local order_clause = #keys > 0 and ("\nORDER BY " .. table.concat(keys, ", ")) or ""
+    return "SELECT " .. table.concat(parts, ", ") .. "\nFROM (\n" .. sql .. "\n)" .. order_clause
 end
 
 ESV_SQL_TEXT = M

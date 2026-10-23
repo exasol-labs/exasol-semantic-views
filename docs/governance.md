@@ -66,8 +66,10 @@ A model you cannot see resolves to *not found* rather than to a modelling error.
 ## 2. Which relations a model vouches for — reported, and enforced in `GOVERNED`
 
 `VALIDATE_MODEL` derives a **trust class** for every physical relation the
-planner may emit — representations *and* materializations, by one derivation:
-resolve transitive base relations through `EXA_ALL_DEPENDENCIES`.
+planner may emit — representations, materializations and F5 identity mapping
+relations, by one derivation: resolve transitive base relations through
+`EXA_ALL_DEPENDENCIES`. A mapping relation is never `DIVERGENT`: it reads
+different tables by nature.
 
 | class | meaning |
 |---|---|
@@ -220,7 +222,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS('sales');
 script rather than a validation rule because answering exactly needs the
 compiler. There is deliberately **no version comparison**: ESV creates one model
 version per model and authoring mutates it in place, so a version check could
-never fire.
+never fire. To notice that a definition changed without recompiling anything,
+compare definition hashes (`SEMANTIC_AGENT.DEFINITION_HASHES_FOR_AGENT`); they
+move exactly when a definition does.
 
 `VALIDATE_MODEL` reports the part the catalog can settle, which is the dangerous
 part — `SEMANTIC_MODEL_068`, a frozen view reading a relation the model no longer

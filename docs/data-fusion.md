@@ -225,8 +225,39 @@ not:
   fails on the incomplete representation rather than on itself, and the
   bindings will not be seeded to the new partition.
 
-Sequential single-representation coverage calls cannot initialize a
-partition set; the batch call is what validates the set as a whole.
+Single-representation `SET_REPRESENTATION_COVERAGE` calls follow the same
+rule as registering separately. On a draft nothing is validated between
+calls, so declaring each partition's coverage in turn works, provided it all
+happens before a dimension or fact is added to the entity
+(`tests/integration/verify_fusion_f3.py` does exactly this). On a published
+model each call is validated as a candidate on its own, and the first one
+leaves the set incomplete, so it is rejected and restored
+(`SEMANTIC_ADMIN_059`). There the batch call is the only way: it validates
+the set as a whole.
+
+**Coverage is trusted as declared, and checked against the data.** The
+compiler reads each partition through its coverage predicate, so a row sitting
+in a partition outside that partition's window is left out of every answer
+unless the partition that does cover its time holds it too. That is how moving
+rows to the archive *before* moving the boundary silently drops them.
+`VALIDATE_MODEL` reports such rows as `SEMANTIC_MODEL_074`.
+`EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE('model')` runs the same
+check without recording a validation run, so a dashboard can poll it. It
+returns `OUTSIDE_ROWS` and `STRANDED_KEYS` per partition; rows outside a window
+with no stranded keys are copies an archive job leaves between its copy and its
+delete. Move the boundary with `SET_REPRESENTATION_COVERAGE_BATCH` in the same
+job that moves the rows.
+
+**How a reconciled attribute is answered is counted too.** Validation reports
+conflicting values (`SEMANTIC_MODEL_046`) and nothing else, yet the two cases
+that change what a viewer sees are different. A key the first-ranked source
+leaves NULL is filled from another source, and a key no source answers lands in
+a NULL group. `EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FUSION_HEALTH('model')`
+returns, per `COALESCE` or `RECONCILE` attribute, `TOTAL_KEYS`,
+`FROM_FIRST_SOURCE`, `FILLED` and `UNRESOLVED`. They are measured over the
+primary representation's keys with the compiler's own fused expression, so
+they describe what a query returns. It returns counts only, never key values,
+and writes nothing.
 
 ### Attribute Reconciliation
 

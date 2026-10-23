@@ -235,12 +235,17 @@ do
             classified[tostring(row_value(row, "RELATION_NAME", 1))] =
                 tostring(row_value(row, "TRUST_CLASS", 2))
         end
-        local sources, unvouched = {}, {}
+        -- One entry per relation: the SQL names a relation once per reference,
+        -- and an F5 mapping is referenced once per mapped binding.
+        local sources, unvouched, seen = {}, {}, {}
         for _, relation in ipairs(relations) do
-            local trust_class = classified[relation] or "NOT_CLASSIFIED"
-            sources[#sources + 1] = {relation = relation, trust_class = trust_class}
-            if trust_class ~= "GOVERNED" and trust_class ~= "RAW" then
-                unvouched[#unvouched + 1] = relation
+            if not seen[relation] then
+                seen[relation] = true
+                local trust_class = classified[relation] or "NOT_CLASSIFIED"
+                sources[#sources + 1] = {relation = relation, trust_class = trust_class}
+                if trust_class ~= "GOVERNED" and trust_class ~= "RAW" then
+                    unvouched[#unvouched + 1] = relation
+                end
             end
         end
         local principal = scalar("SELECT CURRENT_USER")
@@ -1531,6 +1536,74 @@ local function near_field_names(normalized, candidates)
     return near
 end
 
+-- A field the caller named that this model no longer has, because it was
+-- dropped: the refusal says so instead of guessing. Shared by both lanes, like
+-- near_field_names, so a redundant wrapper cannot change the diagnosis.
+--
+-- Guessing was the dangerous answer. After `DROP METRIC gross_margin_pct` the
+-- name was simply unknown, the nearest name was `gross_margin` -- a currency
+-- metric -- and the one-token fix, `gross_margin AS gross_margin_pct`, shipped
+-- a dashboard showing "Gross Margin % 123000.0%". A dropped field has no
+-- near-miss worth suggesting; the caller needs to know it is gone.
+--
+-- Read only on the refusal path. On the module table because the chunk is at
+-- its 200-local ceiling.
+function M.dropped_field_refusal(error_prefix, model, field_name)
+    if model == nil or missing(model.version_id) or missing(field_name) then
+        return nil
+    end
+    local ok, rows = pcall(query, [[
+        SELECT 'metric' AS FIELD_KIND FROM SEMANTIC_SOURCE.METRICS
+         WHERE VERSION_ID = :version_id AND STATUS = 'INACTIVE'
+           AND UPPER(METRIC_NAME) = UPPER(:field_name)
+        UNION ALL
+        SELECT 'dimension' FROM SEMANTIC_SOURCE.DIMENSIONS
+         WHERE VERSION_ID = :version_id AND STATUS = 'INACTIVE'
+           AND UPPER(DIMENSION_NAME) = UPPER(:field_name)
+    ]], {version_id = model.version_id, field_name = trim(field_name)})
+    if not ok or rows == nil or #rows == 0 then
+        return nil
+    end
+    local kind = tostring(row_value(rows[1], "FIELD_KIND", 1))
+    return error_result(error_prefix .. "_029",
+        "The " .. kind .. " " .. tostring(field_name) .. " was dropped from model "
+        .. tostring(model.model_name) .. " and is no longer available. It was not"
+        .. " renamed -- a renamed field still answers to its old name -- so no"
+        .. " other field stands in for it; ask the model's owner what replaces it."
+        .. " SEMANTIC_CATALOG.METRIC_OVERVIEW lists dropped metrics as INACTIVE.")
+end
+
+-- The format hint of each suggested field, for CLARIFICATION_JSON: a near name
+-- can be a different kind of number -- `gross_margin` is currency,
+-- `gross_margin_pct` a fraction -- and a caller choosing between them should
+-- see that before it picks one. Read only on the refusal path.
+function M.candidate_formats(model, names)
+    local formats = {}
+    if model == nil or missing(model.version_id) or #names == 0 then
+        return formats
+    end
+    local ok, rows = pcall(query, [[
+        SELECT METRIC_NAME AS FIELD_NAME, FORMAT_HINT FROM SEMANTIC_SOURCE.METRICS
+         WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+        UNION ALL
+        SELECT DIMENSION_NAME, FORMAT_HINT FROM SEMANTIC_SOURCE.DIMENSIONS
+         WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+    ]], {version_id = model.version_id})
+    if not ok then
+        return formats
+    end
+    local wanted = {}
+    for _, name in ipairs(names) do wanted[upper(name)] = name end
+    for _, row in ipairs(rows or {}) do
+        local name = wanted[upper(tostring(row_value(row, "FIELD_NAME", 1)))]
+        local hint = row_value(row, "FORMAT_HINT", 2)
+        if name ~= nil and not missing(hint) then
+            formats[name] = tostring(hint)
+        end
+    end
+    return formats
+end
+
 local function resolve_field(ctx, field_name, expected_kind)
     if missing(field_name) then
         return nil, error_result("SEMANTIC_REQUEST_020", "Field name is required.")
@@ -1577,6 +1650,11 @@ local function resolve_field(ctx, field_name, expected_kind)
             candidates = names,
             clarification_question = "Which field did you mean for " .. tostring(field_name) .. "?",
         })
+    end
+
+    local dropped = M.dropped_field_refusal("SEMANTIC_REQUEST", ctx.model, field_name)
+    if dropped ~= nil then
+        return nil, dropped
     end
 
     -- An unknown field is the most common thing an agent gets wrong, and it is
@@ -1646,6 +1724,7 @@ local function resolve_field(ctx, field_name, expected_kind)
             field = tostring(field_name),
             object = ctx.object ~= nil and tostring(ctx.object.name) or nil,
             candidates = near,
+            candidate_formats = M.candidate_formats(ctx.model, near),
             available_in_objects = elsewhere,
             clarification_question = question,
         })
@@ -2034,7 +2113,10 @@ local function fused_attribute_expression(ctx, entity, base_representation,
         return nil, nil, "Fusion strategy " .. tostring(strategy) .. " for attribute '"
             .. tostring(attribute_key) .. "' has fewer than two active contributors."
     end
-    return "COALESCE(" .. table.concat(expressions, ", ") .. ")", contributors, nil
+    -- The contributor expressions in rank order, last: CHECK_FUSION_HEALTH
+    -- counts what the first one answers on its own.
+    return "COALESCE(" .. table.concat(expressions, ", ") .. ")", contributors, nil,
+        expressions
 end
 
 local function select_attribute_bindings(ctx, dimensions, metrics, needed_entities)
@@ -3034,6 +3116,10 @@ local function compile_request_table(request, options)
             "Invalid canonical query specification: " .. tostring(query_spec_error) .. ".")
     end
     request = normalized_request
+    -- What a refusal is logged against. Most of the returns below hand back
+    -- the error alone, so the request and model are recorded on the caller's
+    -- options as soon as they are known rather than threaded through each.
+    options.resolved_request = request
     if request.proof_mode ~= "LEGACY_JOIN" and request.proof_mode ~= "STRICT_GRAIN" then
         return error_result(error_prefix .. "_071",
             "Unsupported proof_mode: " .. tostring(request.proof_mode) .. ".")
@@ -3049,6 +3135,7 @@ local function compile_request_table(request, options)
     end
 
     local model = options.model or load_model(model_name)
+    options.resolved_model = model
     if model == nil then
         -- The model is absent *from what this caller may see*, which is the
         -- same answer for a model that does not exist and one that exists but
@@ -3124,6 +3211,19 @@ local function compile_request_table(request, options)
         return nil
     end
 
+    -- The name each output field was requested by, when that was a synonym
+    -- rather than the field's own name; see M.with_requested_names.
+    local requested_names = {}
+    local function note_requested(field, written)
+        local field_key = field.kind .. ":" .. key(field.id)
+        if requested_names[field_key] == nil then
+            requested_names[field_key] = tostring(written)
+            if upper(tostring(written)) ~= upper(field.name) then
+                requested_names.renamed = true
+            end
+        end
+    end
+
     local selected_dimensions = {}
     local selected_dimension_seen = {}
     for _, dimension_name in ipairs(as_array(request.dimensions, "dimensions")) do
@@ -3135,6 +3235,7 @@ local function compile_request_table(request, options)
         if masked ~= nil then
             return masked
         end
+        note_requested(field, dimension_name)
         add_unique(selected_dimensions, selected_dimension_seen, field)
     end
 
@@ -3149,6 +3250,7 @@ local function compile_request_table(request, options)
         if masked ~= nil then
             return masked
         end
+        note_requested(field, metric_name)
         add_unique(selected_metrics, selected_metric_seen, field)
     end
     -- Dimension-only discovery (BUG-D-003): allow an empty metrics list as long
@@ -3446,6 +3548,8 @@ local function compile_request_table(request, options)
         for _, dimension in ipairs(selected_dimensions) do
             plan.dimensions[#plan.dimensions + 1] = dimension.name
         end
+        plan.definition_hashes = M.definition_hashes(model, selected_dimensions,
+            selected_metrics)
         local representation_entity_ids = {}
         for entity_id, _ in pairs(needed_entities) do
             representation_entity_ids[#representation_entity_ids + 1] = entity_id
@@ -3603,8 +3707,9 @@ local function compile_request_table(request, options)
         if governance_refusal ~= nil then
             return governance_refusal, request, model
         end
-        local result = envelope.attach_planning_runtime(
-            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms)
+        local result = M.with_requested_names(envelope.attach_planning_runtime(
+            envelope.ok_result(internal_sql, plan, validation_run_id), planning_started_ms),
+            ctx, request, requested_names, selected_dimensions, selected_metrics)
         if cache_key ~= nil then
             compile_cache.cache_store(model.version_id, cache_key, result)
         end
@@ -3679,12 +3784,80 @@ local function compile_request_table(request, options)
     if governance_refusal ~= nil then
         return governance_refusal, request, model
     end
-    local result = envelope.attach_planning_runtime(
-        envelope.ok_result(statement_sql, plan, validation_run_id), planning_started_ms)
+    local result = M.with_requested_names(envelope.attach_planning_runtime(
+        envelope.ok_result(statement_sql, plan, validation_run_id), planning_started_ms),
+        ctx, request, requested_names, selected_dimensions, selected_metrics)
     if cache_key ~= nil then
         compile_cache.cache_store(model.version_id, cache_key, result)
     end
     return result, request, model
+end
+
+-- The definition hash of each selected field, from the view FIELDS_FOR_AGENT
+-- reads, so a consumer can store what this SQL was compiled against and
+-- compare it later; see SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES. Read on a
+-- cold compile only: a cache hit returns the plan stored with its SQL, and any
+-- change that moves a hash also invalidates the cache. The model hash is left
+-- to MODELS_FOR_AGENT -- reading it here would double the cost of the read.
+--
+-- On the module table because the chunk is at its 200-local ceiling.
+function M.definition_hashes(model, dimensions, metrics)
+    local wanted = {DIMENSION = {}, METRIC = {}}
+    for _, field in ipairs(dimensions) do wanted.DIMENSION[key(field.id)] = field.name end
+    for _, field in ipairs(metrics) do wanted.METRIC[key(field.id)] = field.name end
+    local ok, rows = pcall(query, [[
+        SELECT FIELD_KIND, FIELD_ID, DEFINITION_HASH
+          FROM SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES
+         WHERE VERSION_ID = :version_id AND FIELD_KIND IN ('DIMENSION', 'METRIC')
+    ]], {version_id = model.version_id})
+    if not ok then
+        return nil
+    end
+    local hashes = {dimensions = {}, metrics = {}}
+    for _, row in ipairs(rows or {}) do
+        local kind = tostring(row_value(row, "FIELD_KIND", 1))
+        local name = wanted[kind] and wanted[kind][key(row_value(row, "FIELD_ID", 2))]
+        if name ~= nil then
+            local bucket = kind == "DIMENSION" and hashes.dimensions or hashes.metrics
+            bucket[name] = tostring(row_value(row, "DEFINITION_HASH", 3))
+        end
+    end
+    return hashes
+end
+
+-- A structured request names each output column after the field it asked
+-- for, as written, when that was a synonym. The planner names columns after
+-- the canonical field, so after `RENAME METRIC` a request still asking for the
+-- old name got a column under the new one, and a consumer reading results by
+-- name lost the value. The Semantic SQL lane names its columns itself
+-- (compile_sql_internal), so it is left alone here.
+--
+-- Only a request that used a synonym is re-projected: everything else keeps
+-- the planner's SQL exactly. The result is cached re-projected, which is safe
+-- because the cache key is the request as written.
+--
+-- On the module table because the chunk is at its 200-local ceiling.
+function M.with_requested_names(result, ctx, request, requested_names, dimensions, metrics)
+    if not requested_names.renamed or request.source == "SEMANTIC_SQL" then
+        return result
+    end
+    local columns = {}
+    for _, fields in ipairs({dimensions, metrics}) do
+        for _, field in ipairs(fields) do
+            columns[#columns + 1] = {source = field.name,
+                output = requested_names[field.kind .. ":" .. key(field.id)] or field.name}
+        end
+    end
+    local order_by = {}
+    for _, item in ipairs(request.order_by or {}) do
+        local field = resolve_field(ctx, item.field, nil)
+        -- A JSON null decodes to a truthy sentinel, not to nil.
+        order_by[#order_by + 1] = {field = field and field.name or item.field,
+            direction = not missing(item.direction) and item.direction or nil,
+            nulls = not missing(item.nulls) and item.nulls or nil}
+    end
+    result.generated_sql = sql_text.output_projection(result.generated_sql, columns, order_by)
+    return result
 end
 
 local function compile_internal(request_json)
@@ -3703,7 +3876,13 @@ local function compile_internal(request_json)
     -- PUBLISH_MODEL (and VALIDATE_MODEL) own the writes to VALIDATION_RUNS,
     -- METRIC_DEPENDENCIES, and METRIC_DIMENSION_MATRIX. Re-running them on every
     -- compile produced transaction collisions under concurrent load (BUG-001).
-    return compile_request_table(request, {validate = false, error_prefix = "SEMANTIC_REQUEST"})
+    local options = {validate = false, error_prefix = "SEMANTIC_REQUEST"}
+    local result, normalized, model = compile_request_table(request, options)
+    -- A refusal keeps its model and its client in AGENT_REQUEST_LOG. Both were
+    -- NULL, so REQUEST_HISTORY_FOR_AGENT filtered by either showed only what
+    -- had worked.
+    return result, normalized or options.resolved_request,
+        model or options.resolved_model
 end
 
 -- Is this `WRAPPER(field)` one the layer refuses, and why?
@@ -3836,6 +4015,9 @@ local function parse_semantic_sql(statement_text, options)
         return nil, error_result("SEMANTIC_QUERY_003", "FROM must reference one published semantic object as schema.object.")
     end
     local model = load_model_by_published_schema(published_schema, object_name)
+    -- Recorded on the caller's options so a refusal from any of the returns
+    -- below can still be logged against its model; see compile_sql_internal.
+    options.resolved_model = model
     if model == nil then
         if options.unchanged_unknown_schema then
             -- The preprocessor is active and declined, so the query falls
@@ -3912,8 +4094,9 @@ local function parse_semantic_sql(statement_text, options)
     local wildcard_select = #select_parts == 1 and #select_parts[1] == 1 and select_parts[1][1].text == "*"
     -- The names and order the caller asked for. The planner orders columns its
     -- own way and names them after the semantic field; a SQL client needs its
-    -- own select list back. Unaliased columns take the published SQL name, which
-    -- is what the view's metadata advertises.
+    -- own select list back. Unaliased columns take the name the caller wrote,
+    -- upper-cased as Exasol folds an unquoted identifier; `*` takes the
+    -- published SQL name.
     local output_columns = {}
     local function request_output(field, alias)
         output_columns[#output_columns + 1] = {
@@ -3958,7 +4141,13 @@ local function parse_semantic_sql(statement_text, options)
         if bind_err ~= nil then
             return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
+        -- An unaliased column is named after what the caller wrote, as SQL
+        -- names a column reference -- not after the field it resolved to. The
+        -- two differ only for a synonym, and the synonym a rename leaves behind
+        -- is there so existing statements keep working; a column that came
+        -- back under the new name broke every consumer reading it by name.
         local output_alias = syntax.alias_from_select_part(part)
+        local output_name = output_alias or upper(field_name)
         if measure_wrapped then
             -- This lane compiles the statement at exactly its selected
             -- dimensions -- an explicit GROUP BY must cover them and nothing
@@ -3970,13 +4159,13 @@ local function parse_semantic_sql(statement_text, options)
                 return nil, wrapper_refusal
             end
             if lowering ~= nil then
-                lowering.output = output_alias or upper(field.name)
+                lowering.output = output_name
                 meta.wrapper_lowerings = meta.wrapper_lowerings or {}
                 meta.wrapper_lowerings[#meta.wrapper_lowerings + 1] = lowering
             end
         end
         selected_output[#selected_output + 1] = field.name
-        request_output(field, output_alias)
+        request_output(field, output_name)
         if output_alias ~= nil then
             select_aliases[upper(output_alias)] = field.name
         end
@@ -4110,13 +4299,17 @@ end
 
 local function compile_sql_internal(statement_sql, options)
     options = options or {}
-    local request, parse_err, model, meta = parse_semantic_sql(statement_sql, {
+    local parse_options = {
         unchanged_nonsemantic = options.unchanged_nonsemantic,
         unchanged_unknown_schema = options.unchanged_unknown_schema,
         sql_cache = options.sql_cache,
-    })
+    }
+    local request, parse_err, model, meta = parse_semantic_sql(statement_sql, parse_options)
+    -- A refusal is logged against the model its FROM clause named. Without it
+    -- QUERY_LOG recorded MODEL_ID NULL, and after a breaking change the owner
+    -- could see who was still succeeding but not who had started failing.
     if parse_err ~= nil then
-        return parse_err, nil, nil
+        return parse_err, nil, parse_options.resolved_model
     end
     if meta ~= nil and meta.cached ~= nil then
         return meta.cached, nil, model
@@ -4124,16 +4317,25 @@ local function compile_sql_internal(statement_sql, options)
     if request ~= nil and request.status == "UNCHANGED" then
         return request, nil, nil
     end
-    local result, compiled_request, compiled_model = compile_request_table(request, {
+    local table_options = {
         model = model,
         ctx = meta and meta.ctx or nil,
         validate = options.validate,
         error_prefix = "SEMANTIC_QUERY",
         source = "SEMANTIC_SQL",
-    })
+    }
+    local result, compiled_request, compiled_model = compile_request_table(request, table_options)
     if result ~= nil and result.status == "OK" and meta ~= nil then
+        -- ORDER BY keys as the compiled SQL names them: a key may have been
+        -- written as a synonym, and the projection matches canonical names.
+        local order_by = {}
+        for _, item in ipairs(request.order_by or {}) do
+            local field = meta.ctx and resolve_field(meta.ctx, item.field, nil)
+            order_by[#order_by + 1] = {field = field and field.name or item.field,
+                direction = item.direction, nulls = item.nulls}
+        end
         result.generated_sql = sql_text.output_projection(result.generated_sql,
-                                                          meta.output_columns)
+                                                          meta.output_columns, order_by)
         -- A wrapper accepted because each group is one row is recorded, so the
         -- plan says the wrapper was lowered rather than applied (GitHub #8).
         if meta.wrapper_lowerings ~= nil then
@@ -4149,7 +4351,8 @@ local function compile_sql_internal(statement_sql, options)
     if result ~= nil and result.status ~= "OK" then
         envelope.recode_error_prefix(result, "SEMANTIC_QUERY")
     end
-    return result, compiled_request, compiled_model
+    return result, compiled_request or table_options.resolved_request,
+        compiled_model or model
 end
 
 local function collision_error(msg)
@@ -4263,6 +4466,8 @@ refusal_rules.expansion_wins_when_unjudged = {
     -- lanes see it, they now produce the same code, which is what
     -- verify_sql_lane_parity.py holds.
     SEMANTIC_QUERY_020 = true,
+    -- And a dropped field, for the same statements.
+    SEMANTIC_QUERY_029 = true,
     -- Re-aggregation, likewise. Where the other lane read the statement it says
     -- something sharper about the same mistake -- which dimensions an explicit
     -- GROUP BY failed to cover (`_008`), that HAVING needs a metric (`_026`),
@@ -4605,7 +4810,13 @@ do
             if is_bare_word then
                 local text = syntax.token_identifier_value(token) or ""
                 local normalized = string.lower(text)
-                if text ~= "" and not STATEMENT_WORDS[upper(text)]
+                local dropped = text ~= "" and not STATEMENT_WORDS[upper(text)]
+                    and by_name[upper(text)] == nil and not seen[normalized]
+                    and M.dropped_field_refusal("SEMANTIC_QUERY", reference.model, text)
+                if dropped then
+                    seen[normalized] = true
+                    found[#found + 1] = dropped
+                elseif text ~= "" and not STATEMENT_WORDS[upper(text)]
                     and by_name[upper(text)] == nil and not seen[normalized] then
                     seen[normalized] = true
                     local near = near_field_names(normalized, candidates)
@@ -4621,6 +4832,7 @@ do
                             field = text,
                             object = tostring(reference.object_name),
                             candidates = near,
+                            candidate_formats = M.candidate_formats(reference.model, near),
                             clarification_question = "Which field did you mean instead of "
                                 .. text .. "?",
                         }
@@ -5952,6 +6164,227 @@ function M.compile_request_json(request_json)
     return result
 end
 
+-- What each metric's compiled SQL actually returns, against the type it
+-- declares. The published view and FIELDS_FOR_AGENT advertise the declared
+-- type, so a ratio declared DECIMAL(18,6) that the compiler returns as DOUBLE
+-- hands a typed consumer a float where a decimal was promised. The type is
+-- read with TYPEOF over the compiled SQL under WHERE FALSE, so no data is
+-- scanned; one compile per semantic object covers all of its metrics.
+--
+-- COMPATIBLE is false when the type family differs or a DECIMAL's scale does.
+-- A SUM widens DECIMAL(18,2) to DECIMAL(36,2): same scale, same values, and
+-- flagging it would flag nearly every model, so it is reported but not called
+-- incompatible.
+local function declared_type_compatible(declared, compiled)
+    local function normalize(type_text)
+        local text = upper(trim(tostring(type_text or ""))):gsub("%s+", " ")
+        text = text:gsub("^DOUBLE PRECISION$", "DOUBLE"):gsub("^FLOAT$", "DOUBLE")
+        -- A character set after the parentheses (VARCHAR(20) UTF8) is ignored.
+        local family, arguments = text:match("^([A-Z ]-)%s*%(([^)]*)%)")
+        return family or text, arguments
+    end
+    local declared_family, declared_arguments = normalize(declared)
+    local compiled_family, compiled_arguments = normalize(compiled)
+    declared_family = declared_family:gsub("^NUMERIC$", "DECIMAL"):gsub("^DEC$", "DECIMAL")
+    if declared_family ~= compiled_family then return false end
+    if declared_family == "DECIMAL" then
+        local declared_scale = tonumber((declared_arguments or ""):match(",%s*(%d+)") or 0)
+        local compiled_scale = tonumber((compiled_arguments or ""):match(",%s*(%d+)") or 0)
+        return declared_scale == compiled_scale
+    end
+    return true
+end
+
+--
+-- A compile costs about a third of a second whatever it asks for, and VALIDATE_MODEL
+-- runs after every mutation, so validation hands in what it observed last time
+-- (`previous`: metric id -> {key, compiled_type}) and only an object with a
+-- metric whose observation key moved is compiled again. The key is everything
+-- a compiled type depends on: the metric's definition hash (what it computes,
+-- transitively), the column types of every relation the model's SQL can read,
+-- and this compiler's build. CHECK_METRIC_TYPES passes nothing and always
+-- compiles.
+function M.metric_result_types(model_name, previous)
+    local model = load_model(normalize_name(model_name, "model"))
+    if model == nil then
+        error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name))
+    end
+    local source_hash = scalar([[
+        SELECT HASH_SHA256(GROUP_CONCAT(c.COLUMN_SCHEMA || '.' || c.COLUMN_TABLE || '.'
+                   || c.COLUMN_NAME || ' ' || c.COLUMN_TYPE
+                   ORDER BY c.COLUMN_SCHEMA, c.COLUMN_TABLE, c.COLUMN_NAME SEPARATOR ','))
+          FROM SYS.EXA_ALL_COLUMNS c
+          JOIN (SELECT DISTINCT UPPER(RELATION_SCHEMA) AS RELATION_SCHEMA,
+                       UPPER(RELATION_OBJECT) AS RELATION_OBJECT
+                  FROM SEMANTIC_SOURCE.MODEL_RELATIONS WHERE VERSION_ID = :version_id) r
+            ON c.COLUMN_SCHEMA = r.RELATION_SCHEMA AND c.COLUMN_TABLE = r.RELATION_OBJECT
+    ]], {version_id = model.version_id})
+    local by_object, order = {}, {}
+    for _, row in ipairs(query([[
+        SELECT so.OBJECT_NAME, mt.METRIC_NAME, mt.DATA_TYPE, mt.METRIC_ID, h.DEFINITION_HASH
+          FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
+          JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+          JOIN SEMANTIC_SOURCE.METRICS mt
+            ON oc.COLUMN_KIND = 'METRIC' AND mt.METRIC_ID = oc.OBJECT_REF_ID
+          LEFT JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+            ON h.FIELD_KIND = 'METRIC' AND h.FIELD_ID = mt.METRIC_ID
+         WHERE so.VERSION_ID = :version_id AND so.STATUS = 'ACTIVE'
+           AND mt.STATUS = 'ACTIVE' AND oc.IS_VISIBLE = TRUE AND mt.IS_PRIVATE = FALSE
+         ORDER BY so.OBJECT_NAME, oc.ORDINAL_POSITION
+    ]], {version_id = model.version_id}) or {}) do
+        local object_name = tostring(row_value(row, "OBJECT_NAME", 1))
+        if by_object[object_name] == nil then
+            by_object[object_name] = {}
+            order[#order + 1] = object_name
+        end
+        local definition_hash = row_value(row, "DEFINITION_HASH", 5)
+        local metrics = by_object[object_name]
+        metrics[#metrics + 1] = {name = tostring(row_value(row, "METRIC_NAME", 2)),
+                                 declared = tostring(row_value(row, "DATA_TYPE", 3)),
+                                 id = row_value(row, "METRIC_ID", 4),
+                                 -- No hash, no key: such a metric is always compiled.
+                                 key = not missing(definition_hash) and not missing(source_hash)
+                                     and (tostring(definition_hash) .. "|" .. tostring(source_hash)
+                                          .. "|" .. compile_cache.runtime_build()) or nil}
+    end
+    local rows = {}
+    for _, object_name in ipairs(order) do
+        local metrics, names, probes = by_object[object_name], {}, {}
+        local reuse = previous ~= nil
+        for index, metric in ipairs(metrics) do
+            names[index] = metric.name
+            probes[index] = "TYPEOF(MAX(" .. quote_alias(metric.name) .. ")) AS T" .. index
+            local seen = previous and previous[key(metric.id)]
+            if metric.key == nil or seen == nil or seen.key ~= metric.key then reuse = false end
+        end
+        local types, probe_error = {}, nil
+        if reuse then
+            for index, metric in ipairs(metrics) do
+                types[index] = previous[key(metric.id)].compiled_type
+            end
+        else
+            local compiled = compile_request_table({model = model.model_name,
+                object = object_name, metrics = names}, {validate = false, cache = false})
+            if compiled == nil or compiled.status ~= "OK" then
+                probe_error = compiled and compiled.error_message or "compile failed"
+            else
+                local ok, typed = pcall(query, "SELECT " .. table.concat(probes, ", ")
+                    .. " FROM (" .. compiled.generated_sql .. ") WHERE FALSE")
+                if ok and typed ~= nil and #typed > 0 then
+                    for index = 1, #metrics do
+                        types[index] = row_value(typed[1], "T" .. index, index)
+                    end
+                else
+                    probe_error = tostring(typed)
+                end
+            end
+        end
+        for index, metric in ipairs(metrics) do
+            local compiled_type = types[index]
+            local compatible = nil
+            if not missing(compiled_type) then
+                compatible = declared_type_compatible(metric.declared, compiled_type)
+            end
+            rows[#rows + 1] = {
+                object = object_name, metric = metric.name, metric_id = metric.id,
+                declared_type = metric.declared,
+                compiled_type = not missing(compiled_type) and tostring(compiled_type) or nil,
+                compatible = compatible, observation_key = metric.key, reused = reuse,
+                error = probe_error,
+            }
+        end
+    end
+    return rows
+end
+
+-- How a COALESCE or RECONCILE attribute is actually being answered: over the
+-- keys of the entity's primary representation, how many the first-ranked
+-- source answers, how many another source fills, and how many no source
+-- answers at all. Validation reported only conflicts, so a key the
+-- authoritative source left NULL was silently filled from a supplemental one,
+-- and a key nobody covered moved its revenue into a NULL segment, with no
+-- count anywhere.
+--
+-- Measured with the compiler's own fused expression and joins
+-- (fused_attribute_expression), so the counts describe exactly what a query
+-- returns. Counts only: no key values leave the probe, because this runs with
+-- the caller's rights and an agent-facing surface must not carry row values.
+function M.fusion_health(model_name)
+    local model = load_model(normalize_name(model_name, "model"))
+    if model == nil then
+        error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name))
+    end
+    local object_name = scalar([[
+        SELECT MIN(OBJECT_NAME) FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS
+         WHERE VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+    ]], {version_id = model.version_id})
+    if missing(object_name) then return {} end
+    -- Any object will do: entities, bindings and fusion policies load model-wide.
+    local ctx, _, load_message = load_catalog(model, object_name)
+    if ctx == nil then error(tostring(load_message)) end
+    local names = {}
+    for _, row in ipairs(query([[
+        SELECT 'DIMENSION' AS KIND, DIMENSION_ID AS ID, DIMENSION_NAME AS NAME
+          FROM SEMANTIC_SOURCE.DIMENSIONS WHERE VERSION_ID = :version_id
+        UNION ALL
+        SELECT 'FACT', FACT_ID, FACT_NAME
+          FROM SEMANTIC_SOURCE.FACTS WHERE VERSION_ID = :version_id
+    ]], {version_id = model.version_id}) or {}) do
+        names[tostring(row_value(row, "KIND", 1)) .. ":" .. key(row_value(row, "ID", 2))] =
+            tostring(row_value(row, "NAME", 3))
+    end
+    local rows = {}
+    for attribute_key, policy in pairs(ctx.fusion_policy_by_attribute or {}) do
+        local strategy = upper(policy.strategy or "PREFER")
+        local binding = (ctx.bindings_by_attribute[attribute_key] or {})[1]
+        local entity = binding and ctx.entity_by_id[key(binding.entity_id)]
+        if (strategy == "COALESCE" or strategy == "RECONCILE") and entity ~= nil then
+            local attribute_type = string.match(attribute_key, "^([^:]+):")
+            local finding = {entity = entity.name, attribute_type = attribute_type,
+                             attribute = names[attribute_key] or attribute_key,
+                             strategy = strategy}
+            -- A view of the entity, so the joins the expression registers do
+            -- not stay on the catalog's own entity.
+            local probe_entity = setmetatable({}, {__index = entity})
+            local base = entity.primary_representation
+            local fused, contributors, fusion_error, expressions =
+                fused_attribute_expression(ctx, probe_entity, base, attribute_key, strategy)
+            if fused == nil then
+                finding.error = fusion_error
+            else
+                finding.first_source = contributors[1].representation_name
+                local joins = {}
+                for _, join in ipairs(probe_entity.fusion_joins or {}) do
+                    joins[#joins + 1] = " LEFT JOIN " .. join.source_sql .. " " .. join.alias
+                        .. " ON " .. table.concat(join.predicates, " AND ")
+                end
+                local ok, counted = pcall(query,
+                    "SELECT COUNT(*) AS TOTAL_KEYS, COUNT(" .. expressions[1] .. ") AS FIRST_SOURCE,"
+                    .. " COUNT(" .. fused .. ") AS RESOLVED FROM "
+                    .. sql_text.quote_qualified(base.source_schema, base.source_object)
+                    .. " " .. tostring(base.alias) .. table.concat(joins))
+                if not ok or counted == nil or #counted == 0 then
+                    finding.error = tostring(counted)
+                else
+                    local total = tonumber(row_value(counted[1], "TOTAL_KEYS", 1)) or 0
+                    local first = tonumber(row_value(counted[1], "FIRST_SOURCE", 2)) or 0
+                    local resolved = tonumber(row_value(counted[1], "RESOLVED", 3)) or 0
+                    finding.total_keys = total
+                    finding.from_first_source = first
+                    finding.filled = resolved - first
+                    finding.unresolved = total - resolved
+                end
+            end
+            rows[#rows + 1] = finding
+        end
+    end
+    table.sort(rows, function(left, right)
+        return tostring(left.entity) .. "." .. tostring(left.attribute)
+            < tostring(right.entity) .. "." .. tostring(right.attribute)
+    end)
+    return rows
+end
+
 -- Dry-run migration assistance for legacy primary-key and equality-join
 -- metadata. Suggestions are deliberately limited to unambiguous column forms.
 function M.suggest_grain_metadata(model_name)
@@ -6070,6 +6503,8 @@ compile_sql = M.compile_sql
 compile_sql_debug = M.compile_sql_debug
 compile_sql_for_preprocessor = M.compile_sql_for_preprocessor
 suggest_grain_metadata = M.suggest_grain_metadata
+fusion_health = M.fusion_health
+metric_result_types = M.metric_result_types
 
 -- Database-free tests opt into this deliberately small pure-function surface.
 -- Exasol never defines ESV_TEST_MODE, so the installed runtime's public API is
@@ -6078,6 +6513,7 @@ suggest_grain_metadata = M.suggest_grain_metadata
 -- database catalog.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_COMPILER_TEST_API = {
+        declared_type_compatible = declared_type_compatible,
         json_encode = json.encode,
         json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,

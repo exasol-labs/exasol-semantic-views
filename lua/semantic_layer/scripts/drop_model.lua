@@ -175,6 +175,7 @@ query([[
 ]], {model_id = model_id})
 
 local model_tables = {
+    "METRIC_TYPE_OBSERVATIONS",
     "METRIC_DIMENSION_MATRIX",
     "MODEL_ROLE_GRANTS",
     "MODEL_PUBLISH_HISTORY",

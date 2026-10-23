@@ -2780,3 +2780,19 @@ test("an unknown field answers with candidates instead of a dead end", function(
     assert_equal(known.name, "customer_region")
     assert_branch("compiler.field.clarified", false, false)
 end)
+
+test("a declared metric type is compatible when the family and decimal scale match", function()
+    -- A SUM widens the precision at the same scale: compatible. A ratio that
+    -- divides to DOUBLE under a DECIMAL declaration, or a changed scale: not.
+    each({
+        {"DECIMAL(18,2)", "DECIMAL(36,2)", true},
+        {"DECIMAL(18,6)", "DOUBLE", false},
+        {"DECIMAL(18,2)", "DECIMAL(36,4)", false},
+        {"DOUBLE PRECISION", "DOUBLE", true},
+        {"NUMERIC(10)", "DECIMAL(18,0)", true},
+        {"VARCHAR(20)", "VARCHAR(20) UTF8", true},
+    }, function(case)
+        assert_equal(api.declared_type_compatible(case[1], case[2]), case[3],
+            case[1] .. " vs " .. case[2])
+    end)
+end)

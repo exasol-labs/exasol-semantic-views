@@ -746,14 +746,15 @@ end
 
 local function load_model(model_name)
     local rows = query([[
-        SELECT MODEL_ID, ACTIVE_VERSION_ID
+        SELECT MODEL_ID, ACTIVE_VERSION_ID, STATUS
         FROM SYS_SEMANTIC.MODELS
         WHERE UPPER(MODEL_NAME) = UPPER(:model_name)
     ]], {model_name = model_name})
     if rows == nil or #rows == 0 then
         error("SEMANTIC_DDL_040: model not found: " .. tostring(model_name))
     end
-    return {model_id = row_value(rows[1], "MODEL_ID", 1), version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2), model_name = model_name}
+    return {model_id = row_value(rows[1], "MODEL_ID", 1), version_id = row_value(rows[1], "ACTIVE_VERSION_ID", 2),
+            status = row_value(rows[1], "STATUS", 3), model_name = model_name}
 end
 
 local function object_id(model, object_name)
@@ -1193,6 +1194,47 @@ local function identifiers_in_expression(expression)
         end
     end
     return identifiers
+end
+
+-- Re-resolve the metric filters that name a dimension, after that dimension
+-- has been redefined.
+--
+-- A filter is stored twice: as written (`order_status <> 'CANCELLED'`) and
+-- resolved to the dimension's physical expression at the time
+-- (`o.order_status <> 'CANCELLED'`), which is what the compiler and the
+-- validator read. Redefining the dimension left the resolved copy behind. After
+-- a source column was renamed, the repair -- `ADD OR REPLACE DIMENSION
+-- order_status AS o.status_code` -- was refused (SEMANTIC_MODEL_017) because a
+-- filter still read the old column, and nothing in the model could be changed
+-- to fix it. The written form is the definition; the resolved form follows it.
+-- Only metrics with a written form can be re-resolved: a filter given as raw
+-- SQL through ADD_METRIC has nothing to resolve from.
+local function reresolve_dimension_filters(model, dimension_name)
+    for _, row in ipairs(query([[
+        SELECT METRIC_ID, SEMANTIC_FILTER_EXPR
+        FROM SYS_SEMANTIC.METRICS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND STATUS = 'ACTIVE' AND SEMANTIC_FILTER_EXPR IS NOT NULL
+    ]], {model_id = model.model_id, version_id = model.version_id}) or {}) do
+        local written = row_value(row, "SEMANTIC_FILTER_EXPR", 2)
+        local names_dimension = false
+        for _, identifier in ipairs(identifiers_in_expression(written)) do
+            if upper(identifier) == upper(dimension_name) then names_dimension = true end
+        end
+        if names_dimension then
+            local resolved = replace_semantic_identifiers(model, written)
+            local metric_id = row_value(row, "METRIC_ID", 1)
+            query([[
+                UPDATE SYS_SEMANTIC.METRICS
+                SET FILTER_EXPR = :resolved, SQL_FILTER_EXPR = :resolved
+                WHERE METRIC_ID = :metric_id
+            ]], {resolved = resolved, metric_id = metric_id})
+            query([[
+                UPDATE SYS_SEMANTIC.METRIC_FILTERS SET RESOLVED_SQL_EXPR = :resolved
+                WHERE METRIC_ID = :metric_id AND FILTER_KIND = 'SEMANTIC_SQL'
+            ]], {resolved = resolved, metric_id = metric_id})
+        end
+    end
 end
 
 local AGGREGATE_FUNCTIONS = {
@@ -1825,6 +1867,7 @@ local function apply_definition_changes(definition, model, object_id_value, defi
         -- here changes a published column order downstream.
         for _, dimension in ipairs(definition.dimensions) do
             upsert_dimension(model, object_id_value, dimension)
+            reresolve_dimension_filters(model, dimension.name)
         end
         for _, fact in ipairs(definition.facts) do
             upsert_fact(model, object_id_value, fact)
@@ -2551,7 +2594,24 @@ function M.apply_semantic_definition(definition_sql, dry_run)
             return {{"ERROR", "SEMANTIC_DDL_090", "Definition rejected; validation failed: "
                 .. validation_details .. ". Catalog state was restored.", normalized_json, operation_count, validation_run_id}}
         end
-        return {{"OK", nil, "Semantic definition applied.", normalized_json, operation_count, validation_run_id}}
+        -- A published model's views declare its columns, and BI tools read them
+        -- from EXA_ALL_COLUMNS. Left alone, a RENAME METRIC kept advertising the
+        -- old column and a new metric was missing from the view, while the
+        -- model said PUBLISHED. The change is valid by now, so a refresh that
+        -- fails is reported rather than undoing it.
+        local message = "Semantic definition applied."
+        if tostring(model.status or "") == "PUBLISHED" then
+            local refreshed, refresh_error = pcall(query,
+                "EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL(:model_name)",
+                {model_name = definition.model_name})
+            message = refreshed
+                and message .. " The published views were refreshed to match."
+                or message .. " The published views could not be refreshed and still show"
+                    .. " the previous definition: " .. tostring(refresh_error)
+                    .. ". Run EXECUTE SCRIPT SEMANTIC_ADMIN.REFRESH_SEMANTIC_SURFACE("
+                    .. sql_string(definition.model_name) .. ")."
+        end
+        return {{"OK", nil, message, normalized_json, operation_count, validation_run_id}}
     end)
     if ok then
         return result
@@ -3131,6 +3191,12 @@ function M.decode_json(json_text)
 end
 
 apply_semantic_definition = M.apply_semantic_definition
+
+-- For ADD_OR_REPLACE_DIMENSION, which redefines a dimension outside the DDL.
+function M.reresolve_dimension_filters(model_name, dimension_name)
+    reresolve_dimension_filters(load_model(model_name), dimension_name)
+end
+reresolve_dimension_filters_for = M.reresolve_dimension_filters
 apply_normalized_osi_import = M.apply_normalized_osi_import
 import_databricks_metric_view = M.import_databricks_metric_view
 describe_semantic_metric = M.describe_semantic_metric
@@ -3166,6 +3232,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_definition_model = validate_definition_model,
         upsert_metric = upsert_metric,
         upsert_dimension = upsert_dimension,
+        reresolve_dimension_filters = reresolve_dimension_filters,
         snapshot_model_state = snapshot_model_state,
         batch_call = batch_call,
         restore_model_state = restore_model_state,

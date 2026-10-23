@@ -212,7 +212,12 @@ def main() -> int:
 
     order = dataset_by_name(interop, "order")
     assert_equal("order primary key", order.get("primary_key"), ["order_id"])
-    partner_extensions = [ext for ext in order["custom_extensions"] if ext["vendor_name"] == "PARTNER_VENDOR"]
+    # The extension this verifier added, recognised by its payload -- an
+    # exported extension carries only vendor_name and data. Other verifiers may
+    # put their own PARTNER_VENDOR extensions on the same entity of sales.
+    partner_extensions = [ext for ext in order["custom_extensions"]
+                          if ext["vendor_name"] == "PARTNER_VENDOR"
+                          and ext["data"] == '{"opaque":true}']
     assert_equal("non-Exasol extension count", len(partner_extensions), 1)
     assert_equal("non-Exasol extension data preserved", partner_extensions[0]["data"], '{"opaque":true}')
 

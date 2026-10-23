@@ -1467,6 +1467,96 @@ test("validator proves partition grain without requiring equal key sets", functi
     assert_equal(minus_count, 0)
 end)
 
+-- A partitioned entity whose two partitions answer the probes with `counts`:
+-- the out-of-window row count, then the stranded-key count.
+local function partition_coverage_ctx(with_key)
+    local entity = {id = 1, name = "orders", alias = "o"}
+    local archive = {id = 1, entity_id = 1, name = "archive", alias = "o",
+        source_schema = "LAKE", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts < TIMESTAMP '2026-01-01 00:00:00'"}
+    local hot = {id = 2, entity_id = 1, name = "hot", alias = "o",
+        source_schema = "MART", source_object = "ORDERS",
+        coverage_predicate = "o.order_ts >= TIMESTAMP '2026-01-01 00:00:00'"}
+    entity.primary_representation = hot
+    local unique_key = {id = 10, entity_id = 1, name = "order_pk",
+        columns = {{ordinal_position = 1, column_name = "ORDER_ID"}}}
+    return validation_context({
+        entities = {entity},
+        representations_by_entity = {["1"] = {archive, hot}},
+        unique_keys_by_entity = {["1"] = with_key and {unique_key} or {}},
+    })
+end
+
+test("validator reports partition rows no coverage window answers for", function()
+    each({
+        {name = "stranded rows warn", outside = 2, stranded = 1, rule = "SEMANTIC_MODEL_074"},
+        {name = "copies inside the covering window do not", outside = 2, stranded = 0},
+        {name = "no rows outside reports nothing", outside = 0, stranded = 0},
+        {name = "a failing probe is its own warning", fails = true, rule = "SEMANTIC_MODEL_075"},
+        {name = "an unresolvable key column is too", outside = 1, no_column = true,
+         rule = "SEMANTIC_MODEL_075"},
+        {name = "no declared key is too", outside = 1, no_key = true,
+         rule = "SEMANTIC_MODEL_075"},
+    }, function(case)
+        local ctx = partition_coverage_ctx(not case.no_key)
+        with_query(function(sql)
+            if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
+                return columns_response(case.no_column and {} or {"ORDER_ID"})
+            end
+            if case.fails then error("probe timed out") end
+            if contains(sql, " MINUS ") then return {{case.stranded}} end
+            return {{case.outside}}
+        end, function() api.validate_partition_data_coverage(ctx) end)
+        local rules = {}
+        for _, issue in ipairs(ctx.issues) do rules[#rules + 1] = issue.rule_code end
+        assert_equal(table.concat(rules, ","), case.rule and (case.rule .. "," .. case.rule)
+            or "", case.name)
+    end)
+end)
+
+test("validator warns when a published metric compiles to a different kind of number", function()
+    local rows = {
+        {metric = "gross_margin_pct", metric_id = 7, declared_type = "DECIMAL(18,6)",
+         compiled_type = "DOUBLE", compatible = false, observation_key = "k7", reused = false},
+        {metric = "total_revenue", metric_id = 8, declared_type = "DECIMAL(18,2)",
+         compiled_type = "DECIMAL(36,2)", compatible = true, observation_key = "k8", reused = true},
+    }
+    local handed = nil
+    local function probe(_, previous) handed = previous; return rows end
+    each({
+        {status = "PUBLISHED", probe = probe, expected = {"gross_margin_pct"}, recorded = 1},
+        {status = "DRAFT", probe = probe, expected = {}, recorded = 0},
+        {status = "PUBLISHED", probe = nil, expected = {}, recorded = 0},
+        {status = "PUBLISHED", probe = function() error("compile failed") end,
+         expected = {}, recorded = 0},
+    }, function(case)
+        local ctx = validation_context({model_name = "sales", model_status = case.status,
+                                        model_id = 1, version_id = 2})
+        local inserted = 0
+        handed = nil
+        with_query(function(sql)
+            if contains(sql, "SELECT METRIC_ID, OBSERVATION_KEY") then
+                return {{8, "k8", "DECIMAL(36,2)"}}
+            end
+            if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS") then
+                inserted = inserted + 1
+            end
+            return {}
+        end, function() api.validate_metric_result_types(ctx, case.probe) end)
+        local flagged = {}
+        for _, issue in ipairs(ctx.issues) do
+            assert_equal(issue.rule_code, "SEMANTIC_MODEL_076")
+            flagged[#flagged + 1] = issue.object_name
+        end
+        assert_equal(table.concat(flagged, ","), table.concat(case.expected, ","))
+        -- Only the freshly compiled observation is written back; the reused one stays.
+        assert_equal(inserted, case.recorded)
+        if case.probe == probe and case.status == "PUBLISHED" then
+            assert_equal(handed["8"].key, "k8")
+        end
+    end)
+end)
+
 test("validator skips F1 source probes after a local validation error", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

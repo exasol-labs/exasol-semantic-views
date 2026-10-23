@@ -176,6 +176,23 @@ EXPECTED_EXPORT_WARNINGS: dict[str, list[str]] = {
 }
 
 
+def remove_partner_fixtures(con) -> None:
+    """Take this verifier's extensions back off the shared sales model.
+
+    They were left behind, so every later run saw them: verify_osi_export,
+    which counts the partner extensions on `order`, failed on any second run
+    against the same deployment.
+    """
+    names = ", ".join(sql_string(name) for _, _, name in PARTNER_FIXTURES)
+    con.execute(
+        "DELETE FROM SYS_SEMANTIC.CUSTOM_EXTENSIONS"
+        f" WHERE VENDOR_NAME = {sql_string(PARTNER_VENDOR)} AND EXTENSION_NAME IN ({names})"
+        " AND MODEL_ID = (SELECT MODEL_ID FROM SYS_SEMANTIC.MODELS"
+        f" WHERE MODEL_NAME = {sql_string(SOURCE_MODEL)})")
+    con.commit()
+    con.execute(f"EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL({sql_string(SOURCE_MODEL)})").fetchall()
+
+
 def export_lossless(con, model_name: str) -> dict[str, Any]:
     document, warnings = osi.export_model(
         con,
@@ -673,6 +690,7 @@ def main() -> int:
         assert_batch_rollback(con, "unsupported target", unsupported_target_failure_plan(), FAILURE_MODEL)
         assert_batch_rollback(con, "metadata patch failure", metadata_patch_failure_plan(), PATCH_FAILURE_MODEL)
     finally:
+        remove_partner_fixtures(con)
         con.close()
     print("ok OSI round-trip verifier")
     return 0

@@ -218,7 +218,9 @@ if tonumber(duplicate or 0) > 0 then
             .. "' and belongs to no semantic view yet."
     end
     detail = detail .. " Choose a distinct name for this view's column; there is"
-        .. " no operation that shares one dimension between views."
+        .. " no operation that shares one dimension between views. To change"
+        .. " this dimension's own definition instead, call"
+        .. " SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION, which updates it in place."
     error("SEMANTIC_ADMIN_019: duplicate dimension: " .. dimension_name .. "." .. detail)
 end
 
