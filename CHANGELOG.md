@@ -79,6 +79,22 @@ All notable changes to Exasol Semantic Views are documented here.
   validated. A refresh that fails does not undo the change; the result message
   says so and names `REFRESH_SEMANTIC_SURFACE`.
 
+#### Declared metric types are checked against what the compiler returns
+
+- The published view declared `GROSS_MARGIN_PCT DECIMAL(18,6)` and a query
+  returned `DOUBLE`: a typed consumer got a float where a decimal was promised.
+  Validation of a published model now reports a metric whose compiled result is
+  a different kind of number from its declared type as `SEMANTIC_MODEL_076`.
+  That covers a different type family, or a `DECIMAL` scale that differs; a
+  `SUM` widening the precision at the same scale is not reported.
+  `SEMANTIC_ADMIN.CHECK_METRIC_TYPES(model)` lists declared against compiled
+  types for any model. Results are not cast: the declaration is the author's to
+  fix. The check reads no data (`TYPEOF` under `WHERE FALSE`), but it compiles
+  each semantic object, so a published model's validation takes about half a
+  second longer per object; draft models are not checked.
+- The sales example's `gross_margin_pct` now declares `RETURNS DOUBLE`, which
+  is what it always returned, and the ratio examples in the docs do the same.
+
 #### Warnings on the agent surface
 
 - `SEMANTIC_AGENT.VALIDATION_ISSUES_FOR_AGENT` lists every finding of each

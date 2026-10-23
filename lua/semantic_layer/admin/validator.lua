@@ -681,7 +681,8 @@ local function load_model(ctx, model_name_arg)
           m.MODEL_ID,
           m.ACTIVE_VERSION_ID AS VERSION_ID,
           mv.VERSION_NUMBER,
-          m.GOVERNANCE_MODE
+          m.GOVERNANCE_MODE,
+          m.STATUS AS MODEL_STATUS
         FROM SYS_SEMANTIC.MODELS m
         LEFT JOIN SYS_SEMANTIC.MODEL_VERSIONS mv
           ON mv.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -696,6 +697,7 @@ local function load_model(ctx, model_name_arg)
     ctx.model_id = row_value(rows[1], "MODEL_ID", 1)
     ctx.version_id = row_value(rows[1], "VERSION_ID", 2)
     ctx.governance_mode = row_value(rows[1], "GOVERNANCE_MODE", 4)
+    ctx.model_status = row_value(rows[1], "MODEL_STATUS", 5)
     start_validation_run(ctx)
 
     if missing(ctx.version_id) then
@@ -2488,6 +2490,42 @@ local function validate_partition_data_coverage(ctx)
                     .. " coverage boundary with SET_REPRESENTATION_COVERAGE_BATCH, or move"
                     .. " the rows to the partition that covers them."
                     .. " SEMANTIC_ADMIN.CHECK_PARTITION_COVERAGE re-checks without validating.")
+        end
+    end
+end
+
+-- A metric whose compiled result is a different kind of number from the type
+-- it declares. The published view and FIELDS_FOR_AGENT advertise the declared
+-- type, so a ratio declared DECIMAL(18,6) and computed as DOUBLE gives a typed
+-- consumer a float where a decimal was promised, and metadata probes disagree
+-- with the result set. Reported, not corrected: casting would change results
+-- for everyone, and the declaration is the author's to fix.
+--
+-- The compiler decides the type, so it is asked: VALIDATE_MODEL passes in
+-- COMPILER_RUNTIME's metric_result_types, which compiles each semantic object's
+-- metrics once and reads TYPEOF under WHERE FALSE, scanning nothing. (Passed
+-- in because a library cannot import another one for itself.) Anything that
+-- stops the check -- a metric that does not compile yet -- leaves it silent;
+-- the compile itself reports that.
+--
+-- Published models only. The declared type becomes a contract when a published
+-- view advertises it, and the check compiles each object -- about half a second
+-- per object -- which a draft being authored one ADD_* call at a time should
+-- not pay on every call. CHECK_METRIC_TYPES answers for any model on demand.
+local function validate_metric_result_types(ctx, metric_result_types)
+    if (ctx.error_count or 0) > 0 or metric_result_types == nil
+        or tostring(ctx.model_status or "") ~= "PUBLISHED" then return end
+    local ok, rows = pcall(metric_result_types, ctx.model_name)
+    if not ok then return end
+    for _, row in ipairs(rows or {}) do
+        if row.compatible == false then
+            add_issue(ctx, "WARNING", "METRIC", row.metric, "SEMANTIC_MODEL_076",
+                "Metric '" .. tostring(row.metric) .. "' declares " .. tostring(row.declared_type)
+                    .. ", but its compiled result is " .. tostring(row.compiled_type)
+                    .. ". The published view and FIELDS_FOR_AGENT advertise the declared"
+                    .. " type, so a consumer that reads types gets a different one. Declare"
+                    .. " RETURNS " .. tostring(row.compiled_type) .. ", or CAST in the"
+                    .. " expression to the type you mean.")
         end
     end
 end
@@ -4843,7 +4881,9 @@ local function order_root_cause_first(issues)
     return leading
 end
 
-function M.validate_model(model_name_arg)
+-- `metric_result_types` is COMPILER_RUNTIME's, from the VALIDATE_MODEL script;
+-- without it the declared-type check is skipped.
+function M.validate_model(model_name_arg, metric_result_types)
     reset_source_column_cache()
     local ctx = {
         issues = {},
@@ -4887,6 +4927,7 @@ function M.validate_model(model_name_arg)
             validate_fusion_conflicts(ctx)
             validate_partition_data_coverage(ctx)
         end
+        validate_metric_result_types(ctx, metric_result_types)
         -- Every admin DDL script (ADD_*, REMOVE_*, PUBLISH_MODEL) calls
         -- VALIDATE_MODEL after mutating the catalog. Invalidating compile-cache
         -- entries here gives all those callers cache-coherent compile results
@@ -4956,6 +4997,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         validate_structural_rules = validate_structural_rules,
         validate_partition_coverage = validate_partition_coverage,
         validate_partition_data_coverage = validate_partition_data_coverage,
+        validate_metric_result_types = validate_metric_result_types,
         parse_partition_predicate = parse_partition_predicate,
         validate_partition_attribute_bindings = validate_partition_attribute_bindings,
         entity_has_base_metric = entity_has_base_metric,

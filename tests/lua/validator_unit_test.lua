@@ -1514,6 +1514,31 @@ test("validator reports partition rows no coverage window answers for", function
     end)
 end)
 
+test("validator warns when a published metric compiles to a different kind of number", function()
+    local rows = {
+        {metric = "gross_margin_pct", declared_type = "DECIMAL(18,6)",
+         compiled_type = "DOUBLE", compatible = false},
+        {metric = "total_revenue", declared_type = "DECIMAL(18,2)",
+         compiled_type = "DECIMAL(36,2)", compatible = true},
+    }
+    local function probe() return rows end
+    each({
+        {status = "PUBLISHED", probe = probe, expected = {"gross_margin_pct"}},
+        {status = "DRAFT", probe = probe, expected = {}},
+        {status = "PUBLISHED", probe = nil, expected = {}},
+        {status = "PUBLISHED", probe = function() error("compile failed") end, expected = {}},
+    }, function(case)
+        local ctx = validation_context({model_name = "sales", model_status = case.status})
+        api.validate_metric_result_types(ctx, case.probe)
+        local flagged = {}
+        for _, issue in ipairs(ctx.issues) do
+            assert_equal(issue.rule_code, "SEMANTIC_MODEL_076")
+            flagged[#flagged + 1] = issue.object_name
+        end
+        assert_equal(table.concat(flagged, ","), table.concat(case.expected, ","))
+    end)
+end)
+
 test("validator skips F1 source probes after a local validation error", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

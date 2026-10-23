@@ -6164,6 +6164,100 @@ function M.compile_request_json(request_json)
     return result
 end
 
+-- What each metric's compiled SQL actually returns, against the type it
+-- declares. The published view and FIELDS_FOR_AGENT advertise the declared
+-- type, so a ratio declared DECIMAL(18,6) that the compiler returns as DOUBLE
+-- hands a typed consumer a float where a decimal was promised. The type is
+-- read with TYPEOF over the compiled SQL under WHERE FALSE, so no data is
+-- scanned; one compile per semantic object covers all of its metrics.
+--
+-- COMPATIBLE is false when the type family differs or a DECIMAL's scale does.
+-- A SUM widens DECIMAL(18,2) to DECIMAL(36,2): same scale, same values, and
+-- flagging it would flag nearly every model, so it is reported but not called
+-- incompatible.
+local function declared_type_compatible(declared, compiled)
+    local function normalize(type_text)
+        local text = upper(trim(tostring(type_text or ""))):gsub("%s+", " ")
+        text = text:gsub("^DOUBLE PRECISION$", "DOUBLE"):gsub("^FLOAT$", "DOUBLE")
+        -- A character set after the parentheses (VARCHAR(20) UTF8) is ignored.
+        local family, arguments = text:match("^([A-Z ]-)%s*%(([^)]*)%)")
+        return family or text, arguments
+    end
+    local declared_family, declared_arguments = normalize(declared)
+    local compiled_family, compiled_arguments = normalize(compiled)
+    declared_family = declared_family:gsub("^NUMERIC$", "DECIMAL"):gsub("^DEC$", "DECIMAL")
+    if declared_family ~= compiled_family then return false end
+    if declared_family == "DECIMAL" then
+        local declared_scale = tonumber((declared_arguments or ""):match(",%s*(%d+)") or 0)
+        local compiled_scale = tonumber((compiled_arguments or ""):match(",%s*(%d+)") or 0)
+        return declared_scale == compiled_scale
+    end
+    return true
+end
+
+function M.metric_result_types(model_name)
+    local model = load_model(normalize_name(model_name, "model"))
+    if model == nil then
+        error("SEMANTIC_ADMIN_011: model not found: " .. tostring(model_name))
+    end
+    local by_object, order = {}, {}
+    for _, row in ipairs(query([[
+        SELECT so.OBJECT_NAME, mt.METRIC_NAME, mt.DATA_TYPE
+          FROM SEMANTIC_SOURCE.OBJECT_COLUMNS oc
+          JOIN SEMANTIC_SOURCE.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+          JOIN SEMANTIC_SOURCE.METRICS mt
+            ON oc.COLUMN_KIND = 'METRIC' AND mt.METRIC_ID = oc.OBJECT_REF_ID
+         WHERE so.VERSION_ID = :version_id AND so.STATUS = 'ACTIVE'
+           AND mt.STATUS = 'ACTIVE' AND oc.IS_VISIBLE = TRUE AND mt.IS_PRIVATE = FALSE
+         ORDER BY so.OBJECT_NAME, oc.ORDINAL_POSITION
+    ]], {version_id = model.version_id}) or {}) do
+        local object_name = tostring(row_value(row, "OBJECT_NAME", 1))
+        if by_object[object_name] == nil then
+            by_object[object_name] = {}
+            order[#order + 1] = object_name
+        end
+        local metrics = by_object[object_name]
+        metrics[#metrics + 1] = {name = tostring(row_value(row, "METRIC_NAME", 2)),
+                                 declared = tostring(row_value(row, "DATA_TYPE", 3))}
+    end
+    local rows = {}
+    for _, object_name in ipairs(order) do
+        local metrics, names, probes = by_object[object_name], {}, {}
+        for index, metric in ipairs(metrics) do
+            names[index] = metric.name
+            probes[index] = "TYPEOF(MAX(" .. quote_alias(metric.name) .. ")) AS T" .. index
+        end
+        local compiled = compile_request_table({model = model.model_name,
+            object = object_name, metrics = names}, {validate = false, cache = false})
+        local types, probe_error = nil, nil
+        if compiled == nil or compiled.status ~= "OK" then
+            probe_error = compiled and compiled.error_message or "compile failed"
+        else
+            local ok, typed = pcall(query, "SELECT " .. table.concat(probes, ", ")
+                .. " FROM (" .. compiled.generated_sql .. ") WHERE FALSE")
+            if ok and typed ~= nil and #typed > 0 then
+                types = typed[1]
+            else
+                probe_error = tostring(typed)
+            end
+        end
+        for index, metric in ipairs(metrics) do
+            local compiled_type = types and row_value(types, "T" .. index, index) or nil
+            local compatible = nil
+            if not missing(compiled_type) then
+                compatible = declared_type_compatible(metric.declared, compiled_type)
+            end
+            rows[#rows + 1] = {
+                object = object_name, metric = metric.name, declared_type = metric.declared,
+                compiled_type = not missing(compiled_type) and tostring(compiled_type) or nil,
+                compatible = compatible,
+                error = probe_error,
+            }
+        end
+    end
+    return rows
+end
+
 -- How a COALESCE or RECONCILE attribute is actually being answered: over the
 -- keys of the entity's primary representation, how many the first-ranked
 -- source answers, how many another source fills, and how many no source
@@ -6371,6 +6465,7 @@ compile_sql_debug = M.compile_sql_debug
 compile_sql_for_preprocessor = M.compile_sql_for_preprocessor
 suggest_grain_metadata = M.suggest_grain_metadata
 fusion_health = M.fusion_health
+metric_result_types = M.metric_result_types
 
 -- Database-free tests opt into this deliberately small pure-function surface.
 -- Exasol never defines ESV_TEST_MODE, so the installed runtime's public API is
@@ -6379,6 +6474,7 @@ fusion_health = M.fusion_health
 -- database catalog.
 if rawget(_G, "ESV_TEST_MODE") then
     ESV_COMPILER_TEST_API = {
+        declared_type_compatible = declared_type_compatible,
         json_encode = json.encode,
         json_decode = json.decode,
         canonical_request_text = compile_cache.canonical_request_text,

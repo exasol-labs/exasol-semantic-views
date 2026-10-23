@@ -193,7 +193,7 @@ return {
         ["lua/semantic_layer/compiler/semantic_sql_syntax.lua"] = 96.2,
         ["lua/semantic_layer/admin/validator.lua"] = 95.2,
         ["lua/semantic_layer/compiler/materializations.lua"] = 94.2,
-        ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.8,
+        ["lua/semantic_layer/admin/semantic_definition.lua"] = 78.79,
         ["lua/semantic_layer/admin/databricks_import.lua"] = 83.7,
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,
         ["lua/semantic_layer/agent/runtime.lua"] = 95.78,

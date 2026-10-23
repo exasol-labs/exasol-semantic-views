@@ -816,7 +816,7 @@ ALTER SEMANTIC VIEW <model>.<object>
 ADD OR REPLACE METRIC <metric_name>
   AS <numerator_metric> / NULLIF(<denominator_metric>, 0)
   ON ENTITY <base_entity>
-  RETURNS DECIMAL(18,6)
+  RETURNS DOUBLE
   FORMAT 'percent'
   DISPLAY '<display_name>'
   COMMENT '<definition>'

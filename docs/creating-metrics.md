@@ -460,6 +460,13 @@ The important fields are:
 - `METRIC_TYPE`: one of `ADDITIVE`, `RATIO`, `DISTINCT`, `SEMI_ADDITIVE`,
   `WINDOW`, or `DERIVED`.
 - `BASE_ENTITY_NAME`: the entity grain where the metric starts.
+- `DATA_TYPE`: what the metric returns, which the published view declares. Make
+  it what the compiled SQL actually returns: a ratio of two aggregates divides
+  to `DOUBLE`, and a `SUM` over `DECIMAL(p,s)` returns a wider precision at the
+  same scale. On a published model, validation reports a declaration of a
+  different kind of number as `SEMANTIC_MODEL_076`, and
+  `SEMANTIC_ADMIN.CHECK_METRIC_TYPES('model')` lists declared against compiled
+  types on demand.
 - `FORMAT_HINT`: a display hint such as `currency`, `percentage`, or `count`.
   It describes the value; the layer never scales or converts one. A
   `percentage` metric returns a fraction — `0.25` means 25%, as
@@ -555,7 +562,7 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC(
   NULL,
   'RATIO',
   'order_line',
-  'DECIMAL(18,6)',
+  'DOUBLE',
   'Gross Margin %',
   'Gross margin as a percentage of revenue',
   'percentage',
