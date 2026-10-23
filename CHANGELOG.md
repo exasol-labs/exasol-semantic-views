@@ -6,6 +6,33 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-23
+
+A consumer-safety release, driven by a study of hosted dashboards built on the
+layer. A consumer can now record which definition a number was built against
+and notice when it changes. The owner of a model can see who started failing
+after a breaking change. Fusion reports what it used to hide: rows outside every
+coverage window, and keys a supplemental source filled or no source answered.
+Published views follow Semantic DDL, and a metric's declared type is checked
+against what the compiler returns.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from the
+release bundle. It adds `SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS`, four views and
+three `CHECK_*` scripts; nothing is migrated. Things an existing deployment may
+notice:
+
+- A published model can report `WARNING` after its next validation. The new
+  rules are `SEMANTIC_MODEL_074`/`075` (partition rows outside coverage) and
+  `SEMANTIC_MODEL_076` (a metric's declared type differs from its compiled
+  one). `076` fires for any ratio declared `DECIMAL`, including an existing
+  install of the sales example's `gross_margin_pct`: declare `RETURNS DOUBLE`.
+  The first validation of a published model after the upgrade compiles each
+  semantic object once.
+- A column selected by a synonym is named as written, in both lanes, where it
+  used to take the canonical name. A dropped field is refused with `_029`
+  instead of `_020`.
+- `ALTER SEMANTIC VIEW` on a published model republishes it.
+
 ### Added
 
 #### A guide for hosted dashboards and applications
@@ -125,6 +152,11 @@ All notable changes to Exasol Semantic Views are documented here.
   `COMPILE_REQUEST_JSON`.
 - `SEMANTIC_ADMIN_019` points to `ADD_OR_REPLACE_DIMENSION` for changing an
   existing dimension's definition.
+- ruff is pinned at 0.17.2. pyexasol 3.0.1 is supported; the requirement stays
+  `>=3.0`, since its one fix is in the DB-API fetch mapper ESV does not use.
+- Four integration verifiers that passed on a fresh install and failed on any
+  later run against the same deployment no longer depend on earlier runs, and
+  `verify_concurrent_admin` counts only the validation runs it started.
 - Docs: `mcp-server-integration.md` names the `GRANT_MODEL_ROLE` grant and says
   that exasol-mcp-server 2.2.0 resets the session after any failed query
   (exasol/mcp-server#309); `creating-metrics.md` says a `percentage` value is a
@@ -2932,7 +2964,7 @@ not select is refused. Each is called out below.
 
 ## Notes on versioning
 
-Version 0.4.0 is the fourth tagged release. Items above are tracked against the
+Version 0.5.0 is the seventh tagged release. Items above are tracked against the
 development baseline established by the user-study simulations run on
 2026-05-13. Phases 1 and 2 are complete, and the statements Phase 3 deferred --
 subqueries, CTEs and CAST around a semantic object -- compile as of 0.3 through
