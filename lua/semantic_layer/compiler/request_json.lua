@@ -4162,7 +4162,10 @@ local function parse_semantic_sql(statement_text, options)
         end
         local field_name = syntax.identifier_from_part(part)
         if field_name == nil then
-            return nil, error_result("SEMANTIC_QUERY_005", "SELECT supports semantic field names, MEASURE(metric), or *.")
+            local distinct_refusal = syntax.distinct_aggregate_refusal(part)
+            if distinct_refusal ~= nil then return nil, distinct_refusal end
+            return nil, error_result("SEMANTIC_QUERY_005", "SELECT supports semantic field"
+                .. " names, MEASURE(metric), or *. " .. syntax.WRAP_REMEDY)
         end
         local field, bind_err = resolve_field(ctx, field_name, nil)
         if bind_err ~= nil then
@@ -6582,6 +6585,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         split_top_level = syntax.split_top_level,
         unwrap_measure_part = syntax.unwrap_measure_part,
         identifier_from_part = syntax.identifier_from_part,
+        distinct_aggregate_refusal = syntax.distinct_aggregate_refusal,
         alias_from_select_part = syntax.alias_from_select_part,
         literal_from_tokens = syntax.literal_from_tokens,
         find_top_level_clauses = syntax.find_top_level_clauses,
