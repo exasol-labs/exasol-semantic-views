@@ -6,6 +6,55 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-28
+
+A correctness release for three incoming reports. A fused dimension on an
+F3-partitioned object compiled `STATUS = OK` to SQL that could not run; a fusion
+document that bound a new representation to an existing identity was refused;
+and `COUNT(DISTINCT x)` was reported as an unknown field called `DISTINCT`.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from the
+release bundle. Nothing is added to the catalog and nothing is migrated. A
+statement that aggregates over `DISTINCT` is now refused with
+`SEMANTIC_QUERY_019` where it used to get `SEMANTIC_QUERY_020`.
+
+### Fixed
+
+#### A partitioned object joined a remapped representation on the wrong column
+
+- An entity reached through a relationship and anchored on an alternate
+  representation whose key needs an F5.1 `DIRECT` remap was joined on the
+  relationship's declared column verbatim — `o.CUSTOMER_KEY = c.CUSTOMER_KEY`
+  against a source with no `CUSTOMER_KEY`. Validation passed, `PUBLISH_MODEL`
+  succeeded and the compile returned `OK`; the published view failed at
+  execution with `object C.CUSTOMER_KEY not found`.
+- The single-branch renderer applied the remap; the multi-branch renderer read
+  the declared condition from the planner snapshot, and an F3-partitioned object
+  always plans multi-branch. Both now apply the same remap, and the multi-branch
+  plan records it in `relationship_identity_remaps`, which it never did.
+  `SEMANTIC_MODEL_050` was right not to fire: the representation has the remap.
+
+#### A fusion document had to restate an identity the catalog already held
+
+- `APPLY_FUSION_DECLARATION` is an upsert, but a document whose entity block
+  added a representation with an `identity_binding` and no `identity` was
+  refused with `SEMANTIC_FUSION_014` ("entity declares no identity") although
+  the catalog held it and `EXPORT_FUSION_DECLARATION` emitted it. An omitted
+  identity is now resolved from the catalog — an entity holds at most one
+  (`SEMANTIC_ADMIN_051`) — and `_014` fires only when neither has one.
+
+#### `COUNT(DISTINCT x)` was reported as the unknown field `DISTINCT`
+
+- Unwrapped, `DISTINCT x` read as a field `DISTINCT` aliased `x`, in `SELECT`,
+  `ORDER BY`, `WHERE` and `HAVING` alike. It is now refused with
+  `SEMANTIC_QUERY_019`, which names the construct and the pattern that runs:
+  wrap the governed query and aggregate outside it. `SEMANTIC_QUERY_005`, which a
+  window in the select list gets, carries the same remedy.
+
+### Changed
+
+- ruff 0.17.3 and mypy 2.4.1; the static checks pass unchanged.
+
 ## [0.5.0] - 2026-10-23
 
 A consumer-safety release, driven by a study of hosted dashboards built on the
@@ -2964,7 +3013,7 @@ not select is refused. Each is called out below.
 
 ## Notes on versioning
 
-Version 0.5.0 is the seventh tagged release. Items above are tracked against the
+Version 0.5.1 is the eighth tagged release. Items above are tracked against the
 development baseline established by the user-study simulations run on
 2026-05-13. Phases 1 and 2 are complete, and the statements Phase 3 deferred --
 subqueries, CTEs and CAST around a semantic object -- compile as of 0.3 through
