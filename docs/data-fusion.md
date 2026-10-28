@@ -551,8 +551,9 @@ Properties worth relying on:
   absent is not a mistake worth making convenient.
 - **A closed contract.** An unknown key is refused by name
   (`SEMANTIC_FUSION_011`), as are a document naming a different model
-  (`_015`) and an identity binding on an entity that declares no identity
-  (`_014`).
+  (`_015`) and an identity binding on an entity that has no identity
+  (`_014`). An identity the document omits is resolved from the catalog, so a
+  delta that only adds a representation need not restate the entity's identity.
 
 The export is proportional to the fusion, not to the model: an entity with one
 representation, no identity and no declarations exports nothing. The demo `sales`

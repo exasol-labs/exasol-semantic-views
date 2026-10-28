@@ -223,6 +223,31 @@ test("fusion document refuses an identity binding with no identity", function()
     assert_contains(tostring(err), "SEMANTIC_FUSION_014")
 end)
 
+test("fusion document resolves an omitted identity from the catalog", function()
+    -- The document is an upsert: leaving the identity out leaves it alone. A
+    -- delta that only adds a representation binding to the entity's existing
+    -- identity was refused with SEMANTIC_FUSION_014 for an identity the catalog
+    -- held and the exporter emitted.
+    local document = {entities = {customer = {representations = {{
+        name = "crm", source_schema = "CRM", source_object = "C",
+        identity_binding = {source_expression = "c.account_id"},
+    }}}}}
+    local query = fake_query(function(sql)
+        if sql:find("FROM SYS_SEMANTIC.MODELS", 1, true) then
+            return {{7, 9, "sales", "DRAFT"}}
+        elseif sql:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
+            return {{1}}
+        elseif sql:find("FROM SYS_SEMANTIC.SEMANTIC_IDENTITIES", 1, true) then
+            return {{"customer", "cid", "GLOBAL", "DECIMAL(18,0)", ""}}
+        end
+        return {}
+    end)
+    local _, operations = api.plan_document(query, "sales", encode_json(document))
+    assert_equal(#operations, 1)
+    assert_contains(operations[1].label, "ADD_ENTITY_REPRESENTATION_WITH_DECLARATIONS")
+    assert_contains(operations[1].params.declarations_json, '"identity_name":"cid"')
+end)
+
 test("fusion document refuses an entity the model does not have", function()
     -- A typo'd entity name is the likeliest error in a hand-edited document, and
     -- it used to report success having done nothing. Unknown *keys* were already

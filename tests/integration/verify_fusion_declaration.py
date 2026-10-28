@@ -461,16 +461,21 @@ def main() -> int:
                 f"hand-edited document: {unknown_entity}")
         print("ok an entity the model does not have is refused by name")
 
-        orphan = {"entities": {"customer": {"representations": [{
+        # The document is an upsert, so a delta that binds a new representation
+        # to the entity's existing identity need not restate it. It was refused
+        # with SEMANTIC_FUSION_014 for an identity the catalog held and the
+        # exporter emitted. The genuine refusal is checked on COVERED below.
+        delta = {"entities": {"customer": {"representations": [{
             "name": "orphan", "source_kind": "RELATION", "source_schema": SCHEMA,
             "source_object": "C_CRM", "priority": 50,
-            "identity_binding": {"source_expression": "c.account_id",
+            "identity_binding": {"source_expression": "c.customer_id",
                                  "binding_kind": "DIRECT"}}]}}}
-        refused = apply_document(con, MODEL, orphan, True)
-        if refused["status"] != "ERROR" or "SEMANTIC_FUSION_014" not in refused["message"]:
+        resolved = apply_document(con, MODEL, delta, True)
+        if resolved["status"] != "DRY_RUN":
             raise AssertionError(
-                f"an identity binding with no identity was accepted: {refused}")
-        print("ok an identity binding without an identity is refused")
+                "a delta omitting the identity the catalog holds was refused: "
+                f"{resolved}")
+        print("ok a delta resolves the entity's identity from the catalog")
 
         # ---- and the fused model still answers correctly --------------------
         request = {"model": MODEL, "object": "C360", "dimensions": ["cname"]}
@@ -501,6 +506,17 @@ def main() -> int:
         # the fixture above has an identity.
         CUT = "2026-01-01 00:00:00"
         build_model(con, COVERED, published=True, with_identity=False)
+
+        orphan = {"entities": {"customer": {"representations": [{
+            "name": "orphan", "source_kind": "RELATION", "source_schema": SCHEMA,
+            "source_object": "C_CRM", "priority": 50,
+            "identity_binding": {"source_expression": "c.account_id",
+                                 "binding_kind": "DIRECT"}}]}}}
+        refused = apply_document(con, COVERED, orphan, True)
+        if refused["status"] != "ERROR" or "SEMANTIC_FUSION_014" not in refused["message"]:
+            raise AssertionError(
+                f"an identity binding with no identity was accepted: {refused}")
+        print("ok an identity binding without an identity is refused")
 
         def coverage_document(crm_coverage: dict, primary_coverage=None) -> dict:
             representations = [{
