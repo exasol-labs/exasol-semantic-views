@@ -3448,6 +3448,17 @@ local function compile_request_table(request, options)
     end
 
     local snapshot = catalog_snapshot_runtime.from_context(ctx, planning_metrics)
+    -- The multi-branch renderer reads join conditions from the snapshot, so they
+    -- carry the same F5.1 endpoint remap build_sql applies. Without it an entity
+    -- anchored on an alternate representation was joined on the declared key
+    -- column verbatim -- `c.CUSTOMER_KEY` against a source with no such column --
+    -- and an F3-partitioned object, which always plans multi-branch, compiled OK
+    -- to SQL that failed at execution. The snapshot is a detached copy, so this
+    -- does not reach ctx.relationships.
+    for _, relationship in ipairs(snapshot.relationships or {}) do
+        relationship.join_condition, relationship.identity_remaps =
+            relationship_join_condition(ctx, relationship)
+    end
     local relationship_targets = {}
     for entity_id, _ in pairs(needed_entities) do
         if entity_id ~= key(ctx.object.root_entity_id) then
@@ -3687,6 +3698,22 @@ local function compile_request_table(request, options)
             end
             physical_plan = rebound_plan
             physical_plan.source_selection = branch_decision
+        end
+        -- Provenance for the remaps the emitted joins actually carry, once per
+        -- relationship; build_sql records the same for the single-branch lane.
+        local remapped = {}
+        for _, branch in ipairs(physical_plan.branches or {}) do
+            for _, join in ipairs(branch.joins or {}) do
+                local relationship = join.relationship_id ~= nil
+                    and snapshot.relationship_by_id[key(join.relationship_id)] or nil
+                if relationship ~= nil and not remapped[key(relationship.id)] then
+                    remapped[key(relationship.id)] = true
+                    for _, remap in ipairs(relationship.identity_remaps or {}) do
+                        ctx.relationship_identity_remaps[
+                            #ctx.relationship_identity_remaps + 1] = remap
+                    end
+                end
+            end
         end
         typed_plan.physical_plan = physical_plan
         local internal_sql = grain_sql_runtime.render_multi_branch(physical_plan)
