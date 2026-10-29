@@ -142,6 +142,36 @@ test("SQL tokenizer handles comments quoted names and nested commas", function()
     assert_equal(api.identifier_from_part(unchanged), "Region")
 end)
 
+test("an aggregate over DISTINCT is named, never read as a field", function()
+    -- `COUNT(DISTINCT x)` unwrapped to `DISTINCT x`, which reads as the field
+    -- DISTINCT aliased x: the refusal sent the author looking for a column
+    -- called DISTINCT.
+    local function part_of(text)
+        local tokens = api.sql_tokens(text)
+        return api.split_top_level(tokens, 1, #tokens, ",")[1]
+    end
+    local distinct = part_of("COUNT(DISTINCT product)")
+    assert_equal(api.identifier_from_part(distinct), nil)
+    local refusal = api.distinct_aggregate_refusal(distinct)
+    assert_equal(refusal.error_code, "SEMANTIC_QUERY_019")
+    assert_contains(refusal.error_message, "COUNT(DISTINCT ...)")
+    assert_contains(refusal.error_message, "Wrap the semantic query")
+    assert_contains(api.distinct_aggregate_refusal(part_of("MEASURE(DISTINCT revenue)"))
+        .error_message, "MEASURE(DISTINCT ...)")
+    -- Not an aggregate over DISTINCT: nothing to say, either way.
+    assert_equal(api.distinct_aggregate_refusal(part_of("COUNT(product)")), nil)
+    assert_equal(api.distinct_aggregate_refusal(part_of("distinct_customers")), nil)
+
+    local tokens = api.sql_tokens("COUNT(DISTINCT revenue) DESC")
+    local order_by, order_err = api.parse_order_by(tokens, 1, #tokens, {}, {})
+    assert_equal(order_by, nil)
+    assert_equal(order_err.error_code, "SEMANTIC_QUERY_019")
+    local where = api.sql_tokens("COUNT(DISTINCT revenue) > 1")
+    local filters, where_err = api.parse_where_filters(where, 1, #where)
+    assert_equal(filters, nil)
+    assert_equal(where_err.error_code, "SEMANTIC_QUERY_019")
+end)
+
 test("SQL tokenizer property survives deterministic whitespace and comments", function()
     local whitespace = {" ", "  ", "\n", "\t", " /* probe */ "}
     for index = 1, 300 do

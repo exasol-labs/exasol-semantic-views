@@ -111,9 +111,35 @@ do
         return rewritten, true, head
     end
 
+    -- What a semantic query cannot express in its own select list, and the
+    -- pattern that does run: the governed query answers at the grain it names,
+    -- and ordinary SQL -- a window, a distinct count -- runs over that result.
+    M.WRAP_REMEDY = "Wrap the semantic query and apply ordinary SQL outside it:"
+        .. " SELECT ..., <expression> FROM (SELECT <fields> FROM <schema>.<object>"
+        .. " GROUP BY <dimensions>)."
+
+    -- `COUNT(DISTINCT x)`. Unwrapped, the argument reads as a field `DISTINCT`
+    -- aliased `x`, and the refusal sent the author looking for a column called
+    -- DISTINCT. Name the construct instead.
+    local function distinct_aggregate_refusal(part)
+        local unwrapped, wrapped, wrapper = unwrap_measure_part(part)
+        if not wrapped or unwrapped[1] == nil
+            or sql_text.token_upper(unwrapped[1]) ~= "DISTINCT" then
+            return nil
+        end
+        return error_result("SEMANTIC_QUERY_019", tostring(wrapper)
+            .. "(DISTINCT ...) is not supported in a semantic query: a metric"
+            .. " already declares its aggregation. " .. M.WRAP_REMEDY)
+    end
+
     local function identifier_from_part(part)
-        part = unwrap_measure_part(part)
+        local wrapped
+        part, wrapped = unwrap_measure_part(part)
         if #part == 0 then
+            return nil
+        end
+        -- Never a field; see distinct_aggregate_refusal.
+        if wrapped and sql_text.token_upper(part[1]) == "DISTINCT" then
             return nil
         end
         local end_index = #part
@@ -394,8 +420,11 @@ do
                 end
                 goto continue_chunk
             end
-            local field = identifier_from_part(token_slice(tokens, first, op_index - 1))
+            local subject = token_slice(tokens, first, op_index - 1)
+            local field = identifier_from_part(subject)
             if field == nil then
+                local distinct_refusal = distinct_aggregate_refusal(subject)
+                if distinct_refusal ~= nil then return nil, distinct_refusal end
                 return nil, error_result("SEMANTIC_QUERY_031", clause.subject_required)
             end
             -- WHERE keeps the author's spelling and resolves later, against the
@@ -523,6 +552,8 @@ do
                 field = selected_output[ordinal]
             end
             if field == nil then
+                local distinct_refusal = distinct_aggregate_refusal(part)
+                if distinct_refusal ~= nil then return nil, distinct_refusal end
                 return nil, error_result("SEMANTIC_QUERY_060", "ORDER BY supports selected semantic fields only.")
             end
             if select_aliases ~= nil and select_aliases[upper(field)] ~= nil then
@@ -538,6 +569,7 @@ do
     M.METRIC_WRAPPERS = METRIC_WRAPPERS
     M.unwrap_measure_part = unwrap_measure_part
     M.identifier_from_part = identifier_from_part
+    M.distinct_aggregate_refusal = distinct_aggregate_refusal
     M.alias_from_select_part = alias_from_select_part
     M.literal_from_tokens = literal_from_tokens
     M.find_top_level_clauses = find_top_level_clauses

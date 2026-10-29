@@ -91,7 +91,10 @@ LIMIT 10;
 
 `SELECT` accepts semantic field names, `SELECT *`, and the Databricks-style
 metric wrappers `MEASURE(metric)` and `agg(metric)`. `MEASURE()` / `agg()` may
-only wrap metrics; wrapping a dimension returns `SEMANTIC_QUERY_006`.
+only wrap metrics; wrapping a dimension returns `SEMANTIC_QUERY_006`. An
+aggregate over `DISTINCT` (`COUNT(DISTINCT product)`) is refused with
+`SEMANTIC_QUERY_019`: select the field in a wrapped query and count outside it,
+`SELECT COUNT(DISTINCT product) FROM (SELECT product FROM … GROUP BY product)`.
 
 A named aggregate around a metric (`SUM(total_revenue)`) is honoured when it is
 the aggregation the metric declares. Otherwise it would put a different

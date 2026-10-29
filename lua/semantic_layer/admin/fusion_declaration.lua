@@ -724,6 +724,16 @@ local function plan_entity(query_fn, model, entity_name, entity)
                     description = trim(identity.description)},
             }
         end
+    else
+        -- Upsert: an omitted identity is one the document leaves alone, not one
+        -- the entity lacks. A delta that only adds a representation binding to
+        -- the existing identity has to resolve it from the catalog, or it is
+        -- refused for an identity the exporter itself would have emitted. An
+        -- entity holds at most one active identity (SEMANTIC_ADMIN_051).
+        local held = identity_rows(query_fn, model, entity_name)
+        if held ~= nil and #held > 0 then
+            identity_name = row_value(held[1], "IDENTITY_NAME", 2)
+        end
     end
 
     local present = existing_representations(query_fn, model, entity_name)
@@ -799,7 +809,7 @@ local function plan_entity(query_fn, model, entity_name, entity)
             if identity_name == nil then
                 error("SEMANTIC_FUSION_014: representation '" .. name
                     .. "' declares an identity_binding but entity '" .. entity_name
-                    .. "' declares no identity")
+                    .. "' has no identity, in the document or the catalog")
             end
             local identity_declaration = {
                 identity_name = identity_name,
