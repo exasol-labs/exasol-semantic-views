@@ -31,6 +31,11 @@ end
 local function sql_string(value)
     return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
 end
+-- The preprocessor splices compiled SQL into the statement with its line
+-- breaks turned into spaces, so the two are compared that way.
+local function one_line(value)
+    return (string.gsub(tostring(value), "[\r\n]", " "))
+end
 
 if missing(MODEL_NAME) then
     error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
@@ -50,7 +55,8 @@ local published_schema = row_value(model_rows[1], "PUBLISHED_SCHEMA", 2)
 local frozen = query([[
     SELECT fv.VIEW_SCHEMA, fv.VIEW_NAME, fv.OBJECT_NAME, fv.FROZEN_COLUMNS,
            fv.FROZEN_SQL,
-           CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS
+           CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS,
+           v.VIEW_TEXT
       FROM SYS_SEMANTIC.FROZEN_VIEWS fv
       LEFT JOIN SYS.EXA_ALL_VIEWS v
         ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
@@ -67,6 +73,7 @@ for _, row in ipairs(frozen or {}) do
     local frozen_columns = tostring(row_value(row, "FROZEN_COLUMNS", 4) or "")
     local frozen_sql = row_value(row, "FROZEN_SQL", 5)
     local still_exists = tonumber(row_value(row, "STILL_EXISTS", 6) or 0) == 1
+    local view_text = row_value(row, "VIEW_TEXT", 7)
 
     if not still_exists then
         output_rows[#output_rows + 1] = {view_schema, view_name, "DROPPED",
@@ -77,6 +84,16 @@ for _, row in ipairs(frozen or {}) do
         output_rows[#output_rows + 1] = {view_schema, view_name, "UNKNOWN",
             "No compiled baseline was recorded for this view; re-create it to"
             .. " start tracking it."}
+    elseif not missing(view_text) and not string.find(one_line(view_text),
+            one_line(frozen_sql), 1, true) then
+        -- The record is written before Exasol runs the statement, and the view
+        -- can be replaced by one the preprocessor never saw. Either way the view
+        -- does not hold what was recorded, so comparing the record with the
+        -- model would answer a question about some other SQL.
+        output_rows[#output_rows + 1] = {view_schema, view_name, "UNKNOWN",
+            "The view no longer holds the SQL recorded for it: it was re-created"
+            .. " without this semantic object, or the statement that recorded it"
+            .. " did not run. Re-create it over the object to track it again."}
     else
         local parts = {}
         for column in string.gmatch(frozen_columns, "[^,]+") do

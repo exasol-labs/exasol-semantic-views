@@ -402,6 +402,15 @@ answering it needs the compiler. There is deliberately no version comparison:
 ESV creates one model version per model and authoring mutates it in place, so a
 version check could never fire.
 
+Each view has one record, describing it as it now stands: re-creating a view
+replaces its record, so re-creating a `STALE` view is the remedy and the report
+then reads `CURRENT`. A view created with an unqualified name is recorded in the
+session's open schema. The record is written while the statement is rewritten,
+before Exasol runs it, so `CHECK_FROZEN_VIEWS` first checks that the view still
+holds the recorded SQL; when it does not — the view was re-created without the
+semantic object, or the statement never ran — it reports `UNKNOWN` rather than
+judging SQL the view does not hold.
+
 `VALIDATE_MODEL` reports the part the catalog *can* settle, which is also the
 dangerous part — `SEMANTIC_MODEL_068`, a frozen view reading a relation the model
 no longer vouches for, because a rollup was retired or has diverged from the

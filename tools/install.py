@@ -473,6 +473,25 @@ def migrate_version_status(con: Connection) -> int:
     return int(statement.rowcount())
 
 
+def migrate_frozen_view_history(con: Connection) -> int:
+    """Remove frozen-view records a later compilation of the same view replaced.
+
+    The preprocessor appended a record each time a view was compiled, so a
+    re-created view kept its earlier records and CHECK_FROZEN_VIEWS reported
+    each of them. It now replaces them; this clears what an older build left.
+    Idempotent. Returns how many records it removed.
+    """
+    if not table_exists(con, "SYS_SEMANTIC", "FROZEN_VIEWS"):
+        return 0
+    statement = con.execute(
+        "DELETE FROM SYS_SEMANTIC.FROZEN_VIEWS fv WHERE EXISTS ("
+        "SELECT 1 FROM SYS_SEMANTIC.FROZEN_VIEWS n"
+        " WHERE n.VIEW_SCHEMA = fv.VIEW_SCHEMA AND n.VIEW_NAME = fv.VIEW_NAME"
+        " AND n.MODEL_ID = fv.MODEL_ID AND n.OBJECT_NAME = fv.OBJECT_NAME"
+        " AND n.FROZEN_VIEW_ID > fv.FROZEN_VIEW_ID)")
+    return int(statement.rowcount())
+
+
 def migrate_renamed_tables(con: Connection) -> list[str]:
     """Carry an existing catalog across a table rename. Returns what it moved."""
     moved = []
@@ -723,6 +742,9 @@ def main() -> int:
     corrected = migrate_version_status(con)
     if corrected:
         print(f"      {dim(f'marked {corrected} published model version(s) PUBLISHED')}")
+    replaced = migrate_frozen_view_history(con)
+    if replaced:
+        print(f"      {dim(f'removed {replaced} superseded frozen-view record(s)')}")
     install_elapsed = time.monotonic() - t_install
 
     # record which build this deployment is now running, before the example

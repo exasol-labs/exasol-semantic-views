@@ -949,6 +949,43 @@ class InstallerResetTest(unittest.TestCase):
         self.assertEqual(0, INSTALL.migrate_version_status(fresh))
         self.assertFalse([sql for sql in fresh.sql if sql.startswith("UPDATE")])
 
+    def test_superseded_frozen_view_records_are_removed(self):
+        """An older build appended a record per compilation of the same view.
+
+        Only records a newer compilation of the same view and object replaced
+        are removed, so the newest -- what the view now holds -- survives, and a
+        catalog without the table is skipped.
+        """
+        class Deleted(Result):
+            def __init__(self, count):
+                super().__init__([])
+                self.count = count
+
+            def rowcount(self):
+                return self.count
+
+        class Catalog:
+            def __init__(self, has_table, superseded):
+                self.has_table, self.superseded, self.sql = has_table, superseded, []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)] if self.has_table else [])
+                if sql.startswith("DELETE FROM SYS_SEMANTIC.FROZEN_VIEWS"):
+                    return Deleted(self.superseded)
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        upgraded = Catalog(has_table=True, superseded=2)
+        self.assertEqual(2, INSTALL.migrate_frozen_view_history(upgraded))
+        delete = upgraded.sql[-1]
+        for kept_apart in ("VIEW_SCHEMA", "VIEW_NAME", "MODEL_ID", "OBJECT_NAME"):
+            self.assertIn(f"n.{kept_apart} = fv.{kept_apart}", delete)
+        self.assertIn("n.FROZEN_VIEW_ID > fv.FROZEN_VIEW_ID", delete)
+        fresh = Catalog(has_table=False, superseded=0)
+        self.assertEqual(0, INSTALL.migrate_frozen_view_history(fresh))
+        self.assertFalse([sql for sql in fresh.sql if sql.startswith("DELETE")])
+
     def test_added_columns_are_migrated_before_the_views_that_read_them(self):
         """A view built before its column exists fails the whole upgrade.
 

@@ -5670,17 +5670,19 @@ do
     -- answer, and no error. That is a capability and a liability in the same
     -- statement, so a freeze is recorded rather than left to be discovered.
     --
-    -- Returns the target schema and name, or nil when the statement is not a
-    -- view definition.
+    -- Returns the target schema and name, and whether the statement replaces
+    -- an existing view; nil when the statement is not a view definition.
     function bi_expansion.frozen_view_target(tokens)
         local index = 1
         if sql_text.token_upper(tokens[index]) ~= "CREATE" then
             return nil
         end
         index = index + 1
+        local replaces = false
         if sql_text.token_upper(tokens[index]) == "OR"
             and sql_text.token_upper(tokens[index + 1]) == "REPLACE" then
             index = index + 2
+            replaces = true
         end
         if sql_text.token_upper(tokens[index]) == "FORCE" then
             index = index + 1
@@ -5700,13 +5702,40 @@ do
         end
         if tokens[index + 1] ~= nil and tokens[index + 1].text == "."
             and syntax.token_identifier_value(tokens[index + 2]) ~= nil then
-            return first, syntax.token_identifier_value(tokens[index + 2])
+            return first, syntax.token_identifier_value(tokens[index + 2]), replaces
         end
-        -- An unqualified view lands in whatever schema the session has open,
-        -- which the preprocessor cannot see. Recorded with an empty schema
-        -- rather than guessed at: a wrong schema in the catalog would be worse
-        -- than an absent one, because it reads as a fact.
-        return "", first
+        -- An unqualified view lands in whatever schema the session has open;
+        -- record_target resolves it.
+        return "", first, replaces
+    end
+
+    -- Where the view this statement creates will be, or nil when the statement
+    -- will not create it, so that nothing is recorded for it.
+    --
+    -- The record is written while the statement is being rewritten, before
+    -- Exasol runs it, so it has to predict the outcome. An unqualified name
+    -- lands in the session's open schema, which the preprocessor runs in and
+    -- can read; it was recorded with an empty schema instead, which no view
+    -- matches, so CHECK_FROZEN_VIEWS reported every such view -- ibis's schema
+    -- probe among them -- as DROPPED. With no schema open the CREATE fails. A
+    -- plain CREATE VIEW over an existing view fails too: recording it replaced
+    -- the record of the view that stays.
+    function bi_expansion.record_target(view_schema, view_name, replaces)
+        local schema = view_schema
+        if schema == "" then
+            local ok, rows = pcall(query, "SELECT CURRENT_SCHEMA")
+            schema = ok and rows and rows[1] and rows[1][1] or nil
+            if schema == nil or schema == null then return nil end
+        end
+        if not replaces then
+            local ok, rows = pcall(query, [[
+                SELECT 1 FROM SYS.EXA_ALL_VIEWS
+                WHERE UPPER(VIEW_SCHEMA) = UPPER(:view_schema)
+                  AND UPPER(VIEW_NAME) = UPPER(:view_name)
+            ]], {view_schema = tostring(schema), view_name = view_name})
+            if ok and rows ~= nil and #rows > 0 then return nil end
+        end
+        return tostring(schema)
     end
 
     function bi_expansion.rewrite(statement_text)
@@ -5742,7 +5771,7 @@ do
                 .. " Each one is a separate compile.")
         end
 
-        local view_schema, view_name = bi_expansion.frozen_view_target(tokens)
+        local view_schema, view_name, view_replaces = bi_expansion.frozen_view_target(tokens)
         local frozen = {}
 
         -- Reverse order, so an earlier reference's character offsets are still
@@ -6008,7 +6037,20 @@ do
         -- half way leaves no record of a view it never created. Best effort:
         -- losing the record must not fail a CREATE VIEW that otherwise works,
         -- and VALIDATE_MODEL reconciles against EXA_ALL_VIEWS either way.
-        for _, entry in ipairs(frozen) do
+        --
+        -- A record describes the view as it now stands, so it replaces the
+        -- view's earlier ones. Appending kept every compilation: re-creating a
+        -- STALE view -- the documented remedy -- added a CURRENT row beside the
+        -- STALE ones, and the view reported STALE for good.
+        local record_schema = #frozen > 0
+            and bi_expansion.record_target(view_schema, view_name, view_replaces) or nil
+        if record_schema ~= nil then
+            pcall(query, [[
+                DELETE FROM SYS_SEMANTIC.FROZEN_VIEWS
+                WHERE VIEW_SCHEMA = :view_schema AND VIEW_NAME = :view_name
+            ]], {view_schema = upper(record_schema), view_name = upper(view_name)})
+        end
+        for _, entry in ipairs(record_schema ~= nil and frozen or {}) do
             pcall(query, [[
                 INSERT INTO SYS_SEMANTIC.FROZEN_VIEWS (
                   MODEL_ID, VERSION_ID, VIEW_SCHEMA, VIEW_NAME, OBJECT_NAME,
@@ -6020,7 +6062,7 @@ do
             ]], {
                 model_id = entry.model.model_id,
                 version_id = entry.model.version_id,
-                view_schema = upper(view_schema),
+                view_schema = upper(record_schema),
                 view_name = upper(view_name),
                 object_name = entry.reference.object_name,
                 columns = entry.columns,
