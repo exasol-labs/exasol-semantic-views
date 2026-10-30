@@ -912,6 +912,43 @@ class InstallerResetTest(unittest.TestCase):
         absent = NoTable(columns=[])
         self.assertEqual([], INSTALL.migrate_added_columns(absent))
 
+    def test_a_published_models_version_row_stops_reading_draft(self):
+        """PUBLISH_MODEL used to leave the model's one version row as DRAFT.
+
+        The installer corrects rows that predate the fix, and only those: the
+        update is scoped to published models whose version disagrees, so a
+        reinstall corrects nothing twice. A catalog without the table is skipped.
+        """
+        class Updated(Result):
+            def __init__(self, count):
+                super().__init__([])
+                self.count = count
+
+            def rowcount(self):
+                return self.count
+
+        class Catalog:
+            def __init__(self, has_table, stale_rows):
+                self.has_table, self.stale_rows, self.sql = has_table, stale_rows, []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)] if self.has_table else [])
+                if sql.startswith("UPDATE SYS_SEMANTIC.MODEL_VERSIONS"):
+                    return Updated(self.stale_rows)
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        upgraded = Catalog(has_table=True, stale_rows=3)
+        self.assertEqual(3, INSTALL.migrate_version_status(upgraded))
+        update = upgraded.sql[-1]
+        self.assertIn("m.STATUS = 'PUBLISHED'", update)
+        self.assertIn("mv.STATUS <> m.STATUS", update)
+        self.assertEqual(0, INSTALL.migrate_version_status(Catalog(True, 0)))
+        fresh = Catalog(has_table=False, stale_rows=0)
+        self.assertEqual(0, INSTALL.migrate_version_status(fresh))
+        self.assertFalse([sql for sql in fresh.sql if sql.startswith("UPDATE")])
+
     def test_added_columns_are_migrated_before_the_views_that_read_them(self):
         """A view built before its column exists fails the whole upgrade.
 

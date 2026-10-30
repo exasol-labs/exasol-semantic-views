@@ -65,6 +65,11 @@ FROM SEMANTIC_SOURCE.MODELS m
 LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
   ON mv.VERSION_ID = m.ACTIVE_VERSION_ID;
 
+-- A model has one version, which authoring edits in place: VERSION_LABEL and
+-- CHANGE_SUMMARY describe it as it was created, not as it is. STATUS is the
+-- model's lifecycle status, read rather than restated -- the version row's own
+-- column kept the DRAFT it was created with after the model was published --
+-- and DEFINITION_HASH is what moves when the version's content changes.
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.MODEL_VERSIONS AS
 SELECT
   mv.VERSION_ID,
@@ -72,13 +77,17 @@ SELECT
   m.MODEL_NAME,
   mv.VERSION_NUMBER,
   mv.VERSION_LABEL,
-  mv.STATUS,
+  CASE WHEN mv.VERSION_ID = m.ACTIVE_VERSION_ID THEN m.STATUS ELSE mv.STATUS END
+    AS STATUS,
   mv.CHANGE_SUMMARY,
+  h.DEFINITION_HASH,
   mv.CREATED_AT,
   mv.CREATED_BY
 FROM SEMANTIC_SOURCE.MODEL_VERSIONS mv
 JOIN SEMANTIC_SOURCE.MODELS m
-  ON m.MODEL_ID = mv.MODEL_ID;
+  ON m.MODEL_ID = mv.MODEL_ID
+LEFT JOIN SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES h
+  ON h.MODEL_ID = mv.MODEL_ID AND h.VERSION_ID = mv.VERSION_ID;
 
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.ENTITIES AS
 SELECT

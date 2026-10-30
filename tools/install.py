@@ -456,6 +456,23 @@ def migrate_added_columns(con: Connection) -> list[str]:
     return added
 
 
+def migrate_version_status(con: Connection) -> int:
+    """Correct version rows that kept DRAFT after their model was published.
+
+    PUBLISH_MODEL used to set the model's status and leave its one version row
+    as CREATE_MODEL wrote it. Idempotent: a row already in step is untouched.
+    Returns how many rows it corrected.
+    """
+    if not table_exists(con, "SYS_SEMANTIC", "MODEL_VERSIONS"):
+        return 0
+    statement = con.execute(
+        "UPDATE SYS_SEMANTIC.MODEL_VERSIONS mv SET STATUS = m.STATUS"
+        " FROM SYS_SEMANTIC.MODEL_VERSIONS mv"
+        " JOIN SYS_SEMANTIC.MODELS m ON m.ACTIVE_VERSION_ID = mv.VERSION_ID"
+        " WHERE m.STATUS = 'PUBLISHED' AND mv.STATUS <> m.STATUS")
+    return int(statement.rowcount())
+
+
 def migrate_renamed_tables(con: Connection) -> list[str]:
     """Carry an existing catalog across a table rename. Returns what it moved."""
     moved = []
@@ -703,6 +720,9 @@ def main() -> int:
         print(f"      {dim('created role ' + role)}")
     for added in install_files(con):
         print(f"      {dim('added column ' + added)}")
+    corrected = migrate_version_status(con)
+    if corrected:
+        print(f"      {dim(f'marked {corrected} published model version(s) PUBLISHED')}")
     install_elapsed = time.monotonic() - t_install
 
     # record which build this deployment is now running, before the example
