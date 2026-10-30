@@ -5496,22 +5496,27 @@ do
     -- So it is compiled by that lane, and the compiled SQL replaces the block;
     -- everything outside it stays ordinary SQL for Exasol.
     --
-    -- Returns the block's span, or nil: the block must be parenthesized (a
-    -- top-level statement is the whole-statement lane's already), read only this
-    -- object (a join is _012's), contain no other semantic reference, and
-    -- aggregate -- GROUP BY / HAVING, or an aggregate wrapper in its select list.
+    -- Returns the block's span, or nil: the block must be parenthesized or the
+    -- query body of a DDL/DML statement (a top-level SELECT is the
+    -- whole-statement lane's already), read only this object (a join is _012's),
+    -- contain no other semantic reference, and aggregate -- GROUP BY / HAVING, or
+    -- an aggregate wrapper in its select list.
     function bi_expansion.semantic_block(tokens, reference, references)
         local first, last = bi_expansion.select_list_range(tokens, reference)
         if first == nil then return nil end
         local select_index = first - 1
         local open = tokens[select_index - 1]
-        if open == nil or open.text ~= "(" then return nil end
+        local body = open ~= nil and open.text ~= "("
+            and bi_expansion.statement_query_body(tokens, select_index)
+        if open == nil or (open.text ~= "(" and not body) then return nil end
         if bi_expansion.composed_in_from(tokens, reference) then return nil end
         local block_last = #tokens
         for index = reference.last + 1, #tokens do
             local token = tokens[index]
+            local word = sql_text.token_upper(token)
             if token.depth < reference.depth or (token.depth == reference.depth
-                and bi_expansion.SET_OPERATORS[sql_text.token_upper(token)]) then
+                and (bi_expansion.SET_OPERATORS[word]
+                    or (body and bi_expansion.BODY_TRAILERS[word]))) then
                 block_last = index - 1
                 break
             end
@@ -5538,6 +5543,31 @@ do
             last_pos = tokens[block_last].end_pos,
         }
     end
+
+    -- `CREATE VIEW v AS SELECT ...`, `CREATE TABLE t AS SELECT ...` and
+    -- `INSERT INTO t SELECT ...` carry a query the whole-statement lane would
+    -- compile bare, but it refuses the statement for not being a SELECT
+    -- (`_009`). Only a parenthesized block was compiled as one here, so the
+    -- body's GROUP BY was read as grouping the object a second time and refused
+    -- with _015: a query legal on its own was illegal as a view, and ibis, which
+    -- infers a schema with CREATE VIEW ... AS <query>, could not read a
+    -- governed result at all. The body is the statement's first top-level
+    -- SELECT; another arm of a set operation is not a whole query.
+    function bi_expansion.statement_query_body(tokens, select_index)
+        local head = sql_text.token_upper(tokens[1])
+        if head ~= "CREATE" and head ~= "INSERT" then return false end
+        if tokens[select_index].depth ~= 0 then return false end
+        for index = 1, select_index - 1 do
+            if tokens[index].depth == 0 and sql_text.token_upper(tokens[index]) == "SELECT" then
+                return false
+            end
+        end
+        return true
+    end
+
+    -- What Exasol allows after a CTAS or view body, `WITH [NO] DATA` and
+    -- `COMMENT IS`, which belong to the statement, not to the query.
+    bi_expansion.BODY_TRAILERS = {WITH = true, COMMENT = true}
 
     function bi_expansion.composed_in_from(tokens, reference)
         -- Walked outward, not just across the reference's own FROM clause.

@@ -229,6 +229,11 @@ Everything outside the parentheses stays ordinary SQL that Exasol handles
 natively. A `CREATE VIEW` over a semantic object therefore stores *compiled*
 SQL, so the view answers with no preprocessor at all.
 
+The body of `CREATE VIEW … AS`, `CREATE TABLE … AS` and `INSERT INTO … SELECT`
+is compiled exactly as the same query on its own, `GROUP BY` included: a governed
+query that runs as a `SELECT` runs as a view or an extract, which is also how
+ibis infers a result's schema (`CREATE VIEW "ibis_…" AS <query>`).
+
 **Which columns get compiled is inferred from the statement**: every
 `alias.column` reference, unqualified names matching a published column, and
 `*` — where a bare `*` counts only when it is selected from the same query block
