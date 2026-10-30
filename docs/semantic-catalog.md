@@ -776,8 +776,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION(
 );
 ```
 
-Proposals are pinned to the model's active version and duplicate pending
-payloads are idempotent. They do not change model metadata. A human reviewer
+Proposals are pinned to the model's `DEFINITION_HASH` at the time they are
+made (`PROPOSED_DEFINITION_HASH`), and duplicate pending payloads against the
+same definition are idempotent. They do not change model metadata. A human reviewer
 records the decision separately:
 
 ```sql
@@ -787,8 +788,14 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION(
 ```
 
 The other terminal decision is `REJECTED`. A decision is one-way, review notes
-are retained in `MODEL_EVOLUTION_REVIEWS`, and stale proposals cannot be
-certified after the active version changes. `CERTIFIED` means the proposal may
+are retained in `MODEL_EVOLUTION_REVIEWS`, and a stale proposal cannot be
+certified. A proposal is stale once the model's definition hash has moved
+(`IS_STALE`, beside `PROPOSED_DEFINITION_HASH` and `CURRENT_DEFINITION_HASH` in
+`MODEL_EVOLUTION_SUGGESTIONS`), which any change a consumer could observe does;
+the version number cannot measure it, because authoring mutates a model's one
+version in place. Reject a stale proposal and propose it again: the new one is
+pinned to the current definition. A proposal made before 0.5.2 carries no hash
+and reads as stale. `CERTIFIED` means the proposal may
 be implemented; it does not activate it. Apply the reviewed change through the
 normal admin DDL, then validate and publish. The compiler does not read either
 evolution table.

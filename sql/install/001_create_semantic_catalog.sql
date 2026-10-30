@@ -569,7 +569,12 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS (
   CREATED_AT           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CREATED_BY           VARCHAR(256) DEFAULT CURRENT_USER,
   REVIEWED_AT          TIMESTAMP,
-  REVIEWED_BY          VARCHAR(256)
+  REVIEWED_BY          VARCHAR(256),
+  -- The model's DEFINITION_HASH when the suggestion was made: what "stale"
+  -- is measured against. VERSION_ID cannot be, because authoring mutates a
+  -- model's one version in place, so it never moves. NULL on a suggestion
+  -- made before this column existed, which therefore reads as stale.
+  PROPOSED_DEFINITION_HASH VARCHAR(64)
 );
 
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS (
