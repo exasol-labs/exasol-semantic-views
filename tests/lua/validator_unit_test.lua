@@ -3581,3 +3581,39 @@ test("source trust classifies every relation the planner may emit", function()
     assert_branch("validator.trust.mode", run("GOVERNED", RAW_REP, {}, {}, {}) ~= nil, true)
     assert_branch("validator.trust.mode", false, false)
 end)
+
+test("a materialization built from an earlier definition is reported", function()
+    -- The selector already refuses it; this is where the owner who redefined
+    -- the field learns which aggregate to rebuild. No active materialization,
+    -- no hash read.
+    local function run(active, drifted)
+        local ctx = {model_id = 1, version_id = 7, issues = {}, issue_seen = {},
+            error_count = 0, warning_count = 0}
+        local hash_reads = 0
+        with_query(function(sql)
+            if sql:find("SELECT COUNT(*) FROM SYS_SEMANTIC.MATERIALIZATIONS", 1, true) then
+                return {{active}}
+            elseif sql:find("FIELD_DEFINITION_HASHES", 1, true) then
+                hash_reads = hash_reads + 1
+                return drifted
+            end
+            error("unexpected SQL: " .. sql)
+        end, function() api.check_materialization_definitions(ctx) end)
+        return ctx.issues, hash_reads
+    end
+    local issues, reads = run(0, {})
+    assert_equal(#issues, 0)
+    assert_equal(reads, 0)
+
+    issues = run(1, {{"by_region", "METRIC", "revenue"}, {"by_region", "DIMENSION", "region"},
+        {"by_month", "METRIC", "revenue"}})
+    assert_equal(#issues, 2)
+    assert_equal(issues[1].rule_code, "SEMANTIC_MODEL_077")
+    assert_equal(issues[1].severity, "WARNING")
+    assert_contains(issues[1].message, "metric revenue, dimension region")
+    assert_contains(issues[1].message, "MARK_MATERIALIZATION_REFRESHED")
+    assert_equal(issues[2].object_name, "by_month")
+
+    issues = run(1, {})
+    assert_equal(#issues, 0)
+end)

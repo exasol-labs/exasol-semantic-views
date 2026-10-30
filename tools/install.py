@@ -405,6 +405,7 @@ ADDED_COLUMNS = [
     ("MATERIALIZATIONS", "SOURCE_SNAPSHOT", "VARCHAR(512)"),
     ("MATERIALIZATIONS", "FRESHNESS_MAX_AGE_SECONDS", "DECIMAL(18,0)"),
     ("MODEL_EVOLUTION_SUGGESTIONS", "PROPOSED_DEFINITION_HASH", "VARCHAR(64)"),
+    ("MATERIALIZATION_COLUMNS", "DEFINITION_HASH", "VARCHAR(64)"),
 ]
 
 
@@ -489,6 +490,26 @@ def migrate_frozen_view_history(con: Connection) -> int:
         " WHERE n.VIEW_SCHEMA = fv.VIEW_SCHEMA AND n.VIEW_NAME = fv.VIEW_NAME"
         " AND n.MODEL_ID = fv.MODEL_ID AND n.OBJECT_NAME = fv.OBJECT_NAME"
         " AND n.FROZEN_VIEW_ID > fv.FROZEN_VIEW_ID)")
+    return int(statement.rowcount())
+
+
+def migrate_materialization_definitions(con: Connection) -> int:
+    """Stamp materialization columns mapped before definitions were recorded.
+
+    A column records the definition hash of the field it holds, and the
+    selector refuses a materialization whose fields were redefined since. A
+    column mapped by an older build has no hash; it is stamped with the current
+    one, which is what the selector assumed until now, so an upgrade changes no
+    answer and a later redefinition is caught. Returns how many it stamped.
+    """
+    if not table_exists(con, "SYS_SEMANTIC", "MATERIALIZATION_COLUMNS"):
+        return 0
+    statement = con.execute(
+        "UPDATE SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc SET DEFINITION_HASH = h.DEFINITION_HASH"
+        " FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc"
+        " JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h"
+        " ON h.FIELD_KIND = mc.OBJECT_TYPE AND h.FIELD_ID = mc.OBJECT_ID"
+        " WHERE mc.DEFINITION_HASH IS NULL")
     return int(statement.rowcount())
 
 
@@ -745,6 +766,9 @@ def main() -> int:
     replaced = migrate_frozen_view_history(con)
     if replaced:
         print(f"      {dim(f'removed {replaced} superseded frozen-view record(s)')}")
+    stamped = migrate_materialization_definitions(con)
+    if stamped:
+        print(f"      {dim(f'recorded the definition of {stamped} materialization column(s)')}")
     install_elapsed = time.monotonic() - t_install
 
     # record which build this deployment is now running, before the example

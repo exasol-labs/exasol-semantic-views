@@ -867,6 +867,18 @@ those tables as materializations of the live model, with a `MAX_AGE` policy.
 The compiler treats this registry as an optimizer input. It never uses a
 materialization to make an invalid metric/dimension request valid.
 
+### Definition: what the aggregate was built from
+
+Freshness bounds how *old* the data is; it says nothing about which definition
+produced it. A dimension or metric keeps its id when it is redefined, so each
+mapped column also records the field's `DEFINITION_HASH` when it is added. Once a
+mapped field is redefined, the selector refuses the materialization with reason
+code `DEFINITION_CHANGED` and the sources answer, and `VALIDATE_MODEL` names it in
+`SEMANTIC_MODEL_077`. Any redefined field disqualifies it, because a redefined
+dimension changes the grain of every metric beside it. Rebuild the object and call
+`MARK_MATERIALIZATION_REFRESHED`, which records the current definitions as the
+ones the object now holds.
+
 ### Accelerating a model without a second model
 
 A registered materialization is how one model serves the same metrics from a

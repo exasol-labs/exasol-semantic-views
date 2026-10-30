@@ -688,6 +688,11 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MATERIALIZATION_COLUMNS (
   OBJECT_ID          DECIMAL(18,0) NOT NULL,
   PHYSICAL_COLUMN    VARCHAR(256) NOT NULL,
   ROLLUP_POLICY      VARCHAR(64),
+  -- The field's DEFINITION_HASH when the column was mapped or the object last
+  -- marked refreshed: the definition the aggregate holds. A field redefined
+  -- since keeps its id, so without this the selector kept serving numbers
+  -- computed from the old definition.
+  DEFINITION_HASH    VARCHAR(64),
   PRIMARY KEY (MATERIALIZATION_ID, OBJECT_TYPE, OBJECT_ID)
 );
 

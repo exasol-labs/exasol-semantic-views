@@ -986,6 +986,43 @@ class InstallerResetTest(unittest.TestCase):
         self.assertEqual(0, INSTALL.migrate_frozen_view_history(fresh))
         self.assertFalse([sql for sql in fresh.sql if sql.startswith("DELETE")])
 
+    def test_materialization_columns_mapped_before_hashes_are_stamped(self):
+        """A column mapped by an older build has no definition hash.
+
+        It is stamped with the field's current hash -- what the selector assumed
+        until now -- so an upgrade changes no answer and a later redefinition is
+        caught. Only unstamped columns are touched, so a column a refresh
+        stamped keeps its hash, and a catalog without the table is skipped.
+        """
+        class Updated(Result):
+            def __init__(self, count):
+                super().__init__([])
+                self.count = count
+
+            def rowcount(self):
+                return self.count
+
+        class Catalog:
+            def __init__(self, has_table, unstamped):
+                self.has_table, self.unstamped, self.sql = has_table, unstamped, []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)] if self.has_table else [])
+                if sql.startswith("UPDATE SYS_SEMANTIC.MATERIALIZATION_COLUMNS"):
+                    return Updated(self.unstamped)
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        upgraded = Catalog(has_table=True, unstamped=4)
+        self.assertEqual(4, INSTALL.migrate_materialization_definitions(upgraded))
+        update = upgraded.sql[-1]
+        self.assertIn("FIELD_DEFINITION_HASHES", update)
+        self.assertIn("mc.DEFINITION_HASH IS NULL", update)
+        fresh = Catalog(has_table=False, unstamped=0)
+        self.assertEqual(0, INSTALL.migrate_materialization_definitions(fresh))
+        self.assertFalse([sql for sql in fresh.sql if sql.startswith("UPDATE")])
+
     def test_added_columns_are_migrated_before_the_views_that_read_them(self):
         """A view built before its column exists fails the whole upgrade.
 

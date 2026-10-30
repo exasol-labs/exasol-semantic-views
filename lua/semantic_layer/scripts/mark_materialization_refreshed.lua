@@ -96,6 +96,18 @@ query([[
 ]], {refreshed_at = refreshed_at, row_count = row_count,
      source_snapshot = missing(SOURCE_SNAPSHOT) and null or tostring(SOURCE_SNAPSHOT),
      materialization_id = materialization_id})
+-- Marking a refresh vouches for the object's contents as the model now
+-- defines them, so its columns take the current definition hashes. A field
+-- redefined since the last refresh made the selector refuse the object
+-- (DEFINITION_CHANGED); this is how the refresh job puts it back in service.
+query([[
+    UPDATE SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc
+    SET DEFINITION_HASH = h.DEFINITION_HASH
+    FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc
+    JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+      ON h.FIELD_KIND = mc.OBJECT_TYPE AND h.FIELD_ID = mc.OBJECT_ID
+    WHERE mc.MATERIALIZATION_ID = :materialization_id
+]], {materialization_id = materialization_id})
 -- Freshness decides whether the selector may choose it, so cached compiles
 -- for this version no longer describe what a compile would do.
 query([[
