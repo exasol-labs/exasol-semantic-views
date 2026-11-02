@@ -293,7 +293,7 @@ class OneConditionOneRuleCode(unittest.TestCase):
 TICKET_NAMED = re.compile(r"^(?:verify|test)_(?:bug\d+|g\d+|fb\d+|f\d+_|milestone\d+)")
 
 # Drained to empty on 2026-08-31. The 2026-08-25 review pinned 24 names and
-# declined to rename them, for a good reason: a rename touches run_smoke.sh,
+# declined to rename them, for a good reason: a rename touches run_system_tests.sh,
 # tests/unit/test_install.py and the docs for no behaviour change, and "carries real
 # risk of silently dropping a verifier from the suite".
 #
@@ -758,16 +758,16 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
 # `con` fixture from tests/integration/conftest.py instead.
 PRIVATE_CONNECT = 51
 
-# Integration tests are discovered by pytest, not listed. tools/run_smoke.sh
+# Integration tests are discovered by pytest, not listed. tools/run_system_tests.sh
 # used to name each verifier, and a rename that missed it silently stopped the
 # verifier running -- the 2026-08-25 review declined to rename the
 # ticket-named ones for exactly that reason. Discovery removes the list; what
 # remains checkable is that every module in the directory is one pytest
-# collects, and that run_smoke.sh runs the directory.
-SMOKE_SUITE = ROOT / "tools/run_smoke.sh"
+# collects, and that run_system_tests.sh runs the directory.
+SMOKE_SUITE = ROOT / "tools/run_system_tests.sh"
 
 # verify_*.py scripts that predate the move to pytest. tests/integration/
-# conftest.py runs each as one test, in its own process, exactly as run_smoke.sh
+# conftest.py runs each as one test, in its own process, exactly as run_system_tests.sh
 # did. A test_*.py module reports each check by name, takes its connection from
 # a fixture and cleans up in one, and runs on its own with -k. Convert a script
 # when you next touch it; this pin may shrink and may not grow.
@@ -821,7 +821,7 @@ class VerifiersShareTheirPlumbing(unittest.TestCase):
         smoke = SMOKE_SUITE.read_text(encoding="utf-8")
         self.assertIn("-m pytest tests/integration", smoke)
         self.assertNotRegex(smoke, r"(?m)^[^#\n]*verify_[a-z0-9_]+\.py",
-                            "run_smoke.sh runs a verifier by name again; pytest discovers them")
+                            "run_system_tests.sh runs a verifier by name again; pytest discovers them")
 
     def test_legacy_scripts_only_decrease(self):
         legacy = sorted(name for name in self.verifiers if name.startswith("verify_"))

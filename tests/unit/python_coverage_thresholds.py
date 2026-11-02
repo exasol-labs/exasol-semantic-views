@@ -6,7 +6,7 @@ whenever coverage grows; do not lower one to merge.
 
 Only `tools/*.py` files that are exercised by DB-free unit tests appear here.
 The many `verify_*.py` integration scripts are covered by
-`tools/run_smoke.sh` against a real database, not by coverage.py — that
+`tools/run_system_tests.sh` against a real database, not by coverage.py — that
 distinction is why they're excluded via `omit_patterns` below rather than
 appearing here with 0%.
 

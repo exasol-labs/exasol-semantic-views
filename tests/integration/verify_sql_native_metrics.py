@@ -1230,7 +1230,7 @@ ADD OR REPLACE METRIC obsolete_metric
         # Put the model back the way this file found it -- content *and* column
         # order. The probes above used REPLACE blocks, which are set
         # replacements: they drop what they leave out, and verifiers later in
-        # tools/run_smoke.sh depend on this object. verify_osi_batch_import.py
+        # tools/run_system_tests.sh depend on this object. verify_osi_batch_import.py
         # pins OBJECT_COLUMNS exactly, ordinals included, because OSI export
         # carries them to the imported model.
         #

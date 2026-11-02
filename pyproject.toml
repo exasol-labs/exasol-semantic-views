@@ -31,7 +31,7 @@ check_untyped_defs = true
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-# The live-database suite; tools/run_smoke.sh installs the example first.
+# The live-database suite; tools/run_system_tests.sh installs the example first.
 # The database-free tests are unittest modules run by tools/run_python_tests.sh.
 testpaths = ["tests/integration"]
 addopts = "-ra --durations=15"

@@ -526,7 +526,7 @@ sh tools/run_lua_tests.sh
 It executes the canonical compiler, validator, semantic-definition, agent, and
 materialization Lua sources with in-memory catalog fixtures. The suite reports
 and enforces per-runtime active-line coverage plus named decision-outcome
-coverage. The full database-backed smoke workflow runs this lane first and then
+coverage. The full database-backed system-test job runs this lane first and then
 verifies packaging, installation, compilation, generated SQL execution, concurrency,
 host-side regressions, extended Semantic SQL, SQL fixtures, non-SYS model-role
 grant/revoke and raw-source isolation, and integrations against Exasol. The

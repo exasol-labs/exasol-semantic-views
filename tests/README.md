@@ -4,16 +4,18 @@ Each directory is one lane: one runtime requirement, one runner, one CI job.
 
 | Directory | What it tests | Needs | Run with | CI |
 |---|---|---|---|---|
-| `unit/` | Python host tooling, install SQL structure, repository conventions | Python | `sh tools/run_python_tests.sh` | `runtime-tests` / database-free |
-| `lua/` | the Lua runtimes, as Exasol assembles them | `lua5.4` | `sh tools/run_lua_tests.sh` | `runtime-tests` / database-free |
-| `integration/` | the installed layer end to end | a database with the sales example installed | `sh tools/run_smoke.sh` | `smoke` |
-| `integration/fresh_install/` | what the installer leaves behind | a database installed a moment ago | `sh tools/run_smoke.sh` (first) | `smoke` |
-| `fuzz/` | compiler equivalence under random requests | an installed database, and minutes | `sh tools/run_release_gate.sh` | before a release |
+| `unit/` | Python host tooling, install SQL structure, repository conventions | Python | `sh tools/run_python_tests.sh` | `CI` / `database-free` |
+| `lua/` | the Lua runtimes, as Exasol assembles them | `lua5.4` | `sh tools/run_lua_tests.sh` | `CI` / `database-free` |
+| `integration/` | the installed layer end to end | a database with the sales example installed | `sh tools/run_system_tests.sh` | `CI` / `system-tests` |
+| `integration/fresh_install/` | what the installer leaves behind | a database installed a moment ago | `sh tools/run_system_tests.sh` (first) | `CI` / `system-tests` |
+| `fuzz/` | compiler equivalence under random requests | an installed database, and minutes | `sh tools/run_release_gate.sh` | release / `fuzz` |
 
 `fixtures/` holds input data that more than one lane reads.
 
 Static analysis is not a test lane here; `sh tools/run_static_checks.sh` runs it,
 as does the `static-checks` CI job.
+The CI `dependency-audit` job runs `pip-audit` on both requirements files and is
+required by `ci-gate`; a separate scheduled workflow runs the same audit daily.
 
 ## Where a new test goes
 

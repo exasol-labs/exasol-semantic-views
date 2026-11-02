@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # pyexasol 3 reports usage on connect; tests and CI never do.
+  EXASOL_TELEMETRY_DISABLE: "true"
+
+jobs:
+  static-checks:
+    # Ruff, mypy, Luacheck (lua/, tests/lua/ and the Lua embedded in
+    # sql/install/) and ShellCheck; see tools/run_static_checks.sh.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-static.txt
+      - name: Install Luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 liblua5.4-dev luarocks
+          sudo luarocks install luacheck 1.2.0
+      - name: Install Python checkers
+        run: python -m pip install -r tools/requirements-static.txt
+      - name: Run static checks
+        # ShellCheck is preinstalled on GitHub's Ubuntu runners.
+        run: PYTHON_BIN=python sh tools/run_static_checks.sh
+      - name: Install zizmor
+        run: python -m pip install zizmor==1.31.1
+      - name: Audit GitHub Actions workflows
+        run: zizmor --format=github .
+      - name: Check Markdown links
+        uses: tcort/github-action-markdown-link-check@e047c5b37f24ab722bbef1a27b6fab7f96bc4068 # v1.1.3
+        with:
+          config-file: .github/markdown-link-check.json
+
+  database-free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-osi.txt
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: Install host-test dependencies
+        run: python -m pip install -r tools/requirements-osi.txt
+      - name: Run database-free Lua coverage
+        run: LUA_BIN=lua5.4 sh tools/run_lua_tests.sh
+      - name: Run database-free Python tests + coverage
+        # Runs test_osi_tool, test_install, test_release_notes,
+        # test_sql_splitter, and the property-based test suite (test_property)
+        # under coverage.py and enforces the per-file thresholds in
+        # tests/unit/python_coverage_thresholds.py.
+        run: PYTHON_BIN=python sh tools/run_python_tests.sh
+      - name: Build the install SQL
+        # Nothing generated is checked in; this proves the sources assemble.
+        run: python tools/package_lua_scripts.py
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: python -m pip install pip-audit==2.10.1
+      - name: Audit Python dependencies
+        run: sh tools/run_dependency_audit.sh
+
+  system-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      exasol:
+        image: exasol/docker-db:latest-2026.1
+        ports:
+          - 8563:8563
+        options: >-
+          --privileged
+          --shm-size=2gb
+    env:
+      EXASOL_HOST: 127.0.0.1
+      EXASOL_PORT: "8563"
+      EXASOL_USER: sys
+      EXASOL_PASSWORD: exasol
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-osi.txt
+      - name: Install host-test dependencies
+        run: python -m pip install -r tools/requirements-osi.txt
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: Wait for Exasol
+        run: |
+          python - <<'PY'
+          import os, ssl, time, sys
+          import pyexasol
+          deadline = time.monotonic() + 300
+          last = None
+          while time.monotonic() < deadline:
+              try:
+                  con = pyexasol.connect(
+                      dsn=f"{os.environ['EXASOL_HOST']}:{os.environ['EXASOL_PORT']}",
+                      user=os.environ["EXASOL_USER"],
+                      password=os.environ["EXASOL_PASSWORD"],
+                      encryption=True,
+                      websocket_sslopt={"cert_reqs": ssl.CERT_NONE},
+                  )
+                  con.execute("SELECT 1").fetchall()
+                  con.close()
+                  print("Exasol ready.")
+                  sys.exit(0)
+              except Exception as e:
+                  last = repr(e)[:120]
+                  time.sleep(3)
+          print(f"Exasol did not become ready in time. Last error: {last}", file=sys.stderr)
+          sys.exit(1)
+          PY
+      - name: Run system tests
+        run: sh tools/run_system_tests.sh --junitxml=system-results.xml
+      - name: Upload system test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: system-results
+          path: system-results.xml
+          if-no-files-found: ignore
+
+  ci-gate:
+    if: ${{ always() }}
+    needs: [static-checks, database-free, dependency-audit, system-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "$NEEDS_JSON" | jq -e 'length == 4 and all(.[]; .result == "success")'

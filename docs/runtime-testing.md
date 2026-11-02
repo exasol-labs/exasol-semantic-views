@@ -44,7 +44,7 @@ Set `LUA_BIN` when the interpreter is installed under another name.
 ## 2. Live-DB Integration Tests
 
 ```sh
-sh tools/run_smoke.sh
+sh tools/run_system_tests.sh
 ```
 
 Point the host at an Exasol Personal deployment (or any local Exasol) via
@@ -54,7 +54,7 @@ Point the host at an Exasol Personal deployment (or any local Exasol) via
 exasol install local -d dev   # requires the exasol-personal CLI
 ```
 
-The smoke workflow starts with the database-free tests, packages the same Lua
+The system-test script starts with the database-free tests, packages the same Lua
 sources into install SQL, performs a clean install, and exercises catalog DDL,
 validation, compilation, preprocessing, execution, agent APIs,
 materializations, Ossie/OSI, Databricks compatibility, compile caching, and
@@ -63,7 +63,7 @@ concurrent requests against Exasol.
 The live suite is `tests/integration/`, discovered and run by pytest after the
 install, so one failing test no longer stops the rest: the run ends with a
 summary of every failure and the slowest tests. Arguments after
-`run_smoke.sh` go to pytest. Against an installed deployment you can also run it
+`run_system_tests.sh` go to pytest. Against an installed deployment you can also run it
 directly, or any part of it:
 
 ```sh
@@ -188,7 +188,7 @@ On a local Exasol Personal deployment there are two known causes:
 - **The Mac sleeps.** The VM is frozen with it; a run started before a closed
   lid or an idle sleep advances only during the brief maintenance wakes, and the
   guest clock falls behind by the time slept. Keep the machine awake for a long
-  run (`caffeinate -i sh tools/run_smoke.sh`).
+  run (`caffeinate -i sh tools/run_system_tests.sh`).
 - **The deployment has served about 510 SQL processes since it started**
   (seen on `2026.2.0-nano.3`). Its protocol channel registry holds 1 024 entries
   and does not free them, so from then on a session logs in and never gets an
@@ -239,4 +239,4 @@ Database-free coverage measures Lua runtime logic. It does not claim coverage
 of Exasol's `query()`, script import behavior, transaction semantics, optimizer,
 privilege evaluation, or generated SQL execution. Those belong to the live-DB
 lane. Host-side Ossie/OSI behavior remains in `tests/unit/test_osi_tool.py`, which is
-also invoked by the canonical smoke workflow.
+also invoked by the canonical system-test script.
