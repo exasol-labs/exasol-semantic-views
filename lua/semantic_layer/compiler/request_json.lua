@@ -4915,7 +4915,18 @@ do
                 -- guess at which columns were meant.
                 local is_call_argument = previous ~= nil
                     and previous.kind == "symbol" and previous.text == "("
-                if not is_call_argument and token.depth == reference.depth then
+                -- And `a * b` is a multiplication, not a star: a star stands as
+                -- a select item of its own, after SELECT, DISTINCT, ALL or a
+                -- comma. Read as one, `SELECT s.region, s.revenue * 2 FROM obj s`
+                -- compiled every column -- the finest grain -- and returned five
+                -- partial North rows where `/ 2` returned one.
+                local previous_word = previous and sql_text.token_upper(previous)
+                local is_select_item = previous ~= nil
+                    and ((previous.kind == "symbol" and previous.text == ",")
+                        or previous_word == "SELECT" or previous_word == "DISTINCT"
+                        or previous_word == "ALL")
+                if not is_call_argument and is_select_item
+                    and token.depth == reference.depth then
                     take_all()
                 end
             elseif qualified_by_us then

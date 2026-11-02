@@ -2108,6 +2108,12 @@ test("reference expansion finds what to compile, and refuses to guess", function
         "SELECT * FROM SEMANTIC_SALES.SALES t0")
     assert_equal(#api.bi_infer_columns(flat_tokens, flat_reference, columns, by_name), 3)
 
+    -- A `*` after an operand is a multiplication, not a star: read as one, it
+    -- compiled every column and answered at the finest grain.
+    local times_tokens, times_reference = only_reference(
+        "SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE * 2 FROM SEMANTIC_SALES.SALES t0")
+    assert_equal(#api.bi_infer_columns(times_tokens, times_reference, columns, by_name), 2)
+
     -- COUNT(*) names no column, so a statement that names nothing else is
     -- refused rather than answered at a grain nobody asked for.
     local empty_tokens, empty_reference = only_reference(
