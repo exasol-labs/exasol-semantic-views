@@ -53,31 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y lua5.4
       - name: Wait for Exasol
-        run: |
-          python - <<'PY'
-          import os, ssl, time, sys
-          import pyexasol
-          deadline = time.monotonic() + 300
-          last = None
-          while time.monotonic() < deadline:
-              try:
-                  con = pyexasol.connect(
-                      dsn=f"{os.environ['EXASOL_HOST']}:{os.environ['EXASOL_PORT']}",
-                      user=os.environ["EXASOL_USER"],
-                      password=os.environ["EXASOL_PASSWORD"],
-                      encryption=True,
-                      websocket_sslopt={"cert_reqs": ssl.CERT_NONE},
-                  )
-                  con.execute("SELECT 1").fetchall()
-                  con.close()
-                  print("Exasol ready.")
-                  sys.exit(0)
-              except Exception as e:
-                  last = repr(e)[:120]
-                  time.sleep(3)
-          print(f"Exasol did not become ready in time. Last error: {last}", file=sys.stderr)
-          sys.exit(1)
-          PY
+        run: python tools/dev/wait_for_exasol.py
       - name: Install sales fixture
         run: python tools/install.py --example --reset
       - name: Run release fuzz campaign
