@@ -312,6 +312,13 @@ The semantic layer stops supervising at the edge of the derived table. Unlike th
 same hazard under a Virtual Schema, the boundary is visible in your own SQL — you
 wrote the join — which makes it explainable, not safe.
 
+What is refused is a join that *can* repeat a row. Two kinds cannot, and are
+answered: a join to a one-row relation (`CROSS JOIN (SELECT 1.1 AS rate FROM
+DUAL)`), and grouped semantic queries side by side, each grouped by the same
+number of keys and joined `ON` equalities that pair every key one-to-one —
+revenue and cost by region, from two derived tables or two CTEs, joined on region.
+See [Composition](semantic-sql-preprocessor.md#composition-is-refused-by-default).
+
 If your deployment would rather have ordinary-SQL semantics than a refusal, opt
 in per model:
 
@@ -366,7 +373,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 | code | meaning |
 |---|---|
 | `SEMANTIC_QUERY_011` | no column of the object is referenced, so which to compile cannot be inferred |
-| `SEMANTIC_QUERY_012` | the object is joined to another relation; see §4 |
+| `SEMANTIC_QUERY_012` | the object is joined to another relation in a way that can repeat its rows; see §4 |
 | `SEMANTIC_QUERY_010` | `COUNT(*)` directly over the object with no dimension selected — its answer depends on a grain you did not name; wrap it in a subquery |
 | `SEMANTIC_REQUEST_027` | the field is withheld by the model (`IS_PRIVATE` / `IS_HIDDEN`) |
 | `SEMANTIC_REQUEST_024` | the field carries `DISPLAY_POLICY = 'MASK'`; you can still filter on it |

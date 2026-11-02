@@ -772,7 +772,7 @@ place:
 |---|---|
 | add the same dimension to both views, so each can be sliced the same way | `SEMANTIC_ADMIN_019` — dimension names are unique per *model*, not per view, and there is no operation that shares one between views |
 | ask for a field of the other view | `SEMANTIC_QUERY_020` — naming the view that does have it |
-| join the two published views to put the numbers side by side | `SEMANTIC_QUERY_012` — the join can repeat rows and re-aggregation double-counts |
+| join the two published views to put the numbers side by side | answered when each side is grouped by its region dimension and the two are joined on those keys, one-to-one; any other join is `SEMANTIC_QUERY_012` — it can repeat rows and re-aggregation double-counts |
 
 So one business question — *"revenue and freight by region"* — becomes two
 queries, and slicing both by region needs two differently named dimensions over

@@ -192,7 +192,9 @@ source reads the column regardless. Put the real control in the source.
 A published object can be joined to another table, and the join can repeat the
 semantic result's rows so that re-aggregation double-counts: **7270 where the
 model says 3635.** Refused with `SEMANTIC_QUERY_012` unless a model opts in with
-`SET_MODEL_DERIVED_COMPOSITION`. See [BI tools](bi-tools.md#4-the-one-thing-that-is-refused).
+`SET_MODEL_DERIVED_COMPOSITION`. A join that provably cannot repeat a row — to a
+one-row relation, or between grouped semantic queries joined one-to-one on their
+whole grain — is answered without the opt-in. See [BI tools](bi-tools.md#4-the-one-thing-that-is-refused).
 
 ---
 

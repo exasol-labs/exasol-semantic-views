@@ -168,7 +168,7 @@ SELECT * FROM (VALUES
   ('CREATE VIEW over an object', 'SUPPORTED',
    'The stored text is compiled SQL, so the view answers with no preprocessor. Recorded in SEMANTIC_CATALOG.FROZEN_VIEWS and checked by CHECK_FROZEN_VIEWS.', NULL, NULL),
   ('Joining an object to another relation', 'REFUSED BY DEFAULT',
-   'The join can repeat the semantic result''s rows and re-aggregation then double-counts. Opt in per model with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_012', NULL),
+   'The join can repeat the semantic result''s rows and re-aggregation then double-counts. A join that provably cannot is answered: to a one-row relation (SELECT ... [FROM DUAL] with no GROUP BY), or between grouped semantic queries joined one-to-one on their whole grain, with ON equalities pairing every grouping key. Opt in to any other per model with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_012', NULL),
   ('A wrapped block that aggregates the object', 'SUPPORTED',
    'A derived table or CTE that is itself a semantic query over one object -- GROUP BY, HAVING, or an aggregate over its fields, as Power BI DirectQuery sends for table visuals, Top N and filters -- is compiled as that query, at the grain it names, and the result replaces the block. Everything outside it stays ordinary SQL. The aggregate and grouping checks are the ones a bare statement gets.', NULL, NULL),
   ('Grouping the object where the layer cannot read the statement', 'REFUSED BY DEFAULT',

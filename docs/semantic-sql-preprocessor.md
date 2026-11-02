@@ -439,6 +439,30 @@ is refused with `SEMANTIC_QUERY_012`. Unlike the same hazard under a Virtual
 Schema, the boundary is visible in the author's own SQL — they wrote the join —
 which makes it explainable, not safe.
 
+Two kinds of join cannot repeat a row, and are answered:
+
+- a join to a **one-row relation** — `(SELECT 1.1 AS rate FROM DUAL)`, or a
+  `SELECT` with no `FROM` — with no `GROUP BY` or set operation;
+- **grouped semantic queries joined on their whole grain**: each side is a whole
+  semantic query (`SELECT … FROM <object> [WHERE …] GROUP BY <keys>`), so it has
+  one row per key, and each is joined to an earlier one with `ON` equalities that
+  pair all of its keys with all of that one's. The join is then one-to-one:
+
+```sql
+SELECT a.customer_region, a.total_revenue, b.total_cost
+FROM (SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES
+      GROUP BY customer_region) a
+JOIN (SELECT customer_region, total_cost FROM SEMANTIC_SALES.SALES
+      GROUP BY customer_region) b
+  ON a.customer_region = b.customer_region
+```
+
+The same holds when the sides are CTEs, and for any number of them. Everything
+else is refused as before — a different grain on one side, an `OR`, `USING`, a
+comma or `CROSS JOIN` between grouped sides, a "constant" relation that reads a
+table — because the analysis only lets through what it can prove. Grouped queries
+under `UNION ALL` involve no join and compile arm by arm.
+
 A deployment that would rather have ordinary-SQL semantics than a refusal opts
 in per model:
 
