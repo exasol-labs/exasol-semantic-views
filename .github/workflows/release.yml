@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   tests:
-    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository] actionlint supports this same-commit syntax
+    uses: $/.github/workflows/ci.yml
 
   fuzz:
     needs: tests
