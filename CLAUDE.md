@@ -351,7 +351,7 @@ a concept is absent from one of them.
   VIEW` directly once `ENABLE_SEMANTIC_SQL()` is on, on an object that already
   exists. Accepted forms: `REPLACE DIMENSIONS`, `REPLACE FACTS`, `REPLACE
   METRICS`, `ADD OR REPLACE DIMENSION`, `ADD OR REPLACE FACT`, `ADD OR REPLACE
-  METRIC`, `DROP METRIC`, `RENAME METRIC`. Anything else is refused with
+  METRIC`, `DROP METRIC`, `DROP FACT`, `RENAME METRIC`. Anything else is refused with
   `SEMANTIC_DDL_012`, which lists them; any statement that is not `ALTER SEMANTIC
   VIEW` — including `CREATE SEMANTIC VIEW` — is refused with `SEMANTIC_DDL_010`.
 

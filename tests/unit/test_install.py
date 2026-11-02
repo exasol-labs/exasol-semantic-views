@@ -612,18 +612,17 @@ class InstallerResetTest(unittest.TestCase):
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_OR_REPLACE_DIMENSION": "REMOVE_DIMENSION",
             "ADD_DIMENSION_WITH_BINDINGS": "REMOVE_DIMENSION",
-            # Metrics use governed Semantic SQL rather than a standalone admin script.
+            # Metrics and facts are removed with Semantic DDL, the surface that
+            # owns an object's interior, rather than a standalone admin script.
             "ADD_METRIC": "DDL:DROP METRIC",
+            "ADD_FACT": "DDL:DROP FACT",
+            "ADD_FACT_WITH_BINDINGS": "DDL:DROP FACT",
         }
         intentionally_permanent = {
             "ADD_CUSTOM_EXTENSION":
                 "Extension removal is intentionally deferred until extension ownership semantics exist.",
             "ADD_ENTITY":
                 "Entities own dependent model structure and are removed only with DROP_MODEL.",
-            "ADD_FACT":
-                "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
-            "ADD_FACT_WITH_BINDINGS":
-                "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
             "ADD_MATERIALIZATION_COLUMN":
                 "Column removal is unsupported; deactivate the owning materialization instead.",
             "ADD_SYNONYM":
@@ -652,8 +651,9 @@ class InstallerResetTest(unittest.TestCase):
             inverse = inverse_overrides.get(
                 add_name, f"REMOVE_{add_name.removeprefix('ADD_')}"
             )
-            if inverse == "DDL:DROP METRIC":
-                self.assertIn('find_sequence(tokens, {"DROP", "METRIC"}', semantic_definition)
+            if inverse.startswith("DDL:DROP "):
+                kind = inverse.removeprefix("DDL:DROP ")
+                self.assertIn(f'find_sequence(tokens, {{"DROP", "{kind}"}}', semantic_definition)
             else:
                 self.assertIn(
                     inverse,

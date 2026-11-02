@@ -135,8 +135,17 @@ local duplicate = scalar(
       .. " AND UPPER(" .. name_column .. ") = UPPER(:attribute_name)",
     {model_id = model_id, version_id = version_id, attribute_name = attribute_name})
 if tonumber(duplicate or 0) > 0 then
-    local code = attribute_type == "DIMENSION" and "SEMANTIC_ADMIN_019" or "SEMANTIC_ADMIN_020"
-    error(code .. ": duplicate " .. string.lower(attribute_type) .. ": " .. attribute_name)
+    if attribute_type == "DIMENSION" then
+        error("SEMANTIC_ADMIN_019: duplicate dimension: " .. attribute_name .. "."
+            .. " Dimension names are unique per model. To change its definition,"
+            .. " call SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION, which updates it in place.")
+    end
+    error("SEMANTIC_ADMIN_020: duplicate fact: " .. attribute_name .. "."
+        .. " Fact names are unique per model, and this script only creates. To"
+        .. " redefine it, apply ALTER SEMANTIC VIEW " .. model_name .. ".<view>"
+        .. " ADD OR REPLACE FACT " .. attribute_name .. " ON ENTITY " .. entity_name
+        .. " AS ... with SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION; DROP FACT"
+        .. " removes it the same way.")
 end
 if attribute_type == "DIMENSION" then
     local duplicate_column = scalar([[

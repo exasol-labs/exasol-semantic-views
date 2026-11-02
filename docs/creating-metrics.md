@@ -160,8 +160,11 @@ ADD OR REPLACE FACT gross_line_amount
 ```
 
 Omitted definitions remain in the model catalog; use `DROP METRIC` for metric
-removal. Fact removal has no DDL form yet — it waits until dependent-metric
-rewrites are transactional.
+removal and `DROP FACT` for fact removal. A fact belongs to its entity rather than
+to the view the statement names, so `DROP FACT` retires it from the model — its
+view columns, bindings and fusion policy with it — and is refused
+(`SEMANTIC_DDL_094`) while any metric is built on it: drop or redefine those
+first.
 Within one replacement block, a requested synonym is released from its prior
 metric owner before assignment. Repeating that synonym on multiple metrics in
 the block remains an ambiguity and fails with `SEMANTIC_MODEL_021`.
@@ -172,6 +175,9 @@ RENAME METRIC total_revenue TO gross_merchandise_value;
 
 ALTER SEMANTIC VIEW sales.SALES
 DROP METRIC obsolete_revenue;
+
+ALTER SEMANTIC VIEW sales.SALES
+DROP FACT obsolete_amount;
 ```
 
 Rename preserves the metric ID, updates dependent metric expressions, and

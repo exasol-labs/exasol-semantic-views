@@ -455,7 +455,7 @@ identifier.
 
 `ALTER SEMANTIC VIEW` supports `REPLACE DIMENSIONS`, `REPLACE FACTS`, `REPLACE
 METRICS`, single `ADD OR REPLACE DIMENSION`, `ADD OR REPLACE FACT`, `ADD OR
-REPLACE METRIC`, `DROP METRIC`, and `RENAME METRIC ... TO ...`. Any `REPLACE`
+REPLACE METRIC`, `DROP METRIC`, `DROP FACT`, and `RENAME METRIC ... TO ...`. Any `REPLACE`
 block is a valid statement on its own, and the blocks compose — one statement may
 carry dimensions, facts and metrics together, validated once and rolled back as a
 unit. The three single forms each take the rest of the statement as one clause,
