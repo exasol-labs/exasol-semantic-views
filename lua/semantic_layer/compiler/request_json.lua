@@ -4466,6 +4466,7 @@ refusal_rules.expansion_wins = {
     SEMANTIC_QUERY_016 = true,   -- an outer SUM/AVG over a metric that does not add up
     SEMANTIC_QUERY_017 = true,   -- a grain-widening filter that cannot run inside the compile
     SEMANTIC_QUERY_018 = true,   -- a wrapper lowering where groups are not one row each
+    SEMANTIC_QUERY_021 = true,   -- a composed metric under a GROUP BY that splits its grain
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
@@ -4752,16 +4753,9 @@ do
     -- compiled at? Then each group is one row of it, and a wrapper over a metric
     -- is that metric's value. With no GROUP BY it holds only if the object is
     -- compiled at no dimension at all -- one row in total.
-    function bi_expansion.own_block_covers_grain(tokens, reference, wanted)
-        local first, last = bi_expansion.select_list_range(tokens, reference)
-        if first == nil then return false end
-        local dimensions = {}
-        for _, name in ipairs(wanted or {}) do
-            local column = reference.by_name[upper(name)]
-            if column ~= nil and upper(column.kind) == "DIMENSION" then
-                dimensions[#dimensions + 1] = upper(column.name)
-            end
-        end
+    -- The token range of the GROUP BY items in the reference's own block, or
+    -- nil when the block does not group.
+    function bi_expansion.own_group_by(tokens, reference)
         local group_first, group_last
         for index = reference.last + 1, #tokens do
             local token = tokens[index]
@@ -4779,6 +4773,169 @@ do
             end
             group_last = index
         end
+        if group_first == nil then return nil end
+        return group_first, group_last
+    end
+
+    -- Under SET_MODEL_DERIVED_COMPOSITION a reference the expansion splices as
+    -- a derived table already carries each metric at the grain it is compiled
+    -- at, so the Semantic SQL forms around it have to be rewritten into the
+    -- ordinary SQL they mean -- otherwise the opt-in turned the forms
+    -- SEMANTIC_QUERY_005 teaches into engine errors: MEASURE(t0.m) is a
+    -- function Exasol does not have, and a bare t0.m under the author's
+    -- GROUP BY is "not a valid GROUP BY expression".
+    --
+    -- MEASURE(m) and AGG(m) select the metric as defined, so they become m.
+    -- A bare metric under a GROUP BY that covers every dimension the object is
+    -- compiled at is constant in each group, so it joins the GROUP BY: the
+    -- groups do not change, and a join that repeats the row cannot inflate it.
+    -- Under one that does not cover the grain, each group holds several values
+    -- and no rewrite is exact, so it is refused with the remedy.
+    --
+    -- Returns the rewritten statement, a refusal, or nil when there is nothing
+    -- to rewrite. The edits are in the statement's own offsets; the caller
+    -- tokenizes the result again.
+    function bi_expansion.compose_measures(tokens, statement_text, applicable)
+        local edits = {}
+        for _, reference in ipairs(applicable) do
+            local first, last = bi_expansion.select_list_range(tokens, reference)
+            if first ~= nil and bi_expansion.allows_composition(reference.published_schema)
+                and not bi_expansion.semantic_block(tokens, reference, applicable) then
+                local alias = reference.alias and upper(reference.alias) or nil
+                -- A field of this reference: unqualified, or qualified by its alias.
+                local function metric_at(index)
+                    local token = tokens[index]
+                    if token == nil or (token.kind ~= "word" and token.kind ~= "identifier") then
+                        return nil
+                    end
+                    local following = tokens[index + 1]
+                    if following ~= nil and following.kind == "symbol"
+                        and (following.text == "." or following.text == "(") then
+                        return nil
+                    end
+                    -- Unqualified only when the reference has no alias: beside an
+                    -- aliased one, a bare name may be another relation's column,
+                    -- and grouping by that would change the groups.
+                    local previous = tokens[index - 1]
+                    if previous ~= nil and previous.kind == "symbol" and previous.text == "." then
+                        local qualifier = tokens[index - 2]
+                        local named = qualifier and upper(syntax.token_identifier_value(qualifier) or "")
+                        if named ~= (alias or upper(reference.object_name)) then
+                            return nil
+                        end
+                    elseif alias ~= nil or (previous ~= nil and sql_text.token_upper(previous) == "AS") then
+                        return nil
+                    end
+                    local column = reference.by_name[upper(syntax.token_identifier_value(token) or "")]
+                    if column == nil or upper(column.kind) ~= "METRIC" then return nil end
+                    return column, previous ~= nil and previous.text == "." and index - 2 or index
+                end
+
+                -- The metrics the select list names outside any call, and every
+                -- MEASURE: under a GROUP BY these are what SQL requires grouped.
+                local bare, seen = {}, {}
+                local index = first
+                while index <= last do
+                    local token = tokens[index]
+                    local wrapper = sql_text.token_upper(token)
+                    local open = tokens[index + 1]
+                    local close = (wrapper == "MEASURE" or wrapper == "AGG") and open ~= nil
+                        and open.text == "(" and bi_expansion.matching_close(tokens, index + 1) or nil
+                    local column, start
+                    if close ~= nil then column, start = metric_at(close - 1) end
+                    if column ~= nil and start == index + 2 then
+                        edits[#edits + 1] = {first = token.start_pos, last = open.end_pos, text = ""}
+                        edits[#edits + 1] = {first = tokens[close].start_pos,
+                            last = tokens[close].end_pos, text = ""}
+                        if not seen[column.name] then
+                            seen[column.name] = true
+                            bare[#bare + 1] = {column = column, first = start, last = close - 1}
+                        end
+                        index = close
+                    elseif token.depth == tokens[first].depth then
+                        column, start = metric_at(index)
+                        if column and not seen[column.name] then
+                            seen[column.name] = true
+                            bare[#bare + 1] = {column = column, first = start, last = index}
+                        end
+                    end
+                    index = index + 1
+                end
+
+                local group_first, group_last = bi_expansion.own_group_by(tokens, reference)
+                if group_first ~= nil and #bare > 0 then
+                    local grouped = {}
+                    local items = syntax.split_top_level(tokens, first, last, ",")
+                    for _, item in ipairs(syntax.split_top_level(tokens, group_first, group_last, ",")) do
+                        if #item == 1 and item[1].kind == "number" then
+                            item = items[tonumber(item[1].text)] or {}
+                        end
+                        local column = bi_expansion.projected_field(item, reference.by_name)
+                        if column ~= nil then grouped[column.name] = true end
+                    end
+                    local ungrouped = {}
+                    for _, entry in ipairs(bare) do
+                        if not grouped[entry.column.name] then ungrouped[#ungrouped + 1] = entry end
+                    end
+                    if #ungrouped > 0 then
+                        local wanted = bi_expansion.infer_columns(tokens, reference,
+                            reference.columns, reference.by_name)
+                        local rolled = false
+                        for position = group_first, group_last do
+                            local word = sql_text.token_upper(tokens[position])
+                            if word == "ROLLUP" or word == "CUBE" or word == "GROUPING" then
+                                rolled = true
+                            end
+                        end
+                        if wanted ~= nil and (rolled
+                            or not bi_expansion.own_block_covers_grain(tokens, reference, wanted)) then
+                            local name = ungrouped[1].column.name
+                            local written = string.sub(statement_text,
+                                tokens[ungrouped[1].first].start_pos, tokens[ungrouped[1].last].end_pos)
+                            return nil, error_result("SEMANTIC_QUERY_021",
+                                written .. " is " .. tostring(name) .. " at the grain "
+                                .. tostring(reference.published_schema) .. "."
+                                .. tostring(reference.object_name) .. " is compiled at here,"
+                                .. " and this GROUP BY does not group by every dimension of"
+                                .. " that grain" .. (rolled and " in each grouping set" or "")
+                                .. ", so each group holds several of its values. GROUP BY the"
+                                .. " object's dimensions you select, or aggregate the metric"
+                                .. " in ordinary SQL, as SUM(" .. written .. ").")
+                        end
+                        if wanted ~= nil then
+                            local appended = {}
+                            for _, entry in ipairs(ungrouped) do
+                                appended[#appended + 1] = string.sub(statement_text,
+                                    tokens[entry.first].start_pos, tokens[entry.last].end_pos)
+                            end
+                            edits[#edits + 1] = {first = tokens[group_last].end_pos + 1,
+                                last = tokens[group_last].end_pos,
+                                text = ", " .. table.concat(appended, ", ")}
+                        end
+                    end
+                end
+            end
+        end
+        if #edits == 0 then return nil end
+        table.sort(edits, function(a, b) return a.first > b.first end)
+        local text = statement_text
+        for _, edit in ipairs(edits) do
+            text = string.sub(text, 1, edit.first - 1) .. edit.text .. string.sub(text, edit.last + 1)
+        end
+        return text
+    end
+
+    function bi_expansion.own_block_covers_grain(tokens, reference, wanted)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return false end
+        local dimensions = {}
+        for _, name in ipairs(wanted or {}) do
+            local column = reference.by_name[upper(name)]
+            if column ~= nil and upper(column.kind) == "DIMENSION" then
+                dimensions[#dimensions + 1] = upper(column.name)
+            end
+        end
+        local group_first, group_last = bi_expansion.own_group_by(tokens, reference)
         if group_first == nil then return #dimensions == 0 end
         local items = syntax.split_top_level(tokens, first, last, ",")
         local grouped = {}
@@ -6161,6 +6318,13 @@ do
                 .. " Each one is a separate compile.")
         end
 
+        -- Rewritten into the ordinary SQL it means before anything is spliced,
+        -- then read again; a second pass finds nothing left to rewrite.
+        local composed, composed_refusal =
+            bi_expansion.compose_measures(tokens, statement_text, applicable)
+        if composed_refusal ~= nil then return composed_refusal end
+        if composed ~= nil then return bi_expansion.rewrite(composed) end
+
         local view_schema, view_name, view_replaces = bi_expansion.frozen_view_target(tokens)
         local frozen = {}
 
@@ -6205,12 +6369,16 @@ do
             -- one (a mismatched aggregate, an uncovered GROUP BY). Ungrouped, a
             -- refusal falls back to reference expansion, which already answers
             -- aggregate-over-object shapes such as arithmetic around a SUM.
-            local block = not bi_expansion.allows_composition(reference.published_schema)
-                and bi_expansion.semantic_block(tokens, reference, applicable) or nil
+            -- Under the opt-in too: the block's own GROUP BY is the semantic
+            -- query its author wrote, not a re-aggregation, and expanding it
+            -- instead left that GROUP BY over a derived table already grouped --
+            -- invalid SQL, answered by a raw engine error.
+            local composing = bi_expansion.allows_composition(reference.published_schema)
+            local block = bi_expansion.semantic_block(tokens, reference, applicable)
             if block then
                 local block_wanted = bi_expansion.infer_columns(tokens, reference,
                     reference.columns, reference.by_name)
-                local reaggregation = block_wanted ~= nil
+                local reaggregation = block_wanted ~= nil and not composing
                     and bi_expansion.outer_reaggregation_refusal(tokens, reference, block_wanted) or nil
                 if reaggregation ~= nil then
                     return reaggregation
@@ -7022,6 +7190,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         bi_composed_in_from = bi_expansion.composed_in_from,
         bi_unsafe_composition = bi_expansion.unsafe_composition,
         bi_set_operation_arm = bi_expansion.set_operation_arm,
+        bi_compose_measures = bi_expansion.compose_measures,
         bi_outer_reaggregation_refusal = bi_expansion.outer_reaggregation_refusal,
         bi_summable = bi_expansion.summable,
         bi_pushdown_filter = bi_expansion.pushdown_filter,

@@ -2185,6 +2185,65 @@ test("a join that provably cannot repeat a semantic row is not refused", functio
     end)
 end)
 
+test("under the composition opt-in the semantic forms become the SQL they mean", function()
+    -- Spliced as a derived table, the object already carries each metric per
+    -- group, so MEASURE() would be an unknown function and a bare metric under
+    -- the author's GROUP BY an invalid one.
+    local columns = {
+        {name = "customer_region", kind = "DIMENSION"},
+        {name = "total_revenue", kind = "METRIC"},
+    }
+    local by_name = {}
+    for _, column in ipairs(columns) do by_name[column.name:upper()] = column end
+    local join = " FROM SEMANTIC_SALES.SALES t0 JOIN MART.C c ON c.R = t0.customer_region"
+    local function compose(text, allowed)
+        local tokens = api.sql_tokens(text)
+        local found = api.bi_find_references(tokens)
+        for _, reference in ipairs(found) do
+            reference.columns, reference.by_name = columns, by_name
+        end
+        return with_query(function() return {{allowed ~= false}} end, function()
+            return api.bi_compose_measures(tokens, text, found)
+        end)
+    end
+    each({
+        {"SELECT t0.customer_region, t0.total_revenue" .. join .. " GROUP BY 1",
+            "SELECT t0.customer_region, t0.total_revenue" .. join .. " GROUP BY 1, t0.total_revenue"},
+        {"SELECT t0.customer_region, MEASURE(t0.total_revenue) AS r" .. join
+            .. " GROUP BY t0.customer_region",
+            "SELECT t0.customer_region, t0.total_revenue AS r" .. join
+            .. " GROUP BY t0.customer_region, t0.total_revenue"},
+        -- Ungrouped, MEASURE still means the metric; nothing joins the GROUP BY.
+        {"SELECT t0.customer_region, AGG(t0.total_revenue)" .. join,
+            "SELECT t0.customer_region, t0.total_revenue" .. join},
+        -- Already grouped, inside an aggregate, or not this reference's: untouched.
+        {"SELECT t0.customer_region, t0.total_revenue" .. join
+            .. " GROUP BY t0.customer_region, t0.total_revenue", nil},
+        {"SELECT t0.customer_region, SUM(t0.total_revenue)" .. join .. " GROUP BY 1", nil},
+        {"SELECT t0.customer_region, total_revenue" .. join .. " GROUP BY 1", nil},
+    }, function(case)
+        local rewritten, refusal = compose(case[1])
+        assert_equal(refusal, nil)
+        assert_equal(rewritten, case[2])
+    end)
+
+    -- Without the opt-in the guard answers, so nothing is rewritten.
+    assert_equal(compose("SELECT t0.customer_region, MEASURE(t0.total_revenue)" .. join, false), nil)
+
+    -- A GROUP BY that leaves the object's dimension out, or rolls it up,
+    -- puts several values in a group: no rewrite is exact.
+    each({
+        "SELECT c.R, t0.total_revenue" .. join .. " GROUP BY c.R",
+        "SELECT t0.customer_region, t0.total_revenue" .. join
+            .. " GROUP BY ROLLUP (t0.customer_region)",
+    }, function(text)
+        local rewritten, refusal = compose(text)
+        assert_equal(rewritten, nil)
+        assert_equal(refusal.error_code, "SEMANTIC_QUERY_021")
+        assert_contains(refusal.error_message, "SUM(t0.total_revenue)")
+    end)
+end)
+
 test("an arm of a top-level set operation is a whole query", function()
     local function arm(text, index)
         return api.bi_set_operation_arm(api.sql_tokens(text), index)

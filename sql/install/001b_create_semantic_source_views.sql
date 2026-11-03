@@ -187,6 +187,8 @@ SELECT * FROM (VALUES
    'MEASURE() and agg() may only wrap a metric, and a named aggregate only with the aggregate that metric declares. The exception is MIN, MAX, SUM or AVG where each group holds one row of the object: the aggregate of one value is that value, so they select the metric''s value (Tableau ATTR, Power BI''s SUM), and the plan records the lowering. COUNT is always refused.', 'SEMANTIC_QUERY_007', NULL),
   ('An aggregate of a metric where a group holds several rows', 'REFUSED',
    'MIN, MAX, SUM and AVG around a metric that declares another aggregation are accepted only where each group of the statement is one row of the object. Where the grouping does not cover every dimension the object is compiled at, they would combine several values instead of selecting the metric, so they are refused.', 'SEMANTIC_QUERY_018', NULL),
+  ('A metric beside a join under SET_MODEL_DERIVED_COMPOSITION', 'REFUSED',
+   'With the opt-in, MEASURE(metric) and a bare metric are kept as the metric''s value: where the statement groups by every dimension of the object it selects, each group carries one value, however the join repeats the row, and that value is returned. Under a GROUP BY that leaves one of those dimensions out, a group holds several values and none of them is the answer, so it is refused; group by the dimensions, or aggregate the metric in ordinary SQL.', 'SEMANTIC_QUERY_021', NULL),
   ('A SELECT list that names no field', 'REFUSED',
    'SELECT supports semantic field names, MEASURE(metric), or *.', 'SEMANTIC_QUERY_005', NULL),
   ('A wrapper naming no column of the object', 'REFUSED',

@@ -326,7 +326,11 @@ in per model:
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION('sales', 'TRUE');
 ```
 
-Do that knowing the number above is what you are accepting.
+Do that knowing the number above is what you are accepting. It is the explicit
+`SUM` over the joined rows that double-counts. `MEASURE(t0.total_revenue)`, or the
+bare metric, grouped by the object's dimensions still returns each region's
+revenue once, and a `GROUP BY` that splits that grain is refused with
+`SEMANTIC_QUERY_021`.
 
 ---
 
@@ -383,6 +387,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 | `SEMANTIC_QUERY_017` | a filter on a dimension the statement does not select cannot run before aggregation (a subquery, another semantic object, a join); use literal values or select the dimension |
 | `SEMANTIC_QUERY_020` | a name in the select list is not a field of the object; the message says what it might have meant |
 | `SEMANTIC_QUERY_019` | an aggregate over `DISTINCT` (`COUNT(DISTINCT x)`) on the object itself — a metric declares its own aggregation; select the field in a wrapped query and aggregate outside it |
+| `SEMANTIC_QUERY_021` | under `SET_MODEL_DERIVED_COMPOSITION`, a metric selected beside a join under a `GROUP BY` that leaves out a dimension of the object: each group holds several of its values; group by the object's dimensions, or aggregate the metric explicitly |
 | `SEMANTIC_QUERY_029` | the field existed and was dropped from the model; nothing is suggested in its place, because a near name is usually a different number |
 
 **The shape of your statement is not the reason.** A construct is accepted or

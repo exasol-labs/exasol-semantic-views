@@ -470,6 +470,17 @@ in per model:
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION('sales', 'TRUE');
 ```
 
+What the opt-in accepts is ordinary-SQL meaning for *explicit* re-aggregation:
+`SUM(t0.total_revenue)` over the joined rows above is 7270 for North. The
+Semantic SQL forms keep their meaning. A wrapped semantic query is still compiled
+as one. `MEASURE(t0.total_revenue)`, or the bare metric, under a `GROUP BY` that
+covers every dimension of the object the statement selects, is the metric's
+value per group, which is 3635 however many customers North joins. Under a
+`GROUP BY` that leaves one of those dimensions out (`GROUP BY c.REGION`), each
+group holds several values and none of them is the answer. That's refused with
+`SEMANTIC_QUERY_021`: group by the object's dimensions, or aggregate the metric
+explicitly.
+
 Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.
 
