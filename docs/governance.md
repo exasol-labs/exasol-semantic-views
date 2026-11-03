@@ -201,8 +201,25 @@ whole grain — is answered without the opt-in. See [BI tools](bi-tools.md#4-the
 ## 5. Frozen views
 
 `CREATE VIEW` over a semantic object stores *compiled* SQL. The view then answers
-forever, for anyone, with no preprocessor — and with the model as it was when the
-view was made. Nothing in the view says so.
+for anyone, with no preprocessor — and with the model as it was when the view
+was made. Nothing in its answer says so, which is why a view whose model has
+moved on is **retired**:
+
+- Every definition change is validated, and a clean `VALIDATE_MODEL` run ends by
+  calling `SEMANTIC_ADMIN.SYNC_FROZEN_VIEWS`. It recompiles the columns each of
+  the model's frozen views froze. A view that is now `STALE` is replaced, under
+  the same name and columns, by one that raises `SEMANTIC_SURFACE_015`, so an
+  agent or dashboard reading it gets an error instead of an old number. Its text is kept, and
+  its grants are re-applied. The validation reports it as `SEMANTIC_MODEL_078`.
+- Reads pay nothing for this. A current view runs exactly the SQL it froze; the
+  check is paid once per definition change, at validation, one compile per
+  frozen view.
+- The remedy is to re-create the view over the semantic object, which freezes
+  the current definition. If the model instead returns to what the view froze —
+  a reverted change, a dry run, a refused change that was rolled back, each of
+  which validates again — the view is put back as it was.
+- A run with errors or preconditions retires nothing. A view the validating
+  principal may not replace keeps answering, reported as `SEMANTIC_MODEL_079`.
 
 The hazard this combines with: a view frozen while a `DIVERGENT` rollup was
 active bakes that rollup in. The view reads the pre-aggregate and never touches
@@ -212,7 +229,7 @@ that looks like an ordinary view.
 So:
 
 ```sql
--- what is frozen, and whether the view still exists
+-- what is frozen, and whether the view is LIVE, RETIRED or DROPPED
 SELECT VIEW_SCHEMA, VIEW_NAME, PRESENCE, FROZEN_RELATIONS
 FROM SEMANTIC_CATALOG.FROZEN_VIEWS;
 

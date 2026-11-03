@@ -383,9 +383,11 @@ it. Filter with literal values, or select the dimension as well. `IN
 
 ### A view over a semantic object freezes its SQL
 
-Because the stored text is compiled, the view answers forever, for anyone, with
-no preprocessor — and with the model *as it was when the view was made*. Nothing
-in the view says so, so ESV records it:
+Because the stored text is compiled, the view answers for anyone, with no
+preprocessor — and with the model *as it was when the view was made*. ESV
+records it, and once the model compiles something else for those columns, the
+next clean `VALIDATE_MODEL` retires it: reading it raises `SEMANTIC_SURFACE_015`
+until it is re-created ([Governance](governance.md#5-frozen-views)).
 
 ```sql
 SELECT VIEW_SCHEMA, VIEW_NAME, PRESENCE, FROZEN_RELATIONS
@@ -393,7 +395,7 @@ FROM SEMANTIC_CATALOG.FROZEN_VIEWS;
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS('sales');
 -- VIEW_SCHEMA VIEW_NAME  STATUS   DETAIL
--- MART        V_BI       STALE    The model now compiles different SQL ...
+-- MART        V_BI       STALE    The model now compiles different SQL ... The view is retired ...
 ```
 
 `CHECK_FROZEN_VIEWS` recompiles the columns the view froze and compares. That is

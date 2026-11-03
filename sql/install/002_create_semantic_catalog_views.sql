@@ -1119,8 +1119,9 @@ LEFT JOIN SEMANTIC_SOURCE.MODELS m ON m.MODEL_ID = s.MODEL_ID;
 -- A frozen view is the one object in the system that can be correct on the day
 -- it is created and wrong later, with nothing changing in it.
 --
--- PRESENCE is all this view can answer on its own: LIVE or DROPPED. Whether a
--- live one still matches what the model compiles today is an exact question
+-- PRESENCE is LIVE, DROPPED, or RETIRED: replaced by a stand-in that raises
+-- SEMANTIC_SURFACE_015, because a clean VALIDATE_MODEL found it STALE
+-- (SYNC_FROZEN_VIEWS). Whether a live one still matches what the model compiles today is an exact question
 -- that needs the compiler, so it is answered by
 -- SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS rather than guessed at here. There is no
 -- version comparison to make -- ESV creates exactly one model version and
@@ -1136,11 +1137,14 @@ SELECT
   fv.VERSION_ID AS FROZEN_VERSION_ID,
   mv.VERSION_NUMBER AS FROZEN_VERSION_NUMBER,
   m.ACTIVE_VERSION_ID,
-  CASE WHEN v.VIEW_NAME IS NULL THEN 'DROPPED' ELSE 'LIVE' END AS PRESENCE,
+  CASE WHEN v.VIEW_NAME IS NULL THEN 'DROPPED'
+       WHEN fv.RETIRED_AT IS NOT NULL THEN 'RETIRED'
+       ELSE 'LIVE' END AS PRESENCE,
   fv.FROZEN_COLUMNS,
   fv.FROZEN_RELATIONS,
   fv.FROZEN_AT,
-  fv.FROZEN_BY
+  fv.FROZEN_BY,
+  fv.RETIRED_AT
 FROM SEMANTIC_SOURCE.FROZEN_VIEWS fv
 JOIN SEMANTIC_SOURCE.MODELS m
   ON m.MODEL_ID = fv.MODEL_ID

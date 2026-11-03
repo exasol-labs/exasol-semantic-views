@@ -80,6 +80,7 @@ READ_ONLY_OR_INDIRECT = {
     "REVOKE_MODEL_ROLE",                # symmetric with GRANT_MODEL_ROLE
     "PUBLISH_MODEL",                    # activates the version; the compile cache is keyed on model_version_id, so a new version is a natural miss
     "UNPUBLISH_MODEL",                  # symmetric with PUBLISH_MODEL
+    "SYNC_FROZEN_VIEWS",                # writes FROZEN_VIEWS retirement state; no compile reads it
 }
 
 

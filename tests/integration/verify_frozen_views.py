@@ -174,8 +174,15 @@ ADD OR REPLACE METRIC total_amount AS SUM(amount) * 1 ON ENTITY "order"
   RETURNS DECIMAL(18,2) DISPLAY 'Total' COMMENT 'total' ADDITIVE PUBLIC CERTIFIED"""))
     con.commit()
     check("a view whose model changed underneath it reads STALE", frozen_status(), "STALE")
-    check("and it still answers, with the older definition",
-          len(plain.execute(f"SELECT * FROM {VIEW_SCHEMA}.{VIEW_NAME}").fetchall()), 2)
+    # The validation the change ran retired it: answering with the older
+    # definition, silently, is what an agent handed the view could not detect.
+    try:
+        plain.execute(f"SELECT * FROM {VIEW_SCHEMA}.{VIEW_NAME}").fetchall()
+        raised = ""
+    except Exception as error:  # noqa: BLE001 -- the refusal is the assertion
+        raised = str(error)
+    check("and reading it raises instead of answering with the older definition",
+          "SEMANTIC_SURFACE_015" in raised, True)
 
     # 2b. validation says the view is there at all
     #

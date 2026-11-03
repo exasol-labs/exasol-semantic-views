@@ -166,7 +166,7 @@ SELECT * FROM (VALUES
   ('The shape of the statement around the object', 'DOES NOT MATTER',
    'A construct is accepted or refused the same way whether the object is referenced bare or wrapped in a subquery. Wrapping a statement is never a workaround for a refusal.', NULL, NULL),
   ('CREATE VIEW over an object', 'SUPPORTED',
-   'The stored text is compiled SQL, so the view answers with no preprocessor. Recorded in SEMANTIC_CATALOG.FROZEN_VIEWS and checked by CHECK_FROZEN_VIEWS.', NULL, NULL),
+   'The stored text is compiled SQL, so the view answers with no preprocessor. Recorded in SEMANTIC_CATALOG.FROZEN_VIEWS; once a definition it froze changes, validation retires it and reading it raises SEMANTIC_SURFACE_015 until it is re-created.', NULL, NULL),
   ('Joining an object to another relation', 'REFUSED BY DEFAULT',
    'The join can repeat the semantic result''s rows and re-aggregation then double-counts. A join that provably cannot is answered: to a one-row relation (SELECT ... [FROM DUAL] with no GROUP BY), or between grouped semantic queries joined one-to-one on their whole grain, with ON equalities pairing every grouping key. Opt in to any other per model with SET_MODEL_DERIVED_COMPOSITION.', 'SEMANTIC_QUERY_012', NULL),
   ('A wrapped block that aggregates the object', 'SUPPORTED',

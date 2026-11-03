@@ -32,8 +32,9 @@ file. **Don't.** The text is the model as it was at that moment:
 
 Compile per request instead (section 3), or query the published view live. If
 a frozen statement is genuinely what you want, make it a database view with
-`CREATE VIEW` through the preprocessor: that is registered, and
-`CHECK_FROZEN_VIEWS` reports when it goes `STALE`
+`CREATE VIEW` through the preprocessor: that is registered, and when a
+definition it froze changes it is retired and raises `SEMANTIC_SURFACE_015`
+rather than answer with the old one
 ([BI tools: Creating views on top](bi-tools.md#creating-views-on-top)).
 
 ## 2. Session setup

@@ -117,6 +117,8 @@
 
 -- @lua lua/semantic_layer/scripts/check_frozen_views.lua
 
+-- @lua lua/semantic_layer/scripts/sync_frozen_views.lua
+
 -- @lua lua/semantic_layer/scripts/check_partition_coverage.lua
 
 -- @lua lua/semantic_layer/scripts/check_fusion_health.lua

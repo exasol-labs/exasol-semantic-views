@@ -83,6 +83,7 @@ mean the session that ran it has no preprocessor:
 
 | you see | cause |
 |---|---|
+| `SEMANTIC_SURFACE_015: this view was compiled from an earlier definition` | a view created over a semantic object, whose model has changed since; re-create it |
 | `SEMANTIC_SURFACE_001: semantic query requires the Lua SQL preprocessor` | the hook is missing, or was set on a different connection than the one the visual uses |
 | `not a valid GROUP BY expression` | the same. Exasol rejects a grouped metric before the view's guard can run, so this message cannot carry the hint (GitHub #5) |
 
@@ -236,9 +237,10 @@ SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE FROM SEMANTIC_SALES.SALES t0;
 ```
 
 The stored text is compiled physical SQL, so this view answers for anyone, with
-no preprocessor at all. It is also **frozen**: it keeps answering after the model
-changes, with the model as it was when the view was made. ESV records that and
-can tell you — see [Governance](governance.md#5-frozen-views).
+no preprocessor at all. It is also **frozen**: it holds the model as it was when
+the view was made. When a definition it froze changes, the validation that
+change runs retires the view, and reading it raises `SEMANTIC_SURFACE_015` until
+you re-create it — see [Governance](governance.md#5-frozen-views).
 
 ### What the shapes cost
 

@@ -3948,8 +3948,10 @@ local function check_frozen_views(ctx)
             .. " SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS("
             .. sql_text.sql_string(tostring(ctx.model_name))
             .. "), which recompiles each"
-            .. " one and reports CURRENT, STALE or DROPPED. Drop a view to retire"
-            .. " it and this notice with it.")
+            .. " one and reports CURRENT, STALE or DROPPED. A clean validation"
+            .. " retires a STALE one, so reading it raises SEMANTIC_SURFACE_015"
+            .. " until it is re-created. Drop a view to remove it and this notice"
+            .. " with it.")
     end
 end
 

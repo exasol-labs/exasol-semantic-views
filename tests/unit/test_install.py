@@ -1136,7 +1136,8 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
     def test_the_exclusions_are_derived_not_listed(self):
         """The runtime libraries and the UDF-kind scripts, and nothing else."""
         self.assertEqual(
-            set(PACKAGER.RUNTIMES) | {"SEMANTIC_GUARD", "SEMANTIC_PREPROCESSOR"}, self.excluded)
+            set(PACKAGER.RUNTIMES) | {"SEMANTIC_GUARD", "FROZEN_VIEW_GUARD", "SEMANTIC_PREPROCESSOR"},
+            self.excluded)
         self.assertEqual(set(), self.excluded & self.published)
 
     def test_row_returning_and_silent_mutators_are_both_published(self):
