@@ -1023,6 +1023,10 @@ local function plan_entity(query_fn, model, entity_name, entity)
 end
 
 function M.plan_document(query_fn, model_name, declaration_json)
+    -- The model first: a document applied to a model that does not exist was
+    -- refused for whatever the document lacked, so a typo in MODEL_NAME read as
+    -- SEMANTIC_FUSION_012 "document.entities is required".
+    local model = load_model(query_fn, required(model_name, "MODEL_NAME"))
     local declaration_text = required(declaration_json, "DECLARATION_JSON")
     local decoded_ok, document = pcall(json.decode,
         declaration_text)
@@ -1045,7 +1049,6 @@ function M.plan_document(query_fn, model_name, declaration_json)
             .. trim(model_name) .. "'")
     end
 
-    local model = load_model(query_fn, model_name)
     local names = {}
     for entity_name, _ in pairs(document.entities) do
         names[#names + 1] = tostring(entity_name)

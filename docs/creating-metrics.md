@@ -282,6 +282,25 @@ Semantic SQL statements also raise the apply error to the SQL client; direct
 calls to `APPLY_SEMANTIC_DEFINITION` return the same error as a structured
 `STATUS = 'ERROR'` result row.
 
+**From an orchestrator, call `APPLY_SEMANTIC_DEFINITION_OR_FAIL`.** It takes the
+same arguments and returns the same row, but a refusal *raises*, with the rule
+code first in the message. dbt, Airflow, a CI job or any client that judges a
+statement by whether it ran counts a returned `ERROR` row as a success: the run
+goes green over a model that was never changed. The catalog is restored before
+either variant reports, so the only difference is how the refusal reaches you.
+
+```sql
+-- in a dbt hook or macro: a refused definition fails the run
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION_OR_FAIL(
+  '<ALTER SEMANTIC VIEW ...>',
+  FALSE
+);
+```
+
+`ALTER SEMANTIC VIEW` run directly through the preprocessor already uses it.
+The fusion document has the same pair, `APPLY_FUSION_DECLARATION_OR_FAIL`
+([Data fusion](data-fusion.md#the-fusion-declaration-document)).
+
 For single-metric edits, use:
 
 ```sql

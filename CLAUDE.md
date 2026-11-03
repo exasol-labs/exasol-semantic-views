@@ -362,7 +362,9 @@ a concept is absent from one of them.
 
   Note that `APPLY_SEMANTIC_DEFINITION` reports a refusal as `STATUS = 'ERROR'`
   in its result row rather than raising, so check the column, not just for an
-  exception. See `sql/examples/sales_metrics_semantic_definition.sql`.
+  exception. `APPLY_SEMANTIC_DEFINITION_OR_FAIL` raises instead, and is what an
+  orchestrator such as dbt must call: it counts a returned row as success.
+  `APPLY_FUSION_DECLARATION` / `_OR_FAIL` are the same pair for fusion. See `sql/examples/sales_metrics_semantic_definition.sql`.
 - **The `ADD_*` / `SET_*` / `REMOVE_*` scripts own the graph** — everything that
   brings objects into being or relates them: the model, entities, semantic
   objects, relationships, unique keys, representations, coverage (F3), authority

@@ -179,3 +179,5 @@
 -- @lua lua/semantic_layer/scripts/export_fusion_declaration.lua
 
 -- @lua lua/semantic_layer/scripts/apply_fusion_declaration.lua
+
+-- @lua lua/semantic_layer/scripts/apply_fusion_declaration_or_fail.lua
