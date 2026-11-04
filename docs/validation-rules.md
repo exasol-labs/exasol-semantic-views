@@ -459,7 +459,7 @@ path — the selected one — and the choice is reported separately; see
 Run the smoke suite:
 
 ```sh
-PYTHON_BIN=python3 sh tools/run_smoke.sh
+PYTHON_BIN=python3 sh tools/run_system_tests.sh
 ```
 
 The smoke now verifies:

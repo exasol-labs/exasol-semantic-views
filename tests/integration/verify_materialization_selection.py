@@ -4,7 +4,7 @@
 A registered aggregate is chosen when it covers the request, rejected with a
 reason when it does not, and the choice is recorded in plan provenance.
 
-Order-dependent: tools/run_smoke.sh loads sql/examples/sales_materializations.sql
+Order-dependent: tools/run_system_tests.sh loads sql/examples/sales_materializations.sql
 immediately before this script, which is what registers the aggregate.
 """
 

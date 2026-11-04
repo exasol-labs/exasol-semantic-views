@@ -16,6 +16,7 @@ The `run_*.sh` scripts are the entry points to the test lanes and static checks;
 `tests/README.md` maps each to what it runs and needs.
 
 `dev/` holds developer helpers that no user runs: `lint_script_bodies.py` (used by
-`run_static_checks.sh`), `measure_expansion_cost.py` (a live-database
+`run_static_checks.sh`), `wait_for_exasol.py` (shared CI database readiness check),
+`measure_expansion_cost.py` (a live-database
 measurement), and `user_studies/`, the simulated-user harness behind the
 persona reports in `reports/`.

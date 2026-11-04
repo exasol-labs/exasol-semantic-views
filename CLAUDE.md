@@ -40,24 +40,25 @@ python3 tools/install.py --example --reset
 python3 tools/install.py --example
 ```
 
-**Run the full smoke-test suite** (requires an Exasol Personal deployment reachable via `$EXASOL_HOST:$EXASOL_PORT`):
+**Run the full system-test suite** (requires an Exasol Personal deployment reachable via `$EXASOL_HOST:$EXASOL_PORT`):
 ```sh
-sh tools/run_smoke.sh
+sh tools/run_system_tests.sh
 ```
 It installs from scratch, checks the fresh install (`tests/integration/fresh_install/`),
 loads the example materializations, then runs the live suite in `tests/integration/`
 with pytest — every test runs, and the run ends with a summary of all failures.
-Arguments go to pytest (`sh tools/run_smoke.sh -k wrapped`). Against an already
+Arguments go to pytest (`sh tools/run_system_tests.sh -k wrapped`). Against an already
 installed deployment, run it directly: `python3 -m pytest tests/integration -k order_by`.
 
-**Run the release gate before major releases** (smoke + wide fuzz campaign, minutes long):
+**Run the release gate before major releases** (system tests + wide fuzz campaign, minutes long):
 ```sh
 sh tools/run_release_gate.sh
 ```
-This is deliberately NOT part of `run_smoke.sh` — a full fuzz campaign is
-too slow to run on every check. The release gate wraps the smoke suite and adds
+The fuzz campaign is deliberately separate from `run_system_tests.sh` because it
+is too slow to run on every check. The release gate wraps the system suite and adds
 `tests/fuzz/fuzz_semantic_differential.py` under both oracles (`differential` and
-`tlp`) across multiple seeds. Override cadence with `FUZZ_SEEDS` and `FUZZ_CASES`.
+`tlp`) across multiple seeds. CI uses `--fuzz-only` after its system-test job passes.
+Override cadence with `FUZZ_SEEDS` and `FUZZ_CASES`.
 
 **Run database-free Lua runtime tests with coverage:**
 ```sh
@@ -77,7 +78,7 @@ runs the property-based tests in `tests/unit/test_property.py`. Same ratcheting
 discipline as the Lua coverage gate: raise a threshold whenever coverage
 grows; do not lower one to merge.
 
-**Run the static checks** (Ruff, mypy, Luacheck, ShellCheck; CI runs the same):
+**Run the static checks** (Ruff, mypy, Luacheck, ShellCheck; CI runs these too):
 ```sh
 sh tools/run_static_checks.sh
 ```
@@ -88,6 +89,9 @@ block declares. Exasol's globals and the `ESV_*` namespaces are declared in
 `.luacheckrc`; Python rules and the gradually-typed module list are in
 `pyproject.toml`. Add a module to mypy's `files` once it is clean. The tools are
 pinned in `tools/requirements-static.txt` (plus `luarocks install luacheck 1.2.0`).
+CI also runs zizmor, checks local and web Markdown links, and audits both Python
+requirements files with `pip-audit`. The `ci-gate` job requires all four jobs
+to pass. A separate daily dependency audit runs independently of pull requests.
 
 **Run the live cold/warm and scale probe** (requires an installed model):
 ```sh
@@ -558,7 +562,7 @@ the six names.
 | `tools/package_lua_scripts.py` | Builds `build/install/` from `sql/install/` and `lua/` |
 | `tools/install.py` | Full installer: build → connect → reset? → run `build/install/` |
 | `tools/import_databricks.py` | Host helper: reads a Databricks UCMV YAML file and calls the in-DB importer |
-| `tools/run_smoke.sh` | Full smoke suite |
+| `tools/run_system_tests.sh` | Full system-test suite |
 | `tests/README.md` | The test lanes: which directory, what it needs, how it runs |
 
 The Databricks UCMV importer (`SEMANTIC_ADMIN.IMPORT_DATABRICKS_METRIC_VIEW`) and its YAML parser/translator live in `admin/databricks_import.lua`; the MEASURE()/`GROUP BY ALL` query surface lives in `request_json.lua`. See `docs/databricks-metric-views.md`.

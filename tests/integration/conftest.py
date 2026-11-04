@@ -1,6 +1,6 @@
 """Live-database integration tests, discovered and run by pytest.
 
-Everything here runs against an installed deployment: tools/run_smoke.sh
+Everything here runs against an installed deployment: tools/run_system_tests.sh
 installs the sales example and its materializations, then runs
 `pytest tests/integration`. Run a single test the usual way, e.g.
 `pytest tests/integration -k order_by`.
@@ -9,7 +9,7 @@ Two kinds of module live here:
 
 - `test_*.py` -- pytest tests, using the fixtures below.
 - `verify_*.py` -- scripts written before the move to pytest. Each is collected
-  as one test that runs the script exactly as run_smoke.sh used to, in its own
+  as one test that runs the script exactly as run_system_tests.sh used to, in its own
   process, and fails on a non-zero exit. Convert one to `test_*.py` when you
   next touch it; tests/unit/test_conventions.py pins how many remain, and the number
   only shrinks.
@@ -17,7 +17,7 @@ Two kinds of module live here:
 A test must establish the state it needs -- publish the model, register the
 materialization -- rather than rely on a test that happened to run before it.
 The one exception is `fresh_install/`: tests of what the installer itself
-leaves behind, which only hold before anything else has run. run_smoke.sh runs
+leaves behind, which only hold before anything else has run. run_system_tests.sh runs
 that directory straight after the install, and it is collected only when named
 explicitly.
 """
@@ -121,7 +121,7 @@ def installed_example() -> None:
         con.close()
     if not found:
         pytest.exit("integration tests need the sales example installed "
-                    f"(python3 tools/install.py --example, or sh tools/run_smoke.sh): {reason}",
+                    f"(python3 tools/install.py --example, or sh tools/run_system_tests.sh): {reason}",
                     returncode=2)
 
 

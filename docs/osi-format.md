@@ -449,7 +449,7 @@ Live-DB verifiers:
 Run the full local smoke suite with:
 
 ```sh
-sh tools/run_smoke.sh
+sh tools/run_system_tests.sh
 ```
 
 The smoke suite includes the live OSI verifiers.

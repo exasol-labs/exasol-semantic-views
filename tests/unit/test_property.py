@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Property-based tests for the Python host tools.
 
-These are DB-free and run in the standard runtime-tests CI job. They cover
+These are DB-free and run in the standard CI CI job. They cover
 invariants that example-based tests can only sample — string escaping under
 adversarial inputs, JSON round-trips, and idempotence of cleaner functions.
 

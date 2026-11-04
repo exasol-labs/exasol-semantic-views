@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# Release gate: run the full smoke suite AND a wide fuzz campaign.
+# Release gate: run the full system suite AND a wide fuzz campaign.
 #
 # Intent: this is the pre-release verification, not the per-check gate. The
 # fuzz campaign here is deliberately large enough to cost minutes so that
-# nobody is tempted to add it to run_smoke.sh. Run it before every
+# nobody is tempted to add it to run_system_tests.sh. Run it before every
 # major release, after any change to the compiler, planner, or admin scripts
 # whose blast radius is broad.
 #
@@ -11,8 +11,8 @@
 #   FUZZ_SEEDS   — space-separated seeds. Default "0 1 2 7 42 99 123 456".
 #   FUZZ_CASES   — cases per (seed, oracle) pair. Default 250.
 #
-# A divergence in either fuzz oracle exits non-zero AFTER the smoke suite has
-# run, so callers see both the smoke summary and the fuzz reproduction.
+# Pass --fuzz-only when the system suite already passed in CI. A divergence in
+# either fuzz oracle exits non-zero after all seeds have run.
 
 set -eu
 
@@ -30,8 +30,24 @@ fi
 FUZZ_SEEDS="${FUZZ_SEEDS:-0 1 2 7 42 99 123 456}"
 FUZZ_CASES="${FUZZ_CASES:-250}"
 
-echo "==> smoke suite"
-sh tools/run_smoke.sh
+case "${1:-}" in
+  "")
+    echo "==> system suite"
+    sh tools/run_system_tests.sh
+    ;;
+  --fuzz-only)
+    shift
+    ;;
+  *)
+    echo "Usage: sh tools/run_release_gate.sh [--fuzz-only]" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$#" -ne 0 ]; then
+  echo "Usage: sh tools/run_release_gate.sh [--fuzz-only]" >&2
+  exit 2
+fi
 
 echo
 echo "==> Compiler fuzz campaign (seeds='$FUZZ_SEEDS' cases=$FUZZ_CASES)"
@@ -58,4 +74,4 @@ if [ "$FUZZ_FAILURES" -gt 0 ]; then
   echo "RELEASE GATE FAILED: $FUZZ_FAILURES fuzz campaign(s) diverged."
   exit 1
 fi
-echo "RELEASE GATE PASSED: smoke + fuzz all green."
+echo "RELEASE GATE PASSED: fuzz campaign green."

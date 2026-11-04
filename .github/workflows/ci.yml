@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    uses: $/.github/workflows/static-checks.yml
+
+  database-free:
+    uses: $/.github/workflows/database-free.yml
+
+  dependency-audit:
+    uses: $/.github/workflows/dependency-audit.yml
+
+  system-tests:
+    uses: $/.github/workflows/system-tests.yml
+
+  ci-gate:
+    needs: [static-checks, database-free, dependency-audit, system-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All CI jobs completed successfully."

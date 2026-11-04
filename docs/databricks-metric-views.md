@@ -152,4 +152,4 @@ python3 tests/integration/verify_databricks_sql_compat.py   # MEASURE()/agg(), G
 python3 tests/integration/verify_databricks_import.py        # end-to-end import over the demo MART tables
 ```
 
-Both are part of `sh tools/run_smoke.sh`.
+Both are part of `sh tools/run_system_tests.sh`.

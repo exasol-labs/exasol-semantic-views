@@ -18,17 +18,23 @@ concurrency:
 
 jobs:
   tests:
-    uses: ./.github/workflows/runtime-tests.yml
+    uses: $/.github/workflows/ci.yml
+
+  fuzz:
+    needs: tests
+    uses: $/.github/workflows/fuzz.yml
 
   release:
-    needs: tests
+    needs: [tests, fuzz]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Build release bundle
         shell: bash
         run: |

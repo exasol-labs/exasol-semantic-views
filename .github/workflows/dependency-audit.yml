@@ -1,0 +1,28 @@
+name: Scheduled dependency audit
+
+on:
+  workflow_call:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXASOL_TELEMETRY_DISABLE: "true"
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: python -m pip install pip-audit==2.10.1
+      - name: Audit Python dependencies
+        run: sh tools/run_dependency_audit.sh

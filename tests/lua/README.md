@@ -1,7 +1,7 @@
 # Lua Runtime Tests
 
 The runtime has a database-free test lane in addition to the live-DB
-integration suite (`tools/run_smoke.sh` — see `docs/runtime-testing.md`).
+integration suite (`tools/run_system_tests.sh` — see `docs/runtime-testing.md`).
 
 ```sh
 sh tools/run_lua_tests.sh                 # everything, with the coverage gates
