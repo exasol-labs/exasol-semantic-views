@@ -15,6 +15,8 @@ __pycache__/
 # tests/unit/python_coverage_thresholds.py.
 .coverage
 .coverage.*
+.sonar-coverage/
+python-coverage.xml
 venv/
 .venv/
 *.egg-info/

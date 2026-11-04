@@ -1,0 +1,46 @@
+name: SonarQube Cloud analysis
+
+on:
+  workflow_call:
+    secrets:
+      SONAR_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Required by tests/unit/test_workflows.py
+  EXASOL_TELEMETRY_DISABLE: "true"
+
+jobs:
+  sonar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install coverage.py
+        run: python -m pip install 'coverage>=7.16,<8'
+      - name: Download Python unit coverage
+        uses: actions/download-artifact@v7
+        with:
+          name: python-unit-coverage
+          path: .sonar-coverage/unit
+      - name: Download Python integration coverage
+        uses: actions/download-artifact@v7
+        with:
+          name: python-integration-coverage
+          path: .sonar-coverage/integration
+      - name: Combine Python coverage
+        run: |
+          python -m coverage combine .sonar-coverage/unit .sonar-coverage/integration
+          python -m coverage xml -o python-coverage.xml
+      - name: SonarQube Cloud scan
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

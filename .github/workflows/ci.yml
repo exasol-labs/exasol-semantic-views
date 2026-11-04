@@ -23,8 +23,14 @@ jobs:
   system-tests:
     uses: $/.github/workflows/system-tests.yml
 
+  sonar:
+    needs: [database-free, system-tests]
+    uses: $/.github/workflows/sonar.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
   ci-gate:
-    needs: [static-checks, database-free, dependency-audit, system-tests]
+    needs: [static-checks, database-free, dependency-audit, system-tests, sonar]
     runs-on: ubuntu-latest
     steps:
       - run: echo "All CI jobs completed successfully."

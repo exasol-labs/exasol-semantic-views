@@ -240,3 +240,12 @@ of Exasol's `query()`, script import behavior, transaction semantics, optimizer,
 privilege evaluation, or generated SQL execution. Those belong to the live-DB
 lane. Host-side Ossie/OSI behavior remains in `tests/unit/test_osi_tool.py`, which is
 also invoked by the canonical system-test script.
+
+## SonarQube Cloud in CI
+
+The CI workflow scans Python on same-repository pull requests and pushes to
+`main`. Its database-free job provides unit-test coverage. Its system-test job
+also measures the live Python integration suite, including the separate
+`verify_*.py` processes, and the scan job combines both reports. The existing
+Luacheck job remains the Lua analysis gate; SonarQube Cloud does not analyze
+Lua or display Lua coverage.
