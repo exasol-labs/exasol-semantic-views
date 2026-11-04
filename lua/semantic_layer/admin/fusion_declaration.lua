@@ -100,7 +100,8 @@ local function representation_rows(query_fn, model, entity_name)
         SELECT e.ENTITY_NAME, r.REPRESENTATION_ID, r.REPRESENTATION_NAME,
                r.SOURCE_KIND, r.SOURCE_SCHEMA, r.SOURCE_OBJECT, r.SOURCE_ALIAS,
                r.REPRESENTATION_ROLE, r.PRIORITY, r.FRESHNESS_POLICY,
-               r.COVERAGE_PREDICATE, r.VALID_FROM, r.VALID_TO,
+               r.COVERAGE_PREDICATE, TO_CHAR(r.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM,
+               TO_CHAR(r.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO,
                a.AUTHORITY_ROLE
         FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS r
         JOIN SYS_SEMANTIC.ENTITIES e
@@ -602,7 +603,8 @@ end
 local function coverage_matches(query_fn, model, entity_name, representation_name,
         valid_from, valid_to, predicate)
     local rows = query_fn([[
-        SELECT r.VALID_FROM, r.VALID_TO, r.COVERAGE_PREDICATE
+        SELECT TO_CHAR(r.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM, TO_CHAR(r.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO,
+               r.COVERAGE_PREDICATE
         FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS r
         JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = r.ENTITY_ID
         WHERE r.MODEL_ID = :model_id AND r.VERSION_ID = :version_id

@@ -356,7 +356,10 @@ class InstallerResetTest(unittest.TestCase):
                 "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(")
         )
         self.assertIn("COVERAGE_PREDICATE = :coverage_predicate", coverage)
-        self.assertIn("VALID_FROM = :valid_from", coverage)
+        # Parsed in one fixed format, never the session's NLS_TIMESTAMP_FORMAT
+        # (dbt-exasol sets its own).
+        self.assertIn("VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '),"
+                      " 'YYYY-MM-DD HH24:MI:SS.FF6')", coverage)
         self.assertIn("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", coverage)
         self.assertIn("STATUS = 'STALE'", coverage)
         self.assertIn('if tostring(model_status) == "PUBLISHED"', coverage)
@@ -368,7 +371,7 @@ class InstallerResetTest(unittest.TestCase):
             coverage.index("published coverage change rejected and restored"),
         )
         self.assertLess(
-            coverage.index("VALID_TO = :valid_to", coverage.index("candidate_validation")),
+            coverage.index("VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to", coverage.index("candidate_validation")),
             coverage.index("published coverage change rejected and restored"),
         )
 

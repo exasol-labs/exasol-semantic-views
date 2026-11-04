@@ -44,7 +44,8 @@ end
 
 local rows = query([[
     SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, er.REPRESENTATION_ID,
-           m.STATUS, er.COVERAGE_PREDICATE, er.VALID_FROM, er.VALID_TO
+           m.STATUS, er.COVERAGE_PREDICATE, TO_CHAR(er.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM,
+           TO_CHAR(er.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO
     FROM SYS_SEMANTIC.MODELS m
     JOIN SYS_SEMANTIC.ENTITIES e
       ON e.MODEL_ID = m.MODEL_ID
@@ -77,8 +78,8 @@ local previous_valid_to = row_value(rows[1], "VALID_TO", 7) or null
 query([[
     UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
     SET COVERAGE_PREDICATE = :coverage_predicate,
-        VALID_FROM = :valid_from,
-        VALID_TO = :valid_to,
+        VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
+        VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
         UPDATED_AT = CURRENT_TIMESTAMP,
         UPDATED_BY = CURRENT_USER
     WHERE REPRESENTATION_ID = :representation_id
@@ -110,8 +111,8 @@ if tostring(model_status) == "PUBLISHED" then
             query([[
                 UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
                 SET COVERAGE_PREDICATE = :coverage_predicate,
-                    VALID_FROM = :valid_from,
-                    VALID_TO = :valid_to,
+                    VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
+                    VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
                     UPDATED_AT = CURRENT_TIMESTAMP,
                     UPDATED_BY = CURRENT_USER
                 WHERE REPRESENTATION_ID = :representation_id
@@ -130,8 +131,15 @@ if tostring(model_status) == "PUBLISHED" then
     end
 end
 
+-- Reported as stored: a TIMESTAMP result column casts with the session's
+-- NLS_TIMESTAMP_FORMAT, which the stored value read back unformatted is in.
+local stored_bounds = query([[
+    SELECT VALID_FROM, VALID_TO FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+    WHERE REPRESENTATION_ID = :representation_id
+]], {representation_id = representation_id})[1]
 exit({{representation_id, model_name, entity_name, representation_name,
-    predicate == null and "NONE" or "UNION", predicate, valid_from, valid_to}}, [[
+    predicate == null and "NONE" or "UNION", predicate,
+    row_value(stored_bounds, "VALID_FROM", 1), row_value(stored_bounds, "VALID_TO", 2)}}, [[
   REPRESENTATION_ID DECIMAL(18,0),
   MODEL_NAME VARCHAR(256),
   ENTITY_NAME VARCHAR(256),

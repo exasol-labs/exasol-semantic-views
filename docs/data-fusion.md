@@ -198,7 +198,10 @@ editing semantics.
 
 This level exists because a hand-written `UNION ALL` on a date boundary
 is one of the most common quiet-correctness footguns. Each partition
-declares `coverage_predicate` + `valid_from`/`valid_to`; the compiler
+declares `coverage_predicate` + `valid_from`/`valid_to` (written
+`YYYY-MM-DD[ HH24:MI:SS[.FF6]]`, a `T` separator accepted, and read back in that
+form whatever the session's `NLS_TIMESTAMP_FORMAT` — dbt-exasol sets its own);
+the compiler
 clones every grain-proven leaf branch into one partition-branch per
 representation and merges typed aggregate states across them. Only
 mergeable aggregate states may cross partitions; `AVG(...)` alone is
