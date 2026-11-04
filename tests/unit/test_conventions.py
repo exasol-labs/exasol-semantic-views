@@ -890,13 +890,12 @@ class LuaSpecsAreAllRun(unittest.TestCase):
 
 class TestRunsSendNoTelemetry(unittest.TestCase):
     """pyexasol 3 reports usage on every connect unless EXASOL_TELEMETRY_DISABLE
-    is set. A test run is not usage, so every way into one sets it: each CI
-    workflow, each test runner script, and the two Python entry points that are
-    also run directly (pytest's conftest and the fuzz harness)."""
+    is set. A test run is not usage, so each test runner script and the two
+    directly run Python entry points set it. Workflow jobs are checked in
+    test_workflows.py, where their actual env mappings can be inspected."""
 
     def test_every_entry_point_disables_telemetry(self):
         entry_points = [
-            *sorted((ROOT / ".github/workflows").glob("*.yml")),
             *sorted((ROOT / "tools").glob("run_*.sh")),
             ROOT / "tests/integration/conftest.py",
             ROOT / "tests/fuzz/fuzz_semantic_differential.py",
