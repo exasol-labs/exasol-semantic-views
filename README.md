@@ -543,6 +543,12 @@ python3 tests/integration/verify_runtime_performance.py
 See [Runtime testing](docs/runtime-testing.md) for coverage scope, thresholds,
 and large/high-cardinality CI configuration.
 
+The full fuzz campaign also runs before each release. For a same-repository PR,
+a reviewer can run it on demand: open **Actions → Fuzz campaign → Run workflow**,
+select the PR's branch, and start the run. Review the result for the current PR
+commit before approving; a new push requires a new run. The workflow must first
+be present on the default branch for GitHub to show the manual run button.
+
 ## Installation
 
 Point the installer at a running Exasol instance and run:
