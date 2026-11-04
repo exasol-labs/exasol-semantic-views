@@ -618,6 +618,7 @@ Use the admin helpers instead of direct DML:
 SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION
 SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
 SEMANTIC_ADMIN.DROP_MODEL
+SEMANTIC_ADMIN.DROP_MODEL_IF_EXISTS
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS
@@ -633,7 +634,14 @@ SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA
 
 `DROP_MODEL(model_name)` removes one model's catalog and runtime history. It
 drops the published schema only when no other model references that schema and
-the schema is not protected; physical source schemas are never removed.
+the schema is not protected; physical source schemas are never removed. A model
+that does not exist is refused with `SEMANTIC_ADMIN_011`.
+
+`DROP_MODEL_IF_EXISTS(model_name)` is the form for a pipeline that rebuilds a
+model from source on every run, such as a dbt hook: it drops the model exactly as
+`DROP_MODEL` does, or returns one row with `STATUS = 'NOT_FOUND'` when there is
+none, so the first run needs no existence probe. Only a missing model is
+absorbed; any other refusal still raises.
 
 `ADD_CUSTOM_EXTENSION` accepts non-Exasol vendor names without interpretation,
 so import/export can preserve third-party Ossie/OSI extensions. `ADD_UNIQUE_KEY`

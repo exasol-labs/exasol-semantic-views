@@ -82,8 +82,10 @@ if not missing(published_schema) then
     end
 end
 
-query([[
-    DELETE FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
+-- The suggestions this model owns, read once: their reviews and targets are
+-- keyed on the suggestion alone, so they go first or are orphaned.
+local model_suggestions = [[
+    SELECT SUGGESTION_ID FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
     WHERE MODEL_ID = :model_id
        OR AGENT_REQUEST_ID IN (
             SELECT AGENT_REQUEST_ID FROM SYS_SEMANTIC.AGENT_REQUEST_LOG
@@ -104,7 +106,13 @@ query([[
                     WHERE MODEL_ID = :model_id
                   )
        )
-]], {model_id = model_id})
+]]
+for _, child in ipairs({"MODEL_EVOLUTION_REVIEWS", "MODEL_EVOLUTION_TARGETS"}) do
+    query("DELETE FROM SYS_SEMANTIC." .. child .. " WHERE SUGGESTION_ID IN ("
+        .. model_suggestions .. ")", {model_id = model_id})
+end
+query("DELETE FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS WHERE SUGGESTION_ID IN ("
+    .. model_suggestions .. ")", {model_id = model_id})
 query([[
     DELETE FROM SYS_SEMANTIC.AGENT_FEEDBACK
     WHERE AGENT_REQUEST_ID IN (
@@ -175,6 +183,8 @@ query([[
 ]], {model_id = model_id})
 
 local model_tables = {
+    "FROZEN_VIEWS",
+    "SOURCE_TRUST",
     "METRIC_TYPE_OBSERVATIONS",
     "METRIC_DIMENSION_MATRIX",
     "MODEL_ROLE_GRANTS",

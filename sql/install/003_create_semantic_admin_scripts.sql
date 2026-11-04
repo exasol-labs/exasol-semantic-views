@@ -5,6 +5,8 @@
 
 -- @lua lua/semantic_layer/scripts/drop_model.lua
 
+-- @lua lua/semantic_layer/scripts/drop_model_if_exists.lua
+
 -- @lua lua/semantic_layer/scripts/add_entity.lua
 
 -- @lua lua/semantic_layer/scripts/new_validation_errors.lua
