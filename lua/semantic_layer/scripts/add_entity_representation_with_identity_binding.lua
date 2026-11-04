@@ -53,8 +53,9 @@ local scalar = script_support.ESV_ROWS.scalar
 local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
 local representation_name = normalize_name(REPRESENTATION_NAME, "REPRESENTATION_NAME")
-local source_schema = normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA")
-local source_object = normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT")
+-- Stored as the database spells it: the compiler quotes it verbatim.
+local source_schema, source_object = script_support.ESV_SOURCE_COLUMNS.require_relation(
+    query, normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA"), normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT"))
 local identity_name = normalize_name(IDENTITY_NAME, "IDENTITY_NAME")
 local source_expression = trim(SOURCE_EXPRESSION)
 if source_expression == "" then

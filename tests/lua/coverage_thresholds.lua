@@ -181,7 +181,7 @@ return {
         ["lua/semantic_layer/shared/sql_text.lua"] = 99.54,
         ["lua/semantic_layer/shared/catalog_rollback.lua"] = 100,
         ["lua/semantic_layer/shared/grain_graph.lua"] = 95.7,
-        ["lua/semantic_layer/shared/source_columns.lua"] = 92.5,
+        ["lua/semantic_layer/shared/source_columns.lua"] = 95.3,
         ["lua/semantic_layer/shared/identity_join.lua"] = 100,
         ["lua/semantic_layer/compiler/query_spec.lua"] = 100,
         ["lua/semantic_layer/compiler/catalog_snapshot.lua"] = 100,

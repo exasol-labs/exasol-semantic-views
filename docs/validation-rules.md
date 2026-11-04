@@ -59,7 +59,7 @@ messages — it may fall, and it may not rise.
 | Code | Severity | Meaning |
 | --- | --- | --- |
 | `SEMANTIC_MODEL_000` | error | Model name is missing or the model does not exist. |
-| `SEMANTIC_MODEL_001` | error | Entity source table or view is not visible. |
+| `SEMANTIC_MODEL_001` | error | Entity source table or view is not visible under the name stored for it. The compiler quotes a stored source exactly, so a name that differs from the database's only in case is not visible either, and the message names the spelling the database has. `ADD_ENTITY` and `ADD_ENTITY_REPRESENTATION*` resolve the spelling when a source is declared, and refuse one that does not exist (`SEMANTIC_ADMIN_227`). |
 | `SEMANTIC_MODEL_002` | error | Model has no active version. |
 | `SEMANTIC_MODEL_003` | error | Entity alias is duplicated in one model version. |
 | `SEMANTIC_MODEL_004` | error | Object, dimension, or fact references a missing entity. |

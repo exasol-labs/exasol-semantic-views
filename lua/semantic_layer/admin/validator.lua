@@ -213,10 +213,6 @@ local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
 
-local function count_query(statement_sql, params)
-    return tonumber(scalar(statement_sql, params) or 0) or 0
-end
-
 local function upper(value)
     return string.upper(tostring(value))
 end
@@ -388,21 +384,19 @@ local function finish_validation_run(ctx)
     })
 end
 
+-- Exact, because the compiler quotes a stored source verbatim: a stored
+-- `slv_customer` over a physical SLV_CUSTOMER passed a case-insensitive probe
+-- here and then failed every expression bound against it. The second value is
+-- the spelling the database does have, when it differs only in case.
 local function source_object_exists(schema_name, object_name)
-    return count_query([[
-        SELECT COUNT(*)
-        FROM (
-          SELECT TABLE_NAME AS OBJECT_NAME
-          FROM SYS.EXA_ALL_TABLES
-          WHERE (TABLE_SCHEMA = :schema_name OR TABLE_SCHEMA = UPPER(:schema_name))
-            AND (TABLE_NAME = :object_name OR TABLE_NAME = UPPER(:object_name))
-          UNION ALL
-          SELECT VIEW_NAME AS OBJECT_NAME
-          FROM SYS.EXA_ALL_VIEWS
-          WHERE (VIEW_SCHEMA = :schema_name OR VIEW_SCHEMA = UPPER(:schema_name))
-            AND (VIEW_NAME = :object_name OR VIEW_NAME = UPPER(:object_name))
-        ) visible_objects
-    ]], {schema_name = schema_name, object_name = object_name}) > 0
+    local schema, object = source_columns.resolve_relation(query, schema_name, object_name)
+    if schema == nil then
+        return false, nil
+    end
+    if schema == tostring(schema_name) and object == tostring(object_name) then
+        return true, nil
+    end
+    return false, schema .. "." .. object
 end
 
 -- One read per relation, not one per column.
@@ -1781,12 +1775,15 @@ local function validate_structural_rules(ctx)
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_036", "Representation priority must be a positive integer.")
         end
-        if not source_object_exists(representation.source_schema,
-            representation.source_object) then
+        local visible, spelled = source_object_exists(representation.source_schema,
+            representation.source_object)
+        if not visible then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_001", "Source object is not visible: "
                     .. tostring(representation.source_schema) .. "."
-                    .. tostring(representation.source_object) .. ".")
+                    .. tostring(representation.source_object) .. "."
+                    .. (spelled and (" The database spells it " .. spelled
+                        .. ", and a stored source name is quoted exactly as written.") or ""))
         end
     end
     for _, entity in ipairs(ctx.entities) do validate_partition_coverage(ctx, entity) end

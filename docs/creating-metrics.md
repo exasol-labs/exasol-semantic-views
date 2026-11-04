@@ -64,6 +64,13 @@ The sales seed file does this before adding facts and metrics:
 sql/examples/sales_model_seed.sql
 ```
 
+An entity's source must exist when it is declared. `ADD_ENTITY` and the
+`ADD_ENTITY_REPRESENTATION*` scripts look the schema and object up, matching
+the name as written and then in upper case, the way Exasol folds an unquoted
+identifier, and store the spelling the database has. So `slv_customer` from
+dbt's `ref()` is stored as `SLV_CUSTOMER`. A source that matches neither
+spelling, or that the caller cannot see, is refused with `SEMANTIC_ADMIN_227`.
+
 When a script-based setup needs to add a dimension, use the compatibility API:
 
 ```sql
@@ -874,6 +881,13 @@ Implementation details should stay private. For example, a public
 not necessarily be able to query the raw cost field directly.
 
 ## Troubleshooting
+
+`SEMANTIC_ADMIN_227: source relation ... does not exist or is not visible`
+
+`ADD_ENTITY` or an `ADD_ENTITY_REPRESENTATION*` call named a source that is not
+there under the name as written or in upper case. Check the spelling and the
+schema, and that the calling user can read it. A table created with a quoted
+mixed-case name has to be named exactly.
 
 `SEMANTIC_ADMIN_003: invalid METRIC_TYPE`
 

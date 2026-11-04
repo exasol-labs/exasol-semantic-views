@@ -443,6 +443,12 @@ local ANY_COLUMN_NAMES = {
 
 -- Each entry is a name, or a {name, type} pair when the test cares about the
 -- declared type as well as the column's existence.
+-- The source-relation probe answers with the spelling it matched; these stubs
+-- match whatever they are asked for, as written.
+local function visible_relation(params)
+    return {{SCHEMA_NAME = params.schema_name, OBJECT_NAME = params.object_name}}
+end
+
 local function columns_response(names)
     local rows = {}
     for _, entry in ipairs(names) do
@@ -500,7 +506,7 @@ test("source catalog probes preserve non-uppercase identifiers", function()
             assert_true(contains(sql, "TABLE_NAME = :object_name"))
             assert_equal(params.schema_name, "SRC_MONGO_ORDERS")
             assert_equal(params.object_name, "ORDERS_line_items_arr")
-            return {{1}}
+            return visible_relation(params)
         elseif contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             -- The column list is read per relation, so the probe carries the
             -- schema and object but no column name. What has to survive either
@@ -592,6 +598,32 @@ test("validator rejects type-incompatible relationship endpoints", function()
     assert_contains(issue.message, "VARCHAR(2000000) UTF8")
 end)
 
+test("a source stored in another case than the database spells it is not visible", function()
+    -- The compiler quotes a stored source verbatim, so `slv_customer` over a
+    -- physical SLV_CUSTOMER cannot be read. The probe was case-insensitive and
+    -- passed it, and the model failed instead on every expression bound to it.
+    local ctx = validation_context({
+        version_id = 2,
+        entities = {{id = 1, name = "customer", alias = "c", source_schema = "DBT_SILVER",
+            source_object = "slv_customer", primary_representation = {id = 1}}},
+        entity_by_id = {["1"] = {id = 1, name = "customer", alias = "c"}},
+        representations = {{id = 1, entity_id = 1, name = "primary", source_kind = "RELATION",
+            source_schema = "DBT_SILVER", source_object = "slv_customer", alias = "c",
+            role = "PRIMARY", priority = 1}},
+    })
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then
+            return {{SCHEMA_NAME = "DBT_SILVER", OBJECT_NAME = string.upper(params.object_name)}}
+        end
+        return {}
+    end, function() api.validate_structural_rules(ctx) end)
+    local found
+    for _, issue in ipairs(ctx.issues) do
+        if issue.rule_code == "SEMANTIC_MODEL_001" then found = issue.message end
+    end
+    assert_contains(tostring(found), "The database spells it DBT_SILVER.SLV_CUSTOMER")
+end)
+
 test("validator structural rules reject invisible and dangling catalog objects", function()
     local ctx = validation_context({
         version_id = 2,
@@ -618,7 +650,7 @@ test("validator structural rules reject invisible and dangling catalog objects",
         if contains(sql, "COUNT(er.REPRESENTATION_ID)") then
             return {{ENTITY_NAME = "unbound", PRIMARY_COUNT = 0}}
         elseif contains(sql, "FROM SYS.EXA_ALL_TABLES") then
-            return {{params.object_name == "ORDERS" and 1 or 0}}
+            return params.object_name == "ORDERS" and visible_relation(params) or {}
         elseif contains(sql, "HAVING COUNT(*) > 1") then
             return {{SOURCE_ALIAS = "O"}}
         elseif contains(sql, "JOIN SYS.EXA_SQL_KEYWORDS") then
@@ -649,9 +681,9 @@ test("validator structural rules reject invisible and dangling catalog objects",
         source_schema = "MART", source_object = "ORDERS", alias = "o",
         role = "PRIMARY", priority = 1,
     }}})
-    with_query(function(sql)
+    with_query(function(sql, params)
         if contains(sql, "COUNT(er.REPRESENTATION_ID)") then return {} end
-        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return visible_relation(params) end
         return {}
     end, function() api.validate_structural_rules(valid) end)
     assert_branch("validator.structure.valid", valid.error_count == 0, true)
@@ -686,7 +718,7 @@ test("validator rejects malformed and column-incompatible F1 representations", f
     })
     with_query(function(sql, params)
         if contains(sql, "COUNT(er.REPRESENTATION_ID)") then return {} end
-        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return visible_relation(params) end
         if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then
             return params.schema_name == "MART" and any_columns() or {}
         end
@@ -728,8 +760,8 @@ test("validator warns when the legacy key expression misses declared key columns
     end
 
     local partial = context_for("CAST(ol.order_id AS VARCHAR(36))")
-    with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return visible_relation(params) end
         if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_structural_rules(partial) end)
@@ -742,8 +774,8 @@ test("validator warns when the legacy key expression misses declared key columns
     -- Covering every key column is silent, whatever shape the expression has.
     local complete = context_for(
         "CAST(ol.order_id AS VARCHAR(36)) || '-' || CAST(ol.line_id AS VARCHAR(36))")
-    with_query(function(sql)
-        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return {{1}} end
+    with_query(function(sql, params)
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return visible_relation(params) end
         if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
         return {}
     end, function() api.validate_structural_rules(complete) end)
@@ -1770,8 +1802,9 @@ end
 
 test("F5 validator accepts complete certified representation identity metadata", function()
     local ctx = f5_identity_context()
-    with_query(function(sql)
+    with_query(function(sql, params)
         if contains(sql, "FROM SYS.EXA_ALL_COLUMNS") then return any_columns() end
+        if contains(sql, "FROM SYS.EXA_ALL_TABLES") then return visible_relation(params) end
         if contains(sql, "SELECT COUNT(*)") then return {{1}} end
         error("unexpected F5 structural SQL: " .. tostring(sql))
     end, function()
@@ -2914,7 +2947,7 @@ end)
 test("validator public entry point loads and validates a coherent catalog", function()
     local lifecycle = {started = false, finished = false, cache_cleared = false,
         matrix_inserted = false, dependency_inserted = false}
-    local function mock(sql)
+    local function mock(sql, params)
         if contains(sql, "FROM SYS_SEMANTIC.MODELS m") then
             return {{MODEL_ID = 1, VERSION_ID = 2, VERSION_NUMBER = 1}}
         elseif contains(sql, "INSERT INTO SYS_SEMANTIC.VALIDATION_RUNS") then
@@ -2972,7 +3005,7 @@ test("validator public entry point loads and validates a coherent catalog", func
         elseif contains(sql, "SELECT CUSTOM_EXTENSION_ID") then
             return {{60, "MODEL", 1, "acme", "quality", "JSON", '{"level":"gold"}'}}
         elseif contains(sql, "FROM SYS.EXA_ALL_TABLES") then
-            return {{1}}
+            return visible_relation(params)
         elseif contains(sql, "HAVING COUNT(DISTINCT COLUMN_NAME) = 2") then
             -- The MODEL_ID/VERSION_ID agreement check derives its table list.
             return {{COLUMN_TABLE = "DIMENSIONS"}, {COLUMN_TABLE = "FACTS"}}
