@@ -1,0 +1,41 @@
+name: Database-free tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # pyexasol 3 reports usage on connect; tests and CI never do.
+  EXASOL_TELEMETRY_DISABLE: "true"
+
+jobs:
+  database-free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-osi.txt
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: Install host-test dependencies
+        run: python -m pip install -r tools/requirements-osi.txt
+      - name: Run database-free Lua coverage
+        run: LUA_BIN=lua5.4 sh tools/run_lua_tests.sh
+      - name: Run database-free Python tests + coverage
+        # Runs test_osi_tool, test_install, test_release_notes,
+        # test_sql_splitter, and the property-based test suite (test_property)
+        # under coverage.py and enforces the per-file thresholds in
+        # tests/unit/python_coverage_thresholds.py.
+        run: PYTHON_BIN=python sh tools/run_python_tests.sh
+      - name: Build the install SQL
+        # Nothing generated is checked in; this proves the sources assemble.
+        run: python tools/package_lua_scripts.py

@@ -1,0 +1,55 @@
+name: System tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # pyexasol 3 reports usage on connect; tests and CI never do.
+  EXASOL_TELEMETRY_DISABLE: "true"
+
+jobs:
+  system-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      exasol:
+        image: exasol/docker-db:latest-2026.1
+        ports:
+          - 8563:8563
+        options: >-
+          --privileged
+          --shm-size=2gb
+    env:
+      EXASOL_HOST: 127.0.0.1
+      EXASOL_PORT: "8563"
+      EXASOL_USER: sys
+      EXASOL_PASSWORD: exasol
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/requirements-osi.txt
+      - name: Install host-test dependencies
+        run: python -m pip install -r tools/requirements-osi.txt
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+      - name: Wait for Exasol
+        run: python tools/dev/wait_for_exasol.py
+      - name: Run system tests
+        run: sh tools/run_system_tests.sh --junitxml=system-results.xml
+      - name: Upload system test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: system-results
+          path: system-results.xml
+          if-no-files-found: ignore
