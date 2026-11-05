@@ -14,6 +14,7 @@ end
 
 local issues = validator.validate_model(MODEL_NAME, metric_result_types)
 local output_rows = {}
+local clean = true
 for _, issue in ipairs(issues or {}) do
     table.insert(output_rows, {
         issue.severity,
@@ -22,6 +23,34 @@ for _, issue in ipairs(issues or {}) do
         issue.rule_code,
         issue.message,
     })
+    if issue.severity == "ERROR" or issue.severity == "PRECONDITION" then
+        clean = false
+    end
+end
+
+-- A frozen view that no longer matches the model is retired here, after the
+-- run is recorded, because the check compiles and a compile reads the latest
+-- run. Only after a clean one: a run with errors is one a caller is about to
+-- roll back, and such a model compiles nothing to compare with. The rows are
+-- this call's report, not the run's -- the run judged the catalog, and
+-- CHECK_FROZEN_VIEWS reports the views' state for as long as it lasts.
+local synced_ok, synced = false, nil
+if clean then
+    synced_ok, synced = pcall(query,
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.SYNC_FROZEN_VIEWS(:model_name)",
+        {model_name = MODEL_NAME})
+end
+for _, row in ipairs(synced_ok and synced or {}) do
+    local action = row.OUTCOME or row[3]
+    if action == "RETIRED" or action == "FAILED" then
+        table.insert(output_rows, {
+            "WARNING",
+            "FROZEN_VIEW",
+            tostring(row.VIEW_SCHEMA or row[1]) .. "." .. tostring(row.VIEW_NAME or row[2]),
+            action == "RETIRED" and "SEMANTIC_MODEL_078" or "SEMANTIC_MODEL_079",
+            row.DETAIL or row[4],
+        })
+    end
 end
 
 exit(output_rows, [[

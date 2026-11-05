@@ -335,6 +335,14 @@ query([[
         UPDATED_AT = CURRENT_TIMESTAMP
     WHERE MODEL_ID = :model_id
 ]], {model_id = model.id})
+-- A model has one version, which authoring edits in place, so publishing the
+-- model publishes that version. Its row used to keep the DRAFT it was created
+-- with, and read as an unpublished draft of a model serving consumers.
+query([[
+    UPDATE SYS_SEMANTIC.MODEL_VERSIONS
+    SET STATUS = 'PUBLISHED'
+    WHERE VERSION_ID = :version_id
+]], {version_id = model.version_id})
 
 local version_rows = query([[
     SELECT VERSION_NUMBER FROM SYS_SEMANTIC.MODEL_VERSIONS

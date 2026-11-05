@@ -64,6 +64,13 @@ The sales seed file does this before adding facts and metrics:
 sql/examples/sales_model_seed.sql
 ```
 
+An entity's source must exist when it is declared. `ADD_ENTITY` and the
+`ADD_ENTITY_REPRESENTATION*` scripts look the schema and object up, matching
+the name as written and then in upper case, the way Exasol folds an unquoted
+identifier, and store the spelling the database has. So `slv_customer` from
+dbt's `ref()` is stored as `SLV_CUSTOMER`. A source that matches neither
+spelling, or that the caller cannot see, is refused with `SEMANTIC_ADMIN_227`.
+
 When a script-based setup needs to add a dimension, use the compatibility API:
 
 ```sql
@@ -160,8 +167,11 @@ ADD OR REPLACE FACT gross_line_amount
 ```
 
 Omitted definitions remain in the model catalog; use `DROP METRIC` for metric
-removal. Fact removal has no DDL form yet — it waits until dependent-metric
-rewrites are transactional.
+removal and `DROP FACT` for fact removal. A fact belongs to its entity rather than
+to the view the statement names, so `DROP FACT` retires it from the model — its
+view columns, bindings and fusion policy with it — and is refused
+(`SEMANTIC_DDL_094`) while any metric is built on it: drop or redefine those
+first.
 Within one replacement block, a requested synonym is released from its prior
 metric owner before assignment. Repeating that synonym on multiple metrics in
 the block remains an ambiguity and fails with `SEMANTIC_MODEL_021`.
@@ -172,6 +182,9 @@ RENAME METRIC total_revenue TO gross_merchandise_value;
 
 ALTER SEMANTIC VIEW sales.SALES
 DROP METRIC obsolete_revenue;
+
+ALTER SEMANTIC VIEW sales.SALES
+DROP FACT obsolete_amount;
 ```
 
 Rename preserves the metric ID, updates dependent metric expressions, and
@@ -275,6 +288,25 @@ restores the previous catalog state. Check
 Semantic SQL statements also raise the apply error to the SQL client; direct
 calls to `APPLY_SEMANTIC_DEFINITION` return the same error as a structured
 `STATUS = 'ERROR'` result row.
+
+**From an orchestrator, call `APPLY_SEMANTIC_DEFINITION_OR_FAIL`.** It takes the
+same arguments and returns the same row, but a refusal *raises*, with the rule
+code first in the message. dbt, Airflow, a CI job or any client that judges a
+statement by whether it ran counts a returned `ERROR` row as a success: the run
+goes green over a model that was never changed. The catalog is restored before
+either variant reports, so the only difference is how the refusal reaches you.
+
+```sql
+-- in a dbt hook or macro: a refused definition fails the run
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION_OR_FAIL(
+  '<ALTER SEMANTIC VIEW ...>',
+  FALSE
+);
+```
+
+`ALTER SEMANTIC VIEW` run directly through the preprocessor already uses it.
+The fusion document has the same pair, `APPLY_FUSION_DECLARATION_OR_FAIL`
+([Data fusion](data-fusion.md#the-fusion-declaration-document)).
 
 For single-metric edits, use:
 
@@ -766,7 +798,7 @@ place:
 |---|---|
 | add the same dimension to both views, so each can be sliced the same way | `SEMANTIC_ADMIN_019` — dimension names are unique per *model*, not per view, and there is no operation that shares one between views |
 | ask for a field of the other view | `SEMANTIC_QUERY_020` — naming the view that does have it |
-| join the two published views to put the numbers side by side | `SEMANTIC_QUERY_012` — the join can repeat rows and re-aggregation double-counts |
+| join the two published views to put the numbers side by side | answered when each side is grouped by its region dimension and the two are joined on those keys, one-to-one; any other join is `SEMANTIC_QUERY_012` — it can repeat rows and re-aggregation double-counts |
 
 So one business question — *"revenue and freight by region"* — becomes two
 queries, and slicing both by region needs two differently named dimensions over
@@ -849,6 +881,13 @@ Implementation details should stay private. For example, a public
 not necessarily be able to query the raw cost field directly.
 
 ## Troubleshooting
+
+`SEMANTIC_ADMIN_227: source relation ... does not exist or is not visible`
+
+`ADD_ENTITY` or an `ADD_ENTITY_REPRESENTATION*` call named a source that is not
+there under the name as written or in upper case. Check the spelling and the
+schema, and that the calling user can read it. A table created with a quoted
+mixed-case name has to be named exactly.
 
 `SEMANTIC_ADMIN_003: invalid METRIC_TYPE`
 

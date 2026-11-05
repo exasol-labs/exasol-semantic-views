@@ -83,6 +83,7 @@ mean the session that ran it has no preprocessor:
 
 | you see | cause |
 |---|---|
+| `SEMANTIC_SURFACE_015: this view was compiled from an earlier definition` | a view created over a semantic object, whose model has changed since; re-create it |
 | `SEMANTIC_SURFACE_001: semantic query requires the Lua SQL preprocessor` | the hook is missing, or was set on a different connection than the one the visual uses |
 | `not a valid GROUP BY expression` | the same. Exasol rejects a grouped metric before the view's guard can run, so this message cannot carry the hint (GitHub #5) |
 
@@ -236,9 +237,10 @@ SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE FROM SEMANTIC_SALES.SALES t0;
 ```
 
 The stored text is compiled physical SQL, so this view answers for anyone, with
-no preprocessor at all. It is also **frozen**: it keeps answering after the model
-changes, with the model as it was when the view was made. ESV records that and
-can tell you — see [Governance](governance.md#5-frozen-views).
+no preprocessor at all. It is also **frozen**: it holds the model as it was when
+the view was made. When a definition it froze changes, the validation that
+change runs retires the view, and reading it raises `SEMANTIC_SURFACE_015` until
+you re-create it — see [Governance](governance.md#5-frozen-views).
 
 ### What the shapes cost
 
@@ -312,6 +314,13 @@ The semantic layer stops supervising at the edge of the derived table. Unlike th
 same hazard under a Virtual Schema, the boundary is visible in your own SQL — you
 wrote the join — which makes it explainable, not safe.
 
+What is refused is a join that *can* repeat a row. Two kinds cannot, and are
+answered: a join to a one-row relation (`CROSS JOIN (SELECT 1.1 AS rate FROM
+DUAL)`), and grouped semantic queries side by side, each grouped by the same
+number of keys and joined `ON` equalities that pair every key one-to-one —
+revenue and cost by region, from two derived tables or two CTEs, joined on region.
+See [Composition](semantic-sql-preprocessor.md#composition-is-refused-by-default).
+
 If your deployment would rather have ordinary-SQL semantics than a refusal, opt
 in per model:
 
@@ -319,7 +328,11 @@ in per model:
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION('sales', 'TRUE');
 ```
 
-Do that knowing the number above is what you are accepting.
+Do that knowing the number above is what you are accepting. It is the explicit
+`SUM` over the joined rows that double-counts. `MEASURE(t0.total_revenue)`, or the
+bare metric, grouped by the object's dimensions still returns each region's
+revenue once, and a `GROUP BY` that splits that grain is refused with
+`SEMANTIC_QUERY_021`.
 
 ---
 
@@ -366,7 +379,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 | code | meaning |
 |---|---|
 | `SEMANTIC_QUERY_011` | no column of the object is referenced, so which to compile cannot be inferred |
-| `SEMANTIC_QUERY_012` | the object is joined to another relation; see §4 |
+| `SEMANTIC_QUERY_012` | the object is joined to another relation in a way that can repeat its rows; see §4 |
 | `SEMANTIC_QUERY_010` | `COUNT(*)` directly over the object with no dimension selected — its answer depends on a grain you did not name; wrap it in a subquery |
 | `SEMANTIC_REQUEST_027` | the field is withheld by the model (`IS_PRIVATE` / `IS_HIDDEN`) |
 | `SEMANTIC_REQUEST_024` | the field carries `DISPLAY_POLICY = 'MASK'`; you can still filter on it |
@@ -376,6 +389,7 @@ that names the cause and, where there is one, the remedy. The common ones:
 | `SEMANTIC_QUERY_017` | a filter on a dimension the statement does not select cannot run before aggregation (a subquery, another semantic object, a join); use literal values or select the dimension |
 | `SEMANTIC_QUERY_020` | a name in the select list is not a field of the object; the message says what it might have meant |
 | `SEMANTIC_QUERY_019` | an aggregate over `DISTINCT` (`COUNT(DISTINCT x)`) on the object itself — a metric declares its own aggregation; select the field in a wrapped query and aggregate outside it |
+| `SEMANTIC_QUERY_021` | under `SET_MODEL_DERIVED_COMPOSITION`, a metric selected beside a join under a `GROUP BY` that leaves out a dimension of the object: each group holds several of its values; group by the object's dimensions, or aggregate the metric explicitly |
 | `SEMANTIC_QUERY_029` | the field existed and was dropped from the model; nothing is suggested in its place, because a near name is usually a different number |
 
 **The shape of your statement is not the reason.** A construct is accepted or

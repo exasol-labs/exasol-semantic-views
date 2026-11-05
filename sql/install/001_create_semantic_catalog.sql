@@ -569,7 +569,12 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS (
   CREATED_AT           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CREATED_BY           VARCHAR(256) DEFAULT CURRENT_USER,
   REVIEWED_AT          TIMESTAMP,
-  REVIEWED_BY          VARCHAR(256)
+  REVIEWED_BY          VARCHAR(256),
+  -- The model's DEFINITION_HASH when the suggestion was made: what "stale"
+  -- is measured against. VERSION_ID cannot be, because authoring mutates a
+  -- model's one version in place, so it never moves. NULL on a suggestion
+  -- made before this column existed, which therefore reads as stale.
+  PROPOSED_DEFINITION_HASH VARCHAR(64)
 );
 
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS (
@@ -632,11 +637,14 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.FROZEN_VIEWS (
   FROZEN_SQL        VARCHAR(2000000),
   FROZEN_RELATIONS  VARCHAR(2000000),
   FROZEN_AT         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  FROZEN_BY         VARCHAR(256) DEFAULT CURRENT_USER
+  FROZEN_BY         VARCHAR(256) DEFAULT CURRENT_USER,
+  RETIRED_AT        TIMESTAMP,
+  RETIRED_VIEW_TEXT VARCHAR(2000000),
+  RETIRED_SCOPE_SCHEMA VARCHAR(256)
 );
 
 COMMENT ON TABLE SYS_SEMANTIC.FROZEN_VIEWS IS
-  'One row per database view whose text was compiled from a semantic object. Such a view keeps answering after the model changes, so what it froze -- the columns requested, the SQL produced, and the physical relations that SQL reads -- is recorded here rather than left to be discovered when a number goes wrong. FROZEN_SQL is the baseline CHECK_FROZEN_VIEWS recompiles against.';
+  'One row per database view whose text was compiled from a semantic object. Such a view keeps answering after the model changes, so what it froze -- the columns requested, the SQL produced, and the physical relations that SQL reads -- is recorded here rather than left to be discovered when a number goes wrong. FROZEN_SQL is the baseline CHECK_FROZEN_VIEWS recompiles against. A view found STALE when the model is validated is retired: replaced by one that raises SEMANTIC_SURFACE_015, with its own text kept in RETIRED_VIEW_TEXT and the schema it was created in in RETIRED_SCOPE_SCHEMA, so it is put back if the model returns to what it froze.';
 
 CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.SOURCE_TRUST (
   TRUST_ID          DECIMAL(18,0) IDENTITY PRIMARY KEY,
@@ -683,6 +691,11 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MATERIALIZATION_COLUMNS (
   OBJECT_ID          DECIMAL(18,0) NOT NULL,
   PHYSICAL_COLUMN    VARCHAR(256) NOT NULL,
   ROLLUP_POLICY      VARCHAR(64),
+  -- The field's DEFINITION_HASH when the column was mapped or the object last
+  -- marked refreshed: the definition the aggregate holds. A field redefined
+  -- since keeps its id, so without this the selector kept serving numbers
+  -- computed from the old definition.
+  DEFINITION_HASH    VARCHAR(64),
   PRIMARY KEY (MATERIALIZATION_ID, OBJECT_TYPE, OBJECT_ID)
 );
 
@@ -797,6 +810,17 @@ CREATE TABLE IF NOT EXISTS SYS_SEMANTIC.MODEL_ROLE_GRANTS (
   GRANTED_BY       VARCHAR(256) DEFAULT CURRENT_USER,
   STATUS           VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL
 );
+
+-- ============================================================================
+-- Added columns
+-- ============================================================================
+--
+-- The other half of the same problem: a column added to a declaration above
+-- reaches only a fresh install. ADD COLUMN IF NOT EXISTS brings an existing
+-- catalog up to it, and is a no-op on a fresh one.
+ALTER TABLE SYS_SEMANTIC.FROZEN_VIEWS ADD COLUMN IF NOT EXISTS RETIRED_AT TIMESTAMP;
+ALTER TABLE SYS_SEMANTIC.FROZEN_VIEWS ADD COLUMN IF NOT EXISTS RETIRED_VIEW_TEXT VARCHAR(2000000);
+ALTER TABLE SYS_SEMANTIC.FROZEN_VIEWS ADD COLUMN IF NOT EXISTS RETIRED_SCOPE_SCHEMA VARCHAR(256);
 
 -- ============================================================================
 -- Retired columns

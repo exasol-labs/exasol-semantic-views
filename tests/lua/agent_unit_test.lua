@@ -378,8 +378,12 @@ test("F7 evolution proposals are typed versioned and idempotent", function()
                 PUBLISHED_SCHEMA = "SEMANTIC_SALES"}}
         elseif contains(sql, "SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITIES") then
             return {{20}}
+        elseif contains(sql, "FROM SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES") then
+            return {{"hash-now"}}
         elseif contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS")
             and contains(sql, "REVIEW_STATUS = 'PENDING'") then
+            -- A pending duplicate is one made against the same definition.
+            assert_equal(params.definition_hash, "hash-now")
             return duplicate and {{SUGGESTION_ID = 701}} or {}
         elseif contains(sql, "INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS") then
             inserted = params
@@ -403,6 +407,7 @@ test("F7 evolution proposals are typed versioned and idempotent", function()
         assert_true(created[1][8] == false)
         assert_equal(inserted.object_id, 20)
         assert_equal(inserted.version_id, 2)
+        assert_equal(inserted.definition_hash, "hash-now")
         assert_equal(target_insert.object_name, "customer")
 
         duplicate = true
@@ -455,7 +460,10 @@ test("F7 human review certifies without catalog activation", function()
         if contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s") then
             return {{MODEL_ID = 1, VERSION_ID = 2, SUGGESTION_KIND = "DRIFT_REPAIR",
                 OBJECT_TYPE = "ENTITY", OBJECT_ID = 20, REVIEW_STATUS = "PENDING",
-                MODEL_NAME = "sales", ACTIVE_VERSION_ID = 2}}
+                MODEL_NAME = "sales", ACTIVE_VERSION_ID = 2,
+                PROPOSED_DEFINITION_HASH = "hash-at-proposal"}}
+        elseif contains(sql, "FROM SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES") then
+            return {{"hash-at-proposal"}}
         elseif contains(sql, "INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS") then
             review_insert = params
             return {}
@@ -500,6 +508,27 @@ test("F7 review rejects stale certification and repeated decisions", function()
             review_model_evolution(701, "CERTIFIED", "Looks good")
         end, "cannot certify a stale evolution suggestion")
     end)
+    -- The version never moves -- authoring mutates it in place -- so the
+    -- definition hash is what goes stale: a model changed since the proposal,
+    -- and a proposal that predates the hash and so cannot show it did not.
+    for _, case in ipairs({
+        {proposed = "hash-at-proposal", reason = "definition has changed"},
+        {proposed = null, reason = "predates definition hashes"},
+    }) do
+        with_query(function(sql)
+            if contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s") then
+                return {{1, 2, "NEW_CONCEPT", "METRIC", null, "PENDING",
+                    "sales", 2, case.proposed}}
+            elseif contains(sql, "FROM SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES") then
+                return {{"hash-after-edit"}}
+            end
+            return {}
+        end, function()
+            assert_error(function()
+                review_model_evolution(701, "CERTIFIED", "Looks good")
+            end, case.reason)
+        end)
+    end
     with_query(function(sql)
         if contains(sql, "FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s") then
             return {{1, 2, "NEW_CONCEPT", "METRIC", null, "REJECTED",

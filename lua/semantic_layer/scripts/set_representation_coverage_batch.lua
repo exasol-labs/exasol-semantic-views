@@ -185,7 +185,8 @@ if not ok or type(declarations) ~= "table" or #declarations == 0 then
 end
 local rows = query([[
     SELECT m.MODEL_ID, m.ACTIVE_VERSION_ID, m.STATUS, er.REPRESENTATION_ID,
-           er.REPRESENTATION_NAME, er.COVERAGE_PREDICATE, er.VALID_FROM, er.VALID_TO
+           er.REPRESENTATION_NAME, er.COVERAGE_PREDICATE, TO_CHAR(er.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM,
+           TO_CHAR(er.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO
     FROM SYS_SEMANTIC.MODELS m
     JOIN SYS_SEMANTIC.ENTITIES e
       ON e.MODEL_ID = m.MODEL_ID AND e.VERSION_ID = m.ACTIVE_VERSION_ID
@@ -261,7 +262,7 @@ for _, item in ipairs(prepared) do
     query([[
         UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
         SET COVERAGE_PREDICATE = :coverage_predicate,
-            VALID_FROM = :valid_from, VALID_TO = :valid_to,
+            VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'), VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
             UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
         WHERE REPRESENTATION_ID = :representation_id
     ]], {representation_id = item.representation.id,
@@ -291,7 +292,7 @@ if tostring(model_status) == "PUBLISHED" then
                 query([[
                     UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
                     SET COVERAGE_PREDICATE = :coverage_predicate,
-                        VALID_FROM = :valid_from, VALID_TO = :valid_to,
+                        VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'), VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
                         UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
                     WHERE REPRESENTATION_ID = :representation_id
                 ]], {representation_id = representation.id,
@@ -308,11 +309,18 @@ if tostring(model_status) == "PUBLISHED" then
     end
 end
 
+-- The bounds are reported as stored, not as given: a TIMESTAMP result column
+-- casts its value with the session's NLS_TIMESTAMP_FORMAT, and only the stored
+-- value read back unformatted arrives in that format whatever the session's is.
 local result = {}
 for _, item in ipairs(prepared) do
+    local bounds = query([[
+        SELECT VALID_FROM, VALID_TO FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
+        WHERE REPRESENTATION_ID = :representation_id
+    ]], {representation_id = item.representation.id})[1]
     result[#result + 1] = {item.representation.id, model_name, entity_name,
         item.representation.name, item.predicate == null and "NONE" or "UNION",
-        item.predicate, item.valid_from, item.valid_to}
+        item.predicate, row_value(bounds, "VALID_FROM", 1), row_value(bounds, "VALID_TO", 2)}
 end
 exit(result, [[
   REPRESENTATION_ID DECIMAL(18,0), MODEL_NAME VARCHAR(256),

@@ -6,6 +6,124 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-05
+
+Governed answers that stay governed after they leave the compiler, and a
+semantic layer that can be built by an orchestrator. A view compiled from a
+model now stops answering once the model compiles something else, instead of
+returning the old number in silence. A materialization built from an earlier
+definition is no longer served. dbt (or any orchestrator that judges a
+statement by whether it ran) gets refusals that raise, sources resolved as
+`ref()` renders them, timestamps independent of the session's format, and a
+model it can drop without asking first. Semantic SQL answers joins that cannot
+repeat a row, `UNION ALL` arms and query bodies inside `CREATE`/`INSERT`.
+
+A companion dbt package, `exasol_semantic_views`, builds on this release and
+requires it.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from the
+release bundle. The installer adds, to an existing catalog:
+`FROZEN_VIEWS.RETIRED_AT`, `RETIRED_VIEW_TEXT` and `RETIRED_SCOPE_SCHEMA`;
+`MATERIALIZATION_COLUMNS.DEFINITION_HASH` (stamped with today's definitions, so
+no answer changes on upgrade); and
+`MODEL_EVOLUTION_SUGGESTIONS.PROPOSED_DEFINITION_HASH`. It publishes the version
+row of every published model and removes duplicate frozen-view records an older
+build left. Behaviour that changes:
+
+- **A stale frozen view raises.** After a definition change, the validation it
+  runs replaces a `CREATE VIEW` over a semantic object whose SQL the model no
+  longer compiles with a view that raises `SEMANTIC_SURFACE_015`. Re-create the
+  view to answer with the current definition.
+- **`ADD_ENTITY` and `ADD_ENTITY_REPRESENTATION*` refuse a source that does
+  not exist** (`SEMANTIC_ADMIN_227`), and store a source's name as the database
+  spells it. A stored source that differs from the database's only in case is
+  now `SEMANTIC_MODEL_001`.
+- **A suggestion certified after its model changed is refused**
+  (`SEMANTIC_AGENT_044`); one made before this release reads as stale.
+- A duplicate metric is `SEMANTIC_ADMIN_226`, no longer `_021`.
+
+### Added
+
+- **`SYNC_FROZEN_VIEWS(model)`**, which `VALIDATE_MODEL` calls after a clean run:
+  it retires each frozen view `CHECK_FROZEN_VIEWS` finds `STALE`, keeping its
+  text and re-applying its grants, and puts a retired view back once the model
+  compiles what it froze again — a revert, a dry run and a rolled-back change
+  all validate again. Reads pay nothing. `VALIDATE_MODEL` reports
+  `SEMANTIC_MODEL_078` per retirement and `_079` for a view it could not
+  replace; `SEMANTIC_CATALOG.FROZEN_VIEWS.PRESENCE` reads `RETIRED`.
+- **`APPLY_FUSION_DECLARATION_OR_FAIL`**, the raising twin of
+  `APPLY_FUSION_DECLARATION`, as `APPLY_SEMANTIC_DEFINITION_OR_FAIL` is of the
+  DDL apply. Both are now documented as the calls an orchestrator makes.
+- **`DROP_MODEL_IF_EXISTS(model)`**: drops as `DROP_MODEL` does, or returns
+  `STATUS = 'NOT_FOUND'`, so a rebuild needs no existence probe.
+- **`ALTER SEMANTIC VIEW ... DROP FACT`**, refused (`SEMANTIC_DDL_094`) while an
+  active metric is built on the fact. The duplicate refusals of `ADD_METRIC` and
+  `ADD_FACT` name the DDL that redefines and removes what they cannot.
+- `SEMANTIC_CATALOG.MODEL_VERSIONS` carries `DEFINITION_HASH`.
+
+### Fixed
+
+#### Governed results that went stale in silence
+
+- A materialization mapped before a field was redefined kept answering with
+  the old formula. Each mapped column records the field's definition hash;
+  once it moves, selection refuses the materialization with `DEFINITION_CHANGED`
+  and the sources answer, `VALIDATE_MODEL` warns `SEMANTIC_MODEL_077`, and
+  `MARK_MATERIALIZATION_REFRESHED` returns a rebuilt object to service.
+- An evolution proposal was judged stale by its version id, which nothing
+  advances; it is judged by the definition hash it was made against.
+- `PUBLISH_MODEL` left the model's version row `DRAFT`.
+- `CHECK_FROZEN_VIEWS` reported a view once per compilation, so re-creating a
+  `STALE` view never cleared it; an unqualified view read `DROPPED`; and a view
+  re-created without the object was judged by SQL it no longer held (now
+  `UNKNOWN`).
+
+#### Semantic SQL
+
+- A query body inside `CREATE VIEW/TABLE ... AS` or `INSERT INTO ... SELECT`
+  was refused as double grouping (`SEMANTIC_QUERY_015`) though it compiled on
+  its own; it is now judged exactly as the bare query. This is what ibis's
+  schema inference sends.
+- A multiplication's `*` read as `SELECT *`, so `total_revenue * 2` compiled
+  every column at the finest grain and returned partial rows.
+- A join beside a semantic object is answered when it provably cannot repeat a
+  row — to a one-row relation, or between grouped semantic queries of one grain
+  joined on every key — and each arm of a `UNION ALL` compiles as a whole query.
+  Anything else is still `SEMANTIC_QUERY_012`.
+- Under `SET_MODEL_DERIVED_COMPOSITION`, the `GROUP BY` and `MEASURE()` forms
+  that `SEMANTIC_QUERY_005` teaches became raw engine errors beside a join or
+  in a wrapped query. They answer the metric per group now; a `GROUP BY` that
+  splits the object's grain is the new `SEMANTIC_QUERY_021`.
+
+#### Orchestrated builds (dbt)
+
+- `APPLY_FUSION_DECLARATION` blamed the document for a misspelled model name
+  (`SEMANTIC_FUSION_012`); the model is checked first (`SEMANTIC_FUSION_001`).
+- A source named as dbt's `ref()` renders it (`slv_customer` for
+  `SLV_CUSTOMER`) was accepted and failed later on every field bound to it. It
+  is resolved when declared; tables, views, virtual tables and system objects
+  resolve.
+- Coverage windows were parsed and displayed with the session's
+  `NLS_TIMESTAMP_FORMAT`, which dbt-exasol overrides, so an ordinary
+  timestamp was refused inside a dbt build and the fusion export differed by
+  session. They are written and read in one fixed format.
+- `DROP_MODEL` left the model's `FROZEN_VIEWS` and `SOURCE_TRUST` rows and the
+  reviews and targets of its evolution suggestions behind; a unit test now
+  derives the tables it must clear from the catalog DDL.
+
+#### Documentation
+
+- `docs/agent-contract.md` named two of the six `AGENT_READINESS` values; an
+  agent guard written against it rejected every ready model. All six are
+  listed, and a unit test holds the list to the view.
+
+## [0.6.0] - not released
+
+The `v0.6.0` tag was pushed in error, on the commit before these changes
+(`27baa42`, the CI consolidation), and release tags cannot be moved. Its build
+was cancelled and no release was published. Everything prepared as 0.6.0 ships
+as 0.6.1; do not install from the `v0.6.0` tag.
+
 ## [0.5.1] - 2026-10-28
 
 A correctness release for three incoming reports. A fused dimension on an

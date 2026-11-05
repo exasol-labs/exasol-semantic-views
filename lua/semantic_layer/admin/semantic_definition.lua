@@ -632,6 +632,7 @@ local function parse_definition(definition_sql)
     local add_dimension = find_sequence(tokens, {"ADD", "OR", "REPLACE", "DIMENSION"}, next_index, 0)
     local add_metric = find_sequence(tokens, {"ADD", "OR", "REPLACE", "METRIC"}, next_index, 0)
     local drop_metric = find_sequence(tokens, {"DROP", "METRIC"}, next_index, 0)
+    local drop_fact = find_sequence(tokens, {"DROP", "FACT"}, next_index, 0)
     local rename_metric = find_sequence(tokens, {"RENAME", "METRIC"}, next_index, 0)
 
     if drop_metric ~= nil then
@@ -641,6 +642,16 @@ local function parse_definition(definition_sql)
         end
         definition.operation = "DROP_METRIC"
         definition.metric_name = normalize_name(metric_name, "METRIC_NAME")
+        return definition
+    end
+
+    if drop_fact ~= nil then
+        local fact_name = token_identifier(tokens[drop_fact + 2])
+        if fact_name == nil or tokens[drop_fact + 3] ~= nil then
+            error("SEMANTIC_DDL_092: DROP FACT requires exactly one fact name")
+        end
+        definition.operation = "DROP_FACT"
+        definition.fact_name = normalize_name(fact_name, "FACT_NAME")
         return definition
     end
 
@@ -738,7 +749,7 @@ local function parse_definition(definition_sql)
         -- accepted form.
         error("SEMANTIC_DDL_012: expected REPLACE FACTS, REPLACE DIMENSIONS, "
             .. "REPLACE METRICS, ADD OR REPLACE FACT, ADD OR REPLACE DIMENSION, "
-            .. "ADD OR REPLACE METRIC, DROP METRIC, or RENAME METRIC")
+            .. "ADD OR REPLACE METRIC, DROP METRIC, DROP FACT, or RENAME METRIC")
     end
 
     return definition
@@ -1708,6 +1719,53 @@ local function drop_metric(model, object_id_value, metric_name)
     end
 end
 
+-- A fact is declared on an entity, not on the view the statement names, so
+-- dropping it retires it from the model: its view columns, bindings and fusion
+-- policy go, and the row is deactivated as DROP METRIC deactivates a metric,
+-- which keeps a later SEMANTIC_*_029 able to say it was dropped. A metric built
+-- on it would be left reading a name that no longer resolves, so that is
+-- refused up front, by name; validation and the rollback around this stay the
+-- backstop. Fact removal was deferred "until dependent metric rewrites are
+-- transactional" -- refusing instead of rewriting needs no rewrite at all.
+local function drop_fact(model, fact_name)
+    local fact_id = scalar([[
+        SELECT FACT_ID FROM SYS_SEMANTIC.FACTS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+          AND UPPER(FACT_NAME) = UPPER(:fact_name) AND STATUS = 'ACTIVE'
+    ]], {model_id = model.model_id, version_id = model.version_id, fact_name = fact_name})
+    if fact_id == nil then
+        error("SEMANTIC_DDL_093: fact not found: " .. fact_name)
+    end
+    local users = {}
+    for _, row in ipairs(query([[
+        SELECT METRIC_NAME, EXPRESSION, MEASURE_EXPR FROM SYS_SEMANTIC.METRICS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+        ORDER BY METRIC_NAME
+    ]], {model_id = model.model_id, version_id = model.version_id}) or {}) do
+        for position = 2, 3 do
+            local expression = row_value(row, position == 2 and "EXPRESSION" or "MEASURE_EXPR",
+                position)
+            if not missing(expression)
+                and rewrite_identifier(expression, fact_name, "_") ~= tostring(expression) then
+                users[#users + 1] = tostring(row_value(row, "METRIC_NAME", 1))
+                break
+            end
+        end
+    end
+    if #users > 0 then
+        error("SEMANTIC_DDL_094: fact " .. fact_name .. " is used by metric(s) "
+            .. table.concat(users, ", ") .. "; drop or redefine them first")
+    end
+    for _, statement in ipairs({
+        "DELETE FROM SYS_SEMANTIC.OBJECT_COLUMNS WHERE COLUMN_KIND = 'FACT' AND OBJECT_REF_ID = :fact_id",
+        "DELETE FROM SYS_SEMANTIC.ATTRIBUTE_FUSION_POLICIES WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID = :fact_id",
+        "DELETE FROM SYS_SEMANTIC.ATTRIBUTE_BINDINGS WHERE ATTRIBUTE_TYPE = 'FACT' AND ATTRIBUTE_ID = :fact_id",
+        "UPDATE SYS_SEMANTIC.FACTS SET STATUS = 'INACTIVE' WHERE FACT_ID = :fact_id",
+    }) do
+        query(statement, {fact_id = fact_id})
+    end
+end
+
 local function rename_metric(model, object_id_value, old_name, new_name)
     local metric_id = metric_id_for_object(model, object_id_value, old_name)
     local duplicate = scalar([[
@@ -1813,7 +1871,8 @@ local function rename_metric(model, object_id_value, old_name, new_name)
 end
 
 local function definition_operation_count(definition)
-    if definition.operation == "DROP_METRIC" or definition.operation == "RENAME_METRIC" then
+    if definition.operation == "DROP_METRIC" or definition.operation == "RENAME_METRIC"
+        or definition.operation == "DROP_FACT" then
         return 1
     end
     return #definition.facts + #definition.dimensions + #definition.metrics
@@ -1844,6 +1903,8 @@ end
 local function apply_definition_changes(definition, model, object_id_value, definition_source_id)
     if definition.operation == "DROP_METRIC" then
         drop_metric(model, object_id_value, definition.metric_name)
+    elseif definition.operation == "DROP_FACT" then
+        drop_fact(model, definition.fact_name)
     elseif definition.operation == "RENAME_METRIC" then
         rename_metric(model, object_id_value, definition.metric_name, definition.new_metric_name)
     else
@@ -1924,6 +1985,9 @@ local SNAPSHOT_TABLES = {
     {name = "FACTS", where = MODEL_SCOPE},
     {name = "METRICS", where = MODEL_SCOPE},
     {name = "ATTRIBUTE_BINDINGS", where = MODEL_SCOPE},
+    -- DROP FACT deletes a fact's fusion policy, which a refused statement has to
+    -- get back like everything else it touched.
+    {name = "ATTRIBUTE_FUSION_POLICIES", where = MODEL_SCOPE},
     {name = "SYNONYMS", where = MODEL_SCOPE},
     {name = "METRIC_DIMENSION_MATRIX", where = MODEL_SCOPE},
     -- Scoped through a parent, so the capture joins and the delete cannot.
@@ -3237,6 +3301,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         batch_call = batch_call,
         restore_model_state = restore_model_state,
         drop_metric = drop_metric,
+        drop_fact = drop_fact,
         rename_metric = rename_metric,
         model_names_from_plan = model_names_from_plan,
         patch_field_metadata = patch_field_metadata,

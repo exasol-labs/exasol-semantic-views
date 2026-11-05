@@ -341,3 +341,42 @@ test("shared source-column resolution returns the physical spelling", function()
     assert_equal(raised, nil)
     assert_contains(raised_err, "no metadata access")
 end)
+
+test("a source relation resolves to the spelling the database has", function()
+    local resolver = ESV_SOURCE_COLUMNS
+    -- dbt's ref() renders `slv_customer` for a table Exasol created as
+    -- SLV_CUSTOMER, and the compiler quotes a stored source verbatim. The probe
+    -- prefers an exact match and falls back to the upper-case fold; the stub
+    -- holds one table of each kind.
+    local physical = {{"DBT_SILVER", "SLV_CUSTOMER"}, {"DBT_SILVER", "mixed_Case"}}
+    local function catalog(_, params)
+        for _, relation in ipairs(physical) do
+            if (relation[1] == params.schema_name or relation[1] == string.upper(params.schema_name))
+                and (relation[2] == params.object_name
+                    or relation[2] == string.upper(params.object_name)) then
+                return {{SCHEMA_NAME = relation[1], OBJECT_NAME = relation[2]}}
+            end
+        end
+        return {}
+    end
+
+    assert_equal(table.concat({resolver.resolve_relation(catalog, "dbt_silver", "slv_customer")}, "."), "DBT_SILVER.SLV_CUSTOMER")
+    assert_equal(table.concat({resolver.resolve_relation(catalog, "DBT_SILVER", "mixed_Case")}, "."), "DBT_SILVER.mixed_Case")
+    assert_equal(table.concat({resolver.require_relation(catalog, "dbt_silver", "slv_customer")}, "."), "DBT_SILVER.SLV_CUSTOMER")
+
+    -- Not there under either spelling: reported, and refused by the declaring form.
+    local schema, object, reason = resolver.resolve_relation(catalog, "DBT_SILVER", "mixed_case")
+    assert_equal(schema, nil)
+    assert_equal(object, nil)
+    assert_contains(reason, "not visible: DBT_SILVER.mixed_case")
+    local ok, err = pcall(resolver.require_relation, catalog, "DBT_SILVER", "nope")
+    assert_true(not ok)
+    assert_contains(tostring(err), "SEMANTIC_ADMIN_227: source relation DBT_SILVER.nope")
+
+    -- Missing input, a failing probe and a row without names are never guessed at.
+    assert_contains(select(3, resolver.resolve_relation(catalog, nil, "X")), "is required")
+    assert_contains(select(3, resolver.resolve_relation(function() error("no metadata access") end,
+        "A", "B")), "no metadata access")
+    assert_contains(select(3, resolver.resolve_relation(function() return {{}} end,
+        "A", "B")), "not visible")
+end)

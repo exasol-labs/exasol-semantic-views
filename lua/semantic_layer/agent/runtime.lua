@@ -365,6 +365,18 @@ local function evolution_target(model, suggestion_kind, object_type_arg,
     return object_type, object_id, object_name
 end
 
+-- What a suggestion is pinned to, and what "stale" means. Not VERSION_ID:
+-- authoring mutates a model's one version in place, so the version a suggestion
+-- was made against is always still the active one, and a guard keyed on it
+-- certified proposals for a model that had since changed materially. The
+-- definition hash moves exactly when a definition does.
+local function model_definition_hash(model_id, version_id)
+    return scalar([[
+        SELECT DEFINITION_HASH FROM SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id
+    ]], {model_id = model_id, version_id = version_id})
+end
+
 function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
         object_type_arg, object_name_arg, proposed_change_json_arg, rationale_arg)
     local model = model_row(normalize_name(model_name_arg, "MODEL_NAME"))
@@ -377,6 +389,10 @@ function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
     if missing(rationale_arg) then
         error("SEMANTIC_AGENT_001: RATIONALE is required")
     end
+    local definition_hash = model_definition_hash(model.model_id, model.version_id)
+    -- A pending duplicate made against a different definition is stale, so it is
+    -- not the suggestion this call asks for: re-proposing after the model has
+    -- changed has to produce one that can be certified.
     local duplicate = query([[
         SELECT SUGGESTION_ID
         FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS
@@ -386,12 +402,14 @@ function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
           AND OBJECT_TYPE = :object_type
           AND (OBJECT_ID = :object_id OR OBJECT_ID IS NULL AND :object_id IS NULL)
           AND PROPOSED_CHANGE_JSON = :proposed_change_json
+          AND PROPOSED_DEFINITION_HASH = :definition_hash
           AND REVIEW_STATUS = 'PENDING'
         ORDER BY SUGGESTION_ID
         LIMIT 1
     ]], {model_id = model.model_id, version_id = model.version_id,
         suggestion_kind = suggestion_kind, object_type = object_type,
-        object_id = object_id, proposed_change_json = proposed_change_json})
+        object_id = object_id, proposed_change_json = proposed_change_json,
+        definition_hash = definition_hash})
     if duplicate ~= nil and #duplicate > 0 then
         return {{row_value(duplicate[1], "SUGGESTION_ID", 1), model.model_name,
             model.version_id, suggestion_kind, object_type, object_name,
@@ -400,15 +418,15 @@ function M.propose_model_evolution(model_name_arg, suggestion_kind_arg,
     query([[
         INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS (
           MODEL_ID, VERSION_ID, SUGGESTION_KIND, OBJECT_TYPE, OBJECT_ID,
-          PROPOSED_CHANGE_JSON, RATIONALE, REVIEW_STATUS
+          PROPOSED_CHANGE_JSON, RATIONALE, REVIEW_STATUS, PROPOSED_DEFINITION_HASH
         ) VALUES (
           :model_id, :version_id, :suggestion_kind, :object_type, :object_id,
-          :proposed_change_json, :rationale, 'PENDING'
+          :proposed_change_json, :rationale, 'PENDING', :definition_hash
         )
     ]], {model_id = model.model_id, version_id = model.version_id,
         suggestion_kind = suggestion_kind, object_type = object_type,
         object_id = object_id, proposed_change_json = proposed_change_json,
-        rationale = tostring(rationale_arg)})
+        rationale = tostring(rationale_arg), definition_hash = definition_hash})
     local suggestion_id = latest_id("SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS",
         "SUGGESTION_ID")
     query([[
@@ -433,7 +451,8 @@ function M.review_model_evolution(suggestion_id_arg, decision_arg, review_note_a
     end
     local rows = query([[
         SELECT s.MODEL_ID, s.VERSION_ID, s.SUGGESTION_KIND, s.OBJECT_TYPE,
-               s.OBJECT_ID, s.REVIEW_STATUS, m.MODEL_NAME, m.ACTIVE_VERSION_ID
+               s.OBJECT_ID, s.REVIEW_STATUS, m.MODEL_NAME, m.ACTIVE_VERSION_ID,
+               s.PROPOSED_DEFINITION_HASH
         FROM SYS_SEMANTIC.MODEL_EVOLUTION_SUGGESTIONS s
         LEFT JOIN SYS_SEMANTIC.MODELS m ON m.MODEL_ID = s.MODEL_ID
         WHERE s.SUGGESTION_ID = :suggestion_id
@@ -454,6 +473,23 @@ function M.review_model_evolution(suggestion_id_arg, decision_arg, review_note_a
         error("SEMANTIC_AGENT_044: cannot certify a stale evolution suggestion; "
             .. "proposed version=" .. tostring(version_id)
             .. ", active version=" .. tostring(active_version_id))
+    end
+    if decision == "CERTIFIED" then
+        local proposed_hash = row_value(row, "PROPOSED_DEFINITION_HASH", 9)
+        if missing(proposed_hash) then
+            error("SEMANTIC_AGENT_044: cannot certify a stale evolution suggestion;"
+                .. " it predates definition hashes, so nothing shows the model is"
+                .. " unchanged since it was made. Reject it and propose it again.")
+        end
+        local current_hash = model_definition_hash(row_value(row, "MODEL_ID", 1),
+            active_version_id)
+        if tostring(proposed_hash) ~= tostring(current_hash) then
+            error("SEMANTIC_AGENT_044: cannot certify a stale evolution suggestion;"
+                .. " the model's definition has changed since it was proposed"
+                .. " (DEFINITION_HASH " .. string.sub(tostring(proposed_hash), 1, 12)
+                .. "... -> " .. string.sub(tostring(current_hash), 1, 12) .. "...)."
+                .. " Reject it and propose it again against the current model.")
+        end
     end
     query([[
         INSERT INTO SYS_SEMANTIC.MODEL_EVOLUTION_REVIEWS (

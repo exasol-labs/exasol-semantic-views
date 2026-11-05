@@ -69,7 +69,8 @@ if tonumber(identity_binding_count or 0) > 0 then
     error("SEMANTIC_ADMIN_057: cannot remove a representation with active identity bindings; remove mapping relations and identity bindings first")
 end
 local survivor_rows = query([[
-    SELECT REPRESENTATION_ID, COVERAGE_PREDICATE, VALID_FROM, VALID_TO
+    SELECT REPRESENTATION_ID, COVERAGE_PREDICATE, TO_CHAR(VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM,
+           TO_CHAR(VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO
     FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
     WHERE ENTITY_ID = (
       SELECT ENTITY_ID FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS
@@ -129,7 +130,7 @@ if tostring(model_status) == "PUBLISHED" then
                 query([[
                     UPDATE SYS_SEMANTIC.ENTITY_REPRESENTATIONS
                     SET COVERAGE_PREDICATE = :coverage_predicate,
-                        VALID_FROM = :valid_from, VALID_TO = :valid_to,
+                        VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'), VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to, 'T', ' '), 'YYYY-MM-DD HH24:MI:SS.FF6'),
                         UPDATED_AT = CURRENT_TIMESTAMP, UPDATED_BY = CURRENT_USER
                     WHERE REPRESENTATION_ID = :representation_id
                 ]], {representation_id = survivor.id,

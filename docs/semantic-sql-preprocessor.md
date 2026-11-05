@@ -229,6 +229,11 @@ Everything outside the parentheses stays ordinary SQL that Exasol handles
 natively. A `CREATE VIEW` over a semantic object therefore stores *compiled*
 SQL, so the view answers with no preprocessor at all.
 
+The body of `CREATE VIEW … AS`, `CREATE TABLE … AS` and `INSERT INTO … SELECT`
+is compiled exactly as the same query on its own, `GROUP BY` included: a governed
+query that runs as a `SELECT` runs as a view or an extract, which is also how
+ibis infers a result's schema (`CREATE VIEW "ibis_…" AS <query>`).
+
 **Which columns get compiled is inferred from the statement**: every
 `alias.column` reference, unqualified names matching a published column, and
 `*` — where a bare `*` counts only when it is selected from the same query block
@@ -378,9 +383,11 @@ it. Filter with literal values, or select the dimension as well. `IN
 
 ### A view over a semantic object freezes its SQL
 
-Because the stored text is compiled, the view answers forever, for anyone, with
-no preprocessor — and with the model *as it was when the view was made*. Nothing
-in the view says so, so ESV records it:
+Because the stored text is compiled, the view answers for anyone, with no
+preprocessor — and with the model *as it was when the view was made*. ESV
+records it, and once the model compiles something else for those columns, the
+next clean `VALIDATE_MODEL` retires it: reading it raises `SEMANTIC_SURFACE_015`
+until it is re-created ([Governance](governance.md#5-frozen-views)).
 
 ```sql
 SELECT VIEW_SCHEMA, VIEW_NAME, PRESENCE, FROZEN_RELATIONS
@@ -388,7 +395,7 @@ FROM SEMANTIC_CATALOG.FROZEN_VIEWS;
 
 EXECUTE SCRIPT SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS('sales');
 -- VIEW_SCHEMA VIEW_NAME  STATUS   DETAIL
--- MART        V_BI       STALE    The model now compiles different SQL ...
+-- MART        V_BI       STALE    The model now compiles different SQL ... The view is retired ...
 ```
 
 `CHECK_FROZEN_VIEWS` recompiles the columns the view froze and compares. That is
@@ -396,6 +403,15 @@ the exact test, and it is a script rather than a `VALIDATE_MODEL` rule because
 answering it needs the compiler. There is deliberately no version comparison:
 ESV creates one model version per model and authoring mutates it in place, so a
 version check could never fire.
+
+Each view has one record, describing it as it now stands: re-creating a view
+replaces its record, so re-creating a `STALE` view is the remedy and the report
+then reads `CURRENT`. A view created with an unqualified name is recorded in the
+session's open schema. The record is written while the statement is rewritten,
+before Exasol runs it, so `CHECK_FROZEN_VIEWS` first checks that the view still
+holds the recorded SQL; when it does not — the view was re-created without the
+semantic object, or the statement never ran — it reports `UNKNOWN` rather than
+judging SQL the view does not hold.
 
 `VALIDATE_MODEL` reports the part the catalog *can* settle, which is also the
 dangerous part — `SEMANTIC_MODEL_068`, a frozen view reading a relation the model
@@ -425,12 +441,47 @@ is refused with `SEMANTIC_QUERY_012`. Unlike the same hazard under a Virtual
 Schema, the boundary is visible in the author's own SQL — they wrote the join —
 which makes it explainable, not safe.
 
+Two kinds of join cannot repeat a row, and are answered:
+
+- a join to a **one-row relation** — `(SELECT 1.1 AS rate FROM DUAL)`, or a
+  `SELECT` with no `FROM` — with no `GROUP BY` or set operation;
+- **grouped semantic queries joined on their whole grain**: each side is a whole
+  semantic query (`SELECT … FROM <object> [WHERE …] GROUP BY <keys>`), so it has
+  one row per key, and each is joined to an earlier one with `ON` equalities that
+  pair all of its keys with all of that one's. The join is then one-to-one:
+
+```sql
+SELECT a.customer_region, a.total_revenue, b.total_cost
+FROM (SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES
+      GROUP BY customer_region) a
+JOIN (SELECT customer_region, total_cost FROM SEMANTIC_SALES.SALES
+      GROUP BY customer_region) b
+  ON a.customer_region = b.customer_region
+```
+
+The same holds when the sides are CTEs, and for any number of them. Everything
+else is refused as before — a different grain on one side, an `OR`, `USING`, a
+comma or `CROSS JOIN` between grouped sides, a "constant" relation that reads a
+table — because the analysis only lets through what it can prove. Grouped queries
+under `UNION ALL` involve no join and compile arm by arm.
+
 A deployment that would rather have ordinary-SQL semantics than a refusal opts
 in per model:
 
 ```sql
 EXECUTE SCRIPT SEMANTIC_ADMIN.SET_MODEL_DERIVED_COMPOSITION('sales', 'TRUE');
 ```
+
+What the opt-in accepts is ordinary-SQL meaning for *explicit* re-aggregation:
+`SUM(t0.total_revenue)` over the joined rows above is 7270 for North. The
+Semantic SQL forms keep their meaning. A wrapped semantic query is still compiled
+as one. `MEASURE(t0.total_revenue)`, or the bare metric, under a `GROUP BY` that
+covers every dimension of the object the statement selects, is the metric's
+value per group, which is 3635 however many customers North joins. Under a
+`GROUP BY` that leaves one of those dimensions out (`GROUP BY c.REGION`), each
+group holds several values and none of them is the answer. That's refused with
+`SEMANTIC_QUERY_021`: group by the object's dimensions, or aggregate the metric
+explicitly.
 
 Unsupported semantic SQL fails closed with `SEMANTIC_QUERY_*` errors. Ordinary
 SQL against non-semantic schemas is returned unchanged.
@@ -441,7 +492,7 @@ identifier.
 
 `ALTER SEMANTIC VIEW` supports `REPLACE DIMENSIONS`, `REPLACE FACTS`, `REPLACE
 METRICS`, single `ADD OR REPLACE DIMENSION`, `ADD OR REPLACE FACT`, `ADD OR
-REPLACE METRIC`, `DROP METRIC`, and `RENAME METRIC ... TO ...`. Any `REPLACE`
+REPLACE METRIC`, `DROP METRIC`, `DROP FACT`, and `RENAME METRIC ... TO ...`. Any `REPLACE`
 block is a valid statement on its own, and the blocks compose — one statement may
 carry dimensions, facts and metrics together, validated once and rolled back as a
 unit. The three single forms each take the rest of the statement as one clause,

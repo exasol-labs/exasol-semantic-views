@@ -143,18 +143,29 @@ if tonumber(duplicate or 0) > 0 then
     error("SEMANTIC_ADMIN_033: duplicate materialization column: " .. object_type .. " " .. object_name)
 end
 
+-- The definition the aggregate holds for this field, as of now. A field keeps
+-- its id when it is redefined, so the selector compares this hash rather than
+-- the id to tell whether the column still means what the field means.
+local definition_hash = scalar([[
+    SELECT DEFINITION_HASH FROM SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES
+    WHERE FIELD_KIND = :object_type AND FIELD_ID = :object_id
+]], {object_type = object_type, object_id = object_id})
+
 query([[
     INSERT INTO SYS_SEMANTIC.MATERIALIZATION_COLUMNS (
-      MATERIALIZATION_ID, OBJECT_TYPE, OBJECT_ID, PHYSICAL_COLUMN, ROLLUP_POLICY
+      MATERIALIZATION_ID, OBJECT_TYPE, OBJECT_ID, PHYSICAL_COLUMN, ROLLUP_POLICY,
+      DEFINITION_HASH
     ) VALUES (
-      :materialization_id, :object_type, :object_id, :physical_column, :rollup_policy
+      :materialization_id, :object_type, :object_id, :physical_column, :rollup_policy,
+      :definition_hash
     )
 ]], {
     materialization_id = mat_id,
     object_type = object_type,
     object_id = object_id,
     physical_column = physical_column,
-    rollup_policy = rollup_policy
+    rollup_policy = rollup_policy,
+    definition_hash = definition_hash
 })
 -- New materialization column means selection of this materialization may now
 -- apply to additional requests, so drop cached compile results for this model

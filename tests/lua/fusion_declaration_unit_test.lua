@@ -41,6 +41,16 @@ test("fusion document refuses keys it does not know, by name", function()
     assert_branch("fusion.document.closed_contract", good, true)
 end)
 
+test("fusion document names a missing model before anything the document lacks", function()
+    -- An empty document applied to a model that does not exist was refused with
+    -- SEMANTIC_FUSION_012 "document.entities is required": the document was
+    -- blamed for a typo in MODEL_NAME.
+    local no_models = fake_query(function() return {} end)
+    local ok, err = pcall(api.plan_document, no_models, "nosuchmodel", "{}")
+    assert_true(not ok)
+    assert_contains(tostring(err), "SEMANTIC_FUSION_001: model not found: nosuchmodel")
+end)
+
 test("fusion document plans operations in dependency order", function()
     -- Order is not cosmetic. The identity must exist before a representation
     -- binds to it, the representation before an attribute binds to it, and on a

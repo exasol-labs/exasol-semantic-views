@@ -424,6 +424,58 @@ test("metric drop removes membership and deactivates the final membership", func
     assert_true(deactivated)
 end)
 
+test("fact drop retires the fact, and refuses while a metric is built on it", function()
+    local dropped = api.parse_definition([[
+        ALTER SEMANTIC VIEW sales.SALES DROP FACT obsolete_amount
+    ]])
+    assert_equal(dropped.operation, "DROP_FACT")
+    assert_equal(dropped.fact_name, "obsolete_amount")
+    assert_equal(api.definition_operation_count(dropped), 1)
+
+    local model = {model_id = 1, version_id = 2}
+    local function run(fact_rows, metric_rows)
+        local writes = {}
+        local ok, err = pcall(with_query, function(sql)
+            sql = tostring(sql)
+            if sql:find("SELECT FACT_ID FROM SYS_SEMANTIC.FACTS", 1, true) then
+                return fact_rows
+            elseif sql:find("SELECT METRIC_NAME, EXPRESSION, MEASURE_EXPR", 1, true) then
+                return metric_rows
+            elseif sql:find("^DELETE") or sql:find("^UPDATE") then
+                writes[#writes + 1] = sql
+                return {}
+            end
+            error("unexpected drop query: " .. sql)
+        end, function() api.drop_fact(model, "amount") end)
+        return ok, err, writes
+    end
+
+    local ok, err = run({}, {})
+    assert_true(not ok)
+    assert_contains(tostring(err), "SEMANTIC_DDL_093")
+
+    -- Matched as an identifier, in either expression column: not inside a
+    -- longer name, a string or a comment.
+    local writes
+    ok, err, writes = run({{40}}, {
+        {"gross", "SUM(amount)", null},
+        {"net", "SUM(net_amount) /* amount */", "amount"},
+        {"label", "MAX('amount')", null},
+    })
+    assert_true(not ok)
+    assert_contains(tostring(err), "SEMANTIC_DDL_094")
+    assert_contains(tostring(err), "gross, net")
+    assert_equal(#writes, 0)
+
+    ok, err, writes = run({{40}}, {{"other", "SUM(amount_net)", null}})
+    assert_true(ok, err)
+    assert_equal(#writes, 4)
+    assert_contains(writes[1], "OBJECT_COLUMNS")
+    assert_contains(writes[2], "ATTRIBUTE_FUSION_POLICIES")
+    assert_contains(writes[3], "ATTRIBUTE_BINDINGS")
+    assert_contains(writes[4], "SET STATUS = 'INACTIVE'")
+end)
+
 test("semantic DDL accepts a quoted identifier wherever it accepts a name", function()
     -- The demo model ships an entity named `order`, a reserved word. Quoted
     -- metric, fact, model, and object names already parsed, because the
@@ -644,6 +696,8 @@ test("semantic definition rejects incomplete authoring statements", function()
         {"ALTER SEMANTIC VIEW sales.SALES REPLACE METRICS (METRIC x", "SEMANTIC_DDL_034"},
         {"ALTER SEMANTIC VIEW sales.SALES DROP METRIC", "SEMANTIC_DDL_035"},
         {"ALTER SEMANTIC VIEW sales.SALES DROP METRIC x y", "SEMANTIC_DDL_035"},
+        {"ALTER SEMANTIC VIEW sales.SALES DROP FACT", "SEMANTIC_DDL_092"},
+        {"ALTER SEMANTIC VIEW sales.SALES DROP FACT x y", "SEMANTIC_DDL_092"},
         {"ALTER SEMANTIC VIEW sales.SALES RENAME METRIC x y", "SEMANTIC_DDL_036"},
         {"ALTER SEMANTIC VIEW sales.SALES RENAME METRIC x TO X", "SEMANTIC_DDL_083"},
         {"ALTER SEMANTIC VIEW sales.SALES ADD OR REPLACE METRIC x ON ENTITY e RETURNS INT", "SEMANTIC_DDL_031"},

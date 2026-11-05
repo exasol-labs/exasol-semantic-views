@@ -187,6 +187,16 @@ CASES: list[tuple[str, str, str]] = [
         "SEMANTIC_ADMIN_020",
     ),
 
+    # SEMANTIC_ADMIN_226: duplicate metric name -- its own code, since
+    # SEMANTIC_ADMIN_021 means "attribute not found"
+    (
+        "admin_226/duplicate_metric",
+        "EXECUTE SCRIPT SEMANTIC_ADMIN.ADD_METRIC("
+        "'sales', 'SALES', 'total_revenue', 'SUM(net_revenue)', NULL, 'ADDITIVE', "
+        "'order_line', 'DECIMAL(36,2)', 'probe', 'probe', NULL, FALSE, FALSE)",
+        "SEMANTIC_ADMIN_226",
+    ),
+
     # SEMANTIC_ADMIN_045: active representation not found
     (
         "admin_045/representation_not_found",
