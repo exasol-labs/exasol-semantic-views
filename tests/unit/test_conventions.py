@@ -898,7 +898,7 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
             cases = re.split(r"(?=^test\()", source, flags=re.M)[1:]
             self.assertTrue(cases, f"{path.name} has no test cases")
             for case in cases:
-                self.assertEqual(1, len(re.findall(r"(?<![A-Za-z_])(?:H\.)?run\(", case)),
+                self.assertEqual(1, len(re.findall(r"(?<![A-Za-z_])run(?:_[a-z_]+)?\(", case)),
                                  f"{path.name}: each test case must run one script")
 
 

@@ -27,7 +27,7 @@ local function parameters(path)
     return names
 end
 
-function M.run(name, supplied, fixture)
+local function run(name, supplied, fixture)
     fixture = fixture or {}
     supplied = supplied or {}
     local path = root .. "/lua/semantic_layer/scripts/" .. name .. ".lua"
@@ -91,7 +91,7 @@ end
 
 function M.for_script(name)
     return function(supplied, fixture)
-        return M.run(name, supplied, fixture)
+        return run(name, supplied, fixture)
     end
 end
 
