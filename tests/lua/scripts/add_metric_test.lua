@@ -1,4 +1,5 @@
 local H = SCRIPT_BODY
+local run = H.for_script("add_metric")
 local step = H.step
 local supported = H.supported
 
@@ -27,14 +28,14 @@ test("script body: add_metric rolls back a failed validation", function()
     steps[#steps + 1] = step("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL")
     local fixture = supported(steps)
     fixture.error = "SEMANTIC_ADMIN_090: metric rejected"
-    local result = H.run("add_metric", metric_args, fixture)
+    local result = run(metric_args, fixture)
     assert_equal(result.calls[12].bindings.metric_id, 41)
 end)
 
 test("script body: add_metric requires an expression", function()
     local fixture = supported()
     fixture.error = "EXPRESSION is required"
-    H.run("add_metric", {EXPRESSION = null, DATA_TYPE = "DECIMAL"},
+    run({EXPRESSION = null, DATA_TYPE = "DECIMAL"},
         fixture)
 end)
 
@@ -43,7 +44,7 @@ test("script body: add_metric registers a valid metric", function()
     local supplied = {}
     for key, value in pairs(metric_args) do supplied[key] = value end
     supplied.IS_CERTIFIED = "true"
-    local result = H.run("add_metric", supplied, fixture)
+    local result = run(supplied, fixture)
     assert_equal(result.rows[1][1], 41)
     assert_equal(result.rows[1][7], true)
     assert_equal(result.calls[6].bindings.is_certified, true)

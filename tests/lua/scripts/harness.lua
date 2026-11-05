@@ -89,6 +89,12 @@ function M.run(name, supplied, fixture)
     return result
 end
 
+function M.for_script(name)
+    return function(supplied, fixture)
+        return M.run(name, supplied, fixture)
+    end
+end
+
 function M.support(env)
     return {
         ESV_ROWS = {scalar = function(sql, bindings)

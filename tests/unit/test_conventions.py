@@ -881,7 +881,7 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
         present = {path.name.removesuffix("_test.lua") for path in test_dir.glob("*_test.lua")
                    if path.name != "harness_test.lua"}
         exercised = {name for name in present
-                     if re.search(rf'H\.run\("{name}"',
+                     if re.search(rf'H\.for_script\("{name}"\)',
                                   (test_dir / f"{name}_test.lua").read_text(encoding="utf-8"))}
         thresholds = (ROOT / "tests/lua/coverage_thresholds.lua").read_text(encoding="utf-8")
         gated = set(re.findall(r'\["lua/semantic_layer/scripts/([a-z_]+)\.lua"\]', thresholds))
@@ -898,8 +898,8 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
             cases = re.split(r"(?=^test\()", source, flags=re.M)[1:]
             self.assertTrue(cases, f"{path.name} has no test cases")
             for case in cases:
-                self.assertEqual(1, len(re.findall(r"H\.run\(", case)),
-                                 f"{path.name}: each test case must call H.run once")
+                self.assertEqual(1, len(re.findall(r"(?<![A-Za-z_])(?:H\.)?run\(", case)),
+                                 f"{path.name}: each test case must run one script")
 
 
 class LuaSpecsAreAllRun(unittest.TestCase):

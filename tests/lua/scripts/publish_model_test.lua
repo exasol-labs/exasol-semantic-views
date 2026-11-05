@@ -1,4 +1,5 @@
 local H = SCRIPT_BODY
+local run = H.for_script("publish_model")
 local step = H.step
 test("script body: publish_model records a successful publish", function()
     local discovery = '"SEMANTIC_SALES"."SEMANTIC_DISCOVERY"'
@@ -34,7 +35,7 @@ test("script body: publish_model records a successful publish", function()
             {model_id = 11, version_id = 12, version_number = 2, publish_number = 3}),
         step("FROM SYS_SEMANTIC.MODEL_ROLE_GRANTS", {}),
     }}
-    local result = H.run("publish_model", {MODEL_NAME = "sales"}, fixture)
+    local result = run({MODEL_NAME = "sales"}, fixture)
     assert_equal(result.rows[1][3], "orders")
     assert_equal(result.rows[1][4], 1)
     assert_contains(result.columns, "PUBLISHED_SCHEMA VARCHAR")
@@ -50,9 +51,9 @@ test("script body: publish_model refuses invalid validation", function()
             {"ERROR", "MODEL", "sales", "SEMANTIC_MODEL_001", "invalid"},
         }),
     }, error = "SEMANTIC_SURFACE_013"}
-    H.run("publish_model", {MODEL_NAME = "sales"}, fixture)
+    run({MODEL_NAME = "sales"}, fixture)
 end)
 
 test("script body: publish_model requires model name", function()
-    H.run("publish_model", {MODEL_NAME = null}, {error = "MODEL_NAME is required"})
+    run({MODEL_NAME = null}, {error = "MODEL_NAME is required"})
 end)
