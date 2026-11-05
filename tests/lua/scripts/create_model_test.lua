@@ -17,6 +17,11 @@ test("script body: create_model writes model and version in order", function()
         MODEL_NAME = "sales", PUBLISHED_SCHEMA = "SEMANTIC_SALES", DESCRIPTION = null,
     }, fixture)
     assert_equal(#result.calls, 6)
+end)
+
+test("script body: create_model requires model name", function()
+    local fixture = supported()
+    fixture.error = "MODEL_NAME is required"
     H.run("create_model", {MODEL_NAME = null, PUBLISHED_SCHEMA = "SEMANTIC_SALES"},
-        {imports = fixture.imports, error = "MODEL_NAME is required"})
+        fixture)
 end)

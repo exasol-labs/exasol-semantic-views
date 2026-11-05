@@ -6,7 +6,7 @@ test("script body: semantic_preprocessor passes ordinary SQL unchanged", functio
     assert_equal(#result.imports, 0)
 end)
 
-test("script body: semantic_preprocessor rewrites DDL and rejects compiler errors", function()
+test("script body: semantic_preprocessor rewrites DDL", function()
     local ddl = "ALTER SEMANTIC VIEW sales.orders DROP METRIC x"
     local result = H.run("semantic_preprocessor", {}, {
         sql_text = ddl,
@@ -18,6 +18,9 @@ test("script body: semantic_preprocessor rewrites DDL and rejects compiler error
         }},
     })
     assert_equal(result.sql_text, "EXECUTE SCRIPT APPLY(...)")
+end)
+
+test("script body: semantic_preprocessor rejects compiler errors", function()
     H.run("semantic_preprocessor", {}, {
         sql_text = "SELECT * FROM SEMANTIC_SALES.ORDERS",
         sql = {step("SELECT UPPER(PUBLISHED_SCHEMA)", {{"SEMANTIC_SALES"}})},

@@ -29,8 +29,13 @@ test("script body: add_metric rolls back a failed validation", function()
     fixture.error = "SEMANTIC_ADMIN_090: metric rejected"
     local result = H.run("add_metric", metric_args, fixture)
     assert_equal(result.calls[12].bindings.metric_id, 41)
+end)
+
+test("script body: add_metric requires an expression", function()
+    local fixture = supported()
+    fixture.error = "EXPRESSION is required"
     H.run("add_metric", {EXPRESSION = null, DATA_TYPE = "DECIMAL"},
-        {imports = fixture.imports, error = "EXPRESSION is required"})
+        fixture)
 end)
 
 test("script body: add_metric registers a valid metric", function()

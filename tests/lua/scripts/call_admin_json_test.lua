@@ -13,8 +13,12 @@ test("script body: call_admin_json uses signature order and escapes strings", fu
     }}
     local result = H.run("call_admin_json", {SCRIPT_NAME = "drop_model", ARGS_JSON = "{}"}, fixture)
     assert_equal(result.rows[1][3], 0)
+end)
+
+test("script body: call_admin_json refuses recursive calls", function()
     H.run("call_admin_json", {SCRIPT_NAME = "CALL_ADMIN_JSON"},
-        {imports = fixture.imports, error = "cannot call itself"})
+        {imports = {["SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME"] = {}},
+            error = "cannot call itself"})
 end)
 
 test("script body: call_admin_json rejects unknown named arguments", function()

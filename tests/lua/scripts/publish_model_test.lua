@@ -51,5 +51,8 @@ test("script body: publish_model refuses invalid validation", function()
         }),
     }, error = "SEMANTIC_SURFACE_013"}
     H.run("publish_model", {MODEL_NAME = "sales"}, fixture)
+end)
+
+test("script body: publish_model requires model name", function()
     H.run("publish_model", {MODEL_NAME = null}, {error = "MODEL_NAME is required"})
 end)

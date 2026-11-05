@@ -892,6 +892,15 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
         self.assertEqual(selected, gated)
         self.assertTrue(selected <= installed)
 
+    def test_each_script_behavior_case_runs_one_script(self):
+        for path in sorted((ROOT / "tests/lua/scripts").glob("*_test.lua")):
+            source = path.read_text(encoding="utf-8")
+            cases = re.split(r"(?=^test\()", source, flags=re.M)[1:]
+            self.assertTrue(cases, f"{path.name} has no test cases")
+            for case in cases:
+                self.assertEqual(1, len(re.findall(r"H\.run\(", case)),
+                                 f"{path.name}: each test case must call H.run once")
+
 
 class LuaSpecsAreAllRun(unittest.TestCase):
     """tests/lua/run.lua runs the files its `specs` list names, and only those.
