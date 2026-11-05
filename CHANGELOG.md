@@ -6,7 +6,7 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-11-04
+## [0.6.1] - 2026-11-05
 
 Governed answers that stay governed after they leave the compiler, and a
 semantic layer that can be built by an orchestrator. A view compiled from a
@@ -116,6 +116,13 @@ build left. Behaviour that changes:
 - `docs/agent-contract.md` named two of the six `AGENT_READINESS` values; an
   agent guard written against it rejected every ready model. All six are
   listed, and a unit test holds the list to the view.
+
+## [0.6.0] - not released
+
+The `v0.6.0` tag was pushed in error, on the commit before these changes
+(`27baa42`, the CI consolidation), and release tags cannot be moved. Its build
+was cancelled and no release was published. Everything prepared as 0.6.0 ships
+as 0.6.1; do not install from the `v0.6.0` tag.
 
 ## [0.5.1] - 2026-10-28
 
