@@ -872,11 +872,13 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
         self.assertEqual([], sorted(sources - gated),
                          "add these to tests/lua/coverage_thresholds.lua")
 
-    def test_selected_script_bodies_have_tests_and_thresholds(self):
+    def test_every_installed_script_body_has_a_test_and_threshold(self):
         runner = (ROOT / "tests/lua/run.lua").read_text(encoding="utf-8")
-        selection = re.search(r"local selected_scripts = \{(.*?)\n\}", runner, re.S)
-        self.assertIsNotNone(selection)
-        selected = set(re.findall(r'"([a-z_]+)"', selection.group(1)))
+        self.assertIn('dofile(repo_root .. "/tests/lua/scripts/manifest.lua")', runner)
+        manifest = (ROOT / "tests/lua/scripts/manifest.lua").read_text(encoding="utf-8")
+        names = re.findall(r'"([a-z_]+)"', manifest)
+        selected = set(names)
+        self.assertEqual(len(names), len(selected), "script manifest has duplicate names")
         test_dir = ROOT / "tests/lua/scripts"
         present = {path.name.removesuffix("_test.lua") for path in test_dir.glob("*_test.lua")
                    if path.name != "harness_test.lua"}
@@ -886,11 +888,10 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
         thresholds = (ROOT / "tests/lua/coverage_thresholds.lua").read_text(encoding="utf-8")
         gated = set(re.findall(r'\["lua/semantic_layer/scripts/([a-z_]+)\.lua"\]', thresholds))
         installed = {script.name.lower() for script in built_install.PACKAGER.script_registry().values()}
-        self.assertEqual(10, len(selected))
-        self.assertEqual(selected, present)
-        self.assertEqual(selected, exercised)
-        self.assertEqual(selected, gated)
-        self.assertTrue(selected <= installed)
+        self.assertEqual(installed, selected)
+        self.assertEqual(installed, present)
+        self.assertEqual(installed, exercised)
+        self.assertEqual(installed, gated)
 
     def test_each_script_behavior_case_runs_one_script(self):
         for path in sorted((ROOT / "tests/lua/scripts").glob("*_test.lua")):

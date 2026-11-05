@@ -698,7 +698,7 @@ failure, or authorization failure without parsing arbitrary prose.
 
 ## Database-Free Coverage Design
 
-The Lua interpreter executes runtime and selected installed-script tests and
+The Lua interpreter executes runtime and installed-script tests and
 records the lines they reach. For script bodies, coverage uses the Lua 5.4
 compiler's `-p -l` listing to establish all executable source lines. The
 interpreter cannot discover the prototype of an uninstantiated nested local

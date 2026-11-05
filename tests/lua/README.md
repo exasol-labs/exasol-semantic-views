@@ -17,11 +17,11 @@ whole suite.
 `run.lua` is plain Lua with no LuaRocks dependencies. It loads the canonical
 runtime sources under `lua/semantic_layer` into one global environment — the way
 `import()` exposes a runtime's top-level globals inside Exasol — then runs every
-`*_unit_test.lua` listed in `specs`. The ten selected installed script bodies
-have one test file each in `tests/lua/scripts/` and run in fresh environments
+`*_unit_test.lua` listed in `specs`. Every installed script body has one test
+file in `tests/lua/scripts/` and runs in a fresh environment
 through the shared `harness.lua`. Plain Lua cannot list a directory, so
 `tests/unit/test_conventions.py` checks that the spec list is complete and the
-selected scripts have tests and thresholds.
+installed-script manifest matches the packager registry, test files and thresholds.
 
 | Global | Purpose |
 |---|---|
@@ -65,15 +65,14 @@ Thresholds live in `coverage_thresholds.lua` and are enforced per module. The
 suite also records named decision outcomes; each decision passed to
 `assert_branch` is expected to be observed both true and false.
 
-The ten selected bodies have a separate per-script coverage report and floors.
+The installed script bodies have a separate per-script coverage report and floors.
 The runner derives their active lines from Lua 5.4 compiler listings, including
 nested local functions that a test never invokes. `tools/run_lua_tests.sh`
 selects the Lua interpreter and compiler; set `LUA_BIN` and `LUAC_BIN` if needed.
-The other installed script bodies are not in this database-free coverage gate.
 
 ## Script-body test conventions
 
-- Keep one file per selected script in `tests/lua/scripts/<name>_test.lua`.
+- Keep one file per installed script in `tests/lua/scripts/<name>_test.lua`.
   Share Exasol stand-ins and fixture helpers through `harness.lua`.
 - Bind the script name once per file with
   `local run, test_script = H.for_script("<name>")`. Register each case as
@@ -86,9 +85,9 @@ The other installed script bodies are not in this database-free coverage gate.
   SQL step was consumed. Assert rows, result columns, bindings, and call order
   where they define the behavior.
 
-To add another body, add its name to `selected_scripts` in `run.lua`, add its
+To add another body, add its name to `tests/lua/scripts/manifest.lua`, add its
 test file following these conventions, and add a measured floor to
-`coverage_thresholds.lua`. The convention tests check the selected inventory,
+`coverage_thresholds.lua`. The convention tests check the complete inventory,
 per-file binding, and one-run-per-case rule.
 
 Threshold policy:

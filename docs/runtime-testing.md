@@ -9,8 +9,8 @@ fast feedback does not require a database.
 sh tools/run_lua_tests.sh
 ```
 
-This lane executes canonical Lua runtime sources and ten selected installed
-script bodies directly. It covers:
+This lane executes canonical Lua runtime sources and every installed script
+body directly. It covers:
 
 - JSON parsing and encoding;
 - canonical request normalization and cache-key stability;
@@ -31,7 +31,7 @@ high-risk decisions, rather than claiming automatic coverage of every Lua
 conditional.
 
 It reports active-line coverage per runtime, separate active-line coverage for
-the ten selected script bodies, and named true/false decision coverage. The
+each installed script body, and named true/false decision coverage. The
 script denominator includes nested local functions even when no test calls
 them. Enforced thresholds are in
 `tests/lua/coverage_thresholds.lua`. Thresholds are intentionally independent:

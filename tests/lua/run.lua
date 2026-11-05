@@ -236,13 +236,8 @@ local specs = {
     "tests/lua/fusion_declaration_unit_test.lua",
     "tests/lua/agent_unit_test.lua",
 }
--- The selected script tests use one fixture implementation. Keep this list in
--- sync with their per-script thresholds (checked by test_conventions.py).
-local selected_scripts = {
-    "add_entity", "add_metric", "apply_semantic_definition_or_fail",
-    "call_admin_json", "compile_request_json", "create_model", "publish_model",
-    "semantic_guard", "semantic_preprocessor", "validate_model",
-}
+-- The manifest is checked against every installed script by test_conventions.py.
+local selected_scripts = dofile(repo_root .. "/tests/lua/scripts/manifest.lua")
 
 local function script_active_lines(source)
     local compiler = os.getenv("LUAC_BIN") or "luac"

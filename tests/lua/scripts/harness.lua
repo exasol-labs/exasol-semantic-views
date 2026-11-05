@@ -4,6 +4,10 @@ local root = (arg[0]:gsub("\\", "/")):gsub("/?tests/lua/run%.lua$", "")
 if root == "" then root = "." end
 
 local function same(actual, expected, path)
+    if actual == null or expected == null then
+        assert_equal(actual, expected, path)
+        return
+    end
     if type(actual) ~= type(expected) then
         error(path .. ": expected " .. type(expected) .. ", got " .. type(actual), 0)
     end
@@ -96,7 +100,25 @@ function M.for_script(name)
     local function test_script(description, fn)
         test(string.upper(name) .. ": " .. description, fn)
     end
-    return run_script, test_script
+    local function delegate(runtime, method, supplied, rows)
+        local expected = {}
+        local path = root .. "/lua/semantic_layer/scripts/" .. name .. ".lua"
+        for line in io.lines(path) do
+            local param = line:match("^%-%- @param ([A-Z][A-Z0-9_]*)")
+            if param then
+                local value = supplied and supplied[param]
+                expected[#expected + 1] = value == nil and null or value
+            end
+        end
+        return {imports = {[runtime] = {[method] = function(...)
+            assert_equal(select("#", ...), #expected, "delegated argument count")
+            for index = 1, #expected do
+                same(select(index, ...), expected[index], "delegated argument " .. index)
+            end
+            return rows or {{"DELEGATED"}}
+        end}}}
+    end
+    return run_script, test_script, delegate
 end
 
 function M.support(env)
@@ -106,7 +128,7 @@ function M.support(env)
             if not rows or not rows[1] then return nil end
             local row = rows[1]
             return row.VALUE or row.COUNT or row.MAX or row[1]
-        end},
+        end, missing = ESV_ROWS.missing, row_value = ESV_ROWS.row_value},
         ESV_SOURCE_COLUMNS = {require_relation = function(_, schema, object)
             return schema, object
         end},
@@ -121,6 +143,15 @@ function M.supported(sql)
     return {sql = sql or {}, imports = {
         ["SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"] = M.support,
     }}
+end
+
+function M.refusal(expected, imported)
+    local fixture = {error = expected, imports = {}}
+    for _, script in ipairs(imported or {}) do
+        fixture.imports[script] = script == "SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"
+            and M.support or {}
+    end
+    return fixture
 end
 
 return M
