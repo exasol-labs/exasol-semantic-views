@@ -198,5 +198,19 @@ return {
         ["lua/semantic_layer/admin/fusion_declaration.lua"] = 81.58,
         ["lua/semantic_layer/agent/runtime.lua"] = 95.9,
     },
+    -- Selected installed scripts only; initial floors measured with the full
+    -- suite and rounded down to 0.1 percentage point, like the runtime gate.
+    scripts = {
+        ["lua/semantic_layer/scripts/add_entity.lua"] = 90.7,
+        ["lua/semantic_layer/scripts/add_metric.lua"] = 86.0,
+        ["lua/semantic_layer/scripts/apply_semantic_definition_or_fail.lua"] = 91.6,
+        ["lua/semantic_layer/scripts/call_admin_json.lua"] = 77.2,
+        ["lua/semantic_layer/scripts/compile_request_json.lua"] = 93.7,
+        ["lua/semantic_layer/scripts/create_model.lua"] = 89.4,
+        ["lua/semantic_layer/scripts/publish_model.lua"] = 81.3,
+        ["lua/semantic_layer/scripts/semantic_guard.lua"] = 75.0,
+        ["lua/semantic_layer/scripts/semantic_preprocessor.lua"] = 80.7,
+        ["lua/semantic_layer/scripts/validate_model.lua"] = 91.6,
+    },
     branches = 100,
 }

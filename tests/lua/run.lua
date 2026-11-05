@@ -236,7 +236,49 @@ local specs = {
     "tests/lua/fusion_declaration_unit_test.lua",
     "tests/lua/agent_unit_test.lua",
 }
+-- The selected script tests use one fixture implementation. Keep this list in
+-- sync with their per-script thresholds (checked by test_conventions.py).
+local selected_scripts = {
+    "add_entity", "add_metric", "apply_semantic_definition_or_fail",
+    "call_admin_json", "compile_request_json", "create_model", "publish_model",
+    "semantic_guard", "semantic_preprocessor", "validate_model",
+}
+
+local function script_active_lines(source)
+    local compiler = os.getenv("LUAC_BIN") or "luac"
+    local path = repo_root .. "/" .. source
+    local command = string.format("%q -p -l %q", compiler, path)
+    local pipe = assert(io.popen(command, "r"), "Lua compiler required for script coverage")
+    local lines = {}
+    for output in pipe:lines() do
+        local line = tonumber(output:match("^%s*%d+%s+%[(%d+)%]"))
+        if line and line > 0 then lines[line] = true end
+    end
+    assert(pipe:close(), "Lua compiler failed for " .. source)
+    assert(next(lines), "no active lines found for " .. source)
+    return lines
+end
+for _, name in ipairs(selected_scripts) do
+    local source = "lua/semantic_layer/scripts/" .. name .. ".lua"
+    possible[source] = script_active_lines(source)
+end
+do
+    -- PUBLISH_MODEL has nested local helpers. The bytecode inventory must
+    -- count their lines even if no test invokes a particular helper.
+    local source = "lua/semantic_layer/scripts/publish_model.lua"
+    local chunk = assert(loadfile(repo_root .. "/" .. source))
+    local main = debug.getinfo(chunk, "L").activelines
+    local all, main_count = 0, 0
+    for _ in pairs(possible[source]) do all = all + 1 end
+    for _ in pairs(main) do main_count = main_count + 1 end
+    assert(all > main_count, "script coverage omitted nested local functions")
+end
 for _, spec in ipairs(specs) do dofile(repo_root .. "/" .. spec) end
+SCRIPT_BODY = dofile(repo_root .. "/tests/lua/scripts/harness.lua")
+for _, name in ipairs(selected_scripts) do
+    dofile(repo_root .. "/tests/lua/scripts/" .. name .. "_test.lua")
+end
+dofile(repo_root .. "/tests/lua/scripts/harness_test.lua")
 
 local filter = arg[1] or os.getenv("ESV_TEST_FILTER")
 if filter then
@@ -329,6 +371,27 @@ for source, threshold in pairs(thresholds.lines) do
             if not (executed[source] and executed[source][line]) then
                 missed[#missed + 1] = line
             end
+        end
+        table.sort(missed)
+        io.write("    missed: ", table.concat(missed, ","), "\n")
+    end
+    if percentage + 0.0001 < threshold then coverage_failures = coverage_failures + 1 end
+end
+
+io.write("\nLua script-body line coverage\n")
+for source, threshold in pairs(thresholds.scripts) do
+    local active, hit = 0, 0
+    for line in pairs(possible[source] or {}) do
+        active = active + 1
+        if executed[source] and executed[source][line] then hit = hit + 1 end
+    end
+    local percentage = active == 0 and 0 or hit * 100 / active
+    io.write(string.format("  %-62s %4d/%-4d %6.2f%% (minimum %.2f%%)\n",
+        source, hit, active, percentage, threshold))
+    if os.getenv("ESV_COVERAGE_DETAILS") == "1" then
+        local missed = {}
+        for line in pairs(possible[source] or {}) do
+            if not (executed[source] and executed[source][line]) then missed[#missed + 1] = line end
         end
         table.sort(missed)
         io.write("    missed: ", table.concat(missed, ","), "\n")

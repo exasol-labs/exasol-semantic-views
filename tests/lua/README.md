@@ -15,10 +15,13 @@ whole suite.
 ## What the runner provides
 
 `run.lua` is plain Lua with no LuaRocks dependencies. It loads the canonical
-sources under `lua/semantic_layer` into one global environment — the way
+runtime sources under `lua/semantic_layer` into one global environment — the way
 `import()` exposes a runtime's top-level globals inside Exasol — then runs every
-`*_unit_test.lua` listed in `specs`. Plain Lua cannot list a directory, so
-`tests/unit/test_conventions.py` checks that the list names every such file.
+`*_unit_test.lua` listed in `specs`. The ten selected installed script bodies
+have one test file each in `tests/lua/scripts/` and run in fresh environments
+through the shared `harness.lua`. Plain Lua cannot
+list a directory, so `tests/unit/test_conventions.py` checks that the spec list
+is complete and the selected scripts have tests and thresholds.
 
 | Global | Purpose |
 |---|---|
@@ -35,7 +38,8 @@ Exasol supplies some globals to every script; the runner supplies stand-ins:
 |---|---|
 | `null` | a sentinel table whose `tostring` is `"null"` — truthy, like the userdata it stands for |
 | `query(sql, params)` | absent; a test that reaches the catalog installs a fixture with `with_query` |
-| `pquery`, `exit`, `import`, `exa`, `sqlparsing` | absent; code that needs them is covered by the live suite |
+| `pquery` | absent; code that needs it is covered by the live suite |
+| `exit`, `import`, `exa.import`, `sqlparsing` | strict per-script fixtures in `script_body_harness.lua`; absent from runtime tests |
 
 `ESV_TEST_MODE = true` makes each runtime publish an `ESV_*_TEST_API` table of
 its internals. The flag is absent in Exasol, so those tables never become part
@@ -60,6 +64,17 @@ blank lines.
 Thresholds live in `coverage_thresholds.lua` and are enforced per module. The
 suite also records named decision outcomes; each decision passed to
 `assert_branch` is expected to be observed both true and false.
+
+The ten selected bodies have a separate per-script coverage report and floors.
+The runner derives their active lines from Lua 5.4 compiler listings, including
+nested local functions that a test never invokes. `tools/run_lua_tests.sh`
+selects the Lua interpreter and compiler; set `LUA_BIN` and `LUAC_BIN` if needed.
+The other installed script bodies are not in this database-free coverage gate.
+
+To add another body, add its name to `selected_scripts` in `run.lua`, add a
+`tests/lua/scripts/<name>_test.lua` file using `H.run`, and add a measured floor to
+`coverage_thresholds.lua`. Pass only the imports and SQL steps the case expects;
+the harness rejects every other call and checks that all steps were consumed.
 
 Threshold policy:
 

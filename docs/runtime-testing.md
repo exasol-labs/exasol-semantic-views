@@ -9,7 +9,8 @@ fast feedback does not require a database.
 sh tools/run_lua_tests.sh
 ```
 
-This lane executes canonical Lua runtime sources directly. It covers:
+This lane executes canonical Lua runtime sources and ten selected installed
+script bodies directly. It covers:
 
 - JSON parsing and encoding;
 - canonical request normalization and cache-key stability;
@@ -18,7 +19,9 @@ This lane executes canonical Lua runtime sources directly. It covers:
 - semantic-definition and Databricks translation helpers;
 - agent plan/JSON helpers;
 - materialization eligibility, rejection, selection, and rollup decisions;
-- deterministic property tests for request normalization.
+- deterministic property tests for request normalization;
+- script-level request compilation, preprocessing, authoring, validation,
+  publication, and guarded-view refusal with strict database stand-ins.
 
 All installed public Lua entry points are included as coverage roots, including
 semantic-definition describe, explain, export, apply, import, and preprocessing
@@ -27,11 +30,25 @@ outcome coverage**: it enforces both outcomes for explicitly registered
 high-risk decisions, rather than claiming automatic coverage of every Lua
 conditional.
 
-It reports active-line coverage per runtime and named true/false decision
-coverage. Enforced thresholds are in
+It reports active-line coverage per runtime, separate active-line coverage for
+the ten selected script bodies, and named true/false decision coverage. The
+script denominator includes nested local functions even when no test calls
+them. Enforced thresholds are in
 `tests/lua/coverage_thresholds.lua`. Thresholds are intentionally independent:
 high coverage of the smaller materialization runtime cannot conceal lower
 compiler or validator coverage.
+
+### Why script coverage uses `luac`
+
+The Lua interpreter runs the tests and its line hook records executed source
+lines. Its debug API can inspect the loaded top-level chunk and functions that
+exist at runtime, but it cannot enumerate the body of a nested local function
+that was never instantiated. Counting only those visible functions would remove
+untested code from the denominator and overstate coverage. The Lua 5.4 compiler
+lists source lines for every function prototype in a script, including uncalled
+nested functions. The runner uses `luac -p -l` to collect that active-line set;
+`-p` prevents a `luac.out` artifact. This adds only the compiler shipped with
+the Lua 5.4 toolchain, with no LuaRocks dependency or source-code parser.
 
 Lua 5.4 or newer is required. On macOS:
 
@@ -39,7 +56,8 @@ Lua 5.4 or newer is required. On macOS:
 brew install lua
 ```
 
-Set `LUA_BIN` when the interpreter is installed under another name.
+Set `LUA_BIN` and `LUAC_BIN` when the interpreter and compiler are installed
+under other names. See `tests/lua/README.md` for the script-test recipe.
 
 ## 2. Live-DB Integration Tests
 

@@ -872,6 +872,26 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
         self.assertEqual([], sorted(sources - gated),
                          "add these to tests/lua/coverage_thresholds.lua")
 
+    def test_selected_script_bodies_have_tests_and_thresholds(self):
+        runner = (ROOT / "tests/lua/run.lua").read_text(encoding="utf-8")
+        selection = re.search(r"local selected_scripts = \{(.*?)\n\}", runner, re.S)
+        self.assertIsNotNone(selection)
+        selected = set(re.findall(r'"([a-z_]+)"', selection.group(1)))
+        test_dir = ROOT / "tests/lua/scripts"
+        present = {path.name.removesuffix("_test.lua") for path in test_dir.glob("*_test.lua")
+                   if path.name != "harness_test.lua"}
+        exercised = {name for name in present
+                     if re.search(rf'H\.run\("{name}"',
+                                  (test_dir / f"{name}_test.lua").read_text(encoding="utf-8"))}
+        thresholds = (ROOT / "tests/lua/coverage_thresholds.lua").read_text(encoding="utf-8")
+        gated = set(re.findall(r'\["lua/semantic_layer/scripts/([a-z_]+)\.lua"\]', thresholds))
+        installed = {script.name.lower() for script in built_install.PACKAGER.script_registry().values()}
+        self.assertEqual(10, len(selected))
+        self.assertEqual(selected, present)
+        self.assertEqual(selected, exercised)
+        self.assertEqual(selected, gated)
+        self.assertTrue(selected <= installed)
+
 
 class LuaSpecsAreAllRun(unittest.TestCase):
     """tests/lua/run.lua runs the files its `specs` list names, and only those.
