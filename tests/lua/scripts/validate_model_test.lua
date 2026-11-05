@@ -1,7 +1,7 @@
 local H = SCRIPT_BODY
-local run = H.for_script("validate_model")
+local run, test_script = H.for_script("validate_model")
 local step = H.step
-test("script body: validate_model reports issues and syncs clean frozen views", function()
+test_script("reports issues and syncs clean frozen views", function()
     local fixture = {
         imports = {["SEMANTIC_ADMIN.VALIDATOR_RUNTIME"] = {
             validate_model = function(model, metric_types)
@@ -19,7 +19,7 @@ test("script body: validate_model reports issues and syncs clean frozen views", 
     assert_contains(result.columns, "RULE_CODE VARCHAR")
 end)
 
-test("script body: validate_model skips frozen view sync on errors", function()
+test_script("skips frozen view sync on errors", function()
     run({MODEL_NAME = null}, {imports = {
         ["SEMANTIC_ADMIN.VALIDATOR_RUNTIME"] = {
             validate_model = function() return {{severity = "ERROR", object_type = "MODEL", rule_code = "E1"}} end,

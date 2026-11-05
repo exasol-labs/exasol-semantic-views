@@ -1,7 +1,7 @@
 local H = SCRIPT_BODY
-local run = H.for_script("call_admin_json")
+local run, test_script = H.for_script("call_admin_json")
 local step = H.step
-test("script body: call_admin_json uses signature order and escapes strings", function()
+test_script("uses signature order and escapes strings", function()
     local definition = "SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME"
     local fixture = {imports = {[definition] = {
         decode_json = function() return {MODEL_NAME = "O'Brien"} end,
@@ -16,13 +16,13 @@ test("script body: call_admin_json uses signature order and escapes strings", fu
     assert_equal(result.rows[1][3], 0)
 end)
 
-test("script body: call_admin_json refuses recursive calls", function()
+test_script("refuses recursive calls", function()
     run({SCRIPT_NAME = "CALL_ADMIN_JSON"},
         {imports = {["SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME"] = {}},
             error = "cannot call itself"})
 end)
 
-test("script body: call_admin_json rejects unknown named arguments", function()
+test_script("rejects unknown named arguments", function()
     local definition = "SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME"
     run({SCRIPT_NAME = "drop_model", ARGS_JSON = "{}"}, {
         imports = {[definition] = {decode_json = function() return {UNKNOWN = 1} end}},

@@ -1,7 +1,7 @@
 local H = SCRIPT_BODY
-local run = H.for_script("publish_model")
+local run, test_script = H.for_script("publish_model")
 local step = H.step
-test("script body: publish_model records a successful publish", function()
+test_script("records a successful publish", function()
     local discovery = '"SEMANTIC_SALES"."SEMANTIC_DISCOVERY"'
     local fixture = {sql = {
         step("FROM SYS_SEMANTIC.MODELS", {{11, "sales", 12, "SEMANTIC_SALES", null}},
@@ -44,7 +44,7 @@ test("script body: publish_model records a successful publish", function()
     assert_equal(#result.calls, 26)
 end)
 
-test("script body: publish_model refuses invalid validation", function()
+test_script("refuses invalid validation", function()
     local fixture = {sql = {
         step("FROM SYS_SEMANTIC.MODELS", {{11, "sales", 12, "SEMANTIC_SALES", null}}),
         step("EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL", {
@@ -54,6 +54,6 @@ test("script body: publish_model refuses invalid validation", function()
     run({MODEL_NAME = "sales"}, fixture)
 end)
 
-test("script body: publish_model requires model name", function()
+test_script("requires model name", function()
     run({MODEL_NAME = null}, {error = "MODEL_NAME is required"})
 end)

@@ -1,6 +1,6 @@
 local H = SCRIPT_BODY
-local run = H.for_script("compile_request_json")
-test("script body: compile_request_json maps the compiler envelope and columns", function()
+local run, test_script = H.for_script("compile_request_json")
+test_script("maps the compiler envelope and columns", function()
     local request = '{"model":"sales"}'
     local result = run({REQUEST_JSON = request}, {
         imports = { ["SEMANTIC_ADMIN.COMPILER_RUNTIME"] = {
@@ -15,7 +15,7 @@ test("script body: compile_request_json maps the compiler envelope and columns",
     assert_equal(result.imports[1][2], "compiler")
 end)
 
-test("script body: compile_request_json retains a refusal", function()
+test_script("retains a refusal", function()
     local result = run({REQUEST_JSON = null}, {
         imports = { ["SEMANTIC_ADMIN.COMPILER_RUNTIME"] = {
             compile_request_json = function(value)

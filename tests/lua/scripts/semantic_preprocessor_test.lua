@@ -1,13 +1,13 @@
 local H = SCRIPT_BODY
-local run = H.for_script("semantic_preprocessor")
+local run, test_script = H.for_script("semantic_preprocessor")
 local step = H.step
-test("script body: semantic_preprocessor passes ordinary SQL unchanged", function()
+test_script("passes ordinary SQL unchanged", function()
     local result = run({}, {sql_text = "SELECT 1"})
     assert_equal(result.sql_text, "SELECT 1")
     assert_equal(#result.imports, 0)
 end)
 
-test("script body: semantic_preprocessor rewrites DDL", function()
+test_script("rewrites DDL", function()
     local ddl = "ALTER SEMANTIC VIEW sales.orders DROP METRIC x"
     local result = run({}, {
         sql_text = ddl,
@@ -21,7 +21,7 @@ test("script body: semantic_preprocessor rewrites DDL", function()
     assert_equal(result.sql_text, "EXECUTE SCRIPT APPLY(...)")
 end)
 
-test("script body: semantic_preprocessor rejects compiler errors", function()
+test_script("rejects compiler errors", function()
     run({}, {
         sql_text = "SELECT * FROM SEMANTIC_SALES.ORDERS",
         sql = {step("SELECT UPPER(PUBLISHED_SCHEMA)", {{"SEMANTIC_SALES"}})},

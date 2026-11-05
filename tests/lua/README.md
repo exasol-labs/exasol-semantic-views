@@ -73,7 +73,8 @@ The other installed script bodies are not in this database-free coverage gate.
 
 To add another body, add its name to `selected_scripts` in `run.lua`, add a
 `tests/lua/scripts/<name>_test.lua` file with
-`local run = H.for_script("<name>")`, and add a measured floor to
+`local run, test_script = H.for_script("<name>")`, register cases with
+`test_script("behavior", function() ... end)`, and add a measured floor to
 `coverage_thresholds.lua`. Pass only the imports and SQL steps the case expects;
 the harness rejects every other call and checks that all steps were consumed.
 

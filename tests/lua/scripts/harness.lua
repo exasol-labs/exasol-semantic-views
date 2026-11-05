@@ -90,9 +90,13 @@ local function run(name, supplied, fixture)
 end
 
 function M.for_script(name)
-    return function(supplied, fixture)
+    local function run_script(supplied, fixture)
         return run(name, supplied, fixture)
     end
+    local function test_script(description, fn)
+        test(string.upper(name) .. ": " .. description, fn)
+    end
+    return run_script, test_script
 end
 
 function M.support(env)
