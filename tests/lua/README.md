@@ -19,9 +19,9 @@ runtime sources under `lua/semantic_layer` into one global environment — the w
 `import()` exposes a runtime's top-level globals inside Exasol — then runs every
 `*_unit_test.lua` listed in `specs`. The ten selected installed script bodies
 have one test file each in `tests/lua/scripts/` and run in fresh environments
-through the shared `harness.lua`. Plain Lua cannot
-list a directory, so `tests/unit/test_conventions.py` checks that the spec list
-is complete and the selected scripts have tests and thresholds.
+through the shared `harness.lua`. Plain Lua cannot list a directory, so
+`tests/unit/test_conventions.py` checks that the spec list is complete and the
+selected scripts have tests and thresholds.
 
 | Global | Purpose |
 |---|---|
@@ -39,7 +39,7 @@ Exasol supplies some globals to every script; the runner supplies stand-ins:
 | `null` | a sentinel table whose `tostring` is `"null"` — truthy, like the userdata it stands for |
 | `query(sql, params)` | absent; a test that reaches the catalog installs a fixture with `with_query` |
 | `pquery` | absent; code that needs it is covered by the live suite |
-| `exit`, `import`, `exa.import`, `sqlparsing` | strict per-script fixtures in `script_body_harness.lua`; absent from runtime tests |
+| `exit`, `import`, `exa.import`, `sqlparsing` | strict per-script fixtures in `tests/lua/scripts/harness.lua`; absent from runtime tests |
 
 `ESV_TEST_MODE = true` makes each runtime publish an `ESV_*_TEST_API` table of
 its internals. The flag is absent in Exasol, so those tables never become part
@@ -71,12 +71,25 @@ nested local functions that a test never invokes. `tools/run_lua_tests.sh`
 selects the Lua interpreter and compiler; set `LUA_BIN` and `LUAC_BIN` if needed.
 The other installed script bodies are not in this database-free coverage gate.
 
-To add another body, add its name to `selected_scripts` in `run.lua`, add a
-`tests/lua/scripts/<name>_test.lua` file with
-`local run, test_script = H.for_script("<name>")`, register cases with
-`test_script("behavior", function() ... end)`, and add a measured floor to
-`coverage_thresholds.lua`. Pass only the imports and SQL steps the case expects;
-the harness rejects every other call and checks that all steps were consumed.
+## Script-body test conventions
+
+- Keep one file per selected script in `tests/lua/scripts/<name>_test.lua`.
+  Share Exasol stand-ins and fixture helpers through `harness.lua`.
+- Bind the script name once per file with
+  `local run, test_script = H.for_script("<name>")`. Register each case as
+  `test_script("behavior", function() ... end)`; the log then starts with the
+  installed script name, such as `ADD_ENTITY: rejects reserved alias`.
+- Call the bound `run` exactly once per case. Put success, refusal, and other
+  scenarios in separate cases so each failure identifies one behavior.
+- Supply only the expected imports and SQL steps. The harness gives each run a
+  fresh environment, rejects unexpected calls, and checks that every expected
+  SQL step was consumed. Assert rows, result columns, bindings, and call order
+  where they define the behavior.
+
+To add another body, add its name to `selected_scripts` in `run.lua`, add its
+test file following these conventions, and add a measured floor to
+`coverage_thresholds.lua`. The convention tests check the selected inventory,
+per-file binding, and one-run-per-case rule.
 
 Threshold policy:
 
