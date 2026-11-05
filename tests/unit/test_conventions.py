@@ -381,7 +381,8 @@ class SkillsMatchTheSurface(unittest.TestCase):
         # The exact strings SEMANTIC_DDL_012 advertises.
         supported = ("REPLACE DIMENSIONS", "REPLACE FACTS", "REPLACE METRICS",
                      "ADD OR REPLACE DIMENSION", "ADD OR REPLACE FACT",
-                     "ADD OR REPLACE METRIC", "DROP METRIC", "RENAME METRIC")
+                     "ADD OR REPLACE METRIC", "DROP METRIC", "DROP FACT",
+                     "RENAME METRIC")
         denials = ("not yet supported", "is not supported", "not supported in DDL",
                    "has no DDL form")
         offenders = []

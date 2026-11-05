@@ -33,7 +33,10 @@ query: it is the model as it was when compiled, including, on a fused model,
 the coverage boundaries and authority order. A later metric fix or coverage
 move does not reach it, `COMPILE_SQL` leaves no log row, and
 `CHECK_FROZEN_VIEWS` cannot see text stored outside the database. See
-[Hosted dashboards and applications](hosted-apps.md).
+[Hosted dashboards and applications](hosted-apps.md). A database view created
+over a semantic object is registered instead, and once a definition it froze
+changes, reading it raises `SEMANTIC_SURFACE_015` rather than answer with the
+old one: treat that as "re-create or re-compile", never as an empty result.
 
 The database must validate, compile, explain, and log requests
 deterministically. It must not call an LLM.
@@ -124,12 +127,21 @@ Without session activation, Exasol can reject aggregate semantic SQL during
 binding before the published guard expression runs. That engine error cannot
 be redirected by the semantic layer, so agents must treat session setup as a
 precondition rather than use parser errors for recovery.
-Non-published models report `AGENT_READINESS = 'NOT_PUBLISHED'`; validation
-success alone is not sufficient for agent-ready SQL execution.
-`AGENT_READINESS = 'PRECONDITION'` means the model has not been disproved, but
-the validation session did not satisfy a required execution bound. Read
-`VALIDATION_ERRORS_FOR_AGENT` and `INSTRUCTIONS_FOR_AGENT`, satisfy the session
-requirement, and validate again.
+`AGENT_READINESS` is one of six values, decided in this order. It is the
+model's, and `OBJECTS_FOR_AGENT` and `FIELDS_FOR_AGENT` carry the same value
+for each of its objects and fields. A guard that accepts a model should accept
+`VALID` and `WARNING` — the set `VERIFIED_QUERIES_FOR_AGENT` itself serves —
+and treat anything else, including a value this list does not name yet, as not
+ready.
+
+| Value | Means | Agent-ready |
+|---|---|---|
+| `NOT_PUBLISHED` | The model is not published; validation success alone is not sufficient for agent-ready SQL execution. | no |
+| `NEEDS_VALIDATION` | Published, but the active version has no validation run. | no |
+| `INVALID` | The latest validation run reported errors. Read `VALIDATION_ERRORS_FOR_AGENT`. | no |
+| `PRECONDITION` | The model has not been disproved, but the validation session did not satisfy a required execution bound. Read `VALIDATION_ERRORS_FOR_AGENT` and `INSTRUCTIONS_FOR_AGENT`, satisfy the session requirement, and validate again. | no |
+| `WARNING` | Valid, with advisories in `VALIDATION_WARNING_COUNT`. Queries answer correctly; the warnings are worth reading. | yes |
+| `VALID` | Valid, with no errors, preconditions or warnings. | yes |
 
 ## Scripts
 

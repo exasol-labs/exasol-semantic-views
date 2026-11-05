@@ -80,6 +80,7 @@ READ_ONLY_OR_INDIRECT = {
     "REVOKE_MODEL_ROLE",                # symmetric with GRANT_MODEL_ROLE
     "PUBLISH_MODEL",                    # activates the version; the compile cache is keyed on model_version_id, so a new version is a natural miss
     "UNPUBLISH_MODEL",                  # symmetric with PUBLISH_MODEL
+    "SYNC_FROZEN_VIEWS",                # writes FROZEN_VIEWS retirement state; no compile reads it
 }
 
 
@@ -242,3 +243,29 @@ class RecertifyDelegation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DropModelCoversTheCatalog(unittest.TestCase):
+    """DROP_MODEL clears every catalog table that holds a model's rows.
+
+    Its table list is written by hand, and FROZEN_VIEWS and SOURCE_TRUST were
+    added to the catalog without joining it: every rebuild that drops and
+    re-creates a model -- a dbt hook does it on every run -- left their rows
+    behind. The tables are derived here from the catalog DDL, so the next one
+    fails this test instead.
+    """
+
+    # Children keyed on a parent's id rather than MODEL_ID, and the column that
+    # carries it; DROP_MODEL deletes them through the parent.
+    CHILDREN = {"MODEL_EVOLUTION_REVIEWS": "SUGGESTION_ID", "MODEL_EVOLUTION_TARGETS": "SUGGESTION_ID"}
+
+    def test_every_table_with_model_rows_is_cleared(self) -> None:
+        ddl = (ROOT / "sql/install/001_create_semantic_catalog.sql").read_text(encoding="utf-8")
+        body = (ROOT / "lua/semantic_layer/scripts/drop_model.lua").read_text(encoding="utf-8")
+        tables = re.findall(r"CREATE TABLE IF NOT EXISTS SYS_SEMANTIC\.(\w+) \((.*?)\n\);", ddl, re.S)
+        self.assertGreater(len(tables), 40, "the catalog DDL was not found")
+        owned = {name for name, columns in tables if re.search(r"^\s*MODEL_ID\s", columns, re.M)}
+        owned |= set(self.CHILDREN)
+        uncleared = sorted(name for name in owned if f'"{name}"' not in body
+                           and f"SYS_SEMANTIC.{name}" not in body)
+        self.assertEqual([], uncleared, "DROP_MODEL leaves these tables' rows behind")

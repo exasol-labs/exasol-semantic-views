@@ -41,6 +41,7 @@
 -- SEMANTIC_MODEL_047 already rejects an F5 identity combined with F3 coverage on
 -- the same entity, so every *valid* combination is reachable through this call.
 import("SEMANTIC_ADMIN.SEMANTIC_DEFINITION_RUNTIME", "semantic_definition")
+import("SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME", "script_support")
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
@@ -156,8 +157,11 @@ if has_bindings then
     local entity_name_checked = normalize_name(entity_name, "ENTITY_NAME")
     local representation_checked =
         normalize_name(representation_name, "REPRESENTATION_NAME")
-    local source_schema_checked = normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA")
-    local source_object_checked = normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT")
+    -- Stored as the database spells it: the compiler quotes it verbatim.
+    local source_schema_checked, source_object_checked =
+        script_support.ESV_SOURCE_COLUMNS.require_relation(query,
+            normalize_name(SOURCE_SCHEMA, "SOURCE_SCHEMA"),
+            normalize_name(SOURCE_OBJECT, "SOURCE_OBJECT"))
     local source_kind_checked = missing(SOURCE_KIND) and "RELATION"
         or upper(SOURCE_KIND)
     if source_kind_checked ~= "RELATION" and source_kind_checked ~= "VIRTUAL_SCHEMA" then

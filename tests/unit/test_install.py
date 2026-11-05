@@ -356,7 +356,10 @@ class InstallerResetTest(unittest.TestCase):
                 "CREATE OR REPLACE SCRIPT SEMANTIC_ADMIN.SET_REPRESENTATION_COVERAGE(")
         )
         self.assertIn("COVERAGE_PREDICATE = :coverage_predicate", coverage)
-        self.assertIn("VALID_FROM = :valid_from", coverage)
+        # Parsed in one fixed format, never the session's NLS_TIMESTAMP_FORMAT
+        # (dbt-exasol sets its own).
+        self.assertIn("VALID_FROM = TO_TIMESTAMP(REPLACE(:valid_from, 'T', ' '),"
+                      " 'YYYY-MM-DD HH24:MI:SS.FF6')", coverage)
         self.assertIn("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", coverage)
         self.assertIn("STATUS = 'STALE'", coverage)
         self.assertIn('if tostring(model_status) == "PUBLISHED"', coverage)
@@ -368,7 +371,7 @@ class InstallerResetTest(unittest.TestCase):
             coverage.index("published coverage change rejected and restored"),
         )
         self.assertLess(
-            coverage.index("VALID_TO = :valid_to", coverage.index("candidate_validation")),
+            coverage.index("VALID_TO = TO_TIMESTAMP(REPLACE(:valid_to", coverage.index("candidate_validation")),
             coverage.index("published coverage change rejected and restored"),
         )
 
@@ -612,18 +615,17 @@ class InstallerResetTest(unittest.TestCase):
             "ADD_SEMANTIC_IDENTITY_WITH_BINDINGS": "REMOVE_SEMANTIC_IDENTITY",
             "ADD_OR_REPLACE_DIMENSION": "REMOVE_DIMENSION",
             "ADD_DIMENSION_WITH_BINDINGS": "REMOVE_DIMENSION",
-            # Metrics use governed Semantic SQL rather than a standalone admin script.
+            # Metrics and facts are removed with Semantic DDL, the surface that
+            # owns an object's interior, rather than a standalone admin script.
             "ADD_METRIC": "DDL:DROP METRIC",
+            "ADD_FACT": "DDL:DROP FACT",
+            "ADD_FACT_WITH_BINDINGS": "DDL:DROP FACT",
         }
         intentionally_permanent = {
             "ADD_CUSTOM_EXTENSION":
                 "Extension removal is intentionally deferred until extension ownership semantics exist.",
             "ADD_ENTITY":
                 "Entities own dependent model structure and are removed only with DROP_MODEL.",
-            "ADD_FACT":
-                "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
-            "ADD_FACT_WITH_BINDINGS":
-                "Fact removal is intentionally deferred until dependent metric rewrites are transactional.",
             "ADD_MATERIALIZATION_COLUMN":
                 "Column removal is unsupported; deactivate the owning materialization instead.",
             "ADD_SYNONYM":
@@ -652,8 +654,9 @@ class InstallerResetTest(unittest.TestCase):
             inverse = inverse_overrides.get(
                 add_name, f"REMOVE_{add_name.removeprefix('ADD_')}"
             )
-            if inverse == "DDL:DROP METRIC":
-                self.assertIn('find_sequence(tokens, {"DROP", "METRIC"}', semantic_definition)
+            if inverse.startswith("DDL:DROP "):
+                kind = inverse.removeprefix("DDL:DROP ")
+                self.assertIn(f'find_sequence(tokens, {{"DROP", "{kind}"}}', semantic_definition)
             else:
                 self.assertIn(
                     inverse,
@@ -912,6 +915,117 @@ class InstallerResetTest(unittest.TestCase):
         absent = NoTable(columns=[])
         self.assertEqual([], INSTALL.migrate_added_columns(absent))
 
+    def test_a_published_models_version_row_stops_reading_draft(self):
+        """PUBLISH_MODEL used to leave the model's one version row as DRAFT.
+
+        The installer corrects rows that predate the fix, and only those: the
+        update is scoped to published models whose version disagrees, so a
+        reinstall corrects nothing twice. A catalog without the table is skipped.
+        """
+        class Updated(Result):
+            def __init__(self, count):
+                super().__init__([])
+                self.count = count
+
+            def rowcount(self):
+                return self.count
+
+        class Catalog:
+            def __init__(self, has_table, stale_rows):
+                self.has_table, self.stale_rows, self.sql = has_table, stale_rows, []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)] if self.has_table else [])
+                if sql.startswith("UPDATE SYS_SEMANTIC.MODEL_VERSIONS"):
+                    return Updated(self.stale_rows)
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        upgraded = Catalog(has_table=True, stale_rows=3)
+        self.assertEqual(3, INSTALL.migrate_version_status(upgraded))
+        update = upgraded.sql[-1]
+        self.assertIn("m.STATUS = 'PUBLISHED'", update)
+        self.assertIn("mv.STATUS <> m.STATUS", update)
+        self.assertEqual(0, INSTALL.migrate_version_status(Catalog(True, 0)))
+        fresh = Catalog(has_table=False, stale_rows=0)
+        self.assertEqual(0, INSTALL.migrate_version_status(fresh))
+        self.assertFalse([sql for sql in fresh.sql if sql.startswith("UPDATE")])
+
+    def test_superseded_frozen_view_records_are_removed(self):
+        """An older build appended a record per compilation of the same view.
+
+        Only records a newer compilation of the same view and object replaced
+        are removed, so the newest -- what the view now holds -- survives, and a
+        catalog without the table is skipped.
+        """
+        class Deleted(Result):
+            def __init__(self, count):
+                super().__init__([])
+                self.count = count
+
+            def rowcount(self):
+                return self.count
+
+        class Catalog:
+            def __init__(self, has_table, superseded):
+                self.has_table, self.superseded, self.sql = has_table, superseded, []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)] if self.has_table else [])
+                if sql.startswith("DELETE FROM SYS_SEMANTIC.FROZEN_VIEWS"):
+                    return Deleted(self.superseded)
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        upgraded = Catalog(has_table=True, superseded=2)
+        self.assertEqual(2, INSTALL.migrate_frozen_view_history(upgraded))
+        delete = upgraded.sql[-1]
+        for kept_apart in ("VIEW_SCHEMA", "VIEW_NAME", "MODEL_ID", "OBJECT_NAME"):
+            self.assertIn(f"n.{kept_apart} = fv.{kept_apart}", delete)
+        self.assertIn("n.FROZEN_VIEW_ID > fv.FROZEN_VIEW_ID", delete)
+        fresh = Catalog(has_table=False, superseded=0)
+        self.assertEqual(0, INSTALL.migrate_frozen_view_history(fresh))
+        self.assertFalse([sql for sql in fresh.sql if sql.startswith("DELETE")])
+
+    def test_materialization_columns_mapped_before_hashes_are_stamped(self):
+        """A column mapped by an older build has no definition hash.
+
+        It is stamped with the field's current hash -- what the selector assumed
+        until now -- so an upgrade changes no answer and a later redefinition is
+        caught. Only unstamped columns are touched, so a column a refresh
+        stamped keeps its hash, and a catalog without the table is skipped.
+        """
+        class Updated(Result):
+            def __init__(self, count):
+                super().__init__([])
+                self.count = count
+
+            def rowcount(self):
+                return self.count
+
+        class Catalog:
+            def __init__(self, has_table, unstamped):
+                self.has_table, self.unstamped, self.sql = has_table, unstamped, []
+
+            def execute(self, sql):
+                self.sql.append(sql)
+                if "EXA_ALL_TABLES" in sql:
+                    return Result([(1,)] if self.has_table else [])
+                if sql.startswith("UPDATE SYS_SEMANTIC.MATERIALIZATION_COLUMNS"):
+                    return Updated(self.unstamped)
+                raise AssertionError(f"unexpected SQL: {sql}")
+
+        upgraded = Catalog(has_table=True, unstamped=4)
+        self.assertEqual(4, INSTALL.migrate_materialization_definitions(upgraded))
+        update = upgraded.sql[-1]
+        self.assertIn("FIELD_DEFINITION_HASHES", update)
+        self.assertIn("mc.DEFINITION_HASH IS NULL", update)
+        fresh = Catalog(has_table=False, unstamped=0)
+        self.assertEqual(0, INSTALL.migrate_materialization_definitions(fresh))
+        self.assertFalse([sql for sql in fresh.sql if sql.startswith("UPDATE")])
+
     def test_added_columns_are_migrated_before_the_views_that_read_them(self):
         """A view built before its column exists fails the whole upgrade.
 
@@ -1025,7 +1139,8 @@ class AdminScriptSignatureCoverageTest(unittest.TestCase):
     def test_the_exclusions_are_derived_not_listed(self):
         """The runtime libraries and the UDF-kind scripts, and nothing else."""
         self.assertEqual(
-            set(PACKAGER.RUNTIMES) | {"SEMANTIC_GUARD", "SEMANTIC_PREPROCESSOR"}, self.excluded)
+            set(PACKAGER.RUNTIMES) | {"SEMANTIC_GUARD", "FROZEN_VIEW_GUARD", "SEMANTIC_PREPROCESSOR"},
+            self.excluded)
         self.assertEqual(set(), self.excluded & self.published)
 
     def test_row_returning_and_silent_mutators_are_both_published(self):

@@ -219,3 +219,35 @@ test("F3 partition branches bypass materialization substitution", function()
     assert_equal(diagnostics.branches[1].fallback_reason,
         "FUSION_PARTITION_MATERIALIZATION_UNSUPPORTED")
 end)
+
+test("a materialization built from an earlier definition is not used", function()
+    -- A field keeps its id when it is redefined, so the column mapping still
+    -- resolved and the aggregate kept answering with the old definition's
+    -- numbers. The stamped hash is what the aggregate was built from.
+    local function catalog(stamped, current)
+        install_catalog({{1, "sales_by_region", "MART", "SALES_REGION", "AGGREGATE",
+            "ALWAYS", "ACTIVE"}}, {
+            {1, "DIMENSION", 10, "REGION", "DIRECT", "d1", "d1", "region"},
+            {1, "METRIC", 20, "REVENUE", "DIRECT", stamped, current, "revenue"},
+        })
+    end
+    catalog("r1", "r2")
+    local selected, diagnostics = api.select_materialization(ctx, {region}, {revenue}, {})
+    assert_true(selected == nil)
+    local rejection = diagnostics.rejected_materializations[1]
+    assert_equal(rejection.reason_code, "DEFINITION_CHANGED")
+    assert_contains(rejection.reason_message, "METRIC revenue")
+    assert_contains(rejection.reason_message, "MARK_MATERIALIZATION_REFRESHED")
+
+    -- The multi-branch selector reads the same candidates and refuses alike.
+    catalog("r1", "r2")
+    local by_branch = api.select_branch_sources(ctx, branch_plan(false))
+    assert_true(by_branch["branch:1"] == nil)
+
+    -- The definition it was built from, or one never stamped: used as before.
+    for _, stamp in ipairs({"r2", null}) do
+        catalog(stamp, "r2")
+        assert_true(api.select_materialization(ctx, {region}, {revenue}, {}) ~= nil)
+    end
+    assert_equal(api.definition_rejection({}), nil)
+end)

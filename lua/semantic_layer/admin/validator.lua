@@ -213,10 +213,6 @@ local function trim(value)
     return tostring(value):match("^%s*(.-)%s*$")
 end
 
-local function count_query(statement_sql, params)
-    return tonumber(scalar(statement_sql, params) or 0) or 0
-end
-
 local function upper(value)
     return string.upper(tostring(value))
 end
@@ -388,21 +384,19 @@ local function finish_validation_run(ctx)
     })
 end
 
+-- Exact, because the compiler quotes a stored source verbatim: a stored
+-- `slv_customer` over a physical SLV_CUSTOMER passed a case-insensitive probe
+-- here and then failed every expression bound against it. The second value is
+-- the spelling the database does have, when it differs only in case.
 local function source_object_exists(schema_name, object_name)
-    return count_query([[
-        SELECT COUNT(*)
-        FROM (
-          SELECT TABLE_NAME AS OBJECT_NAME
-          FROM SYS.EXA_ALL_TABLES
-          WHERE (TABLE_SCHEMA = :schema_name OR TABLE_SCHEMA = UPPER(:schema_name))
-            AND (TABLE_NAME = :object_name OR TABLE_NAME = UPPER(:object_name))
-          UNION ALL
-          SELECT VIEW_NAME AS OBJECT_NAME
-          FROM SYS.EXA_ALL_VIEWS
-          WHERE (VIEW_SCHEMA = :schema_name OR VIEW_SCHEMA = UPPER(:schema_name))
-            AND (VIEW_NAME = :object_name OR VIEW_NAME = UPPER(:object_name))
-        ) visible_objects
-    ]], {schema_name = schema_name, object_name = object_name}) > 0
+    local schema, object = source_columns.resolve_relation(query, schema_name, object_name)
+    if schema == nil then
+        return false, nil
+    end
+    if schema == tostring(schema_name) and object == tostring(object_name) then
+        return true, nil
+    end
+    return false, schema .. "." .. object
 end
 
 -- One read per relation, not one per column.
@@ -766,8 +760,8 @@ local function load_catalog(ctx)
         SELECT er.REPRESENTATION_ID, er.ENTITY_ID, er.REPRESENTATION_NAME,
                er.SOURCE_KIND, er.SOURCE_SCHEMA, er.SOURCE_OBJECT,
                er.SOURCE_ALIAS, er.REPRESENTATION_ROLE, er.PRIORITY,
-               er.FRESHNESS_POLICY, er.COVERAGE_PREDICATE, er.VALID_FROM,
-               er.VALID_TO, COALESCE(ra.AUTHORITY_ROLE, 'PREFER') AS AUTHORITY_ROLE
+               er.FRESHNESS_POLICY, er.COVERAGE_PREDICATE, TO_CHAR(er.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM,
+               TO_CHAR(er.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO, COALESCE(ra.AUTHORITY_ROLE, 'PREFER') AS AUTHORITY_ROLE
         FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS er
         LEFT JOIN SYS_SEMANTIC.REPRESENTATION_AUTHORITIES ra
           ON ra.MODEL_ID = er.MODEL_ID AND ra.VERSION_ID = er.VERSION_ID
@@ -1781,12 +1775,15 @@ local function validate_structural_rules(ctx)
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_036", "Representation priority must be a positive integer.")
         end
-        if not source_object_exists(representation.source_schema,
-            representation.source_object) then
+        local visible, spelled = source_object_exists(representation.source_schema,
+            representation.source_object)
+        if not visible then
             add_issue(ctx, "ERROR", "ENTITY_REPRESENTATION", object_name,
                 "SEMANTIC_MODEL_001", "Source object is not visible: "
                     .. tostring(representation.source_schema) .. "."
-                    .. tostring(representation.source_object) .. ".")
+                    .. tostring(representation.source_object) .. "."
+                    .. (spelled and (" The database spells it " .. spelled
+                        .. ", and a stored source name is quoted exactly as written.") or ""))
         end
     end
     for _, entity in ipairs(ctx.entities) do validate_partition_coverage(ctx, entity) end
@@ -3807,6 +3804,53 @@ local function check_display_policies(ctx)
     check("METRIC", ctx.metrics)
 end
 
+-- A materialization built from a definition the model no longer has. The
+-- selector refuses it (DEFINITION_CHANGED) and the sources answer, so no
+-- number is wrong; but the accelerator is silently out of service, and only a
+-- plan's rejection list said so. Validation runs after every edit, so this is
+-- where the owner who just redefined a metric learns which aggregates to
+-- rebuild. Skipped without an active materialization: the hashes cost a read.
+local function check_materialization_definitions(ctx)
+    local present = query([[
+        SELECT COUNT(*) FROM SYS_SEMANTIC.MATERIALIZATIONS
+        WHERE MODEL_ID = :model_id AND VERSION_ID = :version_id AND STATUS = 'ACTIVE'
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    if tonumber(present and present[1] and present[1][1] or 0) == 0 then
+        return
+    end
+    local rows = query([[
+        SELECT m.MATERIALIZATION_NAME, mc.OBJECT_TYPE, h.FIELD_NAME
+          FROM SYS_SEMANTIC.MATERIALIZATIONS m
+          JOIN SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc
+            ON mc.MATERIALIZATION_ID = m.MATERIALIZATION_ID
+          JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+            ON h.VERSION_ID = m.VERSION_ID
+           AND h.FIELD_KIND = mc.OBJECT_TYPE AND h.FIELD_ID = mc.OBJECT_ID
+         WHERE m.MODEL_ID = :model_id AND m.VERSION_ID = :version_id
+           AND m.STATUS = 'ACTIVE'
+           AND mc.DEFINITION_HASH IS NOT NULL
+           AND mc.DEFINITION_HASH <> h.DEFINITION_HASH
+         ORDER BY m.MATERIALIZATION_NAME, mc.OBJECT_TYPE, h.FIELD_NAME
+    ]], {model_id = ctx.model_id, version_id = ctx.version_id})
+    local order, fields = {}, {}
+    for _, row in ipairs(rows or {}) do
+        local name = tostring(row_value(row, "MATERIALIZATION_NAME", 1))
+        if fields[name] == nil then
+            fields[name] = {}
+            order[#order + 1] = name
+        end
+        fields[name][#fields[name] + 1] = string.lower(tostring(row_value(row, "OBJECT_TYPE", 2)))
+            .. " " .. tostring(row_value(row, "FIELD_NAME", 3))
+    end
+    for _, name in ipairs(order) do
+        add_issue(ctx, "WARNING", "MATERIALIZATION", name, "SEMANTIC_MODEL_077",
+            "Materialization '" .. name .. "' was built from an earlier definition of "
+            .. table.concat(fields[name], ", ") .. ". Queries read the live sources"
+            .. " instead until it is rebuilt and marked with"
+            .. " MARK_MATERIALIZATION_REFRESHED.")
+    end
+end
+
 local function check_frozen_views(ctx)
     if missing(ctx.model_id) then
         return
@@ -3901,8 +3945,10 @@ local function check_frozen_views(ctx)
             .. " SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS("
             .. sql_text.sql_string(tostring(ctx.model_name))
             .. "), which recompiles each"
-            .. " one and reports CURRENT, STALE or DROPPED. Drop a view to retire"
-            .. " it and this notice with it.")
+            .. " one and reports CURRENT, STALE or DROPPED. A clean validation"
+            .. " retires a STALE one, so reading it raises SEMANTIC_SURFACE_015"
+            .. " until it is re-created. Drop a view to remove it and this notice"
+            .. " with it.")
     end
 end
 
@@ -4934,6 +4980,7 @@ function M.validate_model(model_name_arg, metric_result_types)
         validate_null_placeholder_bindings(ctx)
         extract_metric_dependencies(ctx)
         derive_source_trust(ctx)
+        check_materialization_definitions(ctx)
         -- After the trust classes exist, because a frozen view is judged
         -- against them.
         check_frozen_views(ctx)
@@ -5009,6 +5056,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         check_frozen_views = check_frozen_views,
         resolve_base_relations = resolve_base_relations,
         derive_source_trust = derive_source_trust,
+        check_materialization_definitions = check_materialization_definitions,
         valid_json_text = valid_json_text,
         strip_string_literals = sql_text.strip_string_literals,
         aliases_in_expression = aliases_in_expression,

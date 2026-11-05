@@ -74,6 +74,13 @@ if tonumber(reserved_alias or 0) > 0 then
         .. "' is an Exasol reserved word; choose another alias")
 end
 local model = model_row(model_name)
+-- Resolved where the mistake is made. A source that does not exist was
+-- accepted here, and surfaced steps later as an expression error on every
+-- field bound against it. Stored as the database spells it, because the
+-- compiler quotes it verbatim: dbt's ref() renders `slv_customer` for the
+-- table Exasol created as SLV_CUSTOMER.
+source_schema, source_object = script_support.ESV_SOURCE_COLUMNS.require_relation(
+    query, source_schema, source_object)
 
 local duplicate_name = scalar([[
     SELECT COUNT(*)

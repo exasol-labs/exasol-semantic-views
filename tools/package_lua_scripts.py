@@ -539,7 +539,7 @@ RUNTIMES: dict[str, tuple[str, ...]] = {
     # What a script body shares instead of copying: each one that reads a single
     # value imports this and binds ESV_ROWS.scalar. An import, not text spliced
     # into the body, so a line number Exasol reports stays the file's own.
-    "SCRIPT_SUPPORT_RUNTIME": ("JSON_SOURCE", "ROWS_SOURCE"),
+    "SCRIPT_SUPPORT_RUNTIME": ("JSON_SOURCE", "ROWS_SOURCE", "SOURCE_COLUMNS_SOURCE"),
 }
 
 PLACEHOLDER = re.compile(r"^-- @generated (\S+)$", re.M)

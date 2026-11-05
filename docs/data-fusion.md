@@ -198,7 +198,10 @@ editing semantics.
 
 This level exists because a hand-written `UNION ALL` on a date boundary
 is one of the most common quiet-correctness footguns. Each partition
-declares `coverage_predicate` + `valid_from`/`valid_to`; the compiler
+declares `coverage_predicate` + `valid_from`/`valid_to` (written
+`YYYY-MM-DD[ HH24:MI:SS[.FF6]]`, a `T` separator accepted, and read back in that
+form whatever the session's `NLS_TIMESTAMP_FORMAT` — dbt-exasol sets its own);
+the compiler
 clones every grain-proven leaf branch into one partition-branch per
 representation and merges typed aggregate states across them. Only
 mergeable aggregate states may cross partitions; `AVG(...)` alone is
@@ -424,7 +427,19 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION('sales', '<json>', TRUE);
 `APPLY_` takes `DRY_RUN` and reports `STATUS`, `ERROR_CODE`, `MESSAGE`,
 `OPERATION_COUNT` and `APPLIED_COUNT`. Like `APPLY_SEMANTIC_DEFINITION` it
 reports a refusal as `STATUS = 'ERROR'` in the row rather than raising — check
-the column, including for a malformed document.
+the column, including for a malformed document. The model is checked before the
+document, so a misspelled `MODEL_NAME` is reported as `SEMANTIC_FUSION_001`, not
+as whatever the document lacks.
+
+**From an orchestrator, call `APPLY_FUSION_DECLARATION_OR_FAIL`** instead: same
+arguments, same row on success, and a refusal *raises* with its rule code. dbt and
+similar tools count any statement that returned rows as a success, so with the
+plain variant a refused document leaves the run green over a model that was never
+fused. Either way the catalog is restored before the refusal is reported.
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.APPLY_FUSION_DECLARATION_OR_FAIL('sales', '<json>', FALSE);
+```
 
 **Why a document rather than another call.** On a *published* model, adding a
 *second source* to an entity is not incrementally authorable. Each step below is

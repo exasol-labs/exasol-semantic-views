@@ -5,6 +5,8 @@
 
 -- @lua lua/semantic_layer/scripts/drop_model.lua
 
+-- @lua lua/semantic_layer/scripts/drop_model_if_exists.lua
+
 -- @lua lua/semantic_layer/scripts/add_entity.lua
 
 -- @lua lua/semantic_layer/scripts/new_validation_errors.lua
@@ -117,6 +119,8 @@
 
 -- @lua lua/semantic_layer/scripts/check_frozen_views.lua
 
+-- @lua lua/semantic_layer/scripts/sync_frozen_views.lua
+
 -- @lua lua/semantic_layer/scripts/check_partition_coverage.lua
 
 -- @lua lua/semantic_layer/scripts/check_fusion_health.lua
@@ -177,3 +181,5 @@
 -- @lua lua/semantic_layer/scripts/export_fusion_declaration.lua
 
 -- @lua lua/semantic_layer/scripts/apply_fusion_declaration.lua
+
+-- @lua lua/semantic_layer/scripts/apply_fusion_declaration_or_fail.lua

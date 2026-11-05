@@ -65,6 +65,11 @@ FROM SEMANTIC_SOURCE.MODELS m
 LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv
   ON mv.VERSION_ID = m.ACTIVE_VERSION_ID;
 
+-- A model has one version, which authoring edits in place: VERSION_LABEL and
+-- CHANGE_SUMMARY describe it as it was created, not as it is. STATUS is the
+-- model's lifecycle status, read rather than restated -- the version row's own
+-- column kept the DRAFT it was created with after the model was published --
+-- and DEFINITION_HASH is what moves when the version's content changes.
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.MODEL_VERSIONS AS
 SELECT
   mv.VERSION_ID,
@@ -72,13 +77,17 @@ SELECT
   m.MODEL_NAME,
   mv.VERSION_NUMBER,
   mv.VERSION_LABEL,
-  mv.STATUS,
+  CASE WHEN mv.VERSION_ID = m.ACTIVE_VERSION_ID THEN m.STATUS ELSE mv.STATUS END
+    AS STATUS,
   mv.CHANGE_SUMMARY,
+  h.DEFINITION_HASH,
   mv.CREATED_AT,
   mv.CREATED_BY
 FROM SEMANTIC_SOURCE.MODEL_VERSIONS mv
 JOIN SEMANTIC_SOURCE.MODELS m
-  ON m.MODEL_ID = mv.MODEL_ID;
+  ON m.MODEL_ID = mv.MODEL_ID
+LEFT JOIN SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES h
+  ON h.MODEL_ID = mv.MODEL_ID AND h.VERSION_ID = mv.VERSION_ID;
 
 CREATE OR REPLACE VIEW SEMANTIC_CATALOG.ENTITIES AS
 SELECT
@@ -1050,7 +1059,14 @@ SELECT
   s.VERSION_ID AS PROPOSED_VERSION_ID,
   mv.VERSION_NUMBER AS PROPOSED_VERSION_NUMBER,
   m.ACTIVE_VERSION_ID AS CURRENT_VERSION_ID,
-  CASE WHEN s.VERSION_ID = m.ACTIVE_VERSION_ID THEN FALSE ELSE TRUE END AS IS_STALE,
+  -- The test REVIEW_MODEL_EVOLUTION applies: stale once the model's definition
+  -- hash has moved, or when the suggestion predates the hash. The version alone
+  -- never moves -- authoring mutates it in place.
+  CASE WHEN s.VERSION_ID = m.ACTIVE_VERSION_ID
+        AND s.PROPOSED_DEFINITION_HASH = h.DEFINITION_HASH
+       THEN FALSE ELSE TRUE END AS IS_STALE,
+  s.PROPOSED_DEFINITION_HASH,
+  h.DEFINITION_HASH AS CURRENT_DEFINITION_HASH,
   s.SUGGESTION_KIND,
   s.OBJECT_TYPE,
   s.OBJECT_ID,
@@ -1065,6 +1081,8 @@ SELECT
 FROM SEMANTIC_SOURCE.MODEL_EVOLUTION_SUGGESTIONS s
 JOIN SEMANTIC_SOURCE.MODELS m ON m.MODEL_ID = s.MODEL_ID
 LEFT JOIN SEMANTIC_SOURCE.MODEL_VERSIONS mv ON mv.VERSION_ID = s.VERSION_ID
+LEFT JOIN SEMANTIC_CATALOG.MODEL_DEFINITION_HASHES h
+  ON h.MODEL_ID = m.MODEL_ID AND h.VERSION_ID = m.ACTIVE_VERSION_ID
 LEFT JOIN SEMANTIC_SOURCE.MODEL_EVOLUTION_TARGETS t
   ON t.SUGGESTION_ID = s.SUGGESTION_ID
 WHERE s.SUGGESTION_KIND IN (
@@ -1101,8 +1119,9 @@ LEFT JOIN SEMANTIC_SOURCE.MODELS m ON m.MODEL_ID = s.MODEL_ID;
 -- A frozen view is the one object in the system that can be correct on the day
 -- it is created and wrong later, with nothing changing in it.
 --
--- PRESENCE is all this view can answer on its own: LIVE or DROPPED. Whether a
--- live one still matches what the model compiles today is an exact question
+-- PRESENCE is LIVE, DROPPED, or RETIRED: replaced by a stand-in that raises
+-- SEMANTIC_SURFACE_015, because a clean VALIDATE_MODEL found it STALE
+-- (SYNC_FROZEN_VIEWS). Whether a live one still matches what the model compiles today is an exact question
 -- that needs the compiler, so it is answered by
 -- SEMANTIC_ADMIN.CHECK_FROZEN_VIEWS rather than guessed at here. There is no
 -- version comparison to make -- ESV creates exactly one model version and
@@ -1118,11 +1137,14 @@ SELECT
   fv.VERSION_ID AS FROZEN_VERSION_ID,
   mv.VERSION_NUMBER AS FROZEN_VERSION_NUMBER,
   m.ACTIVE_VERSION_ID,
-  CASE WHEN v.VIEW_NAME IS NULL THEN 'DROPPED' ELSE 'LIVE' END AS PRESENCE,
+  CASE WHEN v.VIEW_NAME IS NULL THEN 'DROPPED'
+       WHEN fv.RETIRED_AT IS NOT NULL THEN 'RETIRED'
+       ELSE 'LIVE' END AS PRESENCE,
   fv.FROZEN_COLUMNS,
   fv.FROZEN_RELATIONS,
   fv.FROZEN_AT,
-  fv.FROZEN_BY
+  fv.FROZEN_BY,
+  fv.RETIRED_AT
 FROM SEMANTIC_SOURCE.FROZEN_VIEWS fv
 JOIN SEMANTIC_SOURCE.MODELS m
   ON m.MODEL_ID = fv.MODEL_ID

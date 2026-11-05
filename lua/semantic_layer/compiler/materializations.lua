@@ -85,6 +85,21 @@ local function freshness_rejection(candidate)
     return nil
 end
 
+-- Why this candidate cannot be used because a field it holds was redefined
+-- after it was built, or nil. A field keeps its id across a redefinition, so
+-- the mapping still resolved and the aggregate kept answering with numbers
+-- computed from the old definition -- the one thing an accelerator must not do.
+-- Any redefined field disqualifies it: a redefined dimension changes the grain
+-- of every metric beside it. Marking the object refreshed re-stamps it.
+local function definition_rejection(candidate)
+    if candidate.redefined == nil then
+        return nil
+    end
+    return "DEFINITION_CHANGED", "Built from an earlier definition of "
+        .. table.concat(candidate.redefined, ", ") .. "; the live sources answer"
+        .. " instead. Rebuild it and record that with MARK_MATERIALIZATION_REFRESHED."
+end
+
 -- Freshness facts the plan records for the materialization it used.
 local function freshness_provenance(candidate)
     local policy = M.freshness_policy(candidate.freshness_policy) or {}
@@ -160,16 +175,24 @@ local function load_candidates(ctx)
         return candidates
     end
 
+    -- Each column beside the definition its field has now: the stamped hash is
+    -- the definition the aggregate was built from (definition_rejection).
     local column_rows = query([[
-        SELECT MATERIALIZATION_ID, OBJECT_TYPE, OBJECT_ID, PHYSICAL_COLUMN, ROLLUP_POLICY
-        FROM SEMANTIC_SOURCE.MATERIALIZATION_COLUMNS
-        WHERE MATERIALIZATION_ID IN (
+        SELECT mc.MATERIALIZATION_ID, mc.OBJECT_TYPE, mc.OBJECT_ID,
+               mc.PHYSICAL_COLUMN, mc.ROLLUP_POLICY, mc.DEFINITION_HASH,
+               h.DEFINITION_HASH AS CURRENT_DEFINITION_HASH, h.FIELD_NAME
+        FROM SEMANTIC_SOURCE.MATERIALIZATION_COLUMNS mc
+        LEFT JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h
+          ON h.VERSION_ID = :version_id
+         AND h.FIELD_KIND = mc.OBJECT_TYPE
+         AND h.FIELD_ID = mc.OBJECT_ID
+        WHERE mc.MATERIALIZATION_ID IN (
           SELECT MATERIALIZATION_ID
           FROM SEMANTIC_SOURCE.MATERIALIZATIONS
           WHERE MODEL_ID = :model_id
             AND VERSION_ID = :version_id
         )
-        ORDER BY MATERIALIZATION_ID, OBJECT_TYPE, OBJECT_ID
+        ORDER BY mc.MATERIALIZATION_ID, mc.OBJECT_TYPE, mc.OBJECT_ID
     ]], {
         model_id = ctx.model.model_id,
         version_id = ctx.model.version_id,
@@ -189,6 +212,14 @@ local function load_candidates(ctx)
                 rollup_policy = row_value(row, "ROLLUP_POLICY", 5),
             }
             candidate.columns[col_key] = column
+            local built_from = row_value(row, "DEFINITION_HASH", 6)
+            local defined_as = row_value(row, "CURRENT_DEFINITION_HASH", 7)
+            if not missing(built_from) and not missing(defined_as)
+                and tostring(built_from) ~= tostring(defined_as) then
+                candidate.redefined = candidate.redefined or {}
+                candidate.redefined[#candidate.redefined + 1] = object_type .. " "
+                    .. tostring(row_value(row, "FIELD_NAME", 8) or object_id)
+            end
             if object_type == "DIMENSION" then
                 candidate.dimension_keys[col_key] = true
             elseif object_type == "METRIC" then
@@ -246,6 +277,10 @@ local function branch_candidate(candidate, physical_plan, branch,
     local stale_code, stale_message = freshness_rejection(candidate)
     if stale_code ~= nil then
         return nil, stale_code, stale_message
+    end
+    local redefined_code, redefined_message = definition_rejection(candidate)
+    if redefined_code ~= nil then
+        return nil, redefined_code, redefined_message
     end
     local dimension_columns = {}
     local dimension_keys = {}
@@ -338,6 +373,8 @@ function M.select_materialization(ctx, selected_dimensions, selected_metrics, fi
             reject("UNSUPPORTED_TYPE", "Only AGGREGATE materializations are supported in this milestone.")
         elseif freshness_rejection(candidate) ~= nil then
             reject(freshness_rejection(candidate))
+        elseif definition_rejection(candidate) ~= nil then
+            reject(definition_rejection(candidate))
         else
             for dimension_key, _ in pairs(required_dimension_keys) do
                 if candidate.columns[dimension_key] == nil then
@@ -499,6 +536,7 @@ if rawget(_G, "ESV_TEST_MODE") then
         supported_freshness = supported_freshness,
         freshness_policy = M.freshness_policy,
         freshness_rejection = freshness_rejection,
+        definition_rejection = definition_rejection,
         allowed_rollup_policy = allowed_rollup_policy,
     }
 end

@@ -13,8 +13,10 @@
 -- move is the definition, and the only faithful test of that is to compile the
 -- same columns again and see whether the SQL comes back the same.
 --
--- STATUS is CURRENT, STALE or DROPPED. A STALE view still answers; it answers
--- with the model as it was when the view was made.
+-- STATUS is CURRENT, STALE or DROPPED. A STALE view answers with the model as
+-- it was when the view was made, until a clean VALIDATE_MODEL retires it
+-- (SYNC_FROZEN_VIEWS); a retired view is judged by the text it was retired
+-- with, since what it holds now is the stand-in that raises.
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
@@ -31,6 +33,14 @@ end
 local function sql_string(value)
     return "'" .. string.gsub(tostring(value), "'", "''") .. "'"
 end
+-- The preprocessor splices compiled SQL into the statement with its line
+-- breaks turned into spaces, so the two are compared that way.
+local function one_line(value)
+    return (string.gsub(tostring(value), "[\r\n]", " "))
+end
+
+local RETIRED = " The view is retired: reading it raises SEMANTIC_SURFACE_015."
+    .. " Re-create it over the object to answer with the current definition."
 
 if missing(MODEL_NAME) then
     error("SEMANTIC_ADMIN_001: MODEL_NAME is required")
@@ -50,7 +60,8 @@ local published_schema = row_value(model_rows[1], "PUBLISHED_SCHEMA", 2)
 local frozen = query([[
     SELECT fv.VIEW_SCHEMA, fv.VIEW_NAME, fv.OBJECT_NAME, fv.FROZEN_COLUMNS,
            fv.FROZEN_SQL,
-           CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS
+           CASE WHEN v.VIEW_NAME IS NULL THEN 0 ELSE 1 END AS STILL_EXISTS,
+           v.VIEW_TEXT, fv.RETIRED_AT, fv.RETIRED_VIEW_TEXT
       FROM SYS_SEMANTIC.FROZEN_VIEWS fv
       LEFT JOIN SYS.EXA_ALL_VIEWS v
         ON UPPER(v.VIEW_SCHEMA) = UPPER(fv.VIEW_SCHEMA)
@@ -67,6 +78,12 @@ for _, row in ipairs(frozen or {}) do
     local frozen_columns = tostring(row_value(row, "FROZEN_COLUMNS", 4) or "")
     local frozen_sql = row_value(row, "FROZEN_SQL", 5)
     local still_exists = tonumber(row_value(row, "STILL_EXISTS", 6) or 0) == 1
+    local view_text = row_value(row, "VIEW_TEXT", 7)
+    local retired = not missing(row_value(row, "RETIRED_AT", 8))
+    local live_text = view_text
+    if retired then
+        view_text = row_value(row, "RETIRED_VIEW_TEXT", 9)
+    end
 
     if not still_exists then
         output_rows[#output_rows + 1] = {view_schema, view_name, "DROPPED",
@@ -77,6 +94,21 @@ for _, row in ipairs(frozen or {}) do
         output_rows[#output_rows + 1] = {view_schema, view_name, "UNKNOWN",
             "No compiled baseline was recorded for this view; re-create it to"
             .. " start tracking it."}
+    elseif retired and (missing(live_text) or not string.find(tostring(live_text),
+            "SEMANTIC_ADMIN.FROZEN_VIEW_GUARD()", 1, true)) then
+        output_rows[#output_rows + 1] = {view_schema, view_name, "UNKNOWN",
+            "The view was retired, and has since been replaced by one the"
+            .. " preprocessor never saw. Re-create it over the object to track it again."}
+    elseif not missing(view_text) and not string.find(one_line(view_text),
+            one_line(frozen_sql), 1, true) then
+        -- The record is written before Exasol runs the statement, and the view
+        -- can be replaced by one the preprocessor never saw. Either way the view
+        -- does not hold what was recorded, so comparing the record with the
+        -- model would answer a question about some other SQL.
+        output_rows[#output_rows + 1] = {view_schema, view_name, "UNKNOWN",
+            "The view no longer holds the SQL recorded for it: it was re-created"
+            .. " without this semantic object, or the statement that recorded it"
+            .. " did not run. Re-create it over the object to track it again."}
     else
         local parts = {}
         for column in string.gmatch(frozen_columns, "[^,]+") do
@@ -91,15 +123,19 @@ for _, row in ipairs(frozen or {}) do
         if status ~= "OK" then
             output_rows[#output_rows + 1] = {view_schema, view_name, "STALE",
                 "The model no longer compiles the columns this view froze: "
-                .. tostring(row_value(compiled and compiled[1], "ERROR_MESSAGE", 3))}
+                .. tostring(row_value(compiled and compiled[1], "ERROR_MESSAGE", 3))
+                .. (retired and RETIRED or "")}
         elseif tostring(current_sql) ~= tostring(frozen_sql) then
             output_rows[#output_rows + 1] = {view_schema, view_name, "STALE",
                 "The model now compiles different SQL for the same columns."
-                .. " This view still answers, with the definition as it was when"
-                .. " the view was created. Re-create it to pick the change up."}
+                .. (retired and RETIRED or " This view still answers, with the definition"
+                    .. " as it was when the view was created, until VALIDATE_MODEL"
+                    .. " retires it. Re-create it to pick the change up.")}
         else
             output_rows[#output_rows + 1] = {view_schema, view_name, "CURRENT",
-                "Matches what the model compiles today."}
+                retired and "Matches what the model compiles again, but is still retired;"
+                    .. " EXECUTE SCRIPT SEMANTIC_ADMIN.SYNC_FROZEN_VIEWS puts it back."
+                    or "Matches what the model compiles today."}
         end
     end
 end

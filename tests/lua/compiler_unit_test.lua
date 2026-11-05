@@ -2108,6 +2108,12 @@ test("reference expansion finds what to compile, and refuses to guess", function
         "SELECT * FROM SEMANTIC_SALES.SALES t0")
     assert_equal(#api.bi_infer_columns(flat_tokens, flat_reference, columns, by_name), 3)
 
+    -- A `*` after an operand is a multiplication, not a star: read as one, it
+    -- compiled every column and answered at the finest grain.
+    local times_tokens, times_reference = only_reference(
+        "SELECT t0.CUSTOMER_REGION, t0.TOTAL_REVENUE * 2 FROM SEMANTIC_SALES.SALES t0")
+    assert_equal(#api.bi_infer_columns(times_tokens, times_reference, columns, by_name), 2)
+
     -- COUNT(*) names no column, so a statement that names nothing else is
     -- refused rather than answered at a grain nobody asked for.
     local empty_tokens, empty_reference = only_reference(
@@ -2134,6 +2140,120 @@ test("reference expansion finds what to compile, and refuses to guess", function
 
     assert_branch("compiler.expansion.projection", none == nil, true)
     assert_branch("compiler.expansion.projection", #wanted == 0, false)
+end)
+
+test("a join that provably cannot repeat a semantic row is not refused", function()
+    -- The guard refused any join beside a semantic object; what it protects
+    -- against is a relation matching a semantic row more than once. A one-row
+    -- relation cannot, and neither can grouped semantic queries joined on their
+    -- whole grain. Every statement is judged by its first reference.
+    local function unsafe(text)
+        local tokens = api.sql_tokens(text)
+        local found = api.bi_find_references(tokens)
+        return api.bi_unsafe_composition(tokens, found[1], found)
+    end
+    local region = "(SELECT customer_region, total_revenue FROM SEMANTIC_SALES.SALES"
+        .. " GROUP BY customer_region)"
+    local cost = "(SELECT customer_region AS r, total_cost FROM SEMANTIC_SALES.SALES"
+        .. " GROUP BY 1)"
+    each({
+        {"SELECT * FROM " .. region .. " a JOIN " .. cost .. " b ON a.customer_region = b.r", false},
+        {"SELECT * FROM " .. region .. " a LEFT OUTER JOIN " .. cost
+            .. " b ON b.r = a.customer_region AND b.total_cost > 0", false},
+        {"SELECT * FROM " .. region .. " a CROSS JOIN (SELECT 2 AS k FROM DUAL) k", false},
+        {"SELECT * FROM SEMANTIC_SALES.SALES s, (SELECT 2 AS k) k", false},
+        {"WITH a AS " .. region .. ", b AS " .. cost
+            .. " SELECT * FROM a JOIN b ON a.customer_region = b.r", false},
+        -- Still refused: the fan-out, and every shape the analysis cannot read.
+        {"SELECT * FROM SEMANTIC_SALES.SALES t0 JOIN MART.C c ON c.R = t0.A", true},
+        {"SELECT * FROM " .. region .. " a JOIN " .. cost
+            .. " b ON a.customer_region = b.r OR a.total_revenue > 0", true},
+        {"SELECT * FROM " .. region .. " a CROSS JOIN " .. cost .. " b", true},
+        {"SELECT * FROM " .. region .. " a, " .. cost .. " b WHERE a.customer_region = b.r", true},
+        {"SELECT * FROM " .. region .. " a JOIN " .. cost .. " b USING (r)", true},
+        {"SELECT * FROM " .. region .. " a JOIN " .. cost .. " ON a.customer_region = r", true},
+        {"SELECT * FROM " .. region .. " a CROSS JOIN (SELECT 1 AS x FROM MART.C) k", true},
+        {"SELECT * FROM " .. region .. " a CROSS JOIN (SELECT 1 AS x UNION ALL SELECT 2) k", true},
+        {"SELECT * FROM " .. region .. " a JOIN (SELECT customer_region, order_status, total_cost"
+            .. " FROM SEMANTIC_SALES.SALES GROUP BY customer_region, order_status) b"
+            .. " ON a.customer_region = b.customer_region", true},
+        {"WITH a AS " .. region .. ", b AS (SELECT * FROM a)"
+            .. " SELECT * FROM b JOIN MART.C c ON c.R = b.customer_region", true},
+        {"SELECT * FROM (SELECT * FROM " .. region .. " x) a JOIN MART.C c ON c.R = a.r", true},
+    }, function(case)
+        assert_equal(unsafe(case[1]), case[2])
+    end)
+end)
+
+test("under the composition opt-in the semantic forms become the SQL they mean", function()
+    -- Spliced as a derived table, the object already carries each metric per
+    -- group, so MEASURE() would be an unknown function and a bare metric under
+    -- the author's GROUP BY an invalid one.
+    local columns = {
+        {name = "customer_region", kind = "DIMENSION"},
+        {name = "total_revenue", kind = "METRIC"},
+    }
+    local by_name = {}
+    for _, column in ipairs(columns) do by_name[column.name:upper()] = column end
+    local join = " FROM SEMANTIC_SALES.SALES t0 JOIN MART.C c ON c.R = t0.customer_region"
+    local function compose(text, allowed)
+        local tokens = api.sql_tokens(text)
+        local found = api.bi_find_references(tokens)
+        for _, reference in ipairs(found) do
+            reference.columns, reference.by_name = columns, by_name
+        end
+        return with_query(function() return {{allowed ~= false}} end, function()
+            return api.bi_compose_measures(tokens, text, found)
+        end)
+    end
+    each({
+        {"SELECT t0.customer_region, t0.total_revenue" .. join .. " GROUP BY 1",
+            "SELECT t0.customer_region, t0.total_revenue" .. join .. " GROUP BY 1, t0.total_revenue"},
+        {"SELECT t0.customer_region, MEASURE(t0.total_revenue) AS r" .. join
+            .. " GROUP BY t0.customer_region",
+            "SELECT t0.customer_region, t0.total_revenue AS r" .. join
+            .. " GROUP BY t0.customer_region, t0.total_revenue"},
+        -- Ungrouped, MEASURE still means the metric; nothing joins the GROUP BY.
+        {"SELECT t0.customer_region, AGG(t0.total_revenue)" .. join,
+            "SELECT t0.customer_region, t0.total_revenue" .. join},
+        -- Already grouped, inside an aggregate, or not this reference's: untouched.
+        {"SELECT t0.customer_region, t0.total_revenue" .. join
+            .. " GROUP BY t0.customer_region, t0.total_revenue", nil},
+        {"SELECT t0.customer_region, SUM(t0.total_revenue)" .. join .. " GROUP BY 1", nil},
+        {"SELECT t0.customer_region, total_revenue" .. join .. " GROUP BY 1", nil},
+    }, function(case)
+        local rewritten, refusal = compose(case[1])
+        assert_equal(refusal, nil)
+        assert_equal(rewritten, case[2])
+    end)
+
+    -- Without the opt-in the guard answers, so nothing is rewritten.
+    assert_equal(compose("SELECT t0.customer_region, MEASURE(t0.total_revenue)" .. join, false), nil)
+
+    -- A GROUP BY that leaves the object's dimension out, or rolls it up,
+    -- puts several values in a group: no rewrite is exact.
+    each({
+        "SELECT c.R, t0.total_revenue" .. join .. " GROUP BY c.R",
+        "SELECT t0.customer_region, t0.total_revenue" .. join
+            .. " GROUP BY ROLLUP (t0.customer_region)",
+    }, function(text)
+        local rewritten, refusal = compose(text)
+        assert_equal(rewritten, nil)
+        assert_equal(refusal.error_code, "SEMANTIC_QUERY_021")
+        assert_contains(refusal.error_message, "SUM(t0.total_revenue)")
+    end)
+end)
+
+test("an arm of a top-level set operation is a whole query", function()
+    local function arm(text, index)
+        return api.bi_set_operation_arm(api.sql_tokens(text), index)
+    end
+    local union = "SELECT a FROM x GROUP BY a UNION ALL SELECT b FROM y GROUP BY b"
+    assert_equal(arm(union, 1), true)
+    assert_equal(arm(union, 10), true)  -- the SELECT after UNION ALL
+    assert_equal(arm(union, 8), false)  -- UNION itself is no SELECT
+    assert_equal(arm("SELECT a FROM x GROUP BY a", 1), false)
+    assert_equal(arm("SELECT * FROM (SELECT a FROM x UNION SELECT b FROM y) q", 5), false)
 end)
 
 test("reference expansion sees composition, which is what the guard refuses", function()

@@ -147,7 +147,14 @@ local duplicate = scalar([[
       AND UPPER(FACT_NAME) = UPPER(:fact_name)
 ]], {model_id = model.model_id, version_id = model.version_id, fact_name = fact_name})
 if tonumber(duplicate or 0) > 0 then
-    error("SEMANTIC_ADMIN_020: duplicate fact: " .. fact_name)
+    -- Names the way forward: facts are redefined and dropped with Semantic DDL,
+    -- the surface that owns them; the script API only creates.
+    error("SEMANTIC_ADMIN_020: duplicate fact: " .. fact_name .. "."
+        .. " Fact names are unique per model, and ADD_FACT only creates. To"
+        .. " redefine it, apply ALTER SEMANTIC VIEW " .. model_name .. ".<view>"
+        .. " ADD OR REPLACE FACT " .. fact_name .. " ON ENTITY " .. entity_name
+        .. " AS ... with SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION; DROP FACT"
+        .. " removes it the same way.")
 end
 
 query([[

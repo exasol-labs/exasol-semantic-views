@@ -203,8 +203,17 @@ local duplicate = scalar([[
       AND VERSION_ID = :version_id
       AND UPPER(METRIC_NAME) = UPPER(:metric_name)
 ]], {model_id = model.model_id, version_id = model.version_id, metric_name = metric_name})
+-- Its own code: SEMANTIC_ADMIN_021 means "attribute not found". And the
+-- refusal names the way forward, because the script API deliberately stops
+-- here -- an object's metrics are edited with Semantic DDL, which replaces,
+-- drops and renames them atomically, with a dry run and a dependency check.
 if tonumber(duplicate or 0) > 0 then
-    error("SEMANTIC_ADMIN_021: duplicate metric: " .. metric_name)
+    error("SEMANTIC_ADMIN_226: duplicate metric: " .. metric_name .. "."
+        .. " Metric names are unique per model, and ADD_METRIC only creates. To"
+        .. " redefine it, apply ALTER SEMANTIC VIEW " .. model_name .. "." .. object_name
+        .. " ADD OR REPLACE METRIC " .. metric_name .. " AS ... with"
+        .. " SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION; DROP METRIC and RENAME"
+        .. " METRIC remove and rename it the same way.")
 end
 ensure_metric_object_column_available(object_id_value, metric_name)
 

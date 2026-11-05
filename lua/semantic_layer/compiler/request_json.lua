@@ -985,8 +985,8 @@ local function load_catalog(model, object_name)
         SELECT er.REPRESENTATION_ID, er.ENTITY_ID, er.REPRESENTATION_NAME,
                er.SOURCE_KIND, er.SOURCE_SCHEMA, er.SOURCE_OBJECT,
                er.SOURCE_ALIAS, er.REPRESENTATION_ROLE, er.PRIORITY,
-               er.FRESHNESS_POLICY, er.COVERAGE_PREDICATE, er.VALID_FROM,
-               er.VALID_TO, COALESCE(ra.AUTHORITY_ROLE, 'PREFER') AS AUTHORITY_ROLE
+               er.FRESHNESS_POLICY, er.COVERAGE_PREDICATE, TO_CHAR(er.VALID_FROM, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_FROM,
+               TO_CHAR(er.VALID_TO, 'YYYY-MM-DD HH24:MI:SS.FF6') AS VALID_TO, COALESCE(ra.AUTHORITY_ROLE, 'PREFER') AS AUTHORITY_ROLE
         FROM SEMANTIC_SOURCE.ENTITY_REPRESENTATIONS er
         LEFT JOIN SEMANTIC_SOURCE.REPRESENTATION_AUTHORITIES ra
           ON ra.MODEL_ID = er.MODEL_ID AND ra.VERSION_ID = er.VERSION_ID
@@ -4466,6 +4466,7 @@ refusal_rules.expansion_wins = {
     SEMANTIC_QUERY_016 = true,   -- an outer SUM/AVG over a metric that does not add up
     SEMANTIC_QUERY_017 = true,   -- a grain-widening filter that cannot run inside the compile
     SEMANTIC_QUERY_018 = true,   -- a wrapper lowering where groups are not one row each
+    SEMANTIC_QUERY_021 = true,   -- a composed metric under a GROUP BY that splits its grain
     SEMANTIC_QUERY_028 = true,   -- the model does not vouch for what this reads
 }
 
@@ -4752,16 +4753,9 @@ do
     -- compiled at? Then each group is one row of it, and a wrapper over a metric
     -- is that metric's value. With no GROUP BY it holds only if the object is
     -- compiled at no dimension at all -- one row in total.
-    function bi_expansion.own_block_covers_grain(tokens, reference, wanted)
-        local first, last = bi_expansion.select_list_range(tokens, reference)
-        if first == nil then return false end
-        local dimensions = {}
-        for _, name in ipairs(wanted or {}) do
-            local column = reference.by_name[upper(name)]
-            if column ~= nil and upper(column.kind) == "DIMENSION" then
-                dimensions[#dimensions + 1] = upper(column.name)
-            end
-        end
+    -- The token range of the GROUP BY items in the reference's own block, or
+    -- nil when the block does not group.
+    function bi_expansion.own_group_by(tokens, reference)
         local group_first, group_last
         for index = reference.last + 1, #tokens do
             local token = tokens[index]
@@ -4779,6 +4773,169 @@ do
             end
             group_last = index
         end
+        if group_first == nil then return nil end
+        return group_first, group_last
+    end
+
+    -- Under SET_MODEL_DERIVED_COMPOSITION a reference the expansion splices as
+    -- a derived table already carries each metric at the grain it is compiled
+    -- at, so the Semantic SQL forms around it have to be rewritten into the
+    -- ordinary SQL they mean -- otherwise the opt-in turned the forms
+    -- SEMANTIC_QUERY_005 teaches into engine errors: MEASURE(t0.m) is a
+    -- function Exasol does not have, and a bare t0.m under the author's
+    -- GROUP BY is "not a valid GROUP BY expression".
+    --
+    -- MEASURE(m) and AGG(m) select the metric as defined, so they become m.
+    -- A bare metric under a GROUP BY that covers every dimension the object is
+    -- compiled at is constant in each group, so it joins the GROUP BY: the
+    -- groups do not change, and a join that repeats the row cannot inflate it.
+    -- Under one that does not cover the grain, each group holds several values
+    -- and no rewrite is exact, so it is refused with the remedy.
+    --
+    -- Returns the rewritten statement, a refusal, or nil when there is nothing
+    -- to rewrite. The edits are in the statement's own offsets; the caller
+    -- tokenizes the result again.
+    function bi_expansion.compose_measures(tokens, statement_text, applicable)
+        local edits = {}
+        for _, reference in ipairs(applicable) do
+            local first, last = bi_expansion.select_list_range(tokens, reference)
+            if first ~= nil and bi_expansion.allows_composition(reference.published_schema)
+                and not bi_expansion.semantic_block(tokens, reference, applicable) then
+                local alias = reference.alias and upper(reference.alias) or nil
+                -- A field of this reference: unqualified, or qualified by its alias.
+                local function metric_at(index)
+                    local token = tokens[index]
+                    if token == nil or (token.kind ~= "word" and token.kind ~= "identifier") then
+                        return nil
+                    end
+                    local following = tokens[index + 1]
+                    if following ~= nil and following.kind == "symbol"
+                        and (following.text == "." or following.text == "(") then
+                        return nil
+                    end
+                    -- Unqualified only when the reference has no alias: beside an
+                    -- aliased one, a bare name may be another relation's column,
+                    -- and grouping by that would change the groups.
+                    local previous = tokens[index - 1]
+                    if previous ~= nil and previous.kind == "symbol" and previous.text == "." then
+                        local qualifier = tokens[index - 2]
+                        local named = qualifier and upper(syntax.token_identifier_value(qualifier) or "")
+                        if named ~= (alias or upper(reference.object_name)) then
+                            return nil
+                        end
+                    elseif alias ~= nil or (previous ~= nil and sql_text.token_upper(previous) == "AS") then
+                        return nil
+                    end
+                    local column = reference.by_name[upper(syntax.token_identifier_value(token) or "")]
+                    if column == nil or upper(column.kind) ~= "METRIC" then return nil end
+                    return column, previous ~= nil and previous.text == "." and index - 2 or index
+                end
+
+                -- The metrics the select list names outside any call, and every
+                -- MEASURE: under a GROUP BY these are what SQL requires grouped.
+                local bare, seen = {}, {}
+                local index = first
+                while index <= last do
+                    local token = tokens[index]
+                    local wrapper = sql_text.token_upper(token)
+                    local open = tokens[index + 1]
+                    local close = (wrapper == "MEASURE" or wrapper == "AGG") and open ~= nil
+                        and open.text == "(" and bi_expansion.matching_close(tokens, index + 1) or nil
+                    local column, start
+                    if close ~= nil then column, start = metric_at(close - 1) end
+                    if column ~= nil and start == index + 2 then
+                        edits[#edits + 1] = {first = token.start_pos, last = open.end_pos, text = ""}
+                        edits[#edits + 1] = {first = tokens[close].start_pos,
+                            last = tokens[close].end_pos, text = ""}
+                        if not seen[column.name] then
+                            seen[column.name] = true
+                            bare[#bare + 1] = {column = column, first = start, last = close - 1}
+                        end
+                        index = close
+                    elseif token.depth == tokens[first].depth then
+                        column, start = metric_at(index)
+                        if column and not seen[column.name] then
+                            seen[column.name] = true
+                            bare[#bare + 1] = {column = column, first = start, last = index}
+                        end
+                    end
+                    index = index + 1
+                end
+
+                local group_first, group_last = bi_expansion.own_group_by(tokens, reference)
+                if group_first ~= nil and #bare > 0 then
+                    local grouped = {}
+                    local items = syntax.split_top_level(tokens, first, last, ",")
+                    for _, item in ipairs(syntax.split_top_level(tokens, group_first, group_last, ",")) do
+                        if #item == 1 and item[1].kind == "number" then
+                            item = items[tonumber(item[1].text)] or {}
+                        end
+                        local column = bi_expansion.projected_field(item, reference.by_name)
+                        if column ~= nil then grouped[column.name] = true end
+                    end
+                    local ungrouped = {}
+                    for _, entry in ipairs(bare) do
+                        if not grouped[entry.column.name] then ungrouped[#ungrouped + 1] = entry end
+                    end
+                    if #ungrouped > 0 then
+                        local wanted = bi_expansion.infer_columns(tokens, reference,
+                            reference.columns, reference.by_name)
+                        local rolled = false
+                        for position = group_first, group_last do
+                            local word = sql_text.token_upper(tokens[position])
+                            if word == "ROLLUP" or word == "CUBE" or word == "GROUPING" then
+                                rolled = true
+                            end
+                        end
+                        if wanted ~= nil and (rolled
+                            or not bi_expansion.own_block_covers_grain(tokens, reference, wanted)) then
+                            local name = ungrouped[1].column.name
+                            local written = string.sub(statement_text,
+                                tokens[ungrouped[1].first].start_pos, tokens[ungrouped[1].last].end_pos)
+                            return nil, error_result("SEMANTIC_QUERY_021",
+                                written .. " is " .. tostring(name) .. " at the grain "
+                                .. tostring(reference.published_schema) .. "."
+                                .. tostring(reference.object_name) .. " is compiled at here,"
+                                .. " and this GROUP BY does not group by every dimension of"
+                                .. " that grain" .. (rolled and " in each grouping set" or "")
+                                .. ", so each group holds several of its values. GROUP BY the"
+                                .. " object's dimensions you select, or aggregate the metric"
+                                .. " in ordinary SQL, as SUM(" .. written .. ").")
+                        end
+                        if wanted ~= nil then
+                            local appended = {}
+                            for _, entry in ipairs(ungrouped) do
+                                appended[#appended + 1] = string.sub(statement_text,
+                                    tokens[entry.first].start_pos, tokens[entry.last].end_pos)
+                            end
+                            edits[#edits + 1] = {first = tokens[group_last].end_pos + 1,
+                                last = tokens[group_last].end_pos,
+                                text = ", " .. table.concat(appended, ", ")}
+                        end
+                    end
+                end
+            end
+        end
+        if #edits == 0 then return nil end
+        table.sort(edits, function(a, b) return a.first > b.first end)
+        local text = statement_text
+        for _, edit in ipairs(edits) do
+            text = string.sub(text, 1, edit.first - 1) .. edit.text .. string.sub(text, edit.last + 1)
+        end
+        return text
+    end
+
+    function bi_expansion.own_block_covers_grain(tokens, reference, wanted)
+        local first, last = bi_expansion.select_list_range(tokens, reference)
+        if first == nil then return false end
+        local dimensions = {}
+        for _, name in ipairs(wanted or {}) do
+            local column = reference.by_name[upper(name)]
+            if column ~= nil and upper(column.kind) == "DIMENSION" then
+                dimensions[#dimensions + 1] = upper(column.name)
+            end
+        end
+        local group_first, group_last = bi_expansion.own_group_by(tokens, reference)
         if group_first == nil then return #dimensions == 0 end
         local items = syntax.split_top_level(tokens, first, last, ",")
         local grouped = {}
@@ -4915,7 +5072,18 @@ do
                 -- guess at which columns were meant.
                 local is_call_argument = previous ~= nil
                     and previous.kind == "symbol" and previous.text == "("
-                if not is_call_argument and token.depth == reference.depth then
+                -- And `a * b` is a multiplication, not a star: a star stands as
+                -- a select item of its own, after SELECT, DISTINCT, ALL or a
+                -- comma. Read as one, `SELECT s.region, s.revenue * 2 FROM obj s`
+                -- compiled every column -- the finest grain -- and returned five
+                -- partial North rows where `/ 2` returned one.
+                local previous_word = previous and sql_text.token_upper(previous)
+                local is_select_item = previous ~= nil
+                    and ((previous.kind == "symbol" and previous.text == ",")
+                        or previous_word == "SELECT" or previous_word == "DISTINCT"
+                        or previous_word == "ALL")
+                if not is_call_argument and is_select_item
+                    and token.depth == reference.depth then
                     take_all()
                 end
             elseif qualified_by_us then
@@ -5496,22 +5664,30 @@ do
     -- So it is compiled by that lane, and the compiled SQL replaces the block;
     -- everything outside it stays ordinary SQL for Exasol.
     --
-    -- Returns the block's span, or nil: the block must be parenthesized (a
-    -- top-level statement is the whole-statement lane's already), read only this
-    -- object (a join is _012's), contain no other semantic reference, and
-    -- aggregate -- GROUP BY / HAVING, or an aggregate wrapper in its select list.
+    -- Returns the block's span, or nil: the block must be parenthesized or the
+    -- query body of a DDL/DML statement (a top-level SELECT is the
+    -- whole-statement lane's already), read only this object (a join is _012's),
+    -- contain no other semantic reference, and aggregate -- GROUP BY / HAVING, or
+    -- an aggregate wrapper in its select list.
     function bi_expansion.semantic_block(tokens, reference, references)
         local first, last = bi_expansion.select_list_range(tokens, reference)
         if first == nil then return nil end
         local select_index = first - 1
         local open = tokens[select_index - 1]
-        if open == nil or open.text ~= "(" then return nil end
-        if bi_expansion.composed_in_from(tokens, reference) then return nil end
+        local body = open ~= nil and open.text ~= "("
+            and bi_expansion.statement_query_body(tokens, select_index)
+        local arm = (open == nil or open.text ~= "(") and not body
+            and bi_expansion.set_operation_arm(tokens, select_index)
+        if not arm and (open == nil or (open.text ~= "(" and not body)) then return nil end
+        if bi_expansion.unsafe_composition(tokens, reference, references) then return nil end
         local block_last = #tokens
         for index = reference.last + 1, #tokens do
             local token = tokens[index]
+            local word = sql_text.token_upper(token)
             if token.depth < reference.depth or (token.depth == reference.depth
-                and bi_expansion.SET_OPERATORS[sql_text.token_upper(token)]) then
+                and (bi_expansion.SET_OPERATORS[word]
+                    or (body and bi_expansion.BODY_TRAILERS[word])
+                    or (arm and (word == "ORDER" or word == "LIMIT")))) then
                 block_last = index - 1
                 break
             end
@@ -5534,10 +5710,62 @@ do
         if not aggregating then return nil end
         return {
             grouped = grouped,
+            arm = arm or nil,
             first_pos = tokens[select_index].start_pos,
             last_pos = tokens[block_last].end_pos,
         }
     end
+
+    -- An arm of a top-level set operation: `SELECT ... UNION ALL SELECT ...`.
+    -- Each arm is a whole query, as a parenthesized block is, but it was not
+    -- compiled as one: the first arm's GROUP BY reached the whole-statement lane
+    -- with the second arm attached, and was refused as a GROUP BY error
+    -- (SEMANTIC_QUERY_008) -- while the same arms wrapped in SELECT * FROM (...)
+    -- compiled. A top-level ORDER BY or LIMIT belongs to the set operation, not
+    -- to its last arm, so the arm stops before it.
+    function bi_expansion.set_operation_arm(tokens, select_index)
+        if tokens[select_index].depth ~= 0 then return false end
+        local has_operator = false
+        for _, token in ipairs(tokens) do
+            if token.depth == 0 and bi_expansion.SET_OPERATORS[sql_text.token_upper(token)] then
+                has_operator = true
+                break
+            end
+        end
+        if not has_operator then return false end
+        local previous = tokens[select_index - 1]
+        local word = previous and sql_text.token_upper(previous)
+        if previous == nil then return true end
+        if word == "ALL" or word == "DISTINCT" then
+            word = sql_text.token_upper(tokens[select_index - 2])
+        end
+        return bi_expansion.SET_OPERATORS[word] == true
+    end
+
+    -- `CREATE VIEW v AS SELECT ...`, `CREATE TABLE t AS SELECT ...` and
+    -- `INSERT INTO t SELECT ...` carry a query the whole-statement lane would
+    -- compile bare, but it refuses the statement for not being a SELECT
+    -- (`_009`). Only a parenthesized block was compiled as one here, so the
+    -- body's GROUP BY was read as grouping the object a second time and refused
+    -- with _015: a query legal on its own was illegal as a view, and ibis, which
+    -- infers a schema with CREATE VIEW ... AS <query>, could not read a
+    -- governed result at all. The body is the statement's first top-level
+    -- SELECT; another arm of a set operation is not a whole query.
+    function bi_expansion.statement_query_body(tokens, select_index)
+        local head = sql_text.token_upper(tokens[1])
+        if head ~= "CREATE" and head ~= "INSERT" then return false end
+        if tokens[select_index].depth ~= 0 then return false end
+        for index = 1, select_index - 1 do
+            if tokens[index].depth == 0 and sql_text.token_upper(tokens[index]) == "SELECT" then
+                return false
+            end
+        end
+        return true
+    end
+
+    -- What Exasol allows after a CTAS or view body, `WITH [NO] DATA` and
+    -- `COMMENT IS`, which belong to the statement, not to the query.
+    bi_expansion.BODY_TRAILERS = {WITH = true, COMMENT = true}
 
     function bi_expansion.composed_in_from(tokens, reference)
         -- Walked outward, not just across the reference's own FROM clause.
@@ -5624,6 +5852,355 @@ do
         return false
     end
 
+    -- A join the composition guard does not have to refuse, because it provably
+    -- cannot repeat a semantic result's rows -- the hazard the guard exists for.
+    --
+    -- The guard was syntactic: any comma or JOIN beside a semantic object was
+    -- refused. So two governed measures side by side on a shared axis -- each
+    -- grouped to region, joined on region -- were refused, and so was a join to a
+    -- one-row constant table; analysts dropped to the raw schemas to get them and
+    -- lost all supervision, which is where a join that does fan out goes
+    -- unnoticed. What the guard protects against is a relation that matches a
+    -- semantic row more than once. Two shapes cannot, and nothing else passes:
+    --
+    -- * a one-row relation: `(SELECT <exprs> [FROM DUAL] [WHERE ...])`, with no
+    --   GROUP BY or set operation, matches every row at most once;
+    -- * grouped semantic queries joined on their whole grain: each is a whole
+    --   semantic query, `SELECT ... FROM <object> [WHERE] GROUP BY <keys>`, so it
+    --   has one row per key, and when each is joined to an earlier one by ON
+    --   equalities pairing all of its keys with all of that one's, the join is
+    --   one-to-one.
+    --
+    -- Every FROM clause that joins something carrying a semantic object -- the
+    -- object itself, a derived table around it, or a CTE that reads it, however
+    -- indirectly -- has to be one of these. Anything the analysis cannot read is
+    -- left to the guard, which refuses it.
+    function bi_expansion.matching_close(tokens, open_index)
+        local depth = tokens[open_index].depth
+        for index = open_index + 1, #tokens do
+            local token = tokens[index]
+            if token.kind == "symbol" and token.text == ")" and token.depth == depth then
+                return index
+            end
+        end
+        return nil
+    end
+
+    -- `WITH name [(cols)] AS (body), ...` before the statement's main query:
+    -- each name with the span of its body.
+    function bi_expansion.cte_bodies(tokens)
+        local bodies = {}
+        local index
+        for i, token in ipairs(tokens) do
+            local word = sql_text.token_upper(token)
+            if token.depth == 0 and word == "WITH" then index = i + 1 break end
+            if token.depth == 0 and word == "SELECT" then return bodies end
+        end
+        while index ~= nil and tokens[index] ~= nil do
+            local name = syntax.token_identifier_value(tokens[index])
+            if name == nil then break end
+            local cursor = index + 1
+            if tokens[cursor] ~= nil and tokens[cursor].text == "(" then
+                cursor = (bi_expansion.matching_close(tokens, cursor) or #tokens) + 1
+            end
+            if sql_text.token_upper(tokens[cursor]) ~= "AS"
+                or tokens[cursor + 1] == nil or tokens[cursor + 1].text ~= "(" then
+                break
+            end
+            local close = bi_expansion.matching_close(tokens, cursor + 1)
+            if close == nil then break end
+            bodies[upper(name)] = {open = cursor + 1, close = close}
+            if tokens[close + 1] ~= nil and tokens[close + 1].text == "," then
+                index = close + 2
+            else
+                index = nil
+            end
+        end
+        return bodies
+    end
+
+    -- ONE_ROW, GROUPED (with the output names of its keys), or nil, for the
+    -- query between a pair of parentheses.
+    function bi_expansion.body_shape(tokens, open, close, references)
+        local depth = tokens[open].depth + 1
+        local select_index = open + 1
+        if sql_text.token_upper(tokens[select_index]) ~= "SELECT"
+            or tokens[select_index].depth ~= depth then
+            return nil
+        end
+        local clauses = {}
+        for index = select_index + 1, close - 1 do
+            local token = tokens[index]
+            if token.depth == depth and token.kind == "word" then
+                local word = sql_text.token_upper(token)
+                if bi_expansion.SET_OPERATORS[word] or word == "CONNECT"
+                    or word == "QUALIFY" or word == "PREFERRING" then
+                    return nil
+                end
+                if clauses[word] == nil then clauses[word] = index end
+            end
+        end
+        local from = clauses.FROM
+        if from == nil or (sql_text.token_upper(tokens[from + 1]) == "DUAL"
+                and (from + 2 == close or tokens[from + 2].depth == depth
+                    and sql_text.token_upper(tokens[from + 2]) == "WHERE")) then
+            if clauses.GROUP == nil and clauses.HAVING == nil then
+                return {kind = "ONE_ROW"}
+            end
+            return nil
+        end
+        local reference
+        for _, candidate in ipairs(references or {}) do
+            if candidate.first == from + 1 and candidate.depth == depth then
+                reference = candidate
+            end
+        end
+        local group = clauses.GROUP
+        if reference == nil or group == nil
+            or sql_text.token_upper(tokens[group + 1]) ~= "BY" then
+            return nil
+        end
+        local after = tokens[reference.last + 1]
+        local after_word = sql_text.token_upper(after)
+        if reference.last + 1 ~= close and not (after.depth == depth
+                and (after_word == "WHERE" or after_word == "GROUP")) then
+            return nil
+        end
+        local group_end = close - 1
+        for _, word in ipairs({"HAVING", "ORDER", "LIMIT"}) do
+            if clauses[word] ~= nil and clauses[word] > group then
+                group_end = math.min(group_end, clauses[word] - 1)
+            end
+        end
+        local items = syntax.split_top_level(tokens, select_index + 1, from - 1, ",")
+        local keys = {}
+        for _, part in ipairs(syntax.split_top_level(tokens, group + 2, group_end, ",")) do
+            local item
+            if #part == 1 and part[1].kind == "number" then
+                item = items[tonumber(part[1].text)]
+            else
+                local named = syntax.identifier_from_part(part)
+                for _, candidate in ipairs(items) do
+                    if named ~= nil and (upper(syntax.identifier_from_part(candidate) or "")
+                            == upper(named) or upper(syntax.alias_from_select_part(candidate)
+                            or "") == upper(named)) then
+                        item = candidate
+                        break
+                    end
+                end
+            end
+            local output = item and (syntax.alias_from_select_part(item)
+                or syntax.identifier_from_part(item))
+            if output == nil then return nil end
+            keys[#keys + 1] = upper(output)
+        end
+        if #keys == 0 then return nil end
+        return {kind = "GROUPED", keys = keys}
+    end
+
+    -- The relations of the FROM clause opened at from_index, each with how it is
+    -- joined, its alias, its span and its ON condition.
+    function bi_expansion.from_items(tokens, from_index)
+        local depth = tokens[from_index].depth
+        local items, current = {}, nil
+        local function open_item(index, join)
+            current = {first = index, join = join}
+            items[#items + 1] = current
+        end
+        local index = from_index + 1
+        local join = "FIRST"
+        while tokens[index] ~= nil and tokens[index].depth >= depth do
+            local token = tokens[index]
+            local word = sql_text.token_upper(token)
+            if token.depth == depth then
+                if token.kind == "word" and ENDS_FROM[word] then break end
+                -- `LEFT OUTER JOIN`: OUTER changes nothing about fan-out.
+                local outer = word == "OUTER" and current == nil
+                if token.kind == "symbol" and token.text == "," then
+                    join, current = "COMMA", nil
+                elseif token.kind == "word" and JOIN_WORDS[word] then
+                    -- A new join starts once the previous relation is complete.
+                    if current ~= nil then join, current = nil, nil end
+                    if word == "CROSS" or word == "NATURAL" then
+                        join = word
+                    elseif join == nil then
+                        join = "ON"
+                    end
+                elseif outer then
+                    current = nil
+                elseif word == "ON" and current ~= nil then
+                    current.on = index
+                elseif word == "USING" and current ~= nil then
+                    current.using = true
+                elseif current == nil then
+                    open_item(index, join)
+                end
+            end
+            if current ~= nil then current.last = index end
+            index = index + 1
+        end
+        for _, item in ipairs(items) do
+            local first = tokens[item.first]
+            local after
+            if first.kind == "symbol" and first.text == "(" then
+                item.close = bi_expansion.matching_close(tokens, item.first)
+                after = item.close and item.close + 1
+            else
+                item.name = syntax.token_identifier_value(first)
+                after = item.first + 1
+                if tokens[after] ~= nil and tokens[after].text == "." then
+                    item.name, after = nil, after + 2
+                end
+            end
+            if after ~= nil and sql_text.token_upper(tokens[after]) == "AS" then after = after + 1 end
+            local alias = after and tokens[after]
+            if alias ~= nil and (item.on == nil or after < item.on)
+                and syntax.token_identifier_value(alias) ~= nil
+                and not NOT_AN_ALIAS[sql_text.token_upper(alias)] then
+                item.alias = upper(syntax.token_identifier_value(alias))
+            elseif item.name ~= nil then
+                item.alias = upper(item.name)
+            end
+        end
+        return items
+    end
+
+    -- `a.x = b.y AND ...` in an ON condition, as {left, right} column pairs; nil
+    -- when the condition is not such a conjunction, since an OR can let a row
+    -- match more than once whatever its equalities say.
+    function bi_expansion.on_equalities(tokens, on_index, last_index)
+        local depth = tokens[on_index].depth
+        local pairs_found, start = {}, on_index + 1
+        for index = on_index + 1, last_index + 1 do
+            local token = tokens[index]
+            local word = token and sql_text.token_upper(token)
+            if token ~= nil and token.depth == depth and word == "OR" then return nil end
+            if token == nil or index > last_index or (token.depth == depth and word == "AND") then
+                local t = {}
+                for k = start, index - 1 do t[#t + 1] = tokens[k] end
+                if #t == 7 and t[2].text == "." and t[4].text == "=" and t[6].text == "." then
+                    local names = {}
+                    for _, k in ipairs({1, 3, 5, 7}) do
+                        names[#names + 1] = syntax.token_identifier_value(t[k])
+                    end
+                    if names[1] and names[2] and names[3] and names[4] then
+                        pairs_found[#pairs_found + 1] = {
+                            {upper(names[1]), upper(names[2])}, {upper(names[3]), upper(names[4])}}
+                    end
+                end
+                start = index + 1
+            end
+        end
+        return pairs_found
+    end
+
+    function bi_expansion.join_cannot_fan_out(tokens, references)
+        if tokens._join_cannot_fan_out ~= nil then return tokens._join_cannot_fan_out end
+        local ctes = bi_expansion.cte_bodies(tokens)
+        -- Which CTEs carry a semantic object, through any number of others.
+        local carrying = {}
+        local function spans_carrier(first, last)
+            for _, reference in ipairs(references) do
+                if reference.first >= first and reference.first <= last then return true end
+            end
+            for index = first, last do
+                local value = syntax.token_identifier_value(tokens[index])
+                if value ~= nil and carrying[upper(value)] then return true end
+            end
+            return false
+        end
+        local grew = true
+        while grew do
+            grew = false
+            for name, body in pairs(ctes) do
+                if not carrying[name] and spans_carrier(body.open, body.close) then
+                    carrying[name], grew = true, true
+                end
+            end
+        end
+        local found_any = false
+        for from_index, token in ipairs(tokens) do
+            if sql_text.token_upper(token) == "FROM" and token.kind == "word" then
+                local items = bi_expansion.from_items(tokens, from_index)
+                local carries = false
+                for _, item in ipairs(items) do
+                    if spans_carrier(item.first, item.close or item.last or item.first) then
+                        carries = true
+                    end
+                end
+                if #items > 1 and carries then
+                    found_any = true
+                    local grouped, multi = {}, 0
+                    for _, item in ipairs(items) do
+                        if item.close ~= nil then
+                            item.shape = bi_expansion.body_shape(tokens, item.first, item.close,
+                                references)
+                        elseif item.name ~= nil and ctes[upper(item.name)] ~= nil then
+                            local body = ctes[upper(item.name)]
+                            item.shape = bi_expansion.body_shape(tokens, body.open, body.close,
+                                references)
+                        end
+                        if item.shape == nil or item.shape.kind ~= "ONE_ROW" then
+                            multi = multi + 1
+                        end
+                    end
+                    -- One relation beside one-row ones: nothing can repeat it.
+                    for position, item in ipairs(multi > 1 and items or {}) do
+                        local shape = item.shape
+                        if shape == nil or shape.kind ~= "ONE_ROW" then
+                            if shape == nil or item.alias == nil or item.using
+                                or (position > 1 and item.join ~= "ON")
+                                or (#grouped > 0 and #shape.keys ~= #grouped[1].keys) then
+                                tokens._join_cannot_fan_out = false
+                                return false
+                            end
+                            if #grouped > 0 then
+                                -- Paired, key for key, with one earlier grouped relation.
+                                local equalities = item.on and bi_expansion.on_equalities(
+                                    tokens, item.on, item.last) or {}
+                                local paired = false
+                                for _, earlier in ipairs(grouped) do
+                                    local mine, theirs, count = {}, {}, 0
+                                    for _, equality in ipairs(equalities) do
+                                        for _, order in ipairs({{1, 2}, {2, 1}}) do
+                                            local a, b = equality[order[1]], equality[order[2]]
+                                            if a[1] == item.alias and b[1] == earlier.alias
+                                                and not mine[a[2]] and not theirs[b[2]] then
+                                                mine[a[2]], theirs[b[2]], count = true, true, count + 1
+                                            end
+                                        end
+                                    end
+                                    local covered = count == #shape.keys
+                                    for _, key_name in ipairs(shape.keys) do
+                                        covered = covered and mine[key_name] == true
+                                    end
+                                    for _, key_name in ipairs(earlier.keys) do
+                                        covered = covered and theirs[key_name] == true
+                                    end
+                                    paired = paired or covered
+                                end
+                                if not paired then
+                                    tokens._join_cannot_fan_out = false
+                                    return false
+                                end
+                            end
+                            grouped[#grouped + 1] = {alias = item.alias, keys = shape.keys}
+                        end
+                    end
+                end
+            end
+        end
+        tokens._join_cannot_fan_out = found_any
+        return found_any
+    end
+
+    -- The guard's question, with the joins that provably cannot fan out taken
+    -- out of it.
+    function bi_expansion.unsafe_composition(tokens, reference, references)
+        return bi_expansion.composed_in_from(tokens, reference)
+            and not bi_expansion.join_cannot_fan_out(tokens, references)
+    end
+
     -- Does this model accept ordinary-SQL semantics over its derived table?
     function bi_expansion.allows_composition(published_schema)
         local allowed = scalar([[
@@ -5640,17 +6217,19 @@ do
     -- answer, and no error. That is a capability and a liability in the same
     -- statement, so a freeze is recorded rather than left to be discovered.
     --
-    -- Returns the target schema and name, or nil when the statement is not a
-    -- view definition.
+    -- Returns the target schema and name, and whether the statement replaces
+    -- an existing view; nil when the statement is not a view definition.
     function bi_expansion.frozen_view_target(tokens)
         local index = 1
         if sql_text.token_upper(tokens[index]) ~= "CREATE" then
             return nil
         end
         index = index + 1
+        local replaces = false
         if sql_text.token_upper(tokens[index]) == "OR"
             and sql_text.token_upper(tokens[index + 1]) == "REPLACE" then
             index = index + 2
+            replaces = true
         end
         if sql_text.token_upper(tokens[index]) == "FORCE" then
             index = index + 1
@@ -5670,13 +6249,40 @@ do
         end
         if tokens[index + 1] ~= nil and tokens[index + 1].text == "."
             and syntax.token_identifier_value(tokens[index + 2]) ~= nil then
-            return first, syntax.token_identifier_value(tokens[index + 2])
+            return first, syntax.token_identifier_value(tokens[index + 2]), replaces
         end
-        -- An unqualified view lands in whatever schema the session has open,
-        -- which the preprocessor cannot see. Recorded with an empty schema
-        -- rather than guessed at: a wrong schema in the catalog would be worse
-        -- than an absent one, because it reads as a fact.
-        return "", first
+        -- An unqualified view lands in whatever schema the session has open;
+        -- record_target resolves it.
+        return "", first, replaces
+    end
+
+    -- Where the view this statement creates will be, or nil when the statement
+    -- will not create it, so that nothing is recorded for it.
+    --
+    -- The record is written while the statement is being rewritten, before
+    -- Exasol runs it, so it has to predict the outcome. An unqualified name
+    -- lands in the session's open schema, which the preprocessor runs in and
+    -- can read; it was recorded with an empty schema instead, which no view
+    -- matches, so CHECK_FROZEN_VIEWS reported every such view -- ibis's schema
+    -- probe among them -- as DROPPED. With no schema open the CREATE fails. A
+    -- plain CREATE VIEW over an existing view fails too: recording it replaced
+    -- the record of the view that stays.
+    function bi_expansion.record_target(view_schema, view_name, replaces)
+        local schema = view_schema
+        if schema == "" then
+            local ok, rows = pcall(query, "SELECT CURRENT_SCHEMA")
+            schema = ok and rows and rows[1] and rows[1][1] or nil
+            if schema == nil or schema == null then return nil end
+        end
+        if not replaces then
+            local ok, rows = pcall(query, [[
+                SELECT 1 FROM SYS.EXA_ALL_VIEWS
+                WHERE UPPER(VIEW_SCHEMA) = UPPER(:view_schema)
+                  AND UPPER(VIEW_NAME) = UPPER(:view_name)
+            ]], {view_schema = tostring(schema), view_name = view_name})
+            if ok and rows ~= nil and #rows > 0 then return nil end
+        end
+        return tostring(schema)
     end
 
     function bi_expansion.rewrite(statement_text)
@@ -5712,7 +6318,14 @@ do
                 .. " Each one is a separate compile.")
         end
 
-        local view_schema, view_name = bi_expansion.frozen_view_target(tokens)
+        -- Rewritten into the ordinary SQL it means before anything is spliced,
+        -- then read again; a second pass finds nothing left to rewrite.
+        local composed, composed_refusal =
+            bi_expansion.compose_measures(tokens, statement_text, applicable)
+        if composed_refusal ~= nil then return composed_refusal end
+        if composed ~= nil then return bi_expansion.rewrite(composed) end
+
+        local view_schema, view_name, view_replaces = bi_expansion.frozen_view_target(tokens)
         local frozen = {}
 
         -- Reverse order, so an earlier reference's character offsets are still
@@ -5733,7 +6346,7 @@ do
             -- QUERY_CAPABILITIES and docs/bi-tools.md publish for this shape,
             -- and the only one of the two that names SET_MODEL_DERIVED_COMPOSITION
             -- as an opt-in for joining rather than for grouping.
-            if bi_expansion.composed_in_from(tokens, reference)
+            if bi_expansion.unsafe_composition(tokens, reference, applicable)
                 and not bi_expansion.allows_composition(reference.published_schema) then
                 return error_result("SEMANTIC_QUERY_012",
                     "This statement joins " .. tostring(reference.published_schema) .. "."
@@ -5756,12 +6369,16 @@ do
             -- one (a mismatched aggregate, an uncovered GROUP BY). Ungrouped, a
             -- refusal falls back to reference expansion, which already answers
             -- aggregate-over-object shapes such as arithmetic around a SUM.
-            local block = not bi_expansion.allows_composition(reference.published_schema)
-                and bi_expansion.semantic_block(tokens, reference, applicable) or nil
+            -- Under the opt-in too: the block's own GROUP BY is the semantic
+            -- query its author wrote, not a re-aggregation, and expanding it
+            -- instead left that GROUP BY over a derived table already grouped --
+            -- invalid SQL, answered by a raw engine error.
+            local composing = bi_expansion.allows_composition(reference.published_schema)
+            local block = bi_expansion.semantic_block(tokens, reference, applicable)
             if block then
                 local block_wanted = bi_expansion.infer_columns(tokens, reference,
                     reference.columns, reference.by_name)
-                local reaggregation = block_wanted ~= nil
+                local reaggregation = block_wanted ~= nil and not composing
                     and bi_expansion.outer_reaggregation_refusal(tokens, reference, block_wanted) or nil
                 if reaggregation ~= nil then
                     return reaggregation
@@ -5786,8 +6403,12 @@ do
                             relations = compile_cache.qualified_relations(compiled_block.generated_sql),
                         }
                     end
+                    -- An arm of a set operation is spliced as a query term: the
+                    -- compiled SQL may open with WITH, which cannot follow UNION.
+                    local spliced = sql_text.flatten_lines(compiled_block.generated_sql)
+                    if block.arm then spliced = "SELECT * FROM (" .. spliced .. ")" end
                     rewritten = string.sub(rewritten, 1, block.first_pos - 1)
-                        .. sql_text.flatten_lines(compiled_block.generated_sql)
+                        .. spliced
                         .. string.sub(rewritten, block.last_pos + 1)
                     expanded = expanded + 1
                     goto next_reference
@@ -5978,7 +6599,20 @@ do
         -- half way leaves no record of a view it never created. Best effort:
         -- losing the record must not fail a CREATE VIEW that otherwise works,
         -- and VALIDATE_MODEL reconciles against EXA_ALL_VIEWS either way.
-        for _, entry in ipairs(frozen) do
+        --
+        -- A record describes the view as it now stands, so it replaces the
+        -- view's earlier ones. Appending kept every compilation: re-creating a
+        -- STALE view -- the documented remedy -- added a CURRENT row beside the
+        -- STALE ones, and the view reported STALE for good.
+        local record_schema = #frozen > 0
+            and bi_expansion.record_target(view_schema, view_name, view_replaces) or nil
+        if record_schema ~= nil then
+            pcall(query, [[
+                DELETE FROM SYS_SEMANTIC.FROZEN_VIEWS
+                WHERE VIEW_SCHEMA = :view_schema AND VIEW_NAME = :view_name
+            ]], {view_schema = upper(record_schema), view_name = upper(view_name)})
+        end
+        for _, entry in ipairs(record_schema ~= nil and frozen or {}) do
             pcall(query, [[
                 INSERT INTO SYS_SEMANTIC.FROZEN_VIEWS (
                   MODEL_ID, VERSION_ID, VIEW_SCHEMA, VIEW_NAME, OBJECT_NAME,
@@ -5990,7 +6624,7 @@ do
             ]], {
                 model_id = entry.model.model_id,
                 version_id = entry.model.version_id,
-                view_schema = upper(view_schema),
+                view_schema = upper(record_schema),
                 view_name = upper(view_name),
                 object_name = entry.reference.object_name,
                 columns = entry.columns,
@@ -6554,6 +7188,9 @@ if rawget(_G, "ESV_TEST_MODE") then
         bi_find_references = bi_expansion.find_references,
         bi_infer_columns = bi_expansion.infer_columns,
         bi_composed_in_from = bi_expansion.composed_in_from,
+        bi_unsafe_composition = bi_expansion.unsafe_composition,
+        bi_set_operation_arm = bi_expansion.set_operation_arm,
+        bi_compose_measures = bi_expansion.compose_measures,
         bi_outer_reaggregation_refusal = bi_expansion.outer_reaggregation_refusal,
         bi_summable = bi_expansion.summable,
         bi_pushdown_filter = bi_expansion.pushdown_filter,

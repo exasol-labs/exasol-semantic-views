@@ -618,6 +618,7 @@ Use the admin helpers instead of direct DML:
 SEMANTIC_ADMIN.ADD_CUSTOM_EXTENSION
 SEMANTIC_ADMIN.GET_CUSTOM_EXTENSIONS
 SEMANTIC_ADMIN.DROP_MODEL
+SEMANTIC_ADMIN.DROP_MODEL_IF_EXISTS
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_COLUMN
 SEMANTIC_ADMIN.ADD_UNIQUE_KEY_WITH_COLUMNS
@@ -633,7 +634,14 @@ SEMANTIC_ADMIN.SUGGEST_GRAIN_METADATA
 
 `DROP_MODEL(model_name)` removes one model's catalog and runtime history. It
 drops the published schema only when no other model references that schema and
-the schema is not protected; physical source schemas are never removed.
+the schema is not protected; physical source schemas are never removed. A model
+that does not exist is refused with `SEMANTIC_ADMIN_011`.
+
+`DROP_MODEL_IF_EXISTS(model_name)` is the form for a pipeline that rebuilds a
+model from source on every run, such as a dbt hook: it drops the model exactly as
+`DROP_MODEL` does, or returns one row with `STATUS = 'NOT_FOUND'` when there is
+none, so the first run needs no existence probe. Only a missing model is
+absorbed; any other refusal still raises.
 
 `ADD_CUSTOM_EXTENSION` accepts non-Exasol vendor names without interpretation,
 so import/export can preserve third-party Ossie/OSI extensions. `ADD_UNIQUE_KEY`
@@ -776,8 +784,9 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.PROPOSE_MODEL_EVOLUTION(
 );
 ```
 
-Proposals are pinned to the model's active version and duplicate pending
-payloads are idempotent. They do not change model metadata. A human reviewer
+Proposals are pinned to the model's `DEFINITION_HASH` at the time they are
+made (`PROPOSED_DEFINITION_HASH`), and duplicate pending payloads against the
+same definition are idempotent. They do not change model metadata. A human reviewer
 records the decision separately:
 
 ```sql
@@ -787,8 +796,14 @@ EXECUTE SCRIPT SEMANTIC_ADMIN.REVIEW_MODEL_EVOLUTION(
 ```
 
 The other terminal decision is `REJECTED`. A decision is one-way, review notes
-are retained in `MODEL_EVOLUTION_REVIEWS`, and stale proposals cannot be
-certified after the active version changes. `CERTIFIED` means the proposal may
+are retained in `MODEL_EVOLUTION_REVIEWS`, and a stale proposal cannot be
+certified. A proposal is stale once the model's definition hash has moved
+(`IS_STALE`, beside `PROPOSED_DEFINITION_HASH` and `CURRENT_DEFINITION_HASH` in
+`MODEL_EVOLUTION_SUGGESTIONS`), which any change a consumer could observe does;
+the version number cannot measure it, because authoring mutates a model's one
+version in place. Reject a stale proposal and propose it again: the new one is
+pinned to the current definition. A proposal made before 0.5.2 carries no hash
+and reads as stale. `CERTIFIED` means the proposal may
 be implemented; it does not activate it. Apply the reviewed change through the
 normal admin DDL, then validate and publish. The compiler does not read either
 evolution table.
@@ -859,6 +874,18 @@ those tables as materializations of the live model, with a `MAX_AGE` policy.
 
 The compiler treats this registry as an optimizer input. It never uses a
 materialization to make an invalid metric/dimension request valid.
+
+### Definition: what the aggregate was built from
+
+Freshness bounds how *old* the data is; it says nothing about which definition
+produced it. A dimension or metric keeps its id when it is redefined, so each
+mapped column also records the field's `DEFINITION_HASH` when it is added. Once a
+mapped field is redefined, the selector refuses the materialization with reason
+code `DEFINITION_CHANGED` and the sources answer, and `VALIDATE_MODEL` names it in
+`SEMANTIC_MODEL_077`. Any redefined field disqualifies it, because a redefined
+dimension changes the grain of every metric beside it. Rebuild the object and call
+`MARK_MATERIALIZATION_REFRESHED`, which records the current definitions as the
+ones the object now holds.
 
 ### Accelerating a model without a second model
 

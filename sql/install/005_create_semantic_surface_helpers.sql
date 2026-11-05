@@ -2,6 +2,8 @@ ALTER SESSION SET SQL_PREPROCESSOR_SCRIPT = NULL;
 
 -- @lua lua/semantic_layer/scripts/semantic_guard.lua
 
+-- @lua lua/semantic_layer/scripts/frozen_view_guard.lua
+
 -- @lua lua/semantic_layer/scripts/publish_model.lua
 
 -- @lua lua/semantic_layer/scripts/refresh_semantic_surface.lua

@@ -404,6 +404,8 @@ ADDED_COLUMNS = [
     ("MATERIALIZATIONS", "REFRESHED_ROW_COUNT", "DECIMAL(18,0)"),
     ("MATERIALIZATIONS", "SOURCE_SNAPSHOT", "VARCHAR(512)"),
     ("MATERIALIZATIONS", "FRESHNESS_MAX_AGE_SECONDS", "DECIMAL(18,0)"),
+    ("MODEL_EVOLUTION_SUGGESTIONS", "PROPOSED_DEFINITION_HASH", "VARCHAR(64)"),
+    ("MATERIALIZATION_COLUMNS", "DEFINITION_HASH", "VARCHAR(64)"),
 ]
 
 
@@ -453,6 +455,62 @@ def migrate_added_columns(con: Connection) -> list[str]:
         con.execute(f"ALTER TABLE SYS_SEMANTIC.{table} ADD COLUMN {column} {ddl}")
         added.append(f"{table}.{column}")
     return added
+
+
+def migrate_version_status(con: Connection) -> int:
+    """Correct version rows that kept DRAFT after their model was published.
+
+    PUBLISH_MODEL used to set the model's status and leave its one version row
+    as CREATE_MODEL wrote it. Idempotent: a row already in step is untouched.
+    Returns how many rows it corrected.
+    """
+    if not table_exists(con, "SYS_SEMANTIC", "MODEL_VERSIONS"):
+        return 0
+    statement = con.execute(
+        "UPDATE SYS_SEMANTIC.MODEL_VERSIONS mv SET STATUS = m.STATUS"
+        " FROM SYS_SEMANTIC.MODEL_VERSIONS mv"
+        " JOIN SYS_SEMANTIC.MODELS m ON m.ACTIVE_VERSION_ID = mv.VERSION_ID"
+        " WHERE m.STATUS = 'PUBLISHED' AND mv.STATUS <> m.STATUS")
+    return int(statement.rowcount())
+
+
+def migrate_frozen_view_history(con: Connection) -> int:
+    """Remove frozen-view records a later compilation of the same view replaced.
+
+    The preprocessor appended a record each time a view was compiled, so a
+    re-created view kept its earlier records and CHECK_FROZEN_VIEWS reported
+    each of them. It now replaces them; this clears what an older build left.
+    Idempotent. Returns how many records it removed.
+    """
+    if not table_exists(con, "SYS_SEMANTIC", "FROZEN_VIEWS"):
+        return 0
+    statement = con.execute(
+        "DELETE FROM SYS_SEMANTIC.FROZEN_VIEWS fv WHERE EXISTS ("
+        "SELECT 1 FROM SYS_SEMANTIC.FROZEN_VIEWS n"
+        " WHERE n.VIEW_SCHEMA = fv.VIEW_SCHEMA AND n.VIEW_NAME = fv.VIEW_NAME"
+        " AND n.MODEL_ID = fv.MODEL_ID AND n.OBJECT_NAME = fv.OBJECT_NAME"
+        " AND n.FROZEN_VIEW_ID > fv.FROZEN_VIEW_ID)")
+    return int(statement.rowcount())
+
+
+def migrate_materialization_definitions(con: Connection) -> int:
+    """Stamp materialization columns mapped before definitions were recorded.
+
+    A column records the definition hash of the field it holds, and the
+    selector refuses a materialization whose fields were redefined since. A
+    column mapped by an older build has no hash; it is stamped with the current
+    one, which is what the selector assumed until now, so an upgrade changes no
+    answer and a later redefinition is caught. Returns how many it stamped.
+    """
+    if not table_exists(con, "SYS_SEMANTIC", "MATERIALIZATION_COLUMNS"):
+        return 0
+    statement = con.execute(
+        "UPDATE SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc SET DEFINITION_HASH = h.DEFINITION_HASH"
+        " FROM SYS_SEMANTIC.MATERIALIZATION_COLUMNS mc"
+        " JOIN SEMANTIC_CATALOG.FIELD_DEFINITION_HASHES h"
+        " ON h.FIELD_KIND = mc.OBJECT_TYPE AND h.FIELD_ID = mc.OBJECT_ID"
+        " WHERE mc.DEFINITION_HASH IS NULL")
+    return int(statement.rowcount())
 
 
 def migrate_renamed_tables(con: Connection) -> list[str]:
@@ -702,6 +760,15 @@ def main() -> int:
         print(f"      {dim('created role ' + role)}")
     for added in install_files(con):
         print(f"      {dim('added column ' + added)}")
+    corrected = migrate_version_status(con)
+    if corrected:
+        print(f"      {dim(f'marked {corrected} published model version(s) PUBLISHED')}")
+    replaced = migrate_frozen_view_history(con)
+    if replaced:
+        print(f"      {dim(f'removed {replaced} superseded frozen-view record(s)')}")
+    stamped = migrate_materialization_definitions(con)
+    if stamped:
+        print(f"      {dim(f'recorded the definition of {stamped} materialization column(s)')}")
     install_elapsed = time.monotonic() - t_install
 
     # record which build this deployment is now running, before the example

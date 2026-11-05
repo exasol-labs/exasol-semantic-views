@@ -845,11 +845,13 @@ applied. Assigning one synonym to multiple metrics in the same block fails
 validation. Use replacement for bootstrap or deliberate surface resets, not
 metric removal.
 
-Remove or rename one metric through Semantic DDL. Dry-run each statement before
-applying it:
+Remove or rename one metric, or remove one fact, through Semantic DDL. Dry-run
+each statement before applying it:
 
 ```sql
 ALTER SEMANTIC VIEW <model>.<object> DROP METRIC <metric_name>;
+
+ALTER SEMANTIC VIEW <model>.<object> DROP FACT <fact_name>;
 
 ALTER SEMANTIC VIEW <model>.<object>
 RENAME METRIC <old_name> TO <new_name>;
@@ -857,7 +859,8 @@ RENAME METRIC <old_name> TO <new_name>;
 
 `DROP METRIC` removes membership from the named object and deactivates the
 metric when no other object uses it. It is rejected and rolled back when active
-metrics still depend on it. `RENAME METRIC` preserves the metric ID, rewrites
+metrics still depend on it. `DROP FACT` retires the fact from the model, since a
+fact belongs to its entity, and is refused while any metric is built on it. `RENAME METRIC` preserves the metric ID, rewrites
 dependent metric expressions, and retains the old name as a synonym, so verified
 requests, structured requests and Semantic SQL that ask for the old name keep
 working, and their output column keeps the name they asked for. On a published
@@ -1091,7 +1094,7 @@ EXPORT SEMANTIC MODEL <model>;
 - Validate before publishing. Never call `PUBLISH_MODEL` without a clean
   `VALIDATE_MODEL` pass.
 - Every `REPLACE ...` block replaces visible membership only; omitted catalog
-  definitions remain. Use `DROP METRIC` or `REMOVE_DIMENSION` for intentional
+  definitions remain. Use `DROP METRIC`, `DROP FACT` or `REMOVE_DIMENSION` for intentional
   removal, and the `ADD OR REPLACE` forms for incremental changes.
 - A `REPLACE` block renumbers the object's columns. One statement carrying all
   three blocks numbers them dimensions, facts, then metrics from 1; separate

@@ -140,6 +140,14 @@ PROBES = {
         # the value, so it is still the refusal this row publishes.
         "sql": f"SELECT CUSTOMER_REGION, COUNT(TOTAL_REVENUE) FROM {PUBLISHED}",
     },
+    "A metric beside a join under SET_MODEL_DERIVED_COMPOSITION": {
+        # Grouped by the joined table's key, not the object's dimension, so each
+        # group holds several regions' revenue. test_composition_group_by.py
+        # holds the forms that answer.
+        "setup": ("composition", {}),
+        "sql": f"SELECT c.REGION, t0.TOTAL_REVENUE FROM {PUBLISHED} t0"
+               " JOIN MART.CUSTOMERS c ON c.REGION = t0.CUSTOMER_REGION GROUP BY c.REGION",
+    },
     "A SELECT list that names no field": {
         "sql": f"SELECT 1 FROM {PUBLISHED} t0",
     },
@@ -213,6 +221,11 @@ def main() -> int:
             f"EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL('{MODEL}')").fetchall()
 
     def apply_setup(kind: str, columns: dict) -> None:
+        if kind == "composition":
+            admin.execute("EXECUTE SCRIPT SEMANTIC_ADMIN."
+                          f"SET_MODEL_DERIVED_COMPOSITION('{MODEL}', 'TRUE')")
+            admin.commit()
+            return
         if kind == "governed":
             admin.execute("EXECUTE SCRIPT SEMANTIC_ADMIN."
                           f"SET_MODEL_GOVERNANCE_MODE('{MODEL}', 'GOVERNED')")
@@ -243,6 +256,8 @@ def main() -> int:
         # the DIVERGENT marking above does not outlive this verifier.
         admin.execute("EXECUTE SCRIPT SEMANTIC_ADMIN."
                       f"SET_MODEL_GOVERNANCE_MODE('{MODEL}', 'OPEN')")
+        admin.execute("EXECUTE SCRIPT SEMANTIC_ADMIN."
+                      f"SET_MODEL_DERIVED_COMPOSITION('{MODEL}', 'FALSE')")
         admin.execute("UPDATE SYS_SEMANTIC.METRICS SET IS_PRIVATE = FALSE,"
                       f" DISPLAY_POLICY = NULL WHERE METRIC_NAME = '{METRIC}'")
         admin.execute("UPDATE SYS_SEMANTIC.DIMENSIONS SET IS_HIDDEN = FALSE,"
