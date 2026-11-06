@@ -119,3 +119,26 @@ test("shared json strict validation refuses what the decoder tolerates", functio
     assert_equal(json.is_valid(null), false)
     assert_equal(json.is_valid(nil), false)
 end)
+
+local function message_without_source(err)
+    local message = tostring(err):gsub("^.-:%d+: ", "", 1)
+    return message
+end
+
+test("shared json diagnostic validation accepts nested JSON", function()
+    local valid, detail = json.validate('{"a":[null,true]}')
+    assert_equal(valid, true)
+    assert_equal(detail, nil)
+end)
+
+test("shared json diagnostic validation explains a leading-zero number", function()
+    local valid, detail = json.validate("01")
+    assert_equal(valid, false)
+    assert_equal(message_without_source(detail), "unexpected trailing JSON at byte 2")
+end)
+
+test("shared json diagnostic validation explains invalid unicode digits", function()
+    local valid, detail = json.validate('"\\uZZZZ"')
+    assert_equal(valid, false)
+    assert_equal(message_without_source(detail), "invalid unicode escape at byte 2")
+end)

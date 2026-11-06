@@ -5,7 +5,6 @@
 -- @param COVERAGE_JSON Array covering every active representation: {representation_name, coverage_predicate, valid_from, valid_to}.
 -- @returns TABLE
 
-local JSON_NULL = {}
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
@@ -21,151 +20,12 @@ end
 local function row_value(row, name, position)
     return row[name] or row[string.lower(name)] or row[position]
 end
-local function json_decode(text)
-    if missing(text) then error("empty JSON payload") end
-    text = tostring(text)
-    local pos = 1
-    local function peek() return string.sub(text, pos, pos) end
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-    local function parse_string()
-        if peek() ~= '"' then error("expected string at byte " .. tostring(pos)) end
-        pos = pos + 1
-        local out = {}
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return table.concat(out)
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" then
-                    out[#out + 1] = e
-                    pos = pos + 2
-                elseif e == "b" then
-                    out[#out + 1] = "\b"
-                    pos = pos + 2
-                elseif e == "f" then
-                    out[#out + 1] = "\f"
-                    pos = pos + 2
-                elseif e == "n" then
-                    out[#out + 1] = "\n"
-                    pos = pos + 2
-                elseif e == "r" then
-                    out[#out + 1] = "\r"
-                    pos = pos + 2
-                elseif e == "t" then
-                    out[#out + 1] = "\t"
-                    pos = pos + 2
-                elseif e == "u" then
-                    out[#out + 1] = "?"
-                    pos = pos + 6
-                else error("invalid escape at byte " .. tostring(pos)) end
-            else
-                out[#out + 1] = c
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-    local parse_value
-    local function parse_number()
-        local start_pos = pos
-        if peek() == "-" then pos = pos + 1 end
-        while string.match(peek(), "%d") do pos = pos + 1 end
-        if peek() == "." then
-            pos = pos + 1
-            while string.match(peek(), "%d") do pos = pos + 1 end
-        end
-        local c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then pos = pos + 1 end
-            while string.match(peek(), "%d") do pos = pos + 1 end
-        end
-        local value = tonumber(string.sub(text, start_pos, pos - 1))
-        if value == nil then error("invalid number at byte " .. tostring(start_pos)) end
-        return value
-    end
-    local function parse_array()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            out[#out + 1] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return out
-            elseif c == "," then pos = pos + 1
-            else error("expected array comma or close at byte " .. tostring(pos)) end
-        end
-    end
-    local function parse_object()
-        pos = pos + 1
-        local out = {}
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return out
-        end
-        while true do
-            skip_ws()
-            local name = parse_string()
-            skip_ws()
-            if peek() ~= ":" then error("expected object colon at byte " .. tostring(pos)) end
-            pos = pos + 1
-            out[name] = parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return out
-            elseif c == "," then pos = pos + 1
-            else error("expected object comma or close at byte " .. tostring(pos)) end
-        end
-    end
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then return parse_string()
-        elseif c == "{" then return parse_object()
-        elseif c == "[" then return parse_array()
-        elseif c == "-" or string.match(c, "%d") then return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return false
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return JSON_NULL
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-    local value = parse_value()
-    skip_ws()
-    if pos <= #text then error("unexpected trailing JSON at byte " .. tostring(pos)) end
-    return value
-end
+import("SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME", "script_support")
+local json = script_support.ESV_JSON
+
 local function json_field(item, name)
     local value = item[name]
-    if value == JSON_NULL then return nil end
+    if value == json.NULL then return nil end
     return value
 end
 local function sql_value(value)
@@ -175,7 +35,7 @@ end
 
 local model_name = normalize_name(MODEL_NAME, "MODEL_NAME")
 local entity_name = normalize_name(ENTITY_NAME, "ENTITY_NAME")
-local ok, declarations = pcall(json_decode, COVERAGE_JSON)
+local ok, declarations = pcall(json.decode, COVERAGE_JSON)
 if not ok or type(declarations) ~= "table" or #declarations == 0 then
     local detail = not ok and tostring(declarations)
         or (type(declarations) ~= "table" and "top-level value is not an array"

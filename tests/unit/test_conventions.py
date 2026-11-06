@@ -545,8 +545,10 @@ DUPLICATED_LUA_BODIES: dict[str, tuple[str, ...]] = {}
 # would pass that check and still mint a second null nobody else recognises.
 JSON_OWNER = "lua/semantic_layer/shared/json.lua"
 JSON_PRIVATE_NAMES = re.compile(
-    r"^local (?:function )?(json_encode|json_decode|json_escape|is_array"
-    r"|parse_json_text)\b|^local JSON_NULL\s*=\s*\{", re.MULTILINE)
+    r"^\s*(?:local\s+(?:function\s+)?|function\s+)"
+    r"(json_encode|json_decode|json_escape|is_array|parse_json_text"
+    r"|parse_value|parse_string|parse_number|parse_array|parse_object)\b"
+    r"|^\s*local\s+(JSON_NULL)\s*=\s*\{", re.MULTILINE)
 
 # Same rule for SQL text, for the same reason: a reworded second copy of
 # `replace_qualified_alias` would pass the body check above and still let the
@@ -596,7 +598,7 @@ def _lua_function_bodies(paths=None):
 # began to see helpers nested inside a function or a `do` block, and ten copies
 # were already there. Fold the next one the same way and lower the pin. It only
 # shrinks.
-SCRIPT_HELPER_COPIES = 87
+SCRIPT_HELPER_COPIES = 86
 
 
 class ScriptHelpersAreCopied(unittest.TestCase):
@@ -657,9 +659,9 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
         """
         offenders = {
             str(path.relative_to(ROOT)): sorted(
-                m.group(1) for m in JSON_PRIVATE_NAMES.finditer(
+                m.group(1) or m.group(2) for m in JSON_PRIVATE_NAMES.finditer(
                     path.read_text(encoding="utf-8")))
-            for path in LUA_SOURCES
+            for path in (*LUA_SOURCES, *sorted(SCRIPT_BODIES_DIR.glob("*.lua")))
             if str(path.relative_to(ROOT)) != JSON_OWNER
             and JSON_PRIVATE_NAMES.search(path.read_text(encoding="utf-8"))
         }
@@ -667,6 +669,13 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
             {}, offenders,
             f"JSON belongs to {JSON_OWNER}; use ESV_JSON rather than declaring "
             "a private codec or sentinel")
+
+    def test_json_ownership_detects_nested_script_parsers(self):
+        for declaration in ("local function json_decode(text)",
+                            "    local function parse_string()",
+                            "    local parse_value", "    function parse_value()",
+                            "local JSON_NULL = {}"):
+            self.assertRegex(declaration, JSON_PRIVATE_NAMES)
 
     def test_sql_text_has_exactly_one_owner(self):
         """The rendering half of the same rule the grain graph has for proofs.
@@ -692,7 +701,7 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
         """Deriving the rule from a module that had been emptied would pass silently."""
         owner = (ROOT / JSON_OWNER).read_text(encoding="utf-8")
         for exported in ("M.NULL", "function M.encode", "function M.decode",
-                         "function M.is_valid", "function M.is_array"):
+                         "function M.validate", "function M.is_valid", "function M.is_array"):
             self.assertIn(exported, owner)
         self.assertIn("ESV_JSON = M", owner)
 
@@ -725,6 +734,11 @@ class RoutinesAreWrittenOnce(unittest.TestCase):
                 name, body = match.group(1), match.group(2)
                 for global_name in ("ESV_JSON", "ESV_SQL_TEXT"):
                     if global_name not in body:
+                        continue
+                    if (global_name == "ESV_JSON"
+                            and "script_support.ESV_JSON" in body
+                            and 'import("SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME", "script_support")'
+                            in body):
                         continue
                     consumers.add((global_name, name))
                     if f"{global_name} = M" in body:
@@ -896,10 +910,12 @@ class LuaRuntimesAreTestedAsPackaged(unittest.TestCase):
     def test_each_script_behavior_case_runs_one_script(self):
         for path in sorted((ROOT / "tests/lua/scripts").glob("*_test.lua")):
             source = path.read_text(encoding="utf-8")
-            cases = re.split(r"(?=^(?:test|test_script)\()", source, flags=re.M)[1:]
+            cases = re.findall(r"^[ \t]*(?:test|test_script)\(.*?^[ \t]*end\)",
+                               source, flags=re.M | re.S)
             self.assertTrue(cases, f"{path.name} has no test cases")
             for case in cases:
-                self.assertEqual(1, len(re.findall(r"(?<![A-Za-z_])run(?:_[a-z_]+)?\(", case)),
+                self.assertEqual(1, len(re.findall(
+                    r"(?<![A-Za-z_])(?:run(?:_[a-z_]+)?|stored|saved)\(", case)),
                                  f"{path.name}: each test case must run one script")
 
 

@@ -123,6 +123,7 @@ end
 
 function M.support(env)
     return {
+        ESV_JSON = ESV_JSON,
         ESV_ROWS = {scalar = function(sql, bindings)
             local rows = env.query(sql, bindings)
             if not rows or not rows[1] then return nil end
