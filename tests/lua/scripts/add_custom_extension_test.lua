@@ -62,23 +62,18 @@ for _, case in ipairs({
         {"invalid number", "-", "invalid number"},
         {"trailing text", "false x", "unexpected trailing JSON"},
         {"trailing array comma", "[1,]", "unexpected JSON token"},
+        {"leading-zero number", "01", "byte ", true},
+        {"fraction without digits", "1.", "byte ", true},
+        {"invalid unicode digits", '"\\uZZZZ"', "byte ", true},
+        {"raw newline", '"raw\nline"', "byte ", true},
     }) do
-    test_script("refuses " .. case[1] .. " before SQL", function()
-        local code = case[2] == "" and "SEMANTIC_ADMIN_001" or "SEMANTIC_ADMIN_040"
+    local name = case[4] and "refuses nonstandard " .. case[1] .. " with SEMANTIC_ADMIN_040"
+        or "refuses " .. case[1] .. " before SQL"
+    test_script(name, function()
+        local code = case[2] == "" and "SEMANTIC_ADMIN_001: DATA_JSON is required"
+            or "SEMANTIC_ADMIN_040: DATA_JSON must be valid JSON"
         local result = run(parameters(case[2]),
             H.refusal(code, {"SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"}))
         assert_contains(result.error, case[3])
-    end)
-end
-
-for _, case in ipairs({
-        {"leading-zero number", "01"}, {"fraction without digits", "1."},
-        {"invalid unicode digits", '"\\uZZZZ"'}, {"raw newline", '"raw\nline"'},
-    }) do
-    test_script("refuses nonstandard " .. case[1] .. " with SEMANTIC_ADMIN_040", function()
-        local result = run(parameters(case[2]),
-            H.refusal("SEMANTIC_ADMIN_040: DATA_JSON must be valid JSON",
-                {"SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"}))
-        assert_contains(result.error, "byte ")
     end)
 end
