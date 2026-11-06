@@ -41,3 +41,12 @@ addopts = "-ra --durations=15"
 # each ping resets the client's wait, so a test hung for an hour. The slowest
 # test takes seconds; override with --timeout.
 timeout = 600
+
+[tool.coverage.run]
+# Coverage files from separate GitHub Actions jobs must refer to the same paths.
+relative_files = true
+omit = ["tools/dev/*"]
+
+[tool.coverage.report]
+# Developer helpers are not part of the Python production coverage surface.
+omit = ["tools/dev/*"]
