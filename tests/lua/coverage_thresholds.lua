@@ -203,7 +203,7 @@ return {
     scripts = {
         ["lua/semantic_layer/scripts/add_agent_instruction.lua"] = 91.6,
         ["lua/semantic_layer/scripts/add_attribute_binding.lua"] = 9.2,
-        ["lua/semantic_layer/scripts/add_custom_extension.lua"] = 6.5,
+        ["lua/semantic_layer/scripts/add_custom_extension.lua"] = 80.8,
         ["lua/semantic_layer/scripts/add_dimension.lua"] = 11.6,
         ["lua/semantic_layer/scripts/add_dimension_with_bindings.lua"] = 92.8,
         ["lua/semantic_layer/scripts/add_entity.lua"] = 90.7,
@@ -297,7 +297,7 @@ return {
         ["lua/semantic_layer/scripts/set_relationship.lua"] = 10.4,
         ["lua/semantic_layer/scripts/set_representation_authority.lua"] = 15.6,
         ["lua/semantic_layer/scripts/set_representation_coverage.lua"] = 9.3,
-        ["lua/semantic_layer/scripts/set_representation_coverage_batch.lua"] = 4.3,
+        ["lua/semantic_layer/scripts/set_representation_coverage_batch.lua"] = 88.0,
         ["lua/semantic_layer/scripts/suggest_grain_metadata.lua"] = 80.0,
         ["lua/semantic_layer/scripts/sync_frozen_views.lua"] = 9.7,
         ["lua/semantic_layer/scripts/validate_model.lua"] = 91.6,
