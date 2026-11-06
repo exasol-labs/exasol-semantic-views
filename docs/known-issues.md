@@ -64,7 +64,7 @@ Exasol 2026.1.0:
   `CEIL(MONTH(o.order_date) / 3.0)`. A clean `--reset` install seeds only `customer_region`,
   `order_month`, `order_status`, `product_category`.
 - **Guidance:** expression validation uses a static function allowlist but does
-  not compile SQL (see CLAUDE.md). Use documented Exasol functions and execute
+  not compile SQL (see [development guidance](development.md#script-and-catalog-usage)). Use documented Exasol functions and execute
   each dimension/fact expression against its source entity before registration.
 
 ### BUG-003 — `VALID_COMBINATIONS_FOR_AGENT` over-reports validity
