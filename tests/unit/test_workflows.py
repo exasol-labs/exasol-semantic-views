@@ -84,10 +84,28 @@ class WorkflowWiringTest(unittest.TestCase):
 
     def test_ci_gate_waits_for_every_reusable_lane(self) -> None:
         jobs = self.workflows["ci.yml"]["jobs"]
-        lanes = set(jobs) - {"ci-gate"}
+        lanes = {"static-checks", "database-free", "dependency-audit", "system-tests"}
         self.assertTrue(lanes)
-        self.assertEqual(set(jobs["ci-gate"]["needs"]), lanes)
+        self.assertEqual(set(jobs["ci-gate"]["needs"]), lanes | {"sonar"})
         self.assertTrue(all(local_target(jobs[name]) for name in lanes))
+
+    def test_sonar_scans_after_both_coverage_jobs(self) -> None:
+        jobs = self.workflows["ci.yml"]["jobs"]
+        sonar = jobs["sonar"]
+        self.assertEqual(set(sonar["needs"]), {"database-free", "system-tests"})
+        self.assertEqual(local_target(sonar), "sonar.yml")
+        steps = self.workflows["sonar.yml"]["jobs"]["sonar"]["steps"]
+        self.assertTrue(any("sonarqube-scan-action@" in step.get("uses", "") for step in steps))
+        self.assertTrue(any("coverage combine" in step.get("run", "") for step in steps))
+
+        unit_steps = self.workflows["database-free.yml"]["jobs"]["database-free"]["steps"]
+        system_steps = self.workflows["system-tests.yml"]["jobs"]["system-tests"]["steps"]
+        self.assertTrue(any(step.get("with", {}).get("name") == "python-unit-coverage"
+                            for step in unit_steps))
+        self.assertTrue(any(step.get("with", {}).get("name") == "python-integration-coverage"
+                            for step in system_steps))
+        self.assertTrue(any("ESV_SYSTEM_COVERAGE=1" in step.get("run", "")
+                            for step in system_steps))
 
     def test_release_waits_for_ci_and_fuzz(self) -> None:
         jobs = self.workflows["release.yml"]["jobs"]
