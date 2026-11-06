@@ -2,7 +2,8 @@ local H = SCRIPT_BODY
 local run, test_script = H.for_script("set_representation_coverage_batch")
 
 test_script("requires MODEL_NAME", function()
-    run({}, H.refusal("SEMANTIC_ADMIN_001: MODEL_NAME is required", {}))
+    run({}, H.refusal("SEMANTIC_ADMIN_001: MODEL_NAME is required",
+        {"SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"}))
 end)
 
 local function parameters(payload)
@@ -69,7 +70,7 @@ for _, case in ipairs({
     test_script("refuses " .. case[1] .. " before SQL", function()
         local result = run(parameters(case[2]),
             H.refusal("SEMANTIC_ADMIN_060: COVERAGE_JSON must be a non-empty JSON array",
-                {}))
+                {"SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"}))
         assert_contains(result.error, case[3])
     end)
 end

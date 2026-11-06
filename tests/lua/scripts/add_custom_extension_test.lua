@@ -75,7 +75,10 @@ for _, case in ipairs({
         {"leading-zero number", "01"}, {"fraction without digits", "1."},
         {"invalid unicode digits", '"\\uZZZZ"'}, {"raw newline", '"raw\nline"'},
     }) do
-    test_script("currently accepts " .. case[1], function()
-        stored(case[2], false)
+    test_script("refuses nonstandard " .. case[1] .. " with SEMANTIC_ADMIN_040", function()
+        local result = run(parameters(case[2]),
+            H.refusal("SEMANTIC_ADMIN_040: DATA_JSON must be valid JSON",
+                {"SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME"}))
+        assert_contains(result.error, "byte ")
     end)
 end
