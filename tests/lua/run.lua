@@ -1,6 +1,7 @@
 -- Minimal database-free test runner and coverage collector for the Exasol Lua
 -- runtime. It intentionally has no LuaRocks dependencies; see README.md for
--- what it provides and why it is not busted.
+-- what it provides and docs/architecture-decisions/lua-test-runner.md for the
+-- comparison with Busted and LuaCov.
 --
 --   lua tests/lua/run.lua [name-substring]
 --   ESV_TEST_SEED=<n>    reproduce a shuffled order; =none keeps file order

@@ -14,6 +14,8 @@ Operational tooling — what a user or an operator runs — at the top level:
 
 The `run_*.sh` scripts are the entry points to the test lanes and static checks;
 `tests/README.md` maps each to what it runs and needs.
+The [Lua packaging decision record](../docs/architecture-decisions/lua-packaging.md)
+compares the packager's bundling job with `amalg`.
 
 `dev/` holds developer helpers that no user runs: `lint_script_bodies.py` (used by
 `run_static_checks.sh`), `wait_for_exasol.py` (shared CI database readiness check),

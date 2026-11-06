@@ -610,6 +610,7 @@ as it stands, for example from a release bundle, which ships it built.
   - [Examples](docs/examples.md)
 - Design
   - [Architecture](docs/architecture.md)
+  - [Implementation decision records](docs/architecture-decisions/README.md)
   - [Semantic compiler](docs/semantic-compiler.md)
   - [Semantic SQL preprocessor](docs/semantic-sql-preprocessor.md)
   - [Semantic catalog](docs/semantic-catalog.md)
