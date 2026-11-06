@@ -36,6 +36,15 @@ jobs:
         # under coverage.py and enforces the per-file thresholds in
         # tests/unit/python_coverage_thresholds.py.
         run: PYTHON_BIN=python sh tools/run_python_tests.sh
+      - name: Save Python unit coverage
+        run: cp .coverage .coverage.unit
+      - name: Upload Python unit coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-unit-coverage
+          path: .coverage.unit
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Build the install SQL
         # Nothing generated is checked in; this proves the sources assemble.
         run: python tools/package_lua_scripts.py

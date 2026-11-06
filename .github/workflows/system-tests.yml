@@ -45,7 +45,14 @@ jobs:
       - name: Wait for Exasol
         run: python tools/dev/wait_for_exasol.py
       - name: Run system tests
-        run: sh tools/run_system_tests.sh --junitxml=system-results.xml
+        run: ESV_SYSTEM_COVERAGE=1 sh tools/run_system_tests.sh --junitxml=system-results.xml
+      - name: Upload Python integration coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-integration-coverage
+          path: .coverage.*
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Upload system test report
         if: always()
         uses: actions/upload-artifact@v7
