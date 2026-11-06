@@ -25,7 +25,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install coverage.py
-        run: python -m pip install 'coverage>=7.16,<8'
+        run: |
+          python -m pip install 'coverage==7.17.2' --only-binary :all:
       - name: Download Python unit coverage
         uses: actions/download-artifact@v7
         with:
