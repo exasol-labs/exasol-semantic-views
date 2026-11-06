@@ -15,4 +15,15 @@ else
   exit 2
 fi
 
-"$lua_bin" tests/lua/run.lua "$@"
+if [ -n "${LUAC_BIN:-}" ]; then
+  luac_bin="$LUAC_BIN"
+elif command -v luac >/dev/null 2>&1; then
+  luac_bin="luac"
+elif command -v luac5.4 >/dev/null 2>&1; then
+  luac_bin="luac5.4"
+else
+  echo "Lua 5.4 compiler is required for script-body coverage." >&2
+  exit 2
+fi
+
+LUAC_BIN="$luac_bin" "$lua_bin" tests/lua/run.lua "$@"

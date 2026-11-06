@@ -696,6 +696,18 @@ Stable error codes are part of this contract. They let agents distinguish a
 request that needs clarification from a model defect, unsupported feature, source
 failure, or authorization failure without parsing arbitrary prose.
 
+## Database-Free Coverage Design
+
+The Lua interpreter executes runtime and installed-script tests and
+records the lines they reach. For script bodies, coverage uses the Lua 5.4
+compiler's `-p -l` listing to establish all executable source lines. The
+interpreter cannot discover the prototype of an uninstantiated nested local
+function through its debug API, so an interpreter-only denominator would make
+untested functions disappear from the coverage figure. The compiler listing
+includes them without executing the script or writing a bytecode artifact.
+This test-only dependency keeps coverage honest while preserving the plain-Lua,
+database-free test lane; live database tests still prove Exasol behavior.
+
 ## Code Map
 
 The main implementation boundaries are:
