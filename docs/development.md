@@ -1,8 +1,5 @@
 # Development reference
 
-This page retains operational details from the former root `CLAUDE.md`. Shared
-rules live in [AGENTS.md](../AGENTS.md).
-
 ## Local Exasol setup
 
 Install Exasol Personal once with `exasol install local -d dev`. The deployment
