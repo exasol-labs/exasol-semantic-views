@@ -6,6 +6,13 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- `ADD_CUSTOM_EXTENSION` now validates `DATA_JSON` as strict RFC 8259 JSON.
+  Nonstandard inputs previously accepted, including `01`, `1.`, raw control
+  characters and invalid Unicode escapes, are refused with
+  `SEMANTIC_ADMIN_040` and a parsing diagnostic.
+
 ## [0.6.1] - 2026-11-05
 
 Governed answers that stay governed after they leave the compiler, and a

@@ -23,6 +23,7 @@
 -- Two entry points read text, and they are deliberately not the same function:
 --
 --   M.decode(text)    builds a value; lenient about scalar spelling
+--   M.validate(text)  answers yes/no with a diagnostic; strict RFC 8259 grammar
 --   M.is_valid(text)  answers yes/no; strict RFC 8259 scalar grammar
 --
 -- The difference is real and load-bearing, so it is one parser with one `strict`
@@ -341,9 +342,17 @@ function M.decode(text)
     return parse(text, false)
 end
 
--- Well-formedness only, under the strict scalar grammar. Never raises.
+-- Well-formedness under the strict scalar grammar, with parse detail.
+-- Never raises; callers may put the detail behind their own refusal code.
+function M.validate(text)
+    local ok, result = pcall(parse, text, true)
+    if ok then return true, nil end
+    return false, tostring(result)
+end
+
+-- Boolean-only compatibility entry point for existing runtime callers.
 function M.is_valid(text)
-    local ok = pcall(parse, text, true)
+    local ok = M.validate(text)
     return ok
 end
 

@@ -9,8 +9,6 @@
 -- @param EXTENSION_NAME Extension name within the vendor; NULL defaults to 'default'. Part of the upsert key.
 -- @returns TABLE
 
-local JSON_NULL = {}
-
 local function missing(value)
     return value == nil or value == null or tostring(value) == ""
 end
@@ -53,6 +51,7 @@ end
 
 import("SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME", "script_support")
 local scalar = script_support.ESV_ROWS.scalar
+local json = script_support.ESV_JSON
 
 local function model_row(model_name)
     local rows = query([[
@@ -67,170 +66,6 @@ local function model_row(model_name)
         model_id = row_value(rows[1], "MODEL_ID", 1),
         version_id = row_value(rows[1], "VERSION_ID", 2)
     }
-end
-
-local function json_decode(text)
-    if missing(text) then
-        error("empty JSON payload")
-    end
-    text = tostring(text)
-    local pos = 1
-
-    local function peek()
-        return string.sub(text, pos, pos)
-    end
-
-    local function skip_ws()
-        while pos <= #text do
-            local c = peek()
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos = pos + 1
-            else
-                return
-            end
-        end
-    end
-
-    local function parse_string()
-        if peek() ~= '"' then
-            error("expected string at byte " .. tostring(pos))
-        end
-        pos = pos + 1
-        while pos <= #text do
-            local c = peek()
-            if c == '"' then
-                pos = pos + 1
-                return true
-            elseif c == "\\" then
-                local e = string.sub(text, pos + 1, pos + 1)
-                if e == '"' or e == "\\" or e == "/" or e == "b" or e == "f"
-                    or e == "n" or e == "r" or e == "t" then
-                    pos = pos + 2
-                elseif e == "u" then
-                    pos = pos + 6
-                else
-                    error("invalid escape at byte " .. tostring(pos))
-                end
-            else
-                pos = pos + 1
-            end
-        end
-        error("unterminated string")
-    end
-
-    local parse_value
-
-    local function parse_number()
-        local start_pos = pos
-        if peek() == "-" then
-            pos = pos + 1
-        end
-        while string.match(peek(), "%d") do
-            pos = pos + 1
-        end
-        if peek() == "." then
-            pos = pos + 1
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        local c = peek()
-        if c == "e" or c == "E" then
-            pos = pos + 1
-            c = peek()
-            if c == "+" or c == "-" then
-                pos = pos + 1
-            end
-            while string.match(peek(), "%d") do
-                pos = pos + 1
-            end
-        end
-        if tonumber(string.sub(text, start_pos, pos - 1)) == nil then
-            error("invalid number at byte " .. tostring(start_pos))
-        end
-        return true
-    end
-
-    local function parse_array()
-        pos = pos + 1
-        skip_ws()
-        if peek() == "]" then
-            pos = pos + 1
-            return true
-        end
-        while true do
-            parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "]" then
-                pos = pos + 1
-                return true
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected array comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    local function parse_object()
-        pos = pos + 1
-        skip_ws()
-        if peek() == "}" then
-            pos = pos + 1
-            return true
-        end
-        while true do
-            skip_ws()
-            parse_string()
-            skip_ws()
-            if peek() ~= ":" then
-                error("expected object colon at byte " .. tostring(pos))
-            end
-            pos = pos + 1
-            parse_value()
-            skip_ws()
-            local c = peek()
-            if c == "}" then
-                pos = pos + 1
-                return true
-            elseif c == "," then
-                pos = pos + 1
-            else
-                error("expected object comma or close at byte " .. tostring(pos))
-            end
-        end
-    end
-
-    function parse_value()
-        skip_ws()
-        local c = peek()
-        if c == '"' then
-            return parse_string()
-        elseif c == "{" then
-            return parse_object()
-        elseif c == "[" then
-            return parse_array()
-        elseif c == "-" or string.match(c, "%d") then
-            return parse_number()
-        elseif string.sub(text, pos, pos + 3) == "true" then
-            pos = pos + 4
-            return true
-        elseif string.sub(text, pos, pos + 4) == "false" then
-            pos = pos + 5
-            return false
-        elseif string.sub(text, pos, pos + 3) == "null" then
-            pos = pos + 4
-            return JSON_NULL
-        end
-        error("unexpected JSON token at byte " .. tostring(pos))
-    end
-
-    parse_value()
-    skip_ws()
-    if pos <= #text then
-        error("unexpected trailing JSON at byte " .. tostring(pos))
-    end
 end
 
 local function scoped_object_id(model, scope_type, scope_name)
@@ -287,7 +122,7 @@ end
 if missing(DATA_JSON) then
     error("SEMANTIC_ADMIN_001: DATA_JSON is required")
 end
-local ok, json_error = pcall(json_decode, DATA_JSON)
+local ok, json_error = json.validate(DATA_JSON)
 if not ok then
     error("SEMANTIC_ADMIN_040: DATA_JSON must be valid JSON: " .. tostring(json_error))
 end
