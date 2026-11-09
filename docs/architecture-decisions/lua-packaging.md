@@ -40,13 +40,18 @@ top-level locals across concatenated files; the generator measures that peak.
 This is a Lua compilation constraint, **not a maximum script size in bytes**.
 [Source: Exasol scripting language](https://docs.exasol.com/db/latest/database_concepts/scripting/general_script_language.htm).
 
-The official `CREATE SCRIPT` page says script content is stored in system
-tables, and Exasol documents importing another script. Neither that page nor
-the scripting-language page supplies a numeric maximum source-text size for a
-`CREATE SCRIPT`. We therefore cannot assert a hard byte limit or that `amalg`
-would exceed one. Separate imported scripts are another documented packaging
-option, with different loading and performance implications that remain
-unmeasured. [Sources: `CREATE SCRIPT`](https://docs.exasol.com/db/latest/sql/create_script.htm),
+`EXA_ALL_SCRIPTS.SCRIPT_TEXT` contains the complete script creation text and
+is `VARCHAR(2000000)`. Exasol defines `VARCHAR` length in characters, not
+bytes. The largest tested `amalg` body, the debug compiler bundle at
+575,478 UTF-8 bytes, is therefore well within that column's capacity even
+after adding the short `CREATE SCRIPT` header. Both trial bundles also
+installed successfully. This establishes that the tested bundles fit; the
+column definition alone does not establish the maximum `CREATE SCRIPT` source
+size or rule out other limits. Separate imported scripts are another documented
+packaging option, with different loading and performance implications that
+remain unmeasured. [Sources: `EXA_ALL_SCRIPTS`](https://docs.exasol.com/db/latest/sql_references/system_tables/metadata/exa_all_scripts.htm),
+[`VARCHAR` data type](https://docs.exasol.com/db/latest/sql_references/data_types/datatypedetails.htm),
+[`CREATE SCRIPT`](https://docs.exasol.com/db/latest/sql/create_script.htm),
 [script imports](https://docs.exasol.com/db/latest/database_concepts/scripting/db_interaction.htm).
 
 ## Live experiment on two runtimes
@@ -98,6 +103,7 @@ supported Exasol version has been checked.
 
 Even if `amalg` replaces concatenation, the generator must still handle
 script signatures, install-SQL placement, catalog views, build stamps, and
-validation. The test also did not establish a hard source-text size limit:
-both trial bundle sizes installed, and the documented 200-local ceiling is a
-Lua compilation limit, not a byte limit.
+validation. The tested bundles fit within the `SCRIPT_TEXT` column and
+installed, but the experiment did not establish a hard `CREATE SCRIPT`
+source-text limit. The documented 200-local ceiling is a Lua compilation
+limit, not a byte limit.
