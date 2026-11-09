@@ -45,11 +45,21 @@ is `VARCHAR(2000000)`. Exasol defines `VARCHAR` length in characters, not
 bytes. The largest tested `amalg` body, the debug compiler bundle at
 575,478 UTF-8 bytes, is therefore well within that column's capacity even
 after adding the short `CREATE SCRIPT` header. Both trial bundles also
-installed successfully. This establishes that the tested bundles fit; the
-column definition alone does not establish the maximum `CREATE SCRIPT` source
-size or rule out other limits. Separate imported scripts are another documented
-packaging option, with different loading and performance implications that
-remain unmeasured. [Sources: `EXA_ALL_SCRIPTS`](https://docs.exasol.com/db/latest/sql_references/system_tables/metadata/exa_all_scripts.htm),
+installed successfully. A separate boundary test on the local Exasol database
+on 2026-11-09 found a stricter limit: a disposable script with stored
+`SCRIPT_TEXT` length **1,999,000 characters** installed, while one character
+more failed with code `42000`, `script text too long, maximum allowed
+characters: 1999000`. The tested `CREATE OR REPLACE SCRIPT` statements were
+1,999,016 and 1,999,017 ASCII characters respectively; the stored text was
+16 characters shorter. Repeating the boundary with `é` instead of ASCII
+produced the same result: 1,999,000 stored characters installed and 1,999,001
+was rejected, although the accepted SQL statement occupied 3,997,960 UTF-8
+bytes. Thus the observed limit counts characters, not UTF-8 bytes, and the
+`VARCHAR(2000000)` column size is not the effective `CREATE SCRIPT` text limit
+on that database. These tests do not establish the limit for every Exasol
+version. Separate imported scripts are another documented packaging option,
+with different loading and performance implications that remain unmeasured.
+[Sources: `EXA_ALL_SCRIPTS`](https://docs.exasol.com/db/latest/sql_references/system_tables/metadata/exa_all_scripts.htm),
 [`VARCHAR` data type](https://docs.exasol.com/db/latest/sql_references/data_types/datatypedetails.htm),
 [`CREATE SCRIPT`](https://docs.exasol.com/db/latest/sql/create_script.htm),
 [script imports](https://docs.exasol.com/db/latest/database_concepts/scripting/db_interaction.htm).
@@ -103,7 +113,6 @@ supported Exasol version has been checked.
 
 Even if `amalg` replaces concatenation, the generator must still handle
 script signatures, install-SQL placement, catalog views, build stamps, and
-validation. The tested bundles fit within the `SCRIPT_TEXT` column and
-installed, but the experiment did not establish a hard `CREATE SCRIPT`
-source-text limit. The documented 200-local ceiling is a Lua compilation
-limit, not a byte limit.
+validation. The tested bundles installed and are far below the measured
+1,999,000-character script-text limit on the local database. The documented
+200-local ceiling is a Lua compilation limit, not a byte limit.
