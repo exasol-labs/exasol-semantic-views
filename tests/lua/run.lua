@@ -4,6 +4,7 @@
 -- comparison with Busted and LuaCov.
 --
 --   lua tests/lua/run.lua [name-substring]
+--   lua tests/lua/run.lua --file tests/lua/scripts/add_custom_extension_test.lua
 --   ESV_TEST_SEED=<n>    reproduce a shuffled order; =none keeps file order
 
 local script_path = arg[0]:gsub("\\", "/")
@@ -14,6 +15,7 @@ ESV_TEST_MODE = true
 null = setmetatable({}, {__tostring = function() return "null" end})
 
 local tests = {}
+local current_test_file
 local branch_outcomes = {}
 local executed = {}
 local possible = {}
@@ -147,7 +149,7 @@ end
 for _, roots in pairs(module_roots) do collect_roots(roots, {}) end
 
 function test(name, fn)
-    tests[#tests + 1] = {name = name, fn = fn}
+    tests[#tests + 1] = {name = name, fn = fn, file = current_test_file}
 end
 
 local function render(value)
@@ -269,18 +271,36 @@ do
     for _ in pairs(main) do main_count = main_count + 1 end
     assert(all > main_count, "script coverage omitted nested local functions")
 end
-for _, spec in ipairs(specs) do dofile(repo_root .. "/" .. spec) end
+local test_files = {}
+local function load_test_file(path)
+    test_files[path] = true
+    current_test_file = path
+    dofile(repo_root .. "/" .. path)
+    current_test_file = nil
+end
+for _, spec in ipairs(specs) do load_test_file(spec) end
 SCRIPT_BODY = dofile(repo_root .. "/tests/lua/scripts/harness.lua")
 for _, name in ipairs(selected_scripts) do
-    dofile(repo_root .. "/tests/lua/scripts/" .. name .. "_test.lua")
+    load_test_file("tests/lua/scripts/" .. name .. "_test.lua")
 end
-dofile(repo_root .. "/tests/lua/scripts/harness_test.lua")
+load_test_file("tests/lua/scripts/harness_test.lua")
 
-local filter = arg[1] or os.getenv("ESV_TEST_FILTER")
-if filter then
+local file_filter
+local name_filter
+if arg[1] == "--file" then
+    assert(arg[2] and arg[2] ~= "" and not arg[3], "usage: --file tests/lua/<test-file>.lua")
+    file_filter = arg[2]:gsub("^%./", "")
+    assert(test_files[file_filter], "unknown Lua test file: " .. file_filter)
+else
+    name_filter = arg[1] or os.getenv("ESV_TEST_FILTER")
+end
+if file_filter or name_filter then
     local selected = {}
     for _, case in ipairs(tests) do
-        if case.name:find(filter, 1, true) then selected[#selected + 1] = case end
+        if (file_filter and case.file == file_filter)
+            or (name_filter and case.name:find(name_filter, 1, true)) then
+            selected[#selected + 1] = case
+        end
     end
     tests = selected
 end
@@ -343,7 +363,8 @@ for _, case in ipairs(tests) do
 end
 debug.sethook()
 
-if filter then
+if file_filter or name_filter then
+    local filter = file_filter and ("file " .. file_filter) or name_filter
     io.write(string.format("\n%d tests matching %q, %d test failures (coverage gate skipped)\n",
         #tests, filter, failures))
     os.exit(failures > 0 and 1 or 0)
