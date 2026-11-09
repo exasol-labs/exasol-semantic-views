@@ -5,12 +5,21 @@ integration suite (`tools/run_system_tests.sh` — see `docs/runtime-testing.md`
 
 ```sh
 sh tools/run_lua_tests.sh                 # everything, with the coverage gates
-sh tools/run_lua_tests.sh "reference expansion"   # tests whose name contains it
+sh tools/run_lua_tests.sh 'ADD_CUSTOM_EXTENSION: stores empty object without rewriting'
+                                           # one test with this full name
+sh tools/run_lua_tests.sh --file tests/lua/scripts/add_custom_extension_test.lua
+                                           # every test defined in this file
 ESV_TEST_SEED=1234 sh tools/run_lua_tests.sh      # reproduce a shuffled order
 ```
 
-A filtered run skips the coverage gates, which only mean something for the
-whole suite.
+Run these commands from the repository root. The argument is a case-sensitive,
+literal substring of the test name printed after `PASS` or `FAIL`; use the full
+name to select one test. `--file` takes a repository-relative test file path and
+runs every test registered by that file, regardless of its test names. It works
+for both `tests/lua/scripts/*_test.lua` and `tests/lua/*_unit_test.lua`.
+Filtered runs skip the coverage gates, which only mean something for the whole
+suite. The summary reports how many tests matched, so check that it says
+`1 tests matching` when running a single test.
 
 ## What the runner provides
 
