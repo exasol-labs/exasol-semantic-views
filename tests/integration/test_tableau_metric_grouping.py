@@ -34,17 +34,17 @@ def test_tableau_metric_group_key_preserves_each_region(semantic_con, sql):
 
 
 UNSAFE = {
-    "metric only": "SELECT COMPLETED_REVENUE FROM SEMANTIC_SALES.SALES"
-                   " GROUP BY COMPLETED_REVENUE",
-    "missing dimension": "SELECT COMPLETED_REVENUE, CUSTOMER_REGION"
-                         " FROM SEMANTIC_SALES.SALES GROUP BY COMPLETED_REVENUE",
-    "unselected metric": "SELECT CUSTOMER_REGION FROM SEMANTIC_SALES.SALES"
-                         " GROUP BY CUSTOMER_REGION, COMPLETED_REVENUE",
+    "metric only": ("SELECT COMPLETED_REVENUE FROM SEMANTIC_SALES.SALES"
+                    " GROUP BY COMPLETED_REVENUE", "SEMANTIC_QUERY_008"),
+    "missing dimension": ("SELECT COMPLETED_REVENUE, CUSTOMER_REGION"
+                          " FROM SEMANTIC_SALES.SALES GROUP BY COMPLETED_REVENUE", "SEMANTIC_QUERY_008"),
+    "unselected metric": ("SELECT CUSTOMER_REGION FROM SEMANTIC_SALES.SALES"
+                          " GROUP BY CUSTOMER_REGION, COMPLETED_REVENUE", "SEMANTIC_QUERY_052"),
 }
 
 
-@pytest.mark.parametrize("statement", UNSAFE.values(), ids=UNSAFE.keys())
+@pytest.mark.parametrize("statement, code", UNSAFE.values(), ids=UNSAFE.keys())
 @pytest.mark.parametrize("nested", [False, True], ids=["bare", "nested"])
-def test_unsafe_metric_group_keys_are_refused(semantic_con, statement, nested):
+def test_unsafe_metric_group_keys_are_refused(semantic_con, statement, code, nested):
     sql = f"SELECT * FROM ({statement}) t" if nested else statement
-    assert outcome(semantic_con, sql) == ("refused", "SEMANTIC_QUERY_008")
+    assert outcome(semantic_con, sql) == ("refused", code)

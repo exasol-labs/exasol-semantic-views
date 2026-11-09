@@ -2646,19 +2646,21 @@ GROUP BY 1,
     assert_equal(named.status, "OK", named.error_message)
     assert_equal(api.json_decode(named.plan_json).dimensions[1], "customer_region")
 
-    for _, statement in ipairs({
-        'SELECT "COMPLETED_REVENUE" FROM SEMANTIC_SALES.SALES GROUP BY 1',
-        'SELECT "COMPLETED_REVENUE", "CUSTOMER_REGION"'
-            .. ' FROM SEMANTIC_SALES.SALES GROUP BY 1',
-        'SELECT "CUSTOMER_REGION" FROM SEMANTIC_SALES.SALES'
-            .. ' GROUP BY "CUSTOMER_REGION", "COMPLETED_REVENUE"',
+    for _, case in ipairs({
+        {'SELECT "COMPLETED_REVENUE" FROM SEMANTIC_SALES.SALES GROUP BY 1',
+            "SEMANTIC_QUERY_008"},
+        {'SELECT "COMPLETED_REVENUE", "CUSTOMER_REGION"'
+            .. ' FROM SEMANTIC_SALES.SALES GROUP BY 1', "SEMANTIC_QUERY_008"},
+        {'SELECT "CUSTOMER_REGION" FROM SEMANTIC_SALES.SALES'
+            .. ' GROUP BY "CUSTOMER_REGION", "COMPLETED_REVENUE"', "SEMANTIC_QUERY_052"},
     }) do
+        local statement, code = case[1], case[2]
         local refused = sql(statement)
-        assert_true(refused.error_code == "SEMANTIC_QUERY_008",
+        assert_true(refused.error_code == code,
             statement .. ": " .. tostring(refused.error_code) .. " " .. tostring(refused.error_message))
         local nested_text = "SELECT * FROM (" .. statement .. ") t"
         local nested = sql(nested_text)
-        assert_true(nested.error_code == "SEMANTIC_QUERY_008",
+        assert_true(nested.error_code == code,
             statement .. ": " .. tostring(nested.error_code) .. " " .. tostring(nested.error_message))
     end
     assert_equal(sql("SELECT * FROM (" .. captured .. ") t").status, "OK")

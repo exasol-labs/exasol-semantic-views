@@ -4267,7 +4267,7 @@ local function parse_semantic_sql(statement_text, options)
                     field_name = selected_output[ordinal]
                 end
                 if field_name == nil then
-                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected dimensions by name or ordinal.")
+                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected semantic fields by name or ordinal.")
                 end
                 local field, bind_err = resolve_field(ctx, field_name, nil)
                 if bind_err ~= nil then
@@ -4280,7 +4280,7 @@ local function parse_semantic_sql(statement_text, options)
                     end
                     grouped[upper(field.name)] = true
                 elseif field.kind ~= "METRIC" or not selected_metric_seen[upper(field.name)] then
-                    return nil, error_result("SEMANTIC_QUERY_008",
+                    return nil, error_result("SEMANTIC_QUERY_052",
                         "GROUP BY metric " .. tostring(field.name) .. " must be selected.")
                 end
             end

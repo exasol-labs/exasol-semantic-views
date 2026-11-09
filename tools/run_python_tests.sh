@@ -15,7 +15,11 @@ set -eu
 export EXASOL_TELEMETRY_DISABLE=true
 
 if [ -z "${PYTHON_BIN:-}" ]; then
-  PYTHON_BIN="python3"
+  if [ -x ".venv/bin/python" ]; then
+    PYTHON_BIN=".venv/bin/python"
+  else
+    PYTHON_BIN="python3"
+  fi
 fi
 
 # Every module in tests/unit is a database-free test; a glob rather than a list,

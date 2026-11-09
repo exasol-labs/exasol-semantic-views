@@ -153,9 +153,9 @@ result already has one metric value per group of those dimensions, so the metric
 does not become a source grouping dimension. For example, Tableau's
 `SELECT completed_revenue, customer_region ... GROUP BY 1, 2` groups only by
 `customer_region` in the compiled query. Metric-only grouping, a missing
-dimension, an unselected metric, or an extra dimension is refused with
-`SEMANTIC_QUERY_008`. Explicit lists may use semantic field names or SELECT
-ordinals.
+dimension, or an extra dimension is refused with `SEMANTIC_QUERY_008`; an
+unselected metric is refused with `SEMANTIC_QUERY_052`. Explicit lists may use
+semantic field names or SELECT ordinals.
 
 `ORDER BY` is limited to selected semantic output fields, output aliases, or
 ordinals, each with an optional `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST`.
