@@ -1,10 +1,11 @@
-# Lua packaging: custom generator or `amalg`
+# Lua packaging: self-contained `amalg` bundles
 
-**Status:** Current generator retained. A live experiment showed that
-non-debug `amalg` bundles can run the two tested runtimes with a
-`package.searchers` shim. The tested `amalg -d` bundles installed but could
-not run on Exasol 2026.2.0-nano.8, so the experiment's error-traceability
-gate was not met.
+**Decision:** Package each callable Exasol script with its required Lua modules
+as a self-contained, non-debug `amalg` bundle. Modules communicate through
+`require()` and returned values, without application-level exported globals or
+Exasol `import()`. Generate the `package.searchers` compatibility shim at build
+time. Duplication of modules across installed scripts is acceptable. This is
+the target design; the current generator still implements the old design.
 
 ## Current contract
 
@@ -28,10 +29,12 @@ statements, not database limits. The experiment compared body bytes separately.
 `amalg` bundles Lua modules located through `package.path`, can embed a main
 script, and has a debug mode intended to preserve original file and line
 information. Its documentation says it does not statically discover `require`
-dependencies. The current global-sharing sources would therefore need an
-explicit wrapper or conversion to modules before `amalg` could reproduce their
-load order and names. The experiment tested such an adaptation for two
-runtimes.
+dependencies. The current global-sharing sources therefore need conversion
+to modules with explicit `require()` dependencies and returned API tables.
+Each installed script will bundle its entry code and transitive dependencies.
+The experiment tested an intermediate adaptation for two runtimes; it
+preserved the existing globals to compare behavior rather than implementing
+the target module API.
 [Source: `amalg` README](https://github.com/siffiejoe/lua-amalg).
 
 Exasol documents a **maximum of 200 local variables** in a Lua function. Since
@@ -58,7 +61,7 @@ bytes. Thus the observed limit counts characters, not UTF-8 bytes, and the
 `VARCHAR(2000000)` column size is not the effective `CREATE SCRIPT` text limit
 on that database. These tests do not establish the limit for every Exasol
 version. Separate imported scripts are another documented packaging option,
-with different loading and performance implications that remain unmeasured.
+but are outside the chosen self-contained design.
 [Sources: `EXA_ALL_SCRIPTS`](https://docs.exasol.com/db/latest/sql_references/system_tables/metadata/exa_all_scripts.htm),
 [`VARCHAR` data type](https://docs.exasol.com/db/latest/sql_references/data_types/datatypedetails.htm),
 [`CREATE SCRIPT`](https://docs.exasol.com/db/latest/sql/create_script.htm),
@@ -88,7 +91,8 @@ at runtime line 1. That line invokes `(loadstring or load)`; an installed
 probe showed both functions are `nil` in this Exasol Lua environment. A
 deliberate error in a separate experiment-only copy was traced to
 `trial_00.lua:347` under local Lua, so local debug line mapping worked, but
-the debug bundle never reached its parser on Exasol.
+the debug bundle never reached its parser on Exasol. Debug mode is not a
+requirement for the chosen design.
 
 Without debug mode, Exasol's `require` did not find the modules that `amalg`
 placed in `package.preload`. A `package.searchers` shim from another Exasol
@@ -102,17 +106,19 @@ and clarification JSON after excluding generated IDs and audit timestamps.
 The compiler retained its import of the current
 `SEMANTIC_ADMIN.MATERIALIZATION_RUNTIME`.
 
-## Decision and remaining work
+## Implementation work
 
-The non-debug result supports an `amalg` refactor for these two runtimes,
-subject to broader testing. It does not satisfy the planned error
-traceability requirement: `amalg -d` cannot run unchanged on the tested
-Exasol version. Keep the current generator until a compatible source-mapping
-approach is chosen and every runtime, wrapper, permission context, and
-supported Exasol version has been checked.
+Convert the shared and compiler/admin sources to modules with explicit
+`require()` dependencies and returned API tables. Bundle each callable script
+with its transitive modules, insert the Exasol `package.searchers` shim during
+the build, and replace every Exasol `import()` call. The generator must still
+handle script signatures, install-SQL placement, catalog views, build stamps,
+and validation. Add a generated-script character-count check against the
+measured 1,999,000-character limit, then test every callable script, permission
+context, and supported Exasol version. The existing two-runtime comparison
+does not cover this per-script design.
 
-Even if `amalg` replaces concatenation, the generator must still handle
-script signatures, install-SQL placement, catalog views, build stamps, and
-validation. The tested bundles installed and are far below the measured
-1,999,000-character script-text limit on the local database. The documented
-200-local ceiling is a Lua compilation limit, not a byte limit.
+The tested bundles installed and are far below the measured script-text limit
+on the local database. Keeping each source as a separate module chunk also
+avoids adding its top-level locals to one shared chunk; individual Lua
+functions still have the documented 200-local ceiling.
