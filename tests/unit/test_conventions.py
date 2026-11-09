@@ -973,6 +973,27 @@ LIFTED_FROM = {
 }
 
 
+class RepositoryInstructions(unittest.TestCase):
+    def test_shared_instruction_file_is_under_codex_limit(self):
+        self.assertLess((ROOT / "AGENTS.md").stat().st_size, 32 * 1024)
+
+    def test_claude_imports_shared_instructions(self):
+        self.assertIn("@AGENTS.md", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+
+    def test_instruction_reference_links_resolve(self):
+        pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+        broken = []
+        for page in (ROOT / "AGENTS.md", ROOT / "CLAUDE.md", ROOT / "docs/development.md"):
+            for target in pattern.findall(page.read_text(encoding="utf-8")):
+                if target.startswith(("http", "mailto", "#!")):
+                    continue
+                file_part = target.partition("#")[0]
+                resolved = (page.parent / file_part).resolve() if file_part else page
+                if not resolved.exists():
+                    broken.append(f"{page.name} -> {target}")
+        self.assertEqual([], broken, "repository instruction links do not resolve")
+
+
 class TermsAreDefinedOnce(unittest.TestCase):
     """docs/glossary.md is the single definitional home for the vocabulary."""
 
