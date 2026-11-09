@@ -6,6 +6,12 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Semantic SQL accepts Tableau's redundant `GROUP BY` key for a selected metric
+  when every selected dimension is also grouped. The metric is not used as a
+  source grouping dimension; unsafe metric grouping remains refused (#38).
+
 ## [0.6.1] - 2026-11-05
 
 Governed answers that stay governed after they leave the compiler, and a
