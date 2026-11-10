@@ -445,9 +445,9 @@ their own**: they hold placeholders that the build fills in.
   per call including the query. Every call site reads one column, so the result
   is unchanged. `SCRIPT_HELPER_COPIES` drops from 103 to 77.
 - Exasol's built-in `cjson` was evaluated as a replacement for `shared/json.lua`
-  and rejected: it emits keys in hash order, encodes a SQL NULL as invalid JSON
-  without an error, and rounds numbers to 14 digits. The reasons are recorded in
-  the module's header.
+  at the time. The probe, exact Exasol version, and raw output were not retained,
+  so the reported key-order, SQL NULL, and number-precision differences remain
+  unverified. See [the JSON decision record](docs/architecture-decisions/json-codec.md).
 
 #### A stalled database fails a test run instead of hanging it
 

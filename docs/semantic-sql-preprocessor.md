@@ -586,6 +586,10 @@ EXPORT SEMANTIC MODEL sales;
 
 ## Hot Path
 
+The [SQL tokenization decision record](architecture-decisions/sql-tokenization.md)
+explains why the shared lexer and semantic parsers remain in use after reviewing
+Exasol's documented `sqlparsing` API.
+
 The preprocessor lane does not call `VALIDATE_MODEL` and does not write request
 logs. It uses the latest successful validation run for the model version and
 fails if no valid snapshot exists. Explicit agent calls through
