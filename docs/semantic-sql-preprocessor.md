@@ -114,7 +114,7 @@ FROM "SEMANTIC_SALES"."ORDER_HEADER" "ORDER_HEADER" GROUP BY 1
 ```
 
 When a statement is compiled directly, every group is one row by construction:
-an explicit `GROUP BY` must cover exactly the selected dimensions, and filters
+an explicit `GROUP BY` must cover the selected dimensions, and filters
 apply before aggregation. Inside a wrapped statement the same holds when the
 block groups by every dimension the object is compiled at. Where it does not,
 the wrapper would combine several values, so it is refused with
@@ -147,10 +147,15 @@ SELECT customer_region, total_revenue
 FROM SEMANTIC_SALES.SALES;          -- GROUP BY customer_region is inferred
 ```
 
-If a `GROUP BY` *is* supplied, it must be `GROUP BY ALL` or exactly cover the
-selected dimensions (no missing or extra fields), otherwise compilation fails
-with `SEMANTIC_QUERY_008`. Explicit `GROUP BY` lists may use selected
-dimension names or ordinals.
+If a `GROUP BY` *is* supplied, it must be `GROUP BY ALL` or cover every selected
+dimension. A selected metric may also appear as a redundant key: the compiled
+result already has one metric value per group of those dimensions, so the metric
+does not become a source grouping dimension. For example, Tableau's
+`SELECT completed_revenue, customer_region ... GROUP BY 1, 2` groups only by
+`customer_region` in the compiled query. Metric-only grouping, a missing
+dimension, or an extra dimension is refused with `SEMANTIC_QUERY_008`; an
+unselected metric is refused with `SEMANTIC_QUERY_052`. Explicit lists may use
+semantic field names or SELECT ordinals.
 
 `ORDER BY` is limited to selected semantic output fields, output aliases, or
 ordinals, each with an optional `ASC`/`DESC` and `NULLS FIRST`/`NULLS LAST`.

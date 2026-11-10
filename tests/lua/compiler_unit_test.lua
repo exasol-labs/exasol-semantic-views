@@ -791,6 +791,12 @@ local function compiler_query_fixture(options)
                 return {}
             end
             return {{1, "sales", 2, 3}}
+        elseif options.tableau_group and normalized:find("SELECT ALLOW_DERIVED_COMPOSITION", 1, true) then
+            return {{false}}
+        elseif options.tableau_group and normalized:find(
+            "SELECT oc.COLUMN_NAME, oc.COLUMN_KIND, mt.AGGREGATION_FUNCTION", 1, true) then
+            return {{"completed_revenue", "METRIC", "SUM"},
+                {"customer_region", "DIMENSION", nil}}
         elseif normalized:find("FROM SYS_SEMANTIC.SEMANTIC_OBJECTS", 1, true) then
             if options.object_missing then return {} end
             return {{40, "SALES", 1}}
@@ -884,6 +890,10 @@ local function compiler_query_fixture(options)
                 {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "ALTERNATE", 20},
             }
         elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            if options.tableau_group then
+                return {{10, "customer_region", 1, "o.region", "VARCHAR(20)",
+                    "Customer Region"}}
+            end
             if options.multi_fact then
                 return {{10, "customer_region", 3, "c.region", "VARCHAR(20)",
                     "Customer Region"}}
@@ -905,6 +915,7 @@ local function compiler_query_fixture(options)
             end
             return {{30, "MEASURE", "FACT", 20, "net_revenue", nil, nil, 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS mf", 1, true) then
+            if options.tableau_group then return {} end
             if options.multi_fact then return {} end
             return {{30, "LOCAL", "order_status = 'COMPLETE'",
                 "o.status = 'COMPLETE'", 10, 1, 1}}
@@ -917,6 +928,12 @@ local function compiler_query_fixture(options)
             end
             return {{30, "FACT", 20}}
         elseif normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            if options.tableau_group then
+                return {{30, "completed_revenue", 1, "SUM(net_revenue)", nil,
+                    "ADDITIVE", "DECIMAL(18,2)", "Completed Revenue", "SIMPLE",
+                    "SUM", "o.amount", nil, nil, nil, nil, nil,
+                    '{"metric_type":"SIMPLE"}'}}
+            end
             if options.multi_fact then
                 return {{30, "activity_ratio", 1, "revenue / tickets", nil,
                     "RATIO", "DECIMAL(18,4)", "Activity Ratio", "RATIO",
@@ -933,6 +950,12 @@ local function compiler_query_fixture(options)
                 "SUM", "o.amount", nil, nil, nil, nil, nil,
                 '{"metric_type":"SIMPLE"}'}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRICS", 1, true) then
+            if options.tableau_group then
+                return {{30, "completed_revenue", 1, "SUM(net_revenue)", nil,
+                    "ADDITIVE", "DECIMAL(18,2)", "Completed Revenue", "SIMPLE",
+                    "SUM", "o.amount", nil, nil, nil, nil, nil,
+                    '{"metric_type":"SIMPLE"}'}}
+            end
             if options.multi_fact then
                 return {
                     {30, "activity_ratio", 1, "revenue / tickets", nil,
@@ -2592,6 +2615,55 @@ test("a wrapper is lowered where each group is one row (Tableau ATTR, Power BI S
         .. " GROUP BY 1").error_code, "SEMANTIC_QUERY_007")
     local plain = sql("SELECT order_status, total_revenue FROM SEMANTIC_SALES.SALES")
     assert_equal(api.json_decode(plain.plan_json).wrapper_lowerings, nil)
+end)
+
+test("a selected Tableau metric is a redundant group key", function()
+    local mock = compiler_query_fixture({tableau_group = true})
+    local function sql(text) return with_query(mock, function() return compile_sql(text) end) end
+    local captured = [[SELECT "SALES"."COMPLETED_REVENUE" AS "COMPLETED_REVENUE",
+"SALES"."CUSTOMER_REGION" AS "CUSTOMER_REGION"
+FROM "SEMANTIC_SALES"."SALES" "SALES"
+GROUP BY 1,
+2]]
+    local compiled = sql(captured)
+    assert_equal(compiled.status, "OK", compiled.error_message)
+    local plan = api.json_decode(compiled.plan_json)
+    assert_equal(#plan.dimensions, 1)
+    assert_equal(plan.dimensions[1], "customer_region")
+    assert_equal(#plan.metrics, 1)
+    assert_equal(plan.metrics[1], "completed_revenue")
+    local metric_output = string.find(compiled.generated_sql,
+        '"completed_revenue" AS "COMPLETED_REVENUE"', 1, true)
+    local region_output = string.find(compiled.generated_sql,
+        '"customer_region" AS "CUSTOMER_REGION"', 1, true)
+    assert_true(metric_output ~= nil and region_output ~= nil and metric_output < region_output)
+    assert_true(string.find(compiled.generated_sql, 'GROUP BY "completed_revenue"', 1, true) == nil)
+
+    local named = sql('SELECT "SALES"."COMPLETED_REVENUE" AS "COMPLETED_REVENUE",'
+        .. ' "SALES"."CUSTOMER_REGION" AS "CUSTOMER_REGION"'
+        .. ' FROM "SEMANTIC_SALES"."SALES" "SALES"'
+        .. ' GROUP BY "SALES"."COMPLETED_REVENUE", "SALES"."CUSTOMER_REGION"')
+    assert_equal(named.status, "OK", named.error_message)
+    assert_equal(api.json_decode(named.plan_json).dimensions[1], "customer_region")
+
+    for _, case in ipairs({
+        {'SELECT "COMPLETED_REVENUE" FROM SEMANTIC_SALES.SALES GROUP BY 1',
+            "SEMANTIC_QUERY_008"},
+        {'SELECT "COMPLETED_REVENUE", "CUSTOMER_REGION"'
+            .. ' FROM SEMANTIC_SALES.SALES GROUP BY 1', "SEMANTIC_QUERY_008"},
+        {'SELECT "CUSTOMER_REGION" FROM SEMANTIC_SALES.SALES'
+            .. ' GROUP BY "CUSTOMER_REGION", "COMPLETED_REVENUE"', "SEMANTIC_QUERY_052"},
+    }) do
+        local statement, code = case[1], case[2]
+        local refused = sql(statement)
+        assert_true(refused.error_code == code,
+            statement .. ": " .. tostring(refused.error_code) .. " " .. tostring(refused.error_message))
+        local nested_text = "SELECT * FROM (" .. statement .. ") t"
+        local nested = sql(nested_text)
+        assert_true(nested.error_code == code,
+            statement .. ": " .. tostring(nested.error_code) .. " " .. tostring(nested.error_message))
+    end
+    assert_equal(sql("SELECT * FROM (" .. captured .. ") t").status, "OK")
 end)
 
 test("COUNT(1) per selected dimension is one row per group (Power BI filter domain)", function()

@@ -4256,7 +4256,8 @@ local function parse_semantic_sql(statement_text, options)
         -- GROUP BY is optional: when omitted, it is inferred from the selected
         -- dimensions (build_sql emits GROUP BY from request.dimensions regardless
         -- of the typed clause). When a GROUP BY *is* supplied, it must be either
-        -- GROUP BY ALL or exactly cover the selected dimensions.
+        -- GROUP BY ALL or cover the selected dimensions. A selected metric is
+        -- already determined by that grain, so grouping by it is redundant.
         if clauses.GROUP_BY ~= nil and not is_group_by_all then
             local grouped = {}
             for _, part in ipairs(syntax.split_top_level(tokens, clauses.GROUP_BY + 2, syntax.clause_end(tokens, clauses, "GROUP_BY"), ",")) do
@@ -4266,25 +4267,27 @@ local function parse_semantic_sql(statement_text, options)
                     field_name = selected_output[ordinal]
                 end
                 if field_name == nil then
-                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected dimensions by name or ordinal.")
+                    return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY supports selected semantic fields by name or ordinal.")
                 end
-                local field, bind_err = resolve_field(ctx, field_name, "DIMENSION")
+                local field, bind_err = resolve_field(ctx, field_name, nil)
                 if bind_err ~= nil then
                     return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
                 end
-                grouped[upper(field.name)] = true
+                if field.kind == "DIMENSION" then
+                    if not selected_dimension_seen[upper(field.name)] then
+                        return nil, error_result("SEMANTIC_QUERY_008",
+                            "GROUP BY must not contain dimensions outside the SELECT list.")
+                    end
+                    grouped[upper(field.name)] = true
+                elseif field.kind ~= "METRIC" or not selected_metric_seen[upper(field.name)] then
+                    return nil, error_result("SEMANTIC_QUERY_052",
+                        "GROUP BY metric " .. tostring(field.name) .. " must be selected.")
+                end
             end
             for _, dimension_name in ipairs(request.dimensions) do
                 if not grouped[upper(dimension_name)] then
                     return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must cover selected dimension " .. tostring(dimension_name) .. ".")
                 end
-            end
-            local group_count = 0
-            for _, _ in pairs(grouped) do
-                group_count = group_count + 1
-            end
-            if group_count ~= #request.dimensions then
-                return nil, error_result("SEMANTIC_QUERY_008", "GROUP BY must not contain dimensions outside the SELECT list.")
             end
         end
     elseif #request.dimensions == 0 and clauses.GROUP_BY ~= nil and not is_group_by_all then
