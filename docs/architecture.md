@@ -756,6 +756,9 @@ independently, planned deterministically, and explained after compilation.
 
 ## Related Documentation
 
+- [Implementation decision records](architecture-decisions/README.md) compare
+  the custom SQL lexer, JSON codec, Lua packager, and test runner with documented
+  alternatives and identify the evidence still needed.
 - [Semantic compiler](semantic-compiler.md) describes request compilation and
   multi-fact planning in more detail.
 - [Semantic catalog](semantic-catalog.md) documents catalog objects and supported

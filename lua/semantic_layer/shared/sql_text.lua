@@ -292,6 +292,8 @@ end
 
 -- One lexer for the Exasol dialect, with two options where its two callers
 -- genuinely disagree.
+-- The decision to keep it instead of adapting Exasol's sqlparsing.tokenize is
+-- documented in docs/architecture-decisions/sql-tokenization.md.
 --
 -- Everything else -- whitespace, `--` and `/* */` comments, single-quoted
 -- literals with `''` escapes, double-quoted identifiers with `""` escapes,

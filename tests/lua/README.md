@@ -106,13 +106,8 @@ Threshold policy:
 - add a regression test before fixing a runtime defect;
 - keep Exasol-dependent behavior in the live-DB smoke suite.
 
-## Why not busted
+## Busted and LuaCov comparison
 
-busted was considered (2026-10) and not adopted. Its coverage is luacov, which
-counts lines differently — every ratcheted threshold above would reset — and
-has no equivalent of the decision-outcome gate. Its per-file insulation works
-against loading every runtime into one environment, which is what makes these
-tests exercise the runtime as Exasol assembles it. And it brings a LuaRocks
-dependency chain to a job that needs only `lua5.4`. What it would have added —
-selection by name, table-driven cases that name the failing case, per-test
-cleanup, isolation and shuffled order — the runner now does itself.
+[The decision record](../../docs/architecture-decisions/lua-test-runner.md)
+compares their documented capabilities with this runner's requirements under
+the assumption that packaging has moved to `amalg` and imports use `require()`.
