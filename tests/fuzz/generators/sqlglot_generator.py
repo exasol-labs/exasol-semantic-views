@@ -70,13 +70,30 @@ def _spec(rng: random.Random, idx: int, *, contract: bool = False) -> Spec:
                 5 if ordering and idx % 4 == 0 else None)
 
 
-def _malformed(idx: int) -> tuple[str, str, str]:
-    if idx % 2:
-        return ("SELECT order_status FROM (SELECT order_status "
-                "FROM SEMANTIC_SALES.SALES", "unclosed-derived-table",
+def _malformed(rng: random.Random, idx: int) -> tuple[str, str, str]:
+    """Corrupt a generated query with one bounded, parser-visible syntax defect."""
+    if rng.randrange(4) == 0:
+        inner = _render(_spec(rng, idx, contract=True), quoted=bool(rng.getrandbits(1)))
+        outer_field = rng.choice(("order_status", "total_revenue"))
+        return (f"SELECT {outer_field} FROM ({inner}", "unclosed-derived-table",
                 "SEMANTIC_QUERY_003")
-    return ("SELECT order_status FROM SEMANTIC_SALES.SALES WHERE (",
-            "open-where-expression", "SEMANTIC_QUERY_030")
+
+    columns = rng.choice((("order_status",),
+                          ("order_status", "total_revenue"),
+                          ("total_revenue", "order_status"),
+                          ('"order_status"',)))
+    prefix = select(*columns).from_("SEMANTIC_SALES.SALES").sql(dialect="exasol")
+    value = rng.choice(("COMPLETE", "CANCELLED"))
+    defect = rng.randrange(3)
+    if defect == 0:
+        extra = rng.choice(("", " AND order_status = 'COMPLETE'"))
+        return (f"{prefix} WHERE (order_status = '{value}'{extra}",
+                "unclosed-where-expression", "SEMANTIC_QUERY_030")
+    if defect == 1:
+        return (f"{prefix} WHERE order_status =", "missing-predicate-value",
+                "SEMANTIC_QUERY_033")
+    return (f"{prefix} WHERE order_status IN ('{value}',", "unclosed-in-list",
+            "SEMANTIC_QUERY_032")
 
 
 def _joined(rng: random.Random, idx: int) -> str:
@@ -137,7 +154,7 @@ class SqlglotGenerator:
 
     def _labelled_sql(self, rng: random.Random, seed: int, idx: int) -> LabelledSqlCase:
         if idx % 10 >= 8:
-            sql, shape, code = _malformed(idx)
+            sql, shape, code = _malformed(rng, idx)
             try:
                 _parse(sql)
             except ParseError:

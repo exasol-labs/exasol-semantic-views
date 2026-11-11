@@ -121,6 +121,18 @@ class SemanticFuzzTest(unittest.TestCase):
                             and case.sql.index("WHERE") < case.sql.index("GROUP BY")
                             for case in first))
 
+    def test_malformed_sql_varies_with_seeded_generation(self):
+        generator = SqlglotGenerator()
+        rng = random.Random(42)
+        malformed = [case for idx in range(500)
+                     if (case := generator.generate(rng, Profile.LABELLED_SQL, 42, idx))
+                     .label.syntax_intent == "invalid"]
+        self.assertEqual(len(malformed), 100)
+        self.assertGreaterEqual(len({case.sql for case in malformed}), 20)
+        self.assertEqual({case.label.rule for case in malformed},
+                         {"SEMANTIC_QUERY_003", "SEMANTIC_QUERY_030",
+                          "SEMANTIC_QUERY_032", "SEMANTIC_QUERY_033"})
+
     def test_sqlglot_joins_cover_every_grouping_key(self):
         generator = SqlglotGenerator()
         joins = [generator.generate(random.Random(1), Profile.LABELLED_SQL, 1, i)

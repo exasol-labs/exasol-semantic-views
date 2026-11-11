@@ -214,7 +214,8 @@ after the first case and do not retain the full generated corpus in memory.
 
 The SQLGlot campaign renders bounded sales-model queries in memory, including
 single-object queries, grouped joins, semantic refusals, and malformed syntax.
-Malformed cases must raise SQLGlot `ParseError` before the Lua compiler checks
+Seeded malformed cases vary their projections, literals, and incomplete clause
+shapes. Each must raise SQLGlot `ParseError` before the Lua compiler checks
 their labelled rejection code. Parse-back success establishes SQLGlot syntax
 acceptance; the contract result checks compiler behavior. The generator also
 advertises paired JSON/SQL and four-variant paired TLP profiles for live oracles.
