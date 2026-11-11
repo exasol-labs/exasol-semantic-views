@@ -23,6 +23,14 @@ jobs:
   system-tests:
     uses: $/.github/workflows/system-tests.yml
 
+  fuzz-smoke:
+    uses: $/.github/workflows/fuzz.yml
+    with:
+      seeds: "0 42"
+      cases: "30"
+      timeout_minutes: 20
+      artifact_name: fuzz-smoke-results
+
   sonar:
     needs: [database-free, system-tests]
     uses: $/.github/workflows/sonar.yml
@@ -30,7 +38,18 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   ci-gate:
-    needs: [static-checks, database-free, dependency-audit, system-tests, sonar]
+    if: ${{ always() }}
+    needs: [static-checks, database-free, dependency-audit, system-tests, fuzz-smoke, sonar]
     runs-on: ubuntu-latest
     steps:
-      - run: echo "All CI jobs completed successfully."
+      - name: Require every CI job to pass
+        env:
+          NEEDS_RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          test -n "$NEEDS_RESULTS"
+          for result in $NEEDS_RESULTS; do
+            if [ "$result" != success ]; then
+              echo "CI job result: $result"
+              exit 1
+            fi
+          done

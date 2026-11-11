@@ -204,8 +204,10 @@ pings, and each ping resets the client's wait.
 The fuzz entry point is `python3 tests/fuzz/run_semantic_fuzz.py`. It defaults to
 the hand-written differential campaign; use `--oracle tlp` for the other live
 campaign. `--generator sqlglot` runs a small compiler contract campaign through
-Lua without connecting to Exasol. The release gate still runs both hand-written
-campaigns across its configured seeds.
+Lua without connecting to Exasol. PR CI runs the hand-written differential and
+TLP campaigns with seeds `0 42` and 30 cases each, in a job parallel to system
+tests. The release gate keeps the wider default of eight seeds and 250 cases
+per oracle; both jobs use `FUZZ_SEEDS` and `FUZZ_CASES` to configure the runner.
 
 On a local Exasol Personal deployment there are two known causes:
 

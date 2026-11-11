@@ -2,6 +2,19 @@ name: Fuzz campaign
 
 on:
   workflow_call:
+    inputs:
+      seeds:
+        description: Space-separated fuzz seeds; empty uses the release defaults.
+        type: string
+      cases:
+        description: Cases per seed and oracle; empty uses the release default.
+        type: string
+      timeout_minutes:
+        description: Maximum time for the fuzz job.
+        type: number
+      artifact_name:
+        description: Name of the uploaded fuzz log artifact.
+        type: string
   workflow_dispatch:
 
 permissions:
@@ -13,7 +26,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: ${{ inputs.timeout_minutes || 120 }}
     services:
       exasol:
         image: exasol/docker-db:latest-2026.1
@@ -45,8 +58,11 @@ jobs:
         run: python tools/dev/wait_for_exasol.py
       - name: Install sales fixture
         run: python tools/install.py --example --reset
-      - name: Run release fuzz campaign
+      - name: Run fuzz campaign
         shell: bash
+        env:
+          FUZZ_SEEDS: ${{ inputs.seeds }}
+          FUZZ_CASES: ${{ inputs.cases }}
         run: |
           set -o pipefail
           PYTHON_BIN=python sh tools/run_release_gate.sh --fuzz-only 2>&1 | tee fuzz-results.log
@@ -54,6 +70,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-results
+          name: ${{ inputs.artifact_name || 'fuzz-results' }}
           path: fuzz-results.log
           if-no-files-found: ignore

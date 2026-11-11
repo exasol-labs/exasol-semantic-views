@@ -11,8 +11,9 @@
 #   FUZZ_SEEDS   — space-separated seeds. Default "0 1 2 7 42 99 123 456".
 #   FUZZ_CASES   — cases per (seed, oracle) pair. Default 250.
 #
-# Pass --fuzz-only when the system suite already passed in CI. A divergence in
-# either fuzz oracle exits non-zero after all seeds have run.
+# Pass --fuzz-only when another CI job owns the system suite, whether it runs
+# in parallel for PRs or finished first for a release. A divergence in either
+# fuzz oracle exits non-zero after all seeds have run.
 
 set -eu
 
@@ -71,7 +72,7 @@ done
 
 echo
 if [ "$FUZZ_FAILURES" -gt 0 ]; then
-  echo "RELEASE GATE FAILED: $FUZZ_FAILURES fuzz campaign(s) diverged."
+  echo "FUZZ CAMPAIGN FAILED: $FUZZ_FAILURES campaign(s) diverged."
   exit 1
 fi
-echo "RELEASE GATE PASSED: fuzz campaign green."
+echo "FUZZ CAMPAIGN PASSED."

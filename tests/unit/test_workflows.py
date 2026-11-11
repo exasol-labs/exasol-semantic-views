@@ -6,6 +6,8 @@ tests cover relationships that a valid individual workflow can still get wrong.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -84,10 +86,49 @@ class WorkflowWiringTest(unittest.TestCase):
 
     def test_ci_gate_waits_for_every_reusable_lane(self) -> None:
         jobs = self.workflows["ci.yml"]["jobs"]
-        lanes = {"static-checks", "database-free", "dependency-audit", "system-tests"}
+        lanes = {"static-checks", "database-free", "dependency-audit", "system-tests",
+                 "fuzz-smoke"}
         self.assertTrue(lanes)
         self.assertEqual(set(jobs["ci-gate"]["needs"]), lanes | {"sonar"})
         self.assertTrue(all(local_target(jobs[name]) for name in lanes))
+
+    def test_pr_fuzz_runs_in_parallel_with_fixed_short_campaign(self) -> None:
+        jobs = self.workflows["ci.yml"]["jobs"]
+        smoke = jobs["fuzz-smoke"]
+        self.assertEqual(local_target(smoke), "fuzz.yml")
+        self.assertNotIn("needs", smoke)
+        self.assertEqual(smoke["with"], {
+            "seeds": "0 42", "cases": "30", "timeout_minutes": "20",
+            "artifact_name": "fuzz-smoke-results",
+        })
+
+        fuzz = self.workflows["fuzz.yml"]
+        self.assertEqual(set(fuzz["on"]["workflow_call"]["inputs"]),
+                         set(smoke["with"]))
+        campaign = next(step for step in fuzz["jobs"]["fuzz"]["steps"]
+                        if "run_release_gate.sh --fuzz-only" in step.get("run", ""))
+        self.assertIn("inputs.seeds", campaign["env"]["FUZZ_SEEDS"])
+        self.assertIn("inputs.cases", campaign["env"]["FUZZ_CASES"])
+        artifacts = [step["with"]["name"] for step in fuzz["jobs"]["fuzz"]["steps"]
+                     if "actions/upload-artifact@" in step.get("uses", "")]
+        self.assertTrue(all("inputs.artifact_name" in name for name in artifacts))
+
+    def test_ci_gate_fails_for_failed_or_skipped_jobs(self) -> None:
+        gate = self.workflows["ci.yml"]["jobs"]["ci-gate"]
+        self.assertEqual(gate["if"], "${{ always() }}")
+        script = gate["steps"][0]["run"]
+        self.assertEqual(gate["steps"][0]["env"]["NEEDS_RESULTS"],
+                         "${{ join(needs.*.result, ' ') }}")
+        results = {name: {"result": "success"} for name in gate["needs"]}
+        for state in ("success", "failure", "skipped", "cancelled"):
+            results["fuzz-smoke"]["result"] = state
+            completed = subprocess.run(
+                ["bash", "-e", "-c", script], cwd=ROOT, capture_output=True, text=True,
+                env={**os.environ, "NEEDS_RESULTS": " ".join(
+                    job["result"] for job in results.values())}, check=False,
+            )
+            self.assertEqual(completed.returncode == 0, state == "success",
+                             f"fuzz-smoke={state}: {completed.stdout}{completed.stderr}")
 
     def test_sonar_scans_after_both_coverage_jobs(self) -> None:
         jobs = self.workflows["ci.yml"]["jobs"]
@@ -111,6 +152,7 @@ class WorkflowWiringTest(unittest.TestCase):
         jobs = self.workflows["release.yml"]["jobs"]
         self.assertEqual(local_target(jobs["tests"]), "ci.yml")
         self.assertEqual(local_target(jobs["fuzz"]), "fuzz.yml")
+        self.assertNotIn("with", jobs["fuzz"])
         self.assertEqual(jobs["fuzz"]["needs"], "tests")
         self.assertEqual(set(jobs["release"]["needs"]), {"tests", "fuzz"})
 
