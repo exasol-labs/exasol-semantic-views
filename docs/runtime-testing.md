@@ -209,6 +209,15 @@ TLP campaigns and the SQLGlot contract campaign with seeds `0 1 2 7 42` and
 60 cases each, in a job parallel to system tests. The release gate keeps the
 wider default of eight seeds and 250 cases per generator and oracle; both jobs
 use `FUZZ_SEEDS` and `FUZZ_CASES` to configure the runner.
+Cases are generated and checked as they run, so large campaigns begin reporting
+after the first case and do not retain the full generated corpus in memory.
+
+The SQLGlot campaign renders bounded sales-model queries in memory, including
+single-object queries, grouped joins, semantic refusals, and malformed syntax.
+Malformed cases must raise SQLGlot `ParseError` before the Lua compiler checks
+their labelled rejection code. Parse-back success establishes SQLGlot syntax
+acceptance; the contract result checks compiler behavior. The generator also
+advertises paired JSON/SQL and four-variant paired TLP profiles for live oracles.
 
 On a local Exasol Personal deployment there are two known causes:
 
