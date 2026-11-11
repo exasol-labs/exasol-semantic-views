@@ -8,7 +8,7 @@ Each directory is one lane: one runtime requirement, one runner, one CI job.
 | `lua/` | the Lua runtimes, as Exasol assembles them | `lua5.4` | `sh tools/run_lua_tests.sh` | `CI` / `database-free` |
 | `integration/` | the installed layer end to end | a database with the sales example installed | `sh tools/run_system_tests.sh` | `CI` / `system-tests` |
 | `integration/fresh_install/` | what the installer leaves behind | a database installed a moment ago | `sh tools/run_system_tests.sh` (first) | `CI` / `system-tests` |
-| `fuzz/` | compiler equivalence under random requests | an installed database, and minutes | `sh tools/run_release_gate.sh` | release / `fuzz` |
+| `fuzz/` | compiler equivalence and SQL contract under random requests | Exasol for hand-written cases; Lua for SQLGlot contract | `sh tools/run_release_gate.sh` or `python3 tests/fuzz/run_semantic_fuzz.py --generator sqlglot` | release / `fuzz`; CI / `database-free` |
 
 `fixtures/` holds input data that more than one lane reads.
 

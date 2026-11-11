@@ -945,7 +945,7 @@ class TestRunsSendNoTelemetry(unittest.TestCase):
         entry_points = [
             *sorted((ROOT / "tools").glob("run_*.sh")),
             ROOT / "tests/integration/conftest.py",
-            ROOT / "tests/fuzz/fuzz_semantic_differential.py",
+            ROOT / "tests/fuzz/run_semantic_fuzz.py",
         ]
         missing = [str(path.relative_to(ROOT)) for path in entry_points
                    if "EXASOL_TELEMETRY_DISABLE" not in path.read_text(encoding="utf-8")]

@@ -201,6 +201,12 @@ means the database has stopped serving sessions, not that a test is slow. A
 socket timeout cannot catch this: a stalled server still answers WebSocket
 pings, and each ping resets the client's wait.
 
+The fuzz entry point is `python3 tests/fuzz/run_semantic_fuzz.py`. It defaults to
+the hand-written differential campaign; use `--oracle tlp` for the other live
+campaign. `--generator sqlglot` runs a small compiler contract campaign through
+Lua without connecting to Exasol. The release gate still runs both hand-written
+campaigns across its configured seeds.
+
 On a local Exasol Personal deployment there are two known causes:
 
 - **The Mac sleeps.** The VM is frozen with it; a run started before a closed
