@@ -200,10 +200,12 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertTrue(backend.closed)
 
     def test_incompatible_and_incomplete_profiles_fail_before_backend(self):
+        handwritten = HandwrittenGenerator()
+        only_sql = type("OnlySql", (), {
+            "name": "sql", "accepted_profiles": (Profile.LABELLED_SQL,),
+        })()
         with self.assertRaisesRegex(ValueError, "no shared case profile"):
-            select_profile(HandwrittenGenerator(), type("OnlySql", (), {
-                "name": "sql", "accepted_profiles": (Profile.LABELLED_SQL,),
-            })())
+            select_profile(handwritten, only_sql)
         called = False
 
         def factory():
@@ -211,9 +213,10 @@ class SemanticFuzzTest(unittest.TestCase):
             called = True
             return _LiveBackend()
 
+        missing = _MissingGenerator()
+        differential = DifferentialOracle()
         with self.assertRaisesRegex(ValueError, "paired case needs JSON and SQL"):
-            run_campaign(_MissingGenerator(), DifferentialOracle(), 0, 1, False,
-                         backend_factory=factory)
+            run_campaign(missing, differential, 0, 1, False, backend_factory=factory)
         self.assertFalse(called)
 
     def test_sqlglot_contract_never_needs_exasol(self):
