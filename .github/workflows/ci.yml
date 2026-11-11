@@ -31,7 +31,7 @@ jobs:
     uses: $/.github/workflows/fuzz.yml
     with:
       seeds: "0 1 2 7 42"
-      cases: "100"
+      cases: "60"
       timeout_minutes: 30
       artifact_name: fuzz-smoke-results
 

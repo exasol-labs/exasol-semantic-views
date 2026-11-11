@@ -544,7 +544,7 @@ See [Runtime testing](docs/runtime-testing.md) for coverage scope, thresholds,
 and large/high-cardinality CI configuration.
 
 Every PR runs a fuzz campaign in parallel with the system tests: seeds
-`0`, `1`, `2`, `7`, and `42`, with 100 cases per generator and oracle. It covers
+`0`, `1`, `2`, `7`, and `42`, with 60 cases per generator and oracle. It covers
 the differential and TLP oracles with hand-written cases and the SQLGlot
 contract oracle. Its result feeds `ci-gate`.
 The full multi-seed campaign still runs before each release. A reviewer can

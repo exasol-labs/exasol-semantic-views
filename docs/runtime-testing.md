@@ -206,7 +206,7 @@ the hand-written differential campaign; use `--oracle tlp` for the other live
 campaign. `--generator sqlglot` runs a small compiler contract campaign through
 Lua without connecting to Exasol. PR CI runs the hand-written differential and
 TLP campaigns and the SQLGlot contract campaign with seeds `0 1 2 7 42` and
-100 cases each, in a job parallel to system tests. The release gate keeps the
+60 cases each, in a job parallel to system tests. The release gate keeps the
 wider default of eight seeds and 250 cases per generator and oracle; both jobs
 use `FUZZ_SEEDS` and `FUZZ_CASES` to configure the runner.
 

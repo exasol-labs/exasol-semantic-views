@@ -99,7 +99,7 @@ class WorkflowWiringTest(unittest.TestCase):
         self.assertEqual(local_target(smoke), "fuzz.yml")
         self.assertNotIn("needs", smoke)
         self.assertEqual(smoke["with"], {
-            "seeds": "0 1 2 7 42", "cases": "100", "timeout_minutes": "30",
+            "seeds": "0 1 2 7 42", "cases": "60", "timeout_minutes": "30",
             "artifact_name": "fuzz-smoke-results",
         })
 
