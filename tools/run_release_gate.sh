@@ -9,11 +9,11 @@
 #
 # Two knobs (environment variables):
 #   FUZZ_SEEDS   — space-separated seeds. Default "0 1 2 7 42 99 123 456".
-#   FUZZ_CASES   — cases per (seed, oracle) pair. Default 250.
+#   FUZZ_CASES   — cases per (seed, generator, oracle) campaign. Default 250.
 #
 # Pass --fuzz-only when another CI job owns the system suite, whether it runs
-# in parallel for PRs or finished first for a release. A divergence in either
-# fuzz oracle exits non-zero after all seeds have run.
+# in parallel for PRs or finished first for a release. A failed campaign exits
+# non-zero after all seeds have run.
 
 set -eu
 
@@ -53,21 +53,28 @@ fi
 echo
 echo "==> Compiler fuzz campaign (seeds='$FUZZ_SEEDS' cases=$FUZZ_CASES)"
 FUZZ_FAILURES=0
+run_campaign() {
+  FUZZ_GENERATOR=$1
+  FUZZ_ORACLE=$2
+  printf "  seed=%s generator=%s oracle=%s " "$FUZZ_SEED" "$FUZZ_GENERATOR" "$FUZZ_ORACLE"
+  if "$PYTHON_BIN" tests/fuzz/run_semantic_fuzz.py \
+       --generator "$FUZZ_GENERATOR" --oracle "$FUZZ_ORACLE" \
+       --seed "$FUZZ_SEED" --cases "$FUZZ_CASES" \
+       > /tmp/fuzz.$$.out 2>&1
+  then
+    echo "OK ($FUZZ_CASES cases)"
+  else
+    echo "FAIL — reproduction below"
+    cat /tmp/fuzz.$$.out
+    FUZZ_FAILURES=$((FUZZ_FAILURES + 1))
+  fi
+  rm -f /tmp/fuzz.$$.out
+}
+
 for FUZZ_SEED in $FUZZ_SEEDS; do
-  for FUZZ_ORACLE in differential tlp; do
-    printf "  seed=%s oracle=%s " "$FUZZ_SEED" "$FUZZ_ORACLE"
-    if "$PYTHON_BIN" tests/fuzz/run_semantic_fuzz.py \
-         --oracle "$FUZZ_ORACLE" --seed "$FUZZ_SEED" --cases "$FUZZ_CASES" \
-         > /tmp/fuzz.$$.out 2>&1
-    then
-      echo "OK ($FUZZ_CASES cases)"
-    else
-      echo "FAIL — reproduction below"
-      cat /tmp/fuzz.$$.out
-      FUZZ_FAILURES=$((FUZZ_FAILURES + 1))
-    fi
-    rm -f /tmp/fuzz.$$.out
-  done
+  run_campaign handwritten differential
+  run_campaign handwritten tlp
+  run_campaign sqlglot contract
 done
 
 echo

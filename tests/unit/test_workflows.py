@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -92,13 +93,13 @@ class WorkflowWiringTest(unittest.TestCase):
         self.assertEqual(set(jobs["ci-gate"]["needs"]), lanes | {"sonar"})
         self.assertTrue(all(local_target(jobs[name]) for name in lanes))
 
-    def test_pr_fuzz_runs_in_parallel_with_fixed_short_campaign(self) -> None:
+    def test_pr_fuzz_runs_in_parallel_with_fixed_campaign(self) -> None:
         jobs = self.workflows["ci.yml"]["jobs"]
         smoke = jobs["fuzz-smoke"]
         self.assertEqual(local_target(smoke), "fuzz.yml")
         self.assertNotIn("needs", smoke)
         self.assertEqual(smoke["with"], {
-            "seeds": "0 42", "cases": "30", "timeout_minutes": "20",
+            "seeds": "0 1 2 7 42", "cases": "100", "timeout_minutes": "30",
             "artifact_name": "fuzz-smoke-results",
         })
 
@@ -112,6 +113,29 @@ class WorkflowWiringTest(unittest.TestCase):
         artifacts = [step["with"]["name"] for step in fuzz["jobs"]["fuzz"]["steps"]
                      if "actions/upload-artifact@" in step.get("uses", "")]
         self.assertTrue(all("inputs.artifact_name" in name for name in artifacts))
+
+    def test_fuzz_runner_includes_sqlglot_contract_for_each_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            location = Path(directory)
+            fake_python = location / "python"
+            calls = location / "calls"
+            fake_python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$FUZZ_CALLS"\n')
+            fake_python.chmod(0o755)
+            completed = subprocess.run(
+                ["sh", "tools/run_release_gate.sh", "--fuzz-only"],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+                env={**os.environ, "PYTHON_BIN": str(fake_python),
+                     "FUZZ_SEEDS": "0 42", "FUZZ_CASES": "3", "FUZZ_CALLS": str(calls)},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(calls.read_text().splitlines(), [
+                f"tests/fuzz/run_semantic_fuzz.py --generator {generator} --oracle {oracle} "
+                f"--seed {seed} --cases 3"
+                for seed in (0, 42)
+                for generator, oracle in (("handwritten", "differential"),
+                                          ("handwritten", "tlp"),
+                                          ("sqlglot", "contract"))
+            ])
 
     def test_ci_gate_fails_for_failed_or_skipped_jobs(self) -> None:
         gate = self.workflows["ci.yml"]["jobs"]["ci-gate"]

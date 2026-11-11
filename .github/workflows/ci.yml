@@ -26,9 +26,9 @@ jobs:
   fuzz-smoke:
     uses: $/.github/workflows/fuzz.yml
     with:
-      seeds: "0 42"
-      cases: "30"
-      timeout_minutes: 20
+      seeds: "0 1 2 7 42"
+      cases: "100"
+      timeout_minutes: 30
       artifact_name: fuzz-smoke-results
 
   sonar:

@@ -543,8 +543,10 @@ python3 tests/integration/verify_runtime_performance.py
 See [Runtime testing](docs/runtime-testing.md) for coverage scope, thresholds,
 and large/high-cardinality CI configuration.
 
-Every PR runs a short fuzz campaign in parallel with the system tests: seeds
-`0` and `42`, with 30 cases per oracle. Its result feeds `ci-gate`.
+Every PR runs a fuzz campaign in parallel with the system tests: seeds
+`0`, `1`, `2`, `7`, and `42`, with 100 cases per generator and oracle. It covers
+the differential and TLP oracles with hand-written cases and the SQLGlot
+contract oracle. Its result feeds `ci-gate`.
 The full multi-seed campaign still runs before each release. A reviewer can
 also run the full campaign on demand for a same-repository PR: open
 **Actions → Fuzz campaign → Run workflow**, select the PR's branch, and start
