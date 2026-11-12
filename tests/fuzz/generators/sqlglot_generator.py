@@ -96,18 +96,19 @@ def _malformed(rng: random.Random, idx: int) -> tuple[str, str, str]:
 
 def _joined(rng: random.Random, idx: int, *, missing_key: bool = False) -> str:
     keys = rng.sample(DIM_NAMES, k=2 if missing_key else 1 + idx % 2)
-    metric = "total_revenue"
-    inner = _render(Spec(keys, [metric]))
+    left_metric, right_metric = "total_revenue", "total_cost"
+    left = _render(Spec(keys, [left_metric]))
+    right = _render(Spec(keys, [right_metric]))
     columns = ", ".join(f"l.{key}" for key in keys)
     on = " AND ".join(f"l.{key} = r.{key}" for key in
                       (keys[:1] if missing_key else keys))
     kind = "LEFT" if idx % 2 else "INNER"
     if idx % 4 < 2:
-        sql = (f"SELECT {columns}, l.{metric}, r.{metric} "
-               f"FROM ({inner}) AS l {kind} JOIN ({inner}) AS r ON {on}")
+        sql = (f"SELECT {columns}, l.{left_metric}, r.{right_metric} "
+               f"FROM ({left}) AS l {kind} JOIN ({right}) AS r ON {on}")
     else:
-        sql = (f"WITH l AS ({inner}), r AS ({inner}) "
-               f"SELECT {columns}, l.{metric}, r.{metric} "
+        sql = (f"WITH l AS ({left}), r AS ({right}) "
+               f"SELECT {columns}, l.{left_metric}, r.{right_metric} "
                f"FROM l {kind} JOIN r ON {on}")
     rendered = parse_one(sql, dialect="exasol",
                          error_level=ErrorLevel.RAISE).sql(dialect="exasol")

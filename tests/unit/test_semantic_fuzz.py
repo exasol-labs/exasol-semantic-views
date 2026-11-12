@@ -134,7 +134,7 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual({case.label.rule for case in malformed},
                          {"SEMANTIC_QUERY_033", "SEMANTIC_QUERY_050"})
 
-    def test_sqlglot_joins_cover_every_grouping_key(self):
+    def test_sqlglot_joins_cover_every_grouping_key_and_distinct_metrics(self):
         generator = SqlglotGenerator()
         joins = [generator.generate(random.Random(1), Profile.LABELLED_SQL, 1, i)
                  for i in (4, 11, 25, 32)]
@@ -145,6 +145,9 @@ class SemanticFuzzTest(unittest.TestCase):
             self.assertEqual(case.label.shape, "grouped-join")
             self.assertEqual(case.label.syntax_intent, "valid")
             self.assertEqual(case.label.expected_status, "ACCEPT")
+            self.assertIn("l.total_revenue, r.total_cost", case.sql)
+            self.assertIn("total_revenue FROM SEMANTIC_SALES.SALES", case.sql)
+            self.assertIn("total_cost FROM SEMANTIC_SALES.SALES", case.sql)
             self.assertIn("l.", case.sql)
             self.assertIn(" = r.", case.sql)
             self.assertNotIn("SEMANTIC_OTHER", case.sql)
