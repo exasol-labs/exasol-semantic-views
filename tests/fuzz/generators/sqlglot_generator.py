@@ -72,36 +72,35 @@ def _spec(rng: random.Random, idx: int, *, contract: bool = False) -> Spec:
 
 def _malformed(rng: random.Random, idx: int) -> tuple[str, str, str]:
     """Corrupt a generated query with one bounded, parser-visible syntax defect."""
-    if rng.randrange(4) == 0:
-        inner = _render(_spec(rng, idx, contract=True), quoted=bool(rng.getrandbits(1)))
-        outer_field = rng.choice(("order_status", "total_revenue"))
-        return (f"SELECT {outer_field} FROM ({inner}", "unclosed-derived-table",
-                "SEMANTIC_QUERY_003")
-
-    columns = rng.choice((("order_status",),
-                          ("order_status", "total_revenue"),
+    columns = rng.choice((("order_status", "total_revenue"),
                           ("total_revenue", "order_status"),
-                          ('"order_status"',)))
-    prefix = select(*columns).from_("SEMANTIC_SALES.SALES").sql(dialect="exasol")
+                          ('"order_status"', '"total_revenue"'),
+                          ("order_status", '"total_revenue"'),
+                          ('"total_revenue"', "order_status"),
+                          ('"total_revenue"', '"order_status"')))
+    prefix = (select(*columns).from_("SEMANTIC_SALES.SALES")
+              .sql(dialect="exasol"))
     value = rng.choice(("COMPLETE", "CANCELLED"))
     defect = rng.randrange(3)
     if defect == 0:
-        extra = rng.choice(("", " AND order_status = 'COMPLETE'"))
-        return (f"{prefix} WHERE (order_status = '{value}'{extra}",
-                "unclosed-where-expression", "SEMANTIC_QUERY_030")
+        return (f"{prefix} WHERE order_status = GROUP BY order_status",
+                "missing-predicate-value", "SEMANTIC_QUERY_033")
     if defect == 1:
-        return (f"{prefix} WHERE order_status =", "missing-predicate-value",
-                "SEMANTIC_QUERY_033")
-    return (f"{prefix} WHERE order_status IN ('{value}',", "unclosed-in-list",
-            "SEMANTIC_QUERY_032")
+        return (f"{prefix} WHERE order_status = '{value}' "
+                "GROUP BY order_status HAVING total_revenue >",
+                "missing-having-value", "SEMANTIC_QUERY_033")
+    return (f"{prefix} WHERE order_status = '{value}' "
+            "GROUP BY order_status LIMIT", "missing-limit-value",
+            "SEMANTIC_QUERY_050")
 
 
-def _joined(rng: random.Random, idx: int) -> str:
-    keys = rng.sample(DIM_NAMES, k=1 + idx % 2)
+def _joined(rng: random.Random, idx: int, *, missing_key: bool = False) -> str:
+    keys = rng.sample(DIM_NAMES, k=2 if missing_key else 1 + idx % 2)
     metric = "total_revenue"
     inner = _render(Spec(keys, [metric]))
     columns = ", ".join(f"l.{key}" for key in keys)
-    on = " AND ".join(f"l.{key} = r.{key}" for key in keys)
+    on = " AND ".join(f"l.{key} = r.{key}" for key in
+                      (keys[:1] if missing_key else keys))
     kind = "LEFT" if idx % 2 else "INNER"
     if idx % 4 < 2:
         sql = (f"SELECT {columns}, l.{metric}, r.{metric} "
@@ -114,6 +113,24 @@ def _joined(rng: random.Random, idx: int) -> str:
                          error_level=ErrorLevel.RAISE).sql(dialect="exasol")
     _parse(rendered)
     return rendered
+
+
+def _unsafe_join(rng: random.Random, idx: int) -> tuple[str, str]:
+    variant = (idx // 10) % 3
+    if variant == 0:
+        return _joined(rng, idx, missing_key=True), "missing-grouping-key"
+    if variant == 1:
+        sql = ("SELECT s.order_status, s.total_revenue, h.total_freight "
+               "FROM SEMANTIC_SALES.SALES AS s JOIN "
+               "SEMANTIC_SALES.ORDER_HEADER AS h "
+               "ON s.order_status = h.ship_mode")
+        return parse_one(sql, dialect="exasol",
+                         error_level=ErrorLevel.RAISE).sql(dialect="exasol"), "cross-object-composition"
+    sql = ("SELECT s.order_status, s.total_revenue, o.order_id "
+           "FROM SEMANTIC_SALES.SALES AS s JOIN MART.ORDERS AS o "
+           "ON s.order_status = o.order_status")
+    return parse_one(sql, dialect="exasol",
+                     error_level=ErrorLevel.RAISE).sql(dialect="exasol"), "ungrouped-relation"
 
 
 def _reference_join(idx: int) -> tuple[str, str]:
@@ -170,11 +187,15 @@ class SqlglotGenerator:
             return LabelledSqlCase(
                 CaseLabel(seed, idx, "single-object", "unknown-field",
                           "valid", "REJECT", "SEMANTIC_QUERY_029"), sql)
+        if idx % 10 == 6:
+            sql, rule = _unsafe_join(rng, idx)
+            return LabelledSqlCase(
+                CaseLabel(seed, idx, "grouped-join", rule,
+                          "valid", "REJECT", "SEMANTIC_QUERY_012"), sql)
         if idx % 7 == 4:
-            code = "SEMANTIC_QUERY_003" if idx % 4 < 2 else "SEMANTIC_QUERY_009"
             return LabelledSqlCase(
                 CaseLabel(seed, idx, "grouped-join", "whole-grouping-key",
-                          "valid", "REJECT", code), _joined(rng, idx))
+                          "valid", "ACCEPT"), _joined(rng, idx))
         spec = _spec(rng, idx, contract=True)
         return LabelledSqlCase(
             CaseLabel(seed, idx, "single-object", "documented-subset",

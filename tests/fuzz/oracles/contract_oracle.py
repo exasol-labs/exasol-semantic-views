@@ -26,6 +26,6 @@ class ContractOracle:
         if passed:
             return CaseResult(case.label.idx, "match", detail=result["status"], sql_text=case.sql)
         detail = (f"expected={expected}/{case.label.expected_code} "
-                  f"observed={result['status']}/{result['error_code']} "
+            f"observed={result['status']}/{result.get('error_code')} "
                   f"generated_sql={result['generated_sql_present']}")
         return CaseResult(case.label.idx, "contract-mismatch", detail=detail, sql_text=case.sql)
