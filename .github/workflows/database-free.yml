@@ -36,6 +36,8 @@ jobs:
         # under coverage.py and enforces the per-file thresholds in
         # tests/unit/python_coverage_thresholds.py.
         run: PYTHON_BIN=python sh tools/run_python_tests.sh
+      - name: Run SQLGlot compiler contract smoke
+        run: LUA_BIN=lua5.4 python tests/fuzz/run_semantic_fuzz.py --generator sqlglot --cases 30
       - name: Save Python unit coverage
         run: cp .coverage .coverage.unit
       - name: Upload Python unit coverage

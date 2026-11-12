@@ -38,7 +38,7 @@ LINE_THRESHOLDS: dict[str, float] = {
 # them here keeps the coverage report readable and prevents them from
 # dragging a per-file gate down to 0%.
 OMIT_PATTERNS: list[str] = [
-    "tests/fuzz/fuzz_semantic_differential.py",
+    "tests/fuzz/*.py",
     "tools/import_databricks.py",
     "tools/package_lua_scripts.py",
     "tools/dev/*.py",                    # developer helpers: lint, live measurement

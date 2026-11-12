@@ -543,11 +543,16 @@ python3 tests/integration/verify_runtime_performance.py
 See [Runtime testing](docs/runtime-testing.md) for coverage scope, thresholds,
 and large/high-cardinality CI configuration.
 
-The full fuzz campaign also runs before each release. For a same-repository PR,
-a reviewer can run it on demand: open **Actions → Fuzz campaign → Run workflow**,
-select the PR's branch, and start the run. Review the result for the current PR
-commit before approving; a new push requires a new run. The workflow must first
-be present on the default branch for GitHub to show the manual run button.
+Every PR runs a fuzz campaign in parallel with the system tests: seeds
+`0`, `1`, `2`, `7`, and `42`, with 60 cases per generator and oracle. It covers
+the differential and TLP oracles with hand-written cases and the SQLGlot
+contract oracle. Its result feeds `ci-gate`.
+The full multi-seed campaign still runs before each release. A reviewer can
+also run the full campaign on demand for a same-repository PR: open
+**Actions → Fuzz campaign → Run workflow**, select the PR's branch, and start
+the run. Review the result for the current PR commit before approving; a new
+push requires a new run. The workflow must first be present on the default
+branch for GitHub to show the manual run button.
 
 ## Installation
 

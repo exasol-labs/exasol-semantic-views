@@ -5,3 +5,4 @@ coverage>=7.16
 hypothesis>=6.170
 pytest>=9.1
 pytest-timeout>=2.4
+sqlglot==30.21.0

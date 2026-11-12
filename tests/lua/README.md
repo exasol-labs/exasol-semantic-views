@@ -79,6 +79,10 @@ The runner derives their active lines from Lua 5.4 compiler listings, including
 nested local functions that a test never invokes. `tools/run_lua_tests.sh`
 selects the Lua interpreter and compiler; set `LUA_BIN` and `LUAC_BIN` if needed.
 
+`semantic_fuzz_driver.lua` is a separate JSON-lines compiler driver used by the
+database-free SQLGlot fuzz campaign. It shares the sales catalog fixture with
+`compiler_unit_test.lua`; it is not part of the coverage runner.
+
 ## Script-body test conventions
 
 - Keep one file per installed script in `tests/lua/scripts/<name>_test.lua`.
