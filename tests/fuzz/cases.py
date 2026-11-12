@@ -158,10 +158,12 @@ def validate_case(case: FuzzCase, profile: Profile) -> None:
     elif isinstance(case, (JsonTlpCase, PairedTlpCase)):
         for name in ("base", "predicate", "complement", "null"):
             value = getattr(case, name)
-            if isinstance(value, PairedCase):
+            if isinstance(case, PairedTlpCase) and isinstance(value, PairedCase):
                 validate_case(value, Profile.PAIRED)
-            elif not isinstance(value, dict) or not value:
-                raise ValueError(f"case {case.label.idx}: missing TLP variant {name}")
+            elif isinstance(case, JsonTlpCase) and isinstance(value, dict) and value:
+                continue
+            else:
+                raise ValueError(f"case {case.label.idx}: invalid or missing TLP variant {name}")
     elif isinstance(case, ReferenceCase):
         if not case.sql.strip() or not case.reference_sql.strip():
             raise ValueError(f"case {case.label.idx}: SQL and independent reference required")

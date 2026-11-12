@@ -339,6 +339,21 @@ class SemanticFuzzTest(unittest.TestCase):
             run_campaign(missing, differential, 0, 1, False, backend_factory=factory)
         self.assertFalse(called)
 
+    def test_tlp_profiles_reject_variants_with_the_wrong_shape(self):
+        label = CaseLabel(0, 0)
+        json_variant = {"model": "sales"}
+        paired_variant = PairedCase(label, json_variant, "SELECT 1")
+        with self.assertRaisesRegex(ValueError, "TLP variant base"):
+            validate_case(PairedTlpCase(label, json_variant, paired_variant,
+                                        paired_variant, paired_variant), Profile.PAIRED_TLP)
+        with self.assertRaisesRegex(ValueError, "TLP variant base"):
+            validate_case(JsonTlpCase(label, paired_variant, json_variant,
+                                      json_variant, json_variant), Profile.JSON_TLP)
+        validate_case(PairedTlpCase(label, paired_variant, paired_variant,
+                                    paired_variant, paired_variant), Profile.PAIRED_TLP)
+        validate_case(JsonTlpCase(label, json_variant, json_variant,
+                                  json_variant, json_variant), Profile.JSON_TLP)
+
     def test_sqlglot_contract_never_needs_exasol(self):
         if shutil.which("lua") is None:
             self.skipTest("Lua unavailable")
