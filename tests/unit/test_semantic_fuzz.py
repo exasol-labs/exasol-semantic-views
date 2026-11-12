@@ -128,6 +128,17 @@ class SemanticFuzzTest(unittest.TestCase):
                             and case.sql.index("WHERE") < case.sql.index("GROUP BY")
                             for case in first))
 
+    def test_sqlglot_seed_varies_choices_within_a_scheduled_rule(self):
+        generator = SqlglotGenerator()
+        accepted = [generator.generate(random.Random(seed), Profile.LABELLED_SQL,
+                                       seed, 0) for seed in range(5)]
+        joins = [generator.generate(random.Random(seed), Profile.LABELLED_SQL,
+                                    seed, 4) for seed in range(5)]
+        self.assertEqual({case.label.rule for case in accepted}, {"documented-subset"})
+        self.assertEqual({case.label.rule for case in joins}, {"whole-grouping-key"})
+        self.assertGreater(len({case.sql for case in accepted}), 1)
+        self.assertGreater(len({case.sql for case in joins}), 1)
+
     def test_malformed_sql_varies_with_seeded_generation(self):
         generator = SqlglotGenerator()
         rng = random.Random(42)
@@ -142,8 +153,9 @@ class SemanticFuzzTest(unittest.TestCase):
 
     def test_sqlglot_joins_cover_every_grouping_key_and_distinct_metrics(self):
         generator = SqlglotGenerator()
-        joins = [generator.generate(random.Random(1), Profile.LABELLED_SQL, 1, i)
-                 for i in (4, 14, 24)]
+        rng = random.Random(1)
+        joins = [generator.generate(rng, Profile.LABELLED_SQL, 1, i)
+                 for i in range(4, 304, 10)]
         self.assertTrue(any("INNER JOIN" in case.sql for case in joins))
         self.assertTrue(any("LEFT JOIN" in case.sql for case in joins))
         self.assertTrue(any(case.sql.startswith("WITH") for case in joins))
