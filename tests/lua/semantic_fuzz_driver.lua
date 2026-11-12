@@ -36,7 +36,7 @@ local function handle(line)
         or type(input.sql) ~= "string" then
         error("input needs numeric id and SQL text")
     end
-    local mock = compiler_query_fixture()
+    local mock = compiler_query_fixture({fuzz_sales = true})
     query = mock
     local ok, result = pcall(_G.compile_sql, input.sql)
     query = nil

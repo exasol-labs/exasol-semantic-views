@@ -24,7 +24,9 @@ from tests.fuzz.cases import (CaseLabel, CaseResult, JsonTlpCase,  # noqa: E402
                               LabelledSqlCase, PairedCase, PairedTlpCase, Profile,
                               ReferenceCase, validate_case)
 from tests.fuzz.connection import ExasolBackend  # noqa: E402
-from tests.fuzz.generators.handwritten import HandwrittenGenerator, gen_spec, gen_tlp_case  # noqa: E402
+from tests.fuzz.generators.handwritten import (DIMENSIONS, METRICS,  # noqa: E402
+                                               HandwrittenGenerator, gen_spec,
+                                               gen_tlp_case)
 from tests.fuzz.generators.sqlglot_generator import SqlglotGenerator  # noqa: E402
 from tests.fuzz.lua_backend import CaseTimeout, LuaBackend  # noqa: E402
 from tests.fuzz.oracles.contract_oracle import ContractOracle  # noqa: E402
@@ -130,10 +132,9 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(len(malformed), 100)
         self.assertGreaterEqual(len({case.sql for case in malformed}), 20)
         self.assertEqual({case.label.rule for case in malformed},
-                         {"SEMANTIC_QUERY_003", "SEMANTIC_QUERY_030",
-                          "SEMANTIC_QUERY_032", "SEMANTIC_QUERY_033"})
+                         {"SEMANTIC_QUERY_033", "SEMANTIC_QUERY_050"})
 
-    def test_sqlglot_joins_cover_every_grouping_key(self):
+    def test_sqlglot_joins_cover_every_grouping_key_and_distinct_metrics(self):
         generator = SqlglotGenerator()
         joins = [generator.generate(random.Random(1), Profile.LABELLED_SQL, 1, i)
                  for i in (4, 11, 25, 32)]
@@ -143,6 +144,10 @@ class SemanticFuzzTest(unittest.TestCase):
         for case in joins:
             self.assertEqual(case.label.shape, "grouped-join")
             self.assertEqual(case.label.syntax_intent, "valid")
+            self.assertEqual(case.label.expected_status, "ACCEPT")
+            self.assertIn("l.total_revenue, r.total_cost", case.sql)
+            self.assertIn("total_revenue FROM SEMANTIC_SALES.SALES", case.sql)
+            self.assertIn("total_cost FROM SEMANTIC_SALES.SALES", case.sql)
             self.assertIn("l.", case.sql)
             self.assertIn(" = r.", case.sql)
             self.assertNotIn("SEMANTIC_OTHER", case.sql)
@@ -151,6 +156,20 @@ class SemanticFuzzTest(unittest.TestCase):
             keys = {key.strip() for key in grouping.group(1).split(",")}
             joined = set(re.findall(r"l\.([a-z_]+) = r\.\1", case.sql))
             self.assertEqual(keys, joined)
+
+    def test_unsafe_joins_have_specific_safety_refusals(self):
+        generator = SqlglotGenerator()
+        cases = [generator.generate(random.Random(7), Profile.LABELLED_SQL, 7, i)
+                 for i in (6, 16, 26)]
+        self.assertEqual({case.label.rule for case in cases},
+                         {"missing-grouping-key", "cross-object-composition",
+                          "ungrouped-relation"})
+        for case in cases:
+            self.assertEqual(case.label.syntax_intent, "valid")
+            self.assertEqual(case.label.expected_status, "REJECT")
+            self.assertEqual(case.label.expected_code, "SEMANTIC_QUERY_012")
+        self.assertIn("ORDER_HEADER", cases[1].sql)
+        self.assertEqual(len(re.findall(r"l\.([a-z_]+) = r\.\1", cases[0].sql)), 1)
 
     def test_sqlglot_paired_and_tlp_profiles(self):
         generator = SqlglotGenerator()
@@ -202,10 +221,10 @@ class SemanticFuzzTest(unittest.TestCase):
 
     def test_handwritten_seeded_sequences_are_unchanged(self):
         expected = {
-            (0, "differential"): "2b7b7d1f817cbbb4182e3995a6aa995a0fdbe362d0b2f62d258f4f7840d5af3c",
-            (0, "tlp"): "e3cccef73467b3a6b570b367ecb392a918d9a732afd1fc78beda2a0ebd3cf8df",
-            (42, "differential"): "56f807910f94300057b2ad57ee9bb31ab123320c9c1d501eaf44d428770a55e7",
-            (42, "tlp"): "c10ada95fbc194fe0ae7c36cb18900222f4c8a558615b776601a2f342428bb8e",
+            (0, "differential"): "b9932cc87bd18838589220d92237aaa5ca70ad1585a52022f0e92f3814264d0c",
+            (0, "tlp"): "118c26bf68e1f84111acf2aa49bfd0a358023762bedca2ebf01e2e3d5e646d04",
+            (42, "differential"): "2aa261870b74380b93b5cd75b6f2322d29910a6edd9c846d0a91881a859fbfe5",
+            (42, "tlp"): "d5cb1a7cacdf893c8d14e05ea0c1dbd5e8ec3ed2764eab609130af64f177a2f6",
         }
         for (seed, name), digest in expected.items():
             rng = random.Random(seed)
@@ -361,6 +380,65 @@ class SemanticFuzzTest(unittest.TestCase):
 
         with redirect_stdout(io.StringIO()):
             self.assertEqual(main(["--generator", "sqlglot", "--cases", "3"]), 0)
+
+    def test_lua_driver_stream_preserves_ids_and_join_contracts(self):
+        command = shutil.which("lua")
+        if command is None:
+            self.skipTest("Lua unavailable")
+        generator = SqlglotGenerator()
+        cases = [generator.generate(random.Random(3), Profile.LABELLED_SQL, 3, i)
+                 for i in (4, 11, 6, 16, 26)]
+        requests = "".join(json.dumps({"id": 100 + index, "sql": case.sql}) + "\n"
+                           for index, case in enumerate(cases))
+        completed = subprocess.run(
+            [command, "tests/lua/semantic_fuzz_driver.lua"], input=requests,
+            text=True, capture_output=True, cwd=ROOT, check=True,
+        )
+        replies = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual([reply["id"] for reply in replies], list(range(100, 105)))
+        self.assertEqual([(reply["status"], reply["generated_sql_present"])
+                          for reply in replies],
+                         [("OK", True), ("OK", True), ("ERROR", False),
+                          ("ERROR", False), ("ERROR", False)])
+        self.assertEqual({reply["error_code"] for reply in replies[2:]},
+                         {"SEMANTIC_QUERY_012"})
+
+    def test_fuzz_fields_and_filter_samples_match_bundled_sales(self):
+        sales_sql = (ROOT / "sql/examples/sales_physical_model.sql").read_text()
+        self.assertEqual([name for name, _, _ in DIMENSIONS],
+                         ["customer_region", "order_status", "product_category",
+                          "order_month"])
+        self.assertEqual(METRICS, ["total_revenue", "completed_revenue",
+                                   "gross_margin", "total_cost"])
+        for name, _, samples in DIMENSIONS:
+            for sample in samples:
+                if name == "order_month":
+                    self.assertRegex(sales_sql, rf"DATE '{sample[:7]}-\d\d'")
+                else:
+                    self.assertIn(f"'{sample}'", sales_sql)
+        if shutil.which("lua") is None:
+            self.skipTest("Lua unavailable")
+        backend = LuaBackend(5)
+        try:
+            for index, (name, _, _) in enumerate(DIMENSIONS):
+                result = backend.compile(index,
+                    f"SELECT {name}, total_revenue FROM SEMANTIC_SALES.SALES GROUP BY {name}")
+                self.assertEqual(result["status"], "OK", name)
+                self.assertTrue(result["generated_sql_present"], name)
+            for index, name in enumerate(METRICS, start=len(DIMENSIONS)):
+                result = backend.compile(index,
+                    f"SELECT order_status, {name} FROM SEMANTIC_SALES.SALES GROUP BY order_status")
+                self.assertEqual(result["status"], "OK", name)
+                self.assertTrue(result["generated_sql_present"], name)
+            for index, name in enumerate(("ship_mode", "customer_segment"),
+                                         start=len(DIMENSIONS) + len(METRICS)):
+                result = backend.compile(index,
+                    f"SELECT {name}, total_freight FROM SEMANTIC_SALES.ORDER_HEADER "
+                    f"GROUP BY {name}")
+                self.assertEqual(result["status"], "OK", name)
+                self.assertTrue(result["generated_sql_present"], name)
+        finally:
+            backend.close()
 
     def test_lua_driver_reports_harness_errors(self):
         command = shutil.which("lua")

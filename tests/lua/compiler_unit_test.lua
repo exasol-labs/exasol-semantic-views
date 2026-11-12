@@ -695,6 +695,59 @@ end)
 
 local compiler_query_fixture = dofile("tests/lua/compiler_fixture.lua")
 
+local function fuzz_sales_sql(text)
+    local mock = compiler_query_fixture({fuzz_sales = true})
+    return with_query(mock, function() return compile_sql(text) end)
+end
+
+local FUZZ_SALES_GROUPED = "SELECT order_status, product_category, total_revenue "
+    .. "FROM SEMANTIC_SALES.SALES GROUP BY order_status, product_category"
+
+local FUZZ_SALES_OBJECT_LOOKUP = [[SELECT OBJECT_ID FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS]]
+
+for _, case in ipairs({
+    {name = "unknown object name", model_id = 1, version_id = 2, object_name = "UNKNOWN"},
+    {name = "wrong model ID", model_id = 99, version_id = 2, object_name = "SALES"},
+    {name = "wrong version ID", model_id = 1, version_id = 99, object_name = "SALES"},
+}) do
+    test("fuzz sales fixture rejects object lookup with " .. case.name, function()
+        local mock = compiler_query_fixture({fuzz_sales = true})
+        assert_equal(#mock(FUZZ_SALES_OBJECT_LOOKUP, case), 0)
+    end)
+end
+
+test("fuzz sales fixture finds ORDER_HEADER in the matching model version", function()
+    local mock = compiler_query_fixture({fuzz_sales = true})
+    local rows = mock(FUZZ_SALES_OBJECT_LOOKUP,
+        {model_id = 1, version_id = 2, object_name = "ORDER_HEADER"})
+    assert_equal(#rows, 1)
+    assert_equal(rows[1][1], 41)
+end)
+
+test("fuzz sales grouped join on every key compiles", function()
+    local safe = fuzz_sales_sql("SELECT l.order_status, l.total_revenue, r.total_revenue "
+        .. "FROM (" .. FUZZ_SALES_GROUPED .. ") l LEFT JOIN ("
+        .. FUZZ_SALES_GROUPED .. ") r "
+        .. "ON l.order_status = r.order_status AND l.product_category = r.product_category")
+    assert_equal(safe.status, "OK")
+    assert_true(type(safe.generated_sql) == "string" and safe.generated_sql ~= "")
+end)
+
+test("fuzz sales grouped join missing a key is refused", function()
+    local unsafe = fuzz_sales_sql("SELECT l.order_status, l.total_revenue, r.total_revenue "
+        .. "FROM (" .. FUZZ_SALES_GROUPED .. ") l LEFT JOIN ("
+        .. FUZZ_SALES_GROUPED .. ") r "
+        .. "ON l.order_status = r.order_status")
+    assert_equal(unsafe.error_code, "SEMANTIC_QUERY_012")
+end)
+
+test("fuzz sales cross-object join is refused", function()
+    local composed = fuzz_sales_sql("SELECT s.order_status, h.total_freight "
+        .. "FROM SEMANTIC_SALES.SALES s JOIN SEMANTIC_SALES.ORDER_HEADER h "
+        .. "ON s.order_status = h.ship_mode")
+    assert_equal(composed.error_code, "SEMANTIC_QUERY_012")
+end)
+
 local function compile_with_fixture(request, options)
     local mock, state = compiler_query_fixture(options)
     local result = with_query(mock, function()

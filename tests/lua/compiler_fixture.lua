@@ -10,6 +10,41 @@ local FIXTURE_BOUNDARY = {
     {"VS_ARCHIVE", "ORDERS"}, {"VS_LAKE", "ORDERS"},
     {"IDENTITY_MAP", "ORDER_XREF"},
 }
+local FUZZ_SALES_BOUNDARY = {{"MART", "ORDER_LINES"}, {"MART", "PRODUCTS"}}
+
+-- The bounded SQLGlot campaign uses these published sales fields. Keep this
+-- catalog distinct from the small orders fixture used by focused Lua tests.
+local FUZZ_SALES_COLUMNS = {
+    SALES = {
+        {"customer_region", "DIMENSION"}, {"order_month", "DIMENSION"},
+        {"order_status", "DIMENSION"}, {"product_category", "DIMENSION"},
+        {"total_revenue", "METRIC", "SUM"},
+        {"total_cost", "METRIC", "SUM"},
+        {"gross_margin", "METRIC"},
+        {"completed_revenue", "METRIC", "SUM"},
+    },
+    ORDER_HEADER = {
+        {"ship_mode", "DIMENSION"}, {"customer_segment", "DIMENSION"},
+        {"total_freight", "METRIC", "SUM"},
+    },
+}
+
+local FUZZ_SALES_METRICS = {
+    {30, "total_revenue", 1, "SUM(net_revenue)", nil, "ADDITIVE",
+        "DECIMAL(18,2)", "Total Revenue", "SIMPLE", "SUM",
+        "ol.quantity * ol.net_unit_price"},
+    {31, "total_cost", 1, "SUM(net_cost)", nil, "ADDITIVE",
+        "DECIMAL(18,2)", "Total Cost", "SIMPLE", "SUM",
+        "ol.quantity * ol.unit_cost"},
+    {32, "gross_margin", 1, "total_revenue - total_cost", nil, "DERIVED",
+        "DECIMAL(18,2)", "Gross Margin", "DERIVED"},
+    {33, "completed_revenue", 1, "SUM(net_revenue)",
+        "o.order_status = 'COMPLETE'", "ADDITIVE", "DECIMAL(18,2)",
+        "Completed Revenue", "SIMPLE", "SUM", "ol.quantity * ol.net_unit_price",
+        "order_status = 'COMPLETE'", "o.order_status = 'COMPLETE'"},
+    {34, "total_freight", 2, "SUM(freight_amount)", nil, "ADDITIVE",
+        "DECIMAL(18,2)", "Total Freight", "SIMPLE", "SUM", "o.freight_amount"},
+}
 
 local function compiler_query_fixture(options)
     options = options or {}
@@ -47,6 +82,11 @@ local function compiler_query_fixture(options)
             local relations = {}
             for index, pair in ipairs(FIXTURE_BOUNDARY) do
                 relations[index] = {pair[1], pair[2]}
+            end
+            if options.fuzz_sales then
+                for _, pair in ipairs(FUZZ_SALES_BOUNDARY) do
+                    relations[#relations + 1] = {pair[1], pair[2]}
+                end
             end
             return relations
         elseif normalized:find("DELETE FROM SYS_SEMANTIC.COMPILE_CACHE", 1, true) then
@@ -96,18 +136,41 @@ local function compiler_query_fixture(options)
                 return {}
             end
             return {{1, "sales", 2, 3}}
-        elseif options.tableau_group and normalized:find("SELECT ALLOW_DERIVED_COMPOSITION", 1, true) then
+        elseif normalized:find("SELECT ALLOW_DERIVED_COMPOSITION", 1, true) then
             return {{false}}
+        elseif options.fuzz_sales and normalized:find(
+            "SELECT oc.COLUMN_NAME, oc.COLUMN_KIND, mt.AGGREGATION_FUNCTION", 1, true) then
+            if tonumber(params.model_id) ~= 1 or tonumber(params.version_id) ~= 2 then
+                return {}
+            end
+            return FUZZ_SALES_COLUMNS[string.upper(tostring(params.object_name))] or {}
         elseif options.tableau_group and normalized:find(
             "SELECT oc.COLUMN_NAME, oc.COLUMN_KIND, mt.AGGREGATION_FUNCTION", 1, true) then
             return {{"completed_revenue", "METRIC", "SUM"},
                 {"customer_region", "DIMENSION", nil}}
         elseif normalized:find("FROM SYS_SEMANTIC.SEMANTIC_OBJECTS", 1, true) then
             if options.object_missing then return {} end
+            if options.fuzz_sales then
+                if tonumber(params.model_id) ~= 1 or tonumber(params.version_id) ~= 2 then
+                    return {}
+                end
+                local name = string.upper(tostring(params.object_name))
+                if name == "SALES" then return {{40, "SALES", 1}} end
+                if name == "ORDER_HEADER" then return {{41, "ORDER_HEADER", 2}} end
+                return {}
+            end
             return {{40, "SALES", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITIES", 1, true) then
             if normalized:find("JOIN SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
                 state.representation_reads = state.representation_reads + 1
+            end
+            if options.fuzz_sales then
+                return {
+                    {1, "order_line", "MART", "ORDER_LINES", "ol", "ol.order_id", "One row per order line"},
+                    {2, "order", "MART", "ORDERS", "o", "o.order_id", "One row per order"},
+                    {3, "customer", "MART", "CUSTOMERS", "c", "c.customer_id", "One row per customer"},
+                    {4, "product", "MART", "PRODUCTS", "p", "p.product_id", "One row per product"},
+                }
             end
             if options.multi_fact then
                 return {
@@ -139,6 +202,14 @@ local function compiler_query_fixture(options)
             return {{1, "orders", "MART", "ORDERS", "o", "o.order_id",
                 "One row per order", 101, "primary", "RELATION", "PRIMARY", 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.ENTITY_REPRESENTATIONS", 1, true) then
+            if options.fuzz_sales then
+                return {
+                    {101, 1, "primary", "RELATION", "MART", "ORDER_LINES", "ol", "PRIMARY", 1},
+                    {102, 2, "primary", "RELATION", "MART", "ORDERS", "o", "PRIMARY", 1},
+                    {103, 3, "primary", "RELATION", "MART", "CUSTOMERS", "c", "PRIMARY", 1},
+                    {104, 4, "primary", "RELATION", "MART", "PRODUCTS", "p", "PRIMARY", 1},
+                }
+            end
             if options.multi_fact then
                 local representations = {
                     {101, 1, "primary", "RELATION", options.missing_multi_source and "" or "MART", "ORDERS", "o", "PRIMARY", 1},
@@ -195,6 +266,16 @@ local function compiler_query_fixture(options)
                 {104, 1, "archive", "VIRTUAL_SCHEMA", "VS_ARCHIVE", "ORDERS", "o", "ALTERNATE", 20},
             }
         elseif normalized:find("JOIN SYS_SEMANTIC.DIMENSIONS", 1, true) then
+            if options.fuzz_sales then
+                if tonumber(params.object_id) == 41 then
+                    return {{15, "ship_mode", 2, "o.ship_mode", "VARCHAR(20)", "Ship Mode"},
+                        {16, "customer_segment", 3, "c.segment", "VARCHAR(40)", "Customer Segment"}}
+                end
+                return {{10, "customer_region", 3, "c.region", "VARCHAR(100)", "Customer Region"},
+                    {11, "order_month", 2, "DATE_TRUNC('month', o.order_date)", "DATE", "Order Month"},
+                    {12, "order_status", 2, "o.order_status", "VARCHAR(32)", "Order Status"},
+                    {13, "product_category", 4, "p.category", "VARCHAR(100)", "Product Category"}}
+            end
             if options.tableau_group then
                 return {{10, "customer_region", 1, "o.region", "VARCHAR(20)",
                     "Customer Region"}}
@@ -210,6 +291,14 @@ local function compiler_query_fixture(options)
             return {{10, "order_status", 1, "o.status", "VARCHAR(20)",
                 "Order Status"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_INPUTS mi", 1, true) then
+            if options.fuzz_sales then
+                return {{30, "MEASURE", "FACT", 20, "net_revenue", nil, nil, 1},
+                    {31, "MEASURE", "FACT", 21, "net_cost", nil, nil, 1},
+                    {32, "LEFT", "METRIC", 30, "total_revenue", nil, nil, 1},
+                    {32, "RIGHT", "METRIC", 31, "total_cost", nil, nil, 2},
+                    {33, "MEASURE", "FACT", 20, "net_revenue", nil, nil, 1},
+                    {34, "MEASURE", "FACT", 22, "freight_amount", nil, nil, 1}}
+            end
             if options.multi_fact then
                 return {
                     {30, "NUMERATOR", "METRIC", 31, "revenue", nil, nil, 1},
@@ -220,11 +309,20 @@ local function compiler_query_fixture(options)
             end
             return {{30, "MEASURE", "FACT", 20, "net_revenue", nil, nil, 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_FILTERS mf", 1, true) then
+            if options.fuzz_sales then
+                return {{33, "LOCAL", "order_status = 'COMPLETE'",
+                    "o.order_status = 'COMPLETE'", 12, 2, 1}}
+            end
             if options.tableau_group then return {} end
             if options.multi_fact then return {} end
             return {{30, "LOCAL", "order_status = 'COMPLETE'",
                 "o.status = 'COMPLETE'", 10, 1, 1}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES md", 1, true) then
+            if options.fuzz_sales then
+                return {{30, "FACT", 20}, {31, "FACT", 21},
+                    {32, "METRIC", 30}, {32, "METRIC", 31},
+                    {33, "FACT", 20}, {34, "FACT", 22}}
+            end
             if options.multi_fact then
                 return {
                     {30, "METRIC", 31}, {30, "METRIC", 32},
@@ -233,6 +331,11 @@ local function compiler_query_fixture(options)
             end
             return {{30, "FACT", 20}}
         elseif normalized:find("JOIN SYS_SEMANTIC.METRICS", 1, true) then
+            if options.fuzz_sales then
+                if tonumber(params.object_id) == 41 then return {FUZZ_SALES_METRICS[5]} end
+                return {FUZZ_SALES_METRICS[1], FUZZ_SALES_METRICS[2],
+                    FUZZ_SALES_METRICS[3], FUZZ_SALES_METRICS[4]}
+            end
             if options.tableau_group then
                 return {{30, "completed_revenue", 1, "SUM(net_revenue)", nil,
                     "ADDITIVE", "DECIMAL(18,2)", "Completed Revenue", "SIMPLE",
@@ -255,6 +358,7 @@ local function compiler_query_fixture(options)
                 "SUM", "o.amount", nil, nil, nil, nil, nil,
                 '{"metric_type":"SIMPLE"}'}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRICS", 1, true) then
+            if options.fuzz_sales then return FUZZ_SALES_METRICS end
             if options.tableau_group then
                 return {{30, "completed_revenue", 1, "SUM(net_revenue)", nil,
                     "ADDITIVE", "DECIMAL(18,2)", "Completed Revenue", "SIMPLE",
@@ -285,6 +389,11 @@ local function compiler_query_fixture(options)
                 "SUM", "o.amount", nil, nil, nil, nil, nil,
                 '{"metric_type":"SIMPLE"}'}}
         elseif normalized:find("FROM SYS_SEMANTIC.FACTS", 1, true) then
+            if options.fuzz_sales then
+                return {{20, "net_revenue", 1, "ol.quantity * ol.net_unit_price", "DECIMAL(18,2)"},
+                    {21, "net_cost", 1, "ol.quantity * ol.unit_cost", "DECIMAL(18,2)"},
+                    {22, "freight_amount", 2, "o.freight_amount", "DECIMAL(18,2)"}}
+            end
             if options.multi_fact then
                 return {
                     {20, "revenue_fact", 1, "o.amount", "DECIMAL(18,2)"},
@@ -402,6 +511,14 @@ local function compiler_query_fixture(options)
             end
             return options.f5_identity_bindings or {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIPS", 1, true) then
+            if options.fuzz_sales then
+                return {{60, "order_line_to_order", 1, 2,
+                    "ol.order_id = o.order_id", "MANY_TO_ONE", "LEFT", nil, 100},
+                    {61, "order_to_customer", 2, 3,
+                        "o.customer_id = c.customer_id", "MANY_TO_ONE", "LEFT", nil, 100},
+                    {62, "order_line_to_product", 1, 4,
+                        "ol.product_id = p.product_id", "MANY_TO_ONE", "LEFT", nil, 100}}
+            end
             if options.multi_fact then
                 return {
                     {60, "orders_customer", 1, 3,
@@ -416,6 +533,11 @@ local function compiler_query_fixture(options)
             end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.RELATIONSHIP_KEY_MAPPINGS", 1, true) then
+            if options.fuzz_sales then
+                return {{60, 1, "order_id", nil, "order_id", nil},
+                    {61, 1, "customer_id", nil, "customer_id", nil},
+                    {62, 1, "product_id", nil, "product_id", nil}}
+            end
             if options.multi_fact and not options.missing_multi_mapping then
                 return {
                     {60, 1, "customer_id", nil, "customer_id", nil},
@@ -427,6 +549,12 @@ local function compiler_query_fixture(options)
             end
             return {}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEYS", 1, true) then
+            if options.fuzz_sales then
+                return {{50, 1, "order_line_pk", "PRIMARY", "NATIVE"},
+                    {51, 2, "order_pk", "PRIMARY", "NATIVE"},
+                    {52, 3, "customer_pk", "PRIMARY", "NATIVE"},
+                    {53, 4, "product_pk", "PRIMARY", "NATIVE"}}
+            end
             if options.multi_fact then
                 if options.f4_fact_reconcile then
                     return {
@@ -441,6 +569,11 @@ local function compiler_query_fixture(options)
             end
             return {{50, 1, "orders_pk", "PRIMARY", "NATIVE"}}
         elseif normalized:find("FROM SYS_SEMANTIC.UNIQUE_KEY_COLUMNS", 1, true) then
+            if options.fuzz_sales then
+                return {{50, 1, "order_id", nil}, {50, 2, "line_id", nil},
+                    {51, 1, "order_id", nil}, {52, 1, "customer_id", nil},
+                    {53, 1, "product_id", nil}}
+            end
             if options.multi_fact then
                 if options.f4_fact_reconcile then
                     return {
@@ -453,11 +586,19 @@ local function compiler_query_fixture(options)
             if options.f51_direct then return {{50, 1, "CUSTOMER_ID", nil}} end
             return {{50, 1, "order_id", nil}}
         elseif normalized:find("FROM SYS_SEMANTIC.SYNONYMS", 1, true) then
+            if options.fuzz_sales then return {} end
             if options.multi_fact then
                 return {{"METRIC", 30, "ratio"}, {"DIMENSION", 10, "region"}}
             end
             return {{"METRIC", 30, "revenue"}, {"DIMENSION", 10, "status"}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DEPENDENCIES", 1, true) then
+            if options.fuzz_sales then
+                local metric = tonumber(params.metric_id)
+                if metric == 32 then return {{"METRIC", 30}, {"METRIC", 31}} end
+                if metric == 31 then return {{"FACT", 21}} end
+                if metric == 34 then return {{"FACT", 22}} end
+                return {{"FACT", 20}}
+            end
             if options.multi_fact then
                 if tonumber(params.metric_id) == 30 then
                     return {{"METRIC", 31}, {"METRIC", 32}}
@@ -481,6 +622,7 @@ local function compiler_query_fixture(options)
             if options.no_validation then return {} end
             return {{77, "OK", 0}}
         elseif normalized:find("FROM SYS_SEMANTIC.METRIC_DIMENSION_MATRIX", 1, true) then
+            if options.fuzz_sales then return {{true, "OK", "MANY_TO_ONE"}} end
             if options.missing_matrix then return {} end
             if options.invalid_matrix then
                 return {{false, "ONE_TO_MANY_ATTRIBUTION_UNSUPPORTED", nil}}

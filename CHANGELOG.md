@@ -6,6 +6,12 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- The database-free SQLGlot fuzz campaign now checks supported grouped joins,
+  rejects joins that can repeat semantic rows, and uses a sales catalog fixture
+  covering its generated fields and the `ORDER_HEADER` object (#63).
+
 ### Fixed
 
 - Semantic SQL accepts Tableau's redundant `GROUP BY` key for a selected metric

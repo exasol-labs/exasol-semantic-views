@@ -15,7 +15,7 @@ OBJECT = "SALES"
 DIMENSIONS: list[tuple[str, str, list[Any]]] = [
     ("customer_region", "varchar", ["North", "South", "West"]),
     ("order_status",    "varchar", ["COMPLETE", "CANCELLED"]),
-    ("product_category","varchar", ["Widgets", "Gadgets", "Gizmos"]),
+    ("product_category","varchar", ["Bikes", "Accessories"]),
     ("order_month",     "date",    ["2026-01-01", "2026-02-01", "2026-03-01"]),
 ]
 
