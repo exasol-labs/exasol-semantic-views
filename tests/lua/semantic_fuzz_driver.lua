@@ -47,13 +47,17 @@ local function handle(line)
         error_code = result.error_code,
         generated_sql_present = type(result.generated_sql) == "string"
             and result.generated_sql ~= "",
+        plan_json = result.plan_json,
     }
 end
 
 for line in io.lines() do
     local ok, result = pcall(handle, line)
     if not ok then
-        result = {status = "HARNESS_ERROR", error_message = tostring(result),
+        local decoded_ok, input = pcall(ESV_JSON.decode, line)
+        local request_id = decoded_ok and type(input) == "table" and input.id or nil
+        result = {id = request_id,
+            status = "HARNESS_ERROR", error_message = tostring(result),
             generated_sql_present = false}
     end
     io.write(ESV_JSON.encode(result), "\n")

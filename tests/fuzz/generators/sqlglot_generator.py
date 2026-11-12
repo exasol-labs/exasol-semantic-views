@@ -94,15 +94,14 @@ def _malformed(rng: random.Random, idx: int) -> tuple[str, str, str]:
             "SEMANTIC_QUERY_050")
 
 
-def _joined(rng: random.Random, idx: int, *, missing_key: bool = False) -> str:
-    keys = rng.sample(DIM_NAMES, k=2 if missing_key else 1 + idx % 2)
+def _joined(rng: random.Random, idx: int) -> str:
+    keys = rng.sample(DIM_NAMES, k=1 + idx % 2)
     left_metric, right_metric = "total_revenue", "total_cost"
     left = _render(Spec(keys, [left_metric]))
     right = _render(Spec(keys, [right_metric]))
     columns = ", ".join(f"l.{key}" for key in keys)
-    on = " AND ".join(f"l.{key} = r.{key}" for key in
-                      (keys[:1] if missing_key else keys))
-    kind = "LEFT" if idx % 2 else "INNER"
+    on = " AND ".join(f"l.{key} = r.{key}" for key in keys)
+    kind = "LEFT" if (idx // 10) % 2 else "INNER"
     if idx % 4 < 2:
         sql = (f"SELECT {columns}, l.{left_metric}, r.{right_metric} "
                f"FROM ({left}) AS l {kind} JOIN ({right}) AS r ON {on}")
@@ -116,22 +115,40 @@ def _joined(rng: random.Random, idx: int, *, missing_key: bool = False) -> str:
     return rendered
 
 
-def _unsafe_join(rng: random.Random, idx: int) -> tuple[str, str]:
-    variant = (idx // 10) % 3
-    if variant == 0:
-        return _joined(rng, idx, missing_key=True), "missing-grouping-key"
-    if variant == 1:
-        sql = ("SELECT s.order_status, s.total_revenue, h.total_freight "
-               "FROM SEMANTIC_SALES.SALES AS s JOIN "
-               "SEMANTIC_SALES.ORDER_HEADER AS h "
-               "ON s.order_status = h.ship_mode")
-        return parse_one(sql, dialect="exasol",
-                         error_level=ErrorLevel.RAISE).sql(dialect="exasol"), "cross-object-composition"
-    sql = ("SELECT s.order_status, s.total_revenue, o.order_id "
-           "FROM SEMANTIC_SALES.SALES AS s JOIN MART.ORDERS AS o "
-           "ON s.order_status = o.order_status")
-    return parse_one(sql, dialect="exasol",
-                     error_level=ErrorLevel.RAISE).sql(dialect="exasol"), "ungrouped-relation"
+def _contract_join(rng: random.Random, idx: int, rule: str) -> tuple[str, str]:
+    """Return one accepted join and a single unsafe edit of that join."""
+    if rule == "cross-object-composition":
+        control = ("SELECT s.order_status, s.total_revenue "
+                   "FROM SEMANTIC_SALES.SALES AS s")
+        mutated = ("SELECT s.order_status, s.total_revenue "
+                   "FROM SEMANTIC_SALES.SALES AS s JOIN "
+                   "SEMANTIC_SALES.ORDER_HEADER AS h "
+                   "ON s.order_status = h.ship_mode")
+    else:
+        keys = rng.sample(DIM_NAMES, k=2 if rule == "missing-grouping-key" else 1)
+        left = _render(Spec(keys, ["total_revenue"]))
+        right = _render(Spec(keys, ["total_cost"]))
+        columns = ", ".join(f"l.{key}" for key in keys)
+        on = " AND ".join(f"l.{key} = r.{key}" for key in keys)
+        prefix = (f"SELECT {columns}, l.total_revenue, r.total_cost "
+                  f"FROM ({left}) AS l INNER JOIN ({right}) AS r ")
+        control = prefix + "ON " + on
+        if rule == "missing-grouping-key":
+            mutated = prefix + f"ON l.{keys[0]} = r.{keys[0]}"
+        elif rule == "or-join":
+            mutated = prefix + f"ON {on} OR l.total_revenue > 0"
+        elif rule == "using-join":
+            mutated = prefix + f"USING ({keys[0]})"
+        else:
+            raise ValueError(f"unknown join mutation: {rule}")
+    _parse(control)
+    _parse(mutated)
+    return control, mutated
+
+
+CONTRACT_SCHEDULE = ("accepted", "omitted-grouping-dimension", "measure-dimension",
+                     "invalid-ordinal", "safe-join", "missing-grouping-key",
+                     "or-join", "using-join", "cross-object-composition", "malformed")
 
 
 def _reference_join(idx: int) -> tuple[str, str]:
@@ -171,7 +188,8 @@ class SqlglotGenerator:
                 raise ValueError(f"sqlglot generator does not provide {profile.value}")
 
     def _labelled_sql(self, rng: random.Random, seed: int, idx: int) -> LabelledSqlCase:
-        if idx % 10 >= 8:
+        rule = CONTRACT_SCHEDULE[idx % len(CONTRACT_SCHEDULE)]
+        if rule == "malformed":
             sql, shape, code = _malformed(rng, idx)
             try:
                 _parse(sql)
@@ -179,30 +197,51 @@ class SqlglotGenerator:
                 pass
             else:
                 raise ValueError(f"case {idx}: malformed template parses in SQLGlot")
-            return LabelledSqlCase(CaseLabel(seed, idx, shape, code,
+            return LabelledSqlCase(CaseLabel(seed, idx, shape, shape,
                                              "invalid", "REJECT", code), sql)
-        if idx % 10 == 7:
-            sql = select("unknown_field").from_("SEMANTIC_SALES.SALES").sql(
-                dialect="exasol")
-            _parse(sql)
-            return LabelledSqlCase(
-                CaseLabel(seed, idx, "single-object", "unknown-field",
-                          "valid", "REJECT", "SEMANTIC_QUERY_029"), sql)
-        if idx % 10 == 6:
-            sql, rule = _unsafe_join(rng, idx)
-            return LabelledSqlCase(
-                CaseLabel(seed, idx, "grouped-join", rule,
-                          "valid", "REJECT", "SEMANTIC_QUERY_012"), sql)
-        if idx % 7 == 4:
+        if rule == "safe-join":
             return LabelledSqlCase(
                 CaseLabel(seed, idx, "grouped-join", "whole-grouping-key",
                           "valid", "ACCEPT"), _joined(rng, idx))
-        spec = _spec(rng, idx, contract=True)
+        if rule in {"missing-grouping-key", "or-join", "using-join",
+                    "cross-object-composition"}:
+            control, sql = _contract_join(rng, idx, rule)
+            return LabelledSqlCase(
+                CaseLabel(seed, idx, "grouped-join", rule,
+                          "valid", "REJECT", "SEMANTIC_QUERY_012"), sql,
+                control_sql=control)
+        if rule == "omitted-grouping-dimension":
+            spec = Spec(["order_status", "customer_region"], ["total_revenue"])
+            control = _render(spec)
+            sql = control.replace("GROUP BY order_status, customer_region",
+                                  "GROUP BY order_status")
+            code = "SEMANTIC_QUERY_008"
+        elif rule == "measure-dimension":
+            control = _render(Spec(["order_status"], ["total_revenue"]))
+            sql = control.replace("order_status, total_revenue",
+                                  "MEASURE(order_status), total_revenue", 1)
+            code = "SEMANTIC_QUERY_006"
+        elif rule == "invalid-ordinal":
+            control = _render(Spec(["order_status"], ["total_revenue"],
+                                   order_by=[OrderBy("order_status", "asc")]))
+            sql = control.replace("ORDER BY order_status ASC", "ORDER BY 3 ASC")
+            code = "SEMANTIC_QUERY_064"
+        else:
+            spec = _spec(rng, idx, contract=True)
+            sql = _render(spec, alias=idx % 4 == 1, quoted=idx % 4 == 2,
+                          inferred=idx % 4 == 3, wrapper=idx % 4 == 0)
+            variant = _render(spec, quoted=True, inferred=idx % 4 == 3,
+                              wrapper=idx % 4 == 0)
+            return LabelledSqlCase(
+                CaseLabel(seed, idx, "single-object", "documented-subset",
+                          "valid", "ACCEPT"), sql, variant_sql=variant,
+                shrink_candidates=(_render(Spec(["order_status"], ["total_revenue"])),))
+        if sql == control:
+            raise ValueError(f"case {idx}: mutation {rule} did not change SQL")
+        _parse(sql)
         return LabelledSqlCase(
-            CaseLabel(seed, idx, "single-object", "documented-subset",
-                      "valid", "ACCEPT"),
-            _render(spec, alias=idx % 4 == 1, quoted=idx % 4 == 2,
-                    inferred=idx % 4 == 3, wrapper=idx % 4 == 0))
+            CaseLabel(seed, idx, "single-object", rule, "valid", "REJECT", code),
+            sql, control_sql=control)
 
     def _paired(self, rng: random.Random, seed: int, idx: int) -> PairedCase:
         spec = _spec(rng, idx)

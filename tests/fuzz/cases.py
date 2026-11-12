@@ -77,6 +77,9 @@ class TlpCase:
 class LabelledSqlCase:
     label: CaseLabel
     sql: str
+    control_sql: str | None = None
+    variant_sql: str | None = None
+    shrink_candidates: tuple[str, ...] = ()
     profile: Profile = field(default=Profile.LABELLED_SQL, init=False)
 
 
@@ -126,6 +129,11 @@ class CaseResult:
     detail: str = ""
     json_payload: dict[str, Any] | None = None
     sql_text: str | None = None
+    seed: int | None = None
+    rule: str = ""
+    expected: str = ""
+    actual: str = ""
+    minimized_sql: str | None = None
 
 
 class Generator(Protocol):
@@ -152,6 +160,9 @@ def validate_case(case: FuzzCase, profile: Profile) -> None:
             raise ValueError(f"case {case.label.idx}: labelled SQL needs SQL and an expected status")
         if case.label.expected_status == "REJECT" and not case.label.expected_code:
             raise ValueError(f"case {case.label.idx}: REJECT needs an expected error code")
+        if case.label.syntax_intent == "valid" and case.label.expected_status == "REJECT" \
+                and not case.control_sql:
+            raise ValueError(f"case {case.label.idx}: semantic rejection needs an accepted control")
     elif isinstance(case, PairedCase):
         if not case.json_payload or not case.sql.strip():
             raise ValueError(f"case {case.label.idx}: paired case needs JSON and SQL")

@@ -110,7 +110,11 @@ class SemanticFuzzTest(unittest.TestCase):
                  for i in range(30)]
         self.assertEqual(first, again)
         self.assertEqual({case.label.syntax_intent for case in first}, {"valid", "invalid"})
-        self.assertTrue(any(case.label.rule == "unknown-field" for case in first))
+        self.assertEqual({case.label.rule for case in first if case.label.syntax_intent == "valid"},
+                         {"documented-subset", "omitted-grouping-dimension",
+                          "measure-dimension", "invalid-ordinal", "whole-grouping-key",
+                          "missing-grouping-key", "or-join", "using-join",
+                          "cross-object-composition"})
         for case in first:
             validate_case(case, Profile.LABELLED_SQL)
             if case.label.syntax_intent == "invalid":
@@ -129,15 +133,16 @@ class SemanticFuzzTest(unittest.TestCase):
         malformed = [case for idx in range(500)
                      if (case := generator.generate(rng, Profile.LABELLED_SQL, 42, idx))
                      .label.syntax_intent == "invalid"]
-        self.assertEqual(len(malformed), 100)
-        self.assertGreaterEqual(len({case.sql for case in malformed}), 20)
+        self.assertEqual(len(malformed), 50)
+        self.assertGreaterEqual(len({case.sql for case in malformed}), 10)
         self.assertEqual({case.label.rule for case in malformed},
-                         {"SEMANTIC_QUERY_033", "SEMANTIC_QUERY_050"})
+                         {"missing-predicate-value", "missing-having-value",
+                          "missing-limit-value"})
 
     def test_sqlglot_joins_cover_every_grouping_key_and_distinct_metrics(self):
         generator = SqlglotGenerator()
         joins = [generator.generate(random.Random(1), Profile.LABELLED_SQL, 1, i)
-                 for i in (4, 11, 25, 32)]
+                 for i in (4, 14, 24)]
         self.assertTrue(any("INNER JOIN" in case.sql for case in joins))
         self.assertTrue(any("LEFT JOIN" in case.sql for case in joins))
         self.assertTrue(any(case.sql.startswith("WITH") for case in joins))
@@ -160,16 +165,19 @@ class SemanticFuzzTest(unittest.TestCase):
     def test_unsafe_joins_have_specific_safety_refusals(self):
         generator = SqlglotGenerator()
         cases = [generator.generate(random.Random(7), Profile.LABELLED_SQL, 7, i)
-                 for i in (6, 16, 26)]
+                 for i in (5, 6, 7, 8)]
         self.assertEqual({case.label.rule for case in cases},
-                         {"missing-grouping-key", "cross-object-composition",
-                          "ungrouped-relation"})
+                         {"missing-grouping-key", "or-join", "using-join",
+                          "cross-object-composition"})
         for case in cases:
             self.assertEqual(case.label.syntax_intent, "valid")
             self.assertEqual(case.label.expected_status, "REJECT")
             self.assertEqual(case.label.expected_code, "SEMANTIC_QUERY_012")
-        self.assertIn("ORDER_HEADER", cases[1].sql)
+        self.assertIn("ORDER_HEADER", cases[3].sql)
         self.assertEqual(len(re.findall(r"l\.([a-z_]+) = r\.\1", cases[0].sql)), 1)
+        for case in cases:
+            self.assertIsNotNone(case.control_sql)
+            self.assertNotEqual(case.control_sql, case.sql)
 
     def test_sqlglot_paired_and_tlp_profiles(self):
         generator = SqlglotGenerator()
@@ -330,6 +338,70 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(oracle.run(Backend("SEMANTIC_QUERY_008"), case, False).verdict,
                          "contract-mismatch")
 
+    def test_contract_mutations_have_accepted_controls_and_exact_codes(self):
+        generator = SqlglotGenerator()
+        rng = random.Random(0)
+        backend = LuaBackend(5)
+        try:
+            cases = [generator.generate(rng, Profile.LABELLED_SQL, 0, idx)
+                     for idx in range(10)]
+            self.assertEqual({case.label.rule for case in cases[1:4]},
+                             {"omitted-grouping-dimension", "measure-dimension",
+                              "invalid-ordinal"})
+            self.assertEqual({case.label.rule for case in cases[5:9]},
+                             {"missing-grouping-key", "or-join", "using-join",
+                              "cross-object-composition"})
+            self.assertEqual(cases[9].label.syntax_intent, "invalid")
+            for case in cases:
+                self.assertEqual(ContractOracle().run(backend, case, False).verdict,
+                                 "match", case.label.rule)
+            self.assertEqual(len(re.findall(r"GROUP BY [^)]*,", cases[5].sql)), 2)
+        finally:
+            backend.close()
+
+    def test_supported_case_refusal_fails_and_shrinks(self):
+        class Backend:
+            def compile(self, idx, sql):
+                return {"status": "ERROR", "error_code": "SEMANTIC_QUERY_029",
+                        "generated_sql_present": False}
+
+        case = SqlglotGenerator().generate(random.Random(0), Profile.LABELLED_SQL, 0, 0)
+        result = ContractOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertEqual(result.actual, "ERROR/SEMANTIC_QUERY_029")
+        self.assertIsNotNone(result.minimized_sql)
+        self.assertLess(len(result.minimized_sql), len(case.sql))
+        self.assertNotIn("both-error", result.verdict)
+
+    def test_rejected_case_wrongly_accepted_fails(self):
+        class Backend:
+            def compile(self, idx, sql):
+                return {"status": "OK", "generated_sql_present": True}
+
+        case = SqlglotGenerator().generate(random.Random(0), Profile.LABELLED_SQL, 0, 5)
+        result = ContractOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertEqual(result.expected, "REJECT/SEMANTIC_QUERY_012")
+        self.assertEqual(result.actual, "OK/-")
+
+    def test_contract_jsonl_is_one_record_per_case(self):
+        from contextlib import redirect_stderr
+
+        output = io.StringIO()
+        summary = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(summary):
+            status = run_campaign(SqlglotGenerator(), ContractOracle(), 0, 10,
+                                  False, jsonl=True)
+        self.assertEqual(status, 0)
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(records), 10)
+        self.assertEqual({record["rule"] for record in records},
+                         {"documented-subset", "omitted-grouping-dimension",
+                          "measure-dimension", "invalid-ordinal", "whole-grouping-key",
+                          "missing-grouping-key", "or-join", "using-join",
+                          "cross-object-composition", "missing-having-value"})
+        self.assertIn("match", summary.getvalue())
+
     def test_custom_oracle_runs_existing_generator(self):
         backend = _TestBackend()
         with redirect_stdout(io.StringIO()):
@@ -387,7 +459,7 @@ class SemanticFuzzTest(unittest.TestCase):
             self.skipTest("Lua unavailable")
         generator = SqlglotGenerator()
         cases = [generator.generate(random.Random(3), Profile.LABELLED_SQL, 3, i)
-                 for i in (4, 11, 6, 16, 26)]
+                 for i in (4, 14, 5, 6, 7, 8)]
         requests = "".join(json.dumps({"id": 100 + index, "sql": case.sql}) + "\n"
                            for index, case in enumerate(cases))
         completed = subprocess.run(
@@ -395,11 +467,11 @@ class SemanticFuzzTest(unittest.TestCase):
             text=True, capture_output=True, cwd=ROOT, check=True,
         )
         replies = [json.loads(line) for line in completed.stdout.splitlines()]
-        self.assertEqual([reply["id"] for reply in replies], list(range(100, 105)))
+        self.assertEqual([reply["id"] for reply in replies], list(range(100, 106)))
         self.assertEqual([(reply["status"], reply["generated_sql_present"])
                           for reply in replies],
                          [("OK", True), ("OK", True), ("ERROR", False),
-                          ("ERROR", False), ("ERROR", False)])
+                          ("ERROR", False), ("ERROR", False), ("ERROR", False)])
         self.assertEqual({reply["error_code"] for reply in replies[2:]},
                          {"SEMANTIC_QUERY_012"})
 
@@ -451,15 +523,22 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(json.loads(completed.stdout)["status"], "HARNESS_ERROR")
 
     def test_lua_backend_rejects_wrong_id_and_timeout(self):
+        class Stdout:
+            def fileno(self):
+                return 1
+
         class Process:
-            stdin = io.StringIO()
-            stdout = io.StringIO('{"id":4,"status":"OK","generated_sql_present":true}\n')
-            stderr = io.StringIO()
+            stdin = io.BytesIO()
+            stdout = Stdout()
+            stderr = None
 
         backend = object.__new__(LuaBackend)
         backend.timeout = 1
+        backend.case_deadline = None
+        backend.pending = bytearray()
         backend.process = Process()
-        with patch("tests.fuzz.lua_backend.select.select", return_value=([backend.process.stdout], [], [])):
+        with patch("tests.fuzz.lua_backend.select.select", return_value=([backend.process.stdout], [], [])), \
+             patch("tests.fuzz.lua_backend.os.read", return_value=b'{"id":4,"status":"OK","generated_sql_present":true}\n'):
             with self.assertRaisesRegex(RuntimeError, "reply ID"):
                 backend.compile(3, "SELECT 1")
         with patch("tests.fuzz.lua_backend.select.select", return_value=([], [], [])):
