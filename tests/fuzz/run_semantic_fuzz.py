@@ -33,7 +33,8 @@ from .lua_backend import CaseTimeout, LuaBackend  # noqa: E402
 from .oracles.contract_oracle import ContractOracle  # noqa: E402
 from .oracles.differential_oracle import DifferentialOracle  # noqa: E402
 from .oracles.tlp_oracle import TlpOracle  # noqa: E402
-from .reporting import print_failures, print_result  # noqa: E402
+from .reporting import (CampaignSummary, HumanResultPrinter, JsonlResultPrinter,  # noqa: E402
+                        ResultPrinter)
 
 
 # pyexasol 3 reports usage on connect; a test run never does.
@@ -65,7 +66,8 @@ def select_profile(generator: Generator, oracle: Oracle) -> Profile:
 
 
 def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
-                 verbose: bool, backend_factory: Callable[[], Any] | None = None) -> int:
+                 verbose: bool, backend_factory: Callable[[], Any] | None = None,
+                 jsonl: bool = False) -> int:
     profile = select_profile(generator, oracle)
     rng = random.Random(seed)
 
@@ -84,6 +86,7 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
 
     backend: Any = (backend_factory() if backend_factory is not None else
                     LuaBackend(CASE_TIMEOUT) if oracle.database_free else connect())
+    printer: ResultPrinter = JsonlResultPrinter() if jsonl else HumanResultPrinter()
     stalled = False
     previous_alarm = None
     try:
@@ -91,6 +94,8 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
             backend.execute("EXECUTE SCRIPT SEMANTIC_ADMIN.PUBLISH_MODEL('sales')")
             previous_alarm = signal.signal(signal.SIGALRM, _case_timed_out)
         counts = dict.fromkeys(VERDICTS, 0)
+        rule_counts: dict[str, int] = {}
+        expected_counts: dict[str, int] = {}
         failures = []
         good = {"match"} if oracle.database_free else {"match", "both-error"}
         def cases_to_run():
@@ -99,6 +104,8 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
             yield from generated
 
         for idx, case in cases_to_run():
+            if oracle.database_free and hasattr(backend, "begin_case"):
+                backend.begin_case()
             if not oracle.database_free:
                 signal.alarm(CASE_TIMEOUT)
             try:
@@ -115,21 +122,18 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
                 if not oracle.database_free:
                     signal.alarm(0)
             counts[result.verdict] = counts.get(result.verdict, 0) + 1
-            print_result(result, good)
+            rule_counts[case.label.rule] = rule_counts.get(case.label.rule, 0) + 1
+            if case.label.expected_status:
+                key = case.label.expected_status
+                expected_counts[key] = expected_counts.get(key, 0) + 1
+            printer.case(case, result, good)
             if result.verdict not in good:
                 failures.append(result)
 
-        print()
-        print("=" * 60)
-        for verdict, count in counts.items():
-            if verdict == "contract-mismatch" and not oracle.database_free:
-                continue
-            print(f"  {verdict:16s} {count}")
-        if failures:
-            print_failures(failures)
-            return 1
-        print(f"\nAll {cases} cases equivalent under seed={seed}, oracle={oracle.name}.")
-        return 0
+        printer.summary(CampaignSummary(counts, expected_counts, rule_counts,
+                                        failures, cases, seed, oracle.name,
+                                        oracle.database_free))
+        return 1 if failures else 0
     finally:
         if previous_alarm is not None:
             signal.signal(signal.SIGALRM, previous_alarm)
@@ -147,11 +151,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generator", choices=tuple(GENERATORS), default="handwritten")
     parser.add_argument("--oracle", choices=tuple(ORACLES))
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--jsonl", action="store_true",
+                        help="write one JSON record per case to stdout; summary to stderr")
     args = parser.parse_args(argv)
     oracle_name = args.oracle or ("contract" if args.generator == "sqlglot" else "differential")
     try:
         return run_campaign(GENERATORS[args.generator], ORACLES[oracle_name],
-                            args.seed, args.cases, args.verbose)
+                            args.seed, args.cases, args.verbose, jsonl=args.jsonl)
     except (ValueError, RuntimeError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2

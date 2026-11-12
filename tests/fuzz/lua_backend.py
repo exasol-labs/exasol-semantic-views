@@ -7,6 +7,7 @@ import os
 import select
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,30 +27,43 @@ class LuaBackend:
         self.timeout = timeout
         self.process = subprocess.Popen(
             [command, "tests/lua/semantic_fuzz_driver.lua"], cwd=ROOT,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
+            bufsize=0,
         )
+        self.pending = bytearray()
+        self.case_deadline: float | None = None
+
+    def begin_case(self) -> None:
+        self.case_deadline = time.monotonic() + self.timeout
 
     def compile(self, idx: int, sql: str) -> dict[str, Any]:
         process = self.process
         assert process.stdin is not None and process.stdout is not None
-        process.stdin.write(json.dumps({"id": idx, "sql": sql}) + "\n")
+        process.stdin.write((json.dumps({"id": idx, "sql": sql}) + "\n").encode())
         process.stdin.flush()
-        ready, _, _ = select.select([process.stdout], [], [], self.timeout)
-        if not ready:
-            raise CaseTimeout
-        line = process.stdout.readline()
-        if not line:
-            detail = process.stderr.read() if process.stderr is not None else ""
-            raise RuntimeError(f"Lua driver exited without a reply: {detail.strip()}")
+        deadline = self.case_deadline or (time.monotonic() + self.timeout)
+        while b"\n" not in self.pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CaseTimeout
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise CaseTimeout
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError("Lua driver exited without a reply")
+            self.pending.extend(chunk)
+        raw, _, remainder = self.pending.partition(b"\n")
+        self.pending = bytearray(remainder)
+        line = raw.decode("utf-8")
         try:
             result = json.loads(line)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"Lua driver returned invalid JSON: {line.strip()}") from exc
-        if result.get("status") == "HARNESS_ERROR":
-            raise RuntimeError(f"Lua driver failed: {result.get('error_message')}")
         if result.get("id") != idx:
             raise RuntimeError(f"Lua driver reply ID {result.get('id')!r} != case ID {idx}")
+        if result.get("status") == "HARNESS_ERROR":
+            raise RuntimeError(f"Lua driver failed: {result.get('error_message')}")
         if result.get("status") not in ("OK", "ERROR"):
             raise RuntimeError(f"Lua driver returned invalid status: {result!r}")
         return result
