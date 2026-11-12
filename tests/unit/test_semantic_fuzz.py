@@ -32,6 +32,7 @@ from tests.fuzz.lua_backend import CaseTimeout, LuaBackend  # noqa: E402
 from tests.fuzz.oracles.contract_oracle import ContractOracle  # noqa: E402
 from tests.fuzz.oracles.differential_oracle import DifferentialOracle  # noqa: E402
 from tests.fuzz.oracles.tlp_oracle import TlpOracle  # noqa: E402
+from tests.fuzz.reporting import CampaignSummary, print_summary  # noqa: E402
 from tests.fuzz.run_semantic_fuzz import run_campaign, select_profile  # noqa: E402
 
 
@@ -359,6 +360,60 @@ class SemanticFuzzTest(unittest.TestCase):
         finally:
             backend.close()
 
+    def test_short_contract_run_exercises_distinct_equivalent_variants(self):
+        generator = SqlglotGenerator()
+        rng = random.Random(0)
+        accepted = [generator.generate(rng, Profile.LABELLED_SQL, 0, idx)
+                    for idx in range(30) if idx % 10 == 0]
+        self.assertEqual(len(accepted), 3)
+        self.assertTrue(all(case.variant_sql and case.variant_sql != case.sql
+                            for case in accepted))
+        self.assertIn(" AS s", accepted[0].sql)
+        self.assertNotIn(" GROUP BY ", accepted[1].sql)
+        self.assertIn("MEASURE(", accepted[2].sql)
+        self.assertTrue(all('"order_status"' in case.variant_sql for case in accepted))
+
+    def test_variant_plan_mismatch_reports_both_queries_and_changed_fields(self):
+        class Backend:
+            def compile(self, idx, sql):
+                dimensions = ["order_status"] if sql == "original" else ["customer_region"]
+                return {"status": "OK", "generated_sql_present": True,
+                        "plan_json": json.dumps({"dimensions": dimensions})}
+
+        case = LabelledSqlCase(CaseLabel(7, 0, expected_status="ACCEPT"),
+                               "original", variant_sql="variant")
+        result = ContractOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertIn("dimensions", result.detail)
+        self.assertIn("order_status", result.expected)
+        self.assertIn("customer_region", result.actual)
+        self.assertEqual(result.sql_text, "original")
+        self.assertEqual(result.variant_sql, "variant")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            print_summary(CampaignSummary({"contract-mismatch": 1}, {"ACCEPT": 1},
+                                          {"documented-subset": 1}, [result], 1, 7,
+                                          "contract", True))
+        self.assertIn("original SQL:  original", output.getvalue())
+        self.assertIn("variant SQL:   variant", output.getvalue())
+
+    def test_variant_refusal_reports_both_queries_and_outcomes(self):
+        class Backend:
+            def compile(self, idx, sql):
+                if sql == "original":
+                    return {"status": "OK", "generated_sql_present": True}
+                return {"status": "ERROR", "error_code": "SEMANTIC_QUERY_029",
+                        "generated_sql_present": False}
+
+        case = LabelledSqlCase(CaseLabel(7, 0, expected_status="ACCEPT"),
+                               "original", variant_sql="variant")
+        result = ContractOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertEqual(result.expected, "OK/-")
+        self.assertEqual(result.actual, "ERROR/SEMANTIC_QUERY_029")
+        self.assertEqual(result.sql_text, "original")
+        self.assertEqual(result.variant_sql, "variant")
+
     def test_supported_case_refusal_fails_and_shrinks(self):
         class Backend:
             def compile(self, idx, sql):
@@ -372,6 +427,22 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertIsNotNone(result.minimized_sql)
         self.assertLess(len(result.minimized_sql), len(case.sql))
         self.assertNotIn("both-error", result.verdict)
+
+    def test_shrink_keeps_the_clause_that_triggers_the_failure(self):
+        class Backend:
+            def compile(self, idx, sql):
+                if " HAVING " in sql:
+                    return {"status": "ERROR", "error_code": "SEMANTIC_QUERY_029",
+                            "generated_sql_present": False}
+                return {"status": "OK", "generated_sql_present": True}
+
+        case = SqlglotGenerator().generate(random.Random(0), Profile.LABELLED_SQL, 0, 0)
+        result = ContractOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertIn(" HAVING ", result.minimized_sql)
+        self.assertIn(" AS s", result.minimized_sql)
+        self.assertNotIn(" LIMIT ", result.minimized_sql)
+        self.assertNotIn(" ORDER BY ", result.minimized_sql)
 
     def test_rejected_case_wrongly_accepted_fails(self):
         class Backend:

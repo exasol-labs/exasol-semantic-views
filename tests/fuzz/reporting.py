@@ -56,4 +56,7 @@ def _print_failures(failures: list[CaseResult]) -> None:
         print(f"  json:    {json.dumps(result.json_payload)}")
         if result.sql_text:
             print(f"  original SQL:  {result.sql_text}")
-            print(f"  minimized SQL: {result.minimized_sql or result.sql_text}")
+        if result.variant_sql:
+            print(f"  variant SQL:   {result.variant_sql}")
+        if result.minimized_sql:
+            print(f"  minimized SQL: {result.minimized_sql}")

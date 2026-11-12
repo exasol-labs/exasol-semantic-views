@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from dataclasses import replace
 
 from sqlglot import parse_one, select
 from sqlglot.errors import ErrorLevel, ParseError
@@ -68,6 +69,25 @@ def _spec(rng: random.Random, idx: int, *, contract: bool = False) -> Spec:
     ordering = [OrderBy(dim, "asc")] if idx % 2 == 0 else []
     return Spec([dim], [metric], filters, having, ordering,
                 5 if ordering and idx % 4 == 0 else None)
+
+
+def _shrink_candidates(spec: Spec, **render_options: bool) -> tuple[str, ...]:
+    """Remove optional clauses while retaining the original fields and syntax form."""
+    candidates = []
+    reduced = spec
+    if reduced.limit is not None:
+        reduced = replace(reduced, limit=None)
+        candidates.append(_render(reduced, **render_options))
+    if reduced.order_by:
+        reduced = replace(reduced, order_by=[])
+        candidates.append(_render(reduced, **render_options))
+    if reduced.having:
+        reduced = replace(reduced, having=[])
+        candidates.append(_render(reduced, **render_options))
+    if reduced.filters:
+        reduced = replace(reduced, filters=[])
+        candidates.append(_render(reduced, **render_options))
+    return tuple(candidates)
 
 
 def _malformed(rng: random.Random, idx: int) -> tuple[str, str, str]:
@@ -228,14 +248,16 @@ class SqlglotGenerator:
             code = "SEMANTIC_QUERY_064"
         else:
             spec = _spec(rng, idx, contract=True)
-            sql = _render(spec, alias=idx % 4 == 1, quoted=idx % 4 == 2,
-                          inferred=idx % 4 == 3, wrapper=idx % 4 == 0)
-            variant = _render(spec, quoted=True, inferred=idx % 4 == 3,
-                              wrapper=idx % 4 == 0)
+            mode = (idx // len(CONTRACT_SCHEDULE)) % 3
+            render_options = {"alias": mode == 0, "inferred": mode == 1,
+                              "wrapper": mode == 2}
+            sql = _render(spec, **render_options)
+            variant = _render(spec, quoted=True, inferred=mode == 1,
+                              wrapper=mode == 2)
             return LabelledSqlCase(
                 CaseLabel(seed, idx, "single-object", "documented-subset",
                           "valid", "ACCEPT"), sql, variant_sql=variant,
-                shrink_candidates=(_render(Spec(["order_status"], ["total_revenue"])),))
+                shrink_candidates=_shrink_candidates(spec, **render_options))
         if sql == control:
             raise ValueError(f"case {idx}: mutation {rule} did not change SQL")
         _parse(sql)

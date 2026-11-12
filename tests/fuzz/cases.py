@@ -134,6 +134,7 @@ class CaseResult:
     expected: str = ""
     actual: str = ""
     minimized_sql: str | None = None
+    variant_sql: str | None = None
 
 
 class Generator(Protocol):
