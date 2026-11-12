@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tests.fuzz.cases import (CaseLabel, CaseResult, JsonTlpCase,  # noqa: E402
-                              LabelledSqlCase, PairedCase, Profile)
+                              LabelledSqlCase, PairedCase, PairedTlpCase, Profile,
+                              validate_case)
 from tests.fuzz.connection import ExasolBackend  # noqa: E402
 from tests.fuzz.generators.handwritten import HandwrittenGenerator, gen_spec, gen_tlp_case  # noqa: E402
 from tests.fuzz.lua_backend import CaseTimeout, LuaBackend  # noqa: E402
@@ -218,6 +219,21 @@ class SemanticFuzzTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "paired case needs JSON and SQL"):
             run_campaign(missing, differential, 0, 1, False, backend_factory=factory)
         self.assertFalse(called)
+
+    def test_tlp_profiles_reject_variants_with_the_wrong_shape(self):
+        label = CaseLabel(0, 0)
+        json_variant = {"model": "sales"}
+        paired_variant = PairedCase(label, json_variant, "SELECT 1")
+        with self.assertRaisesRegex(ValueError, "TLP variant base"):
+            validate_case(PairedTlpCase(label, json_variant, paired_variant,
+                                        paired_variant, paired_variant), Profile.PAIRED_TLP)
+        with self.assertRaisesRegex(ValueError, "TLP variant base"):
+            validate_case(JsonTlpCase(label, paired_variant, json_variant,
+                                      json_variant, json_variant), Profile.JSON_TLP)
+        validate_case(PairedTlpCase(label, paired_variant, paired_variant,
+                                    paired_variant, paired_variant), Profile.PAIRED_TLP)
+        validate_case(JsonTlpCase(label, json_variant, json_variant,
+                                  json_variant, json_variant), Profile.JSON_TLP)
 
     def test_sqlglot_contract_never_needs_exasol(self):
         if shutil.which("lua") is None:
