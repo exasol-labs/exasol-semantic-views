@@ -11,7 +11,7 @@ All notable changes to Exasol Semantic Views are documented here.
 - The database-free SQLGlot compiler contract campaign checks accepted queries
   and exact refusal codes against independently labelled cases, including safe
   and unsafe joins. Short runs cover every mutation; failures report minimized
-  SQL and can be streamed as per-query JSONL (#57).
+  SQL (#57).
 - The database-free SQLGlot fuzz campaign now checks supported grouped joins,
   rejects joins that can repeat semantic rows, and uses a sales catalog fixture
   covering its generated fields and the `ORDER_HEADER` object (#63).

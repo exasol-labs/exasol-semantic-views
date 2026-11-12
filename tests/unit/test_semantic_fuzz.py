@@ -384,24 +384,6 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(result.expected, "REJECT/SEMANTIC_QUERY_012")
         self.assertEqual(result.actual, "OK/-")
 
-    def test_contract_jsonl_is_one_record_per_case(self):
-        from contextlib import redirect_stderr
-
-        output = io.StringIO()
-        summary = io.StringIO()
-        with redirect_stdout(output), redirect_stderr(summary):
-            status = run_campaign(SqlglotGenerator(), ContractOracle(), 0, 10,
-                                  False, jsonl=True)
-        self.assertEqual(status, 0)
-        records = [json.loads(line) for line in output.getvalue().splitlines()]
-        self.assertEqual(len(records), 10)
-        self.assertEqual({record["rule"] for record in records},
-                         {"documented-subset", "omitted-grouping-dimension",
-                          "measure-dimension", "invalid-ordinal", "whole-grouping-key",
-                          "missing-grouping-key", "or-join", "using-join",
-                          "cross-object-composition", "missing-having-value"})
-        self.assertIn("match", summary.getvalue())
-
     def test_custom_oracle_runs_existing_generator(self):
         backend = _TestBackend()
         with redirect_stdout(io.StringIO()):
