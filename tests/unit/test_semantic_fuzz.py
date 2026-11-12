@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -21,9 +22,10 @@ sys.path.insert(0, str(ROOT))
 
 from tests.fuzz.cases import (CaseLabel, CaseResult, JsonTlpCase,  # noqa: E402
                               LabelledSqlCase, PairedCase, PairedTlpCase, Profile,
-                              validate_case)
+                              ReferenceCase, validate_case)
 from tests.fuzz.connection import ExasolBackend  # noqa: E402
 from tests.fuzz.generators.handwritten import HandwrittenGenerator, gen_spec, gen_tlp_case  # noqa: E402
+from tests.fuzz.generators.sqlglot_generator import SqlglotGenerator  # noqa: E402
 from tests.fuzz.lua_backend import CaseTimeout, LuaBackend  # noqa: E402
 from tests.fuzz.oracles.contract_oracle import ContractOracle  # noqa: E402
 from tests.fuzz.oracles.differential_oracle import DifferentialOracle  # noqa: E402
@@ -94,6 +96,88 @@ class _TestBackend:
 
 
 class SemanticFuzzTest(unittest.TestCase):
+    def test_sqlglot_profiles_render_and_label_cases(self):
+        from sqlglot import parse_one
+        from sqlglot.errors import ErrorLevel, ParseError
+
+        generator = SqlglotGenerator()
+        first_rng, again_rng = random.Random(42), random.Random(42)
+        first = [generator.generate(first_rng, Profile.LABELLED_SQL, 42, i)
+                 for i in range(30)]
+        again = [generator.generate(again_rng, Profile.LABELLED_SQL, 42, i)
+                 for i in range(30)]
+        self.assertEqual(first, again)
+        self.assertEqual({case.label.syntax_intent for case in first}, {"valid", "invalid"})
+        self.assertTrue(any(case.label.rule == "unknown-field" for case in first))
+        for case in first:
+            validate_case(case, Profile.LABELLED_SQL)
+            if case.label.syntax_intent == "invalid":
+                self.assertEqual(case.label.expected_status, "REJECT")
+                with self.assertRaises(ParseError):
+                    parse_one(case.sql, dialect="exasol", error_level=ErrorLevel.RAISE)
+            else:
+                parse_one(case.sql, dialect="exasol", error_level=ErrorLevel.RAISE)
+        self.assertTrue(any("WHERE" in case.sql and "GROUP BY" in case.sql
+                            and case.sql.index("WHERE") < case.sql.index("GROUP BY")
+                            for case in first))
+
+    def test_malformed_sql_varies_with_seeded_generation(self):
+        generator = SqlglotGenerator()
+        rng = random.Random(42)
+        malformed = [case for idx in range(500)
+                     if (case := generator.generate(rng, Profile.LABELLED_SQL, 42, idx))
+                     .label.syntax_intent == "invalid"]
+        self.assertEqual(len(malformed), 100)
+        self.assertGreaterEqual(len({case.sql for case in malformed}), 20)
+        self.assertEqual({case.label.rule for case in malformed},
+                         {"SEMANTIC_QUERY_003", "SEMANTIC_QUERY_030",
+                          "SEMANTIC_QUERY_032", "SEMANTIC_QUERY_033"})
+
+    def test_sqlglot_joins_cover_every_grouping_key(self):
+        generator = SqlglotGenerator()
+        joins = [generator.generate(random.Random(1), Profile.LABELLED_SQL, 1, i)
+                 for i in (4, 11, 25, 32)]
+        self.assertTrue(any("INNER JOIN" in case.sql for case in joins))
+        self.assertTrue(any("LEFT JOIN" in case.sql for case in joins))
+        self.assertTrue(any(case.sql.startswith("WITH") for case in joins))
+        for case in joins:
+            self.assertEqual(case.label.shape, "grouped-join")
+            self.assertEqual(case.label.syntax_intent, "valid")
+            self.assertIn("l.", case.sql)
+            self.assertIn(" = r.", case.sql)
+            self.assertNotIn("SEMANTIC_OTHER", case.sql)
+            grouping = re.search(r"GROUP BY ([a-z_, ]+)", case.sql)
+            self.assertIsNotNone(grouping)
+            keys = {key.strip() for key in grouping.group(1).split(",")}
+            joined = set(re.findall(r"l\.([a-z_]+) = r\.\1", case.sql))
+            self.assertEqual(keys, joined)
+
+    def test_sqlglot_paired_and_tlp_profiles(self):
+        generator = SqlglotGenerator()
+        paired = generator.generate(random.Random(3), Profile.PAIRED, 3, 2)
+        validate_case(paired, Profile.PAIRED)
+        self.assertIn(paired.json_payload["dimensions"][0], paired.sql)
+        self.assertIn("SEMANTIC_SALES.SALES", paired.sql)
+        tlp = generator.generate(random.Random(4), Profile.PAIRED_TLP, 4, 0)
+        self.assertIsInstance(tlp, PairedTlpCase)
+        validate_case(tlp, Profile.PAIRED_TLP)
+        self.assertEqual(tlp.base.json_payload["metrics"], tlp.predicate.json_payload["metrics"])
+        self.assertEqual(tlp.base.json_payload["dimensions"], tlp.null.json_payload["dimensions"])
+        self.assertNotIn("filters", tlp.base.json_payload)
+        self.assertEqual(tlp.null.json_payload["filters"][0]["op"], "IS NULL")
+        self.assertNotEqual(tlp.predicate.json_payload["filters"][0]["op"],
+                            tlp.complement.json_payload["filters"][0]["op"])
+        for variant in (tlp.base, tlp.predicate, tlp.complement, tlp.null):
+            self.assertIn(variant.json_payload["metrics"][0], variant.sql)
+
+    def test_sqlglot_reference_is_independent(self):
+        case = SqlglotGenerator().generate(random.Random(0), Profile.REFERENCE, 0, 0)
+        self.assertIsInstance(case, ReferenceCase)
+        validate_case(case, Profile.REFERENCE)
+        self.assertIn("SEMANTIC_SALES.SALES", case.sql)
+        self.assertIn("MART.ORDERS", case.reference_sql)
+        self.assertNotEqual(case.sql, case.reference_sql)
+
     def test_connection_wrapper_owns_compile_calls(self):
         class Connection:
             def __init__(self):
@@ -136,6 +220,41 @@ class SemanticFuzzTest(unittest.TestCase):
             result = run_campaign(_FixedGenerator(), DifferentialOracle(), 7, 1, False,
                                   backend_factory=lambda: backend)
         self.assertEqual(result, 0)
+        self.assertTrue(backend.closed)
+
+    def test_runner_streams_cases_in_seed_order(self):
+        events = []
+
+        class Generator:
+            name = "streaming"
+            profiles = frozenset({Profile.PAIRED})
+
+            def generate(self, rng, profile, seed, idx):
+                if idx:
+                    self.assertion(idx)
+                events.append(("generate", idx, rng.randrange(1000)))
+                return PairedCase(CaseLabel(seed, idx), {"model": "sales"}, "SELECT 1")
+
+            def assertion(self, idx):
+                self_test.assertEqual(events[-1][:2], ("run", idx - 1))
+
+        class Oracle:
+            name = "streaming"
+            accepted_profiles = (Profile.PAIRED,)
+            database_free = True
+
+            def run(self, backend, case, verbose):
+                events.append(("run", case.label.idx))
+                return CaseResult(case.label.idx, "match")
+
+        self_test = self
+        backend = _TestBackend()
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(run_campaign(Generator(), Oracle(), 7, 3, False,
+                                          backend_factory=lambda: backend), 0)
+        self.assertEqual([item[:2] for item in events],
+                         [("generate", 0), ("run", 0), ("generate", 1),
+                          ("run", 1), ("generate", 2), ("run", 2)])
         self.assertTrue(backend.closed)
 
     def test_existing_differential_verdicts(self):

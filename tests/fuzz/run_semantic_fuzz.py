@@ -68,13 +68,19 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
                  verbose: bool, backend_factory: Callable[[], Any] | None = None) -> int:
     profile = select_profile(generator, oracle)
     rng = random.Random(seed)
-    generated = []
-    for idx in range(cases):
-        case = generator.generate(rng, profile, seed, idx)
-        validate_case(case, profile)
-        if case.label.idx != idx or case.label.seed != seed:
-            raise ValueError(f"case {idx}: generator returned the wrong seed or index")
-        generated.append(case)
+
+    def generated_cases():
+        for idx in range(cases):
+            case = generator.generate(rng, profile, seed, idx)
+            validate_case(case, profile)
+            if case.label.idx != idx or case.label.seed != seed:
+                raise ValueError(f"case {idx}: generator returned the wrong seed or index")
+            yield idx, case
+
+    generated = generated_cases()
+    # Preserve the pre-backend check for the first case without materializing
+    # the campaign. Later cases are validated immediately before execution.
+    first = next(generated, None)
 
     backend: Any = (backend_factory() if backend_factory is not None else
                     LuaBackend(CASE_TIMEOUT) if oracle.database_free else connect())
@@ -87,7 +93,12 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
         counts = dict.fromkeys(VERDICTS, 0)
         failures = []
         good = {"match"} if oracle.database_free else {"match", "both-error"}
-        for idx, case in enumerate(generated):
+        def cases_to_run():
+            if first is not None:
+                yield first
+            yield from generated
+
+        for idx, case in cases_to_run():
             if not oracle.database_free:
                 signal.alarm(CASE_TIMEOUT)
             try:
