@@ -104,7 +104,7 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
             yield from generated
 
         for idx, case in cases_to_run():
-            if oracle.database_free and hasattr(backend, "begin_case"):
+            if hasattr(backend, "begin_case"):
                 backend.begin_case()
             if not oracle.database_free:
                 signal.alarm(CASE_TIMEOUT)
