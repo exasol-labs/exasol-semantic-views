@@ -703,16 +703,25 @@ end
 local FUZZ_SALES_GROUPED = "SELECT order_status, product_category, total_revenue "
     .. "FROM SEMANTIC_SALES.SALES GROUP BY order_status, product_category"
 
-test("fuzz sales fixture scopes object lookups by model version and name", function()
+local FUZZ_SALES_OBJECT_LOOKUP = [[SELECT OBJECT_ID FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS]]
+
+for _, case in ipairs({
+    {name = "unknown object name", model_id = 1, version_id = 2, object_name = "UNKNOWN"},
+    {name = "wrong model ID", model_id = 99, version_id = 2, object_name = "SALES"},
+    {name = "wrong version ID", model_id = 1, version_id = 99, object_name = "SALES"},
+}) do
+    test("fuzz sales fixture rejects object lookup with " .. case.name, function()
+        local mock = compiler_query_fixture({fuzz_sales = true})
+        assert_equal(#mock(FUZZ_SALES_OBJECT_LOOKUP, case), 0)
+    end)
+end
+
+test("fuzz sales fixture finds ORDER_HEADER in the matching model version", function()
     local mock = compiler_query_fixture({fuzz_sales = true})
-    assert_equal(#mock([[SELECT OBJECT_ID FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS]],
-        {model_id = 1, version_id = 2, object_name = "UNKNOWN"}), 0)
-    assert_equal(#mock([[SELECT OBJECT_ID FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS]],
-        {model_id = 99, version_id = 2, object_name = "SALES"}), 0)
-    assert_equal(#mock([[SELECT OBJECT_ID FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS]],
-        {model_id = 1, version_id = 99, object_name = "SALES"}), 0)
-    assert_equal(mock([[SELECT OBJECT_ID FROM SEMANTIC_SOURCE.SEMANTIC_OBJECTS]],
-        {model_id = 1, version_id = 2, object_name = "ORDER_HEADER"})[1][1], 41)
+    local rows = mock(FUZZ_SALES_OBJECT_LOOKUP,
+        {model_id = 1, version_id = 2, object_name = "ORDER_HEADER"})
+    assert_equal(#rows, 1)
+    assert_equal(rows[1][1], 41)
 end)
 
 test("fuzz sales grouped join on every key compiles", function()
