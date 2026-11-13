@@ -60,14 +60,22 @@ run_campaign() {
   FUZZ_ORACLE=$2
   CAMPAIGN_CASES=${3:-$FUZZ_CASES}
   printf "  seed=%s generator=%s oracle=%s " "$FUZZ_SEED" "$FUZZ_GENERATOR" "$FUZZ_ORACLE"
+  CAMPAIGN_START=$(date +%s)
   if "$PYTHON_BIN" tests/fuzz/run_semantic_fuzz.py \
        --generator "$FUZZ_GENERATOR" --oracle "$FUZZ_ORACLE" \
        --seed "$FUZZ_SEED" --cases "$CAMPAIGN_CASES" \
        > /tmp/fuzz.$$.out 2>&1
   then
-    echo "OK ($CAMPAIGN_CASES cases)"
+    CAMPAIGN_RESULT=0
   else
-    echo "FAIL — reproduction below"
+    CAMPAIGN_RESULT=$?
+  fi
+  CAMPAIGN_END=$(date +%s)
+  CAMPAIGN_ELAPSED=$((CAMPAIGN_END - CAMPAIGN_START))
+  if [ "$CAMPAIGN_RESULT" -eq 0 ]; then
+    printf 'OK (%s cases, %ss)\n' "$CAMPAIGN_CASES" "$CAMPAIGN_ELAPSED"
+  else
+    printf 'FAIL (%s cases, %ss) — reproduction below\n' "$CAMPAIGN_CASES" "$CAMPAIGN_ELAPSED"
     cat /tmp/fuzz.$$.out
     FUZZ_FAILURES=$((FUZZ_FAILURES + 1))
   fi
