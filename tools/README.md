@@ -15,9 +15,10 @@ Operational tooling — what a user or an operator runs — at the top level:
 
 The `run_*.sh` scripts are the entry points to the test lanes and static checks;
 `tests/README.md` maps each to what it runs and needs.
-`run_lua_typecheck.sh` installs a pinned LuaLS release on first use, requires
-`jq`, and exits with status 1 when it reports diagnostics. CI requires this
-check to pass and uploads the JSON report when it fails.
+`run_static_checks.sh` also runs LuaLS and zizmor. `run_lua_typecheck.sh` installs
+a pinned LuaLS release on first use, requires `curl` and `jq`, and exits with
+status 1 when it reports diagnostics. CI uploads the JSON report even if the
+combined static checks fail.
 The runner derives known script-parameter globals from the `-- @param`
 declarations and lists Exasol's runtime globals and import aliases explicitly,
 so undefined names still produce diagnostics.

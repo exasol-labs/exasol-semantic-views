@@ -12,13 +12,12 @@ Each directory is one lane: one runtime requirement, one runner, one CI job.
 
 `fixtures/` holds input data that more than one lane reads.
 
-Static analysis is not a test lane here; `sh tools/run_static_checks.sh` runs it,
-as does the `static-checks` CI job.
-Run `sh tools/run_lua_typecheck.sh` for LuaLS type diagnostics. It requires
-`curl` and `jq`, downloads a checksum-verified LuaLS release into ignored
-`build/` on first use, and writes `build/luals-check.json`. The command exits
-with status 1 for any diagnostic. The `static-checks` CI job runs it as a
-required gate and uploads the report even when LuaLS finds diagnostics.
+Static analysis is not a test lane here; `sh tools/run_static_checks.sh` runs
+Ruff, mypy, Luacheck, ShellCheck, LuaLS and zizmor, as does the `static-checks`
+CI job. The LuaLS runner needs `curl` and `jq`, downloads a checksum-verified
+release into ignored `build/` on first use, and writes `build/luals-check.json`.
+Run `sh tools/run_lua_typecheck.sh` to run only LuaLS. CI uploads its JSON report
+even when static checks fail.
 
 The CI `dependency-audit` job runs `pip-audit` on both requirements files and is
 required by `ci-gate`; a separate scheduled workflow runs the same audit daily.
