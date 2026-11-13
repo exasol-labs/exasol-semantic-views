@@ -130,11 +130,14 @@ class WorkflowWiringTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertEqual(calls.read_text().splitlines(), [
                 f"tests/fuzz/run_semantic_fuzz.py --generator {generator} --oracle {oracle} "
-                f"--seed {seed} --cases 3"
+                f"--seed {seed} --cases {count}"
                 for seed in (0, 42)
-                for generator, oracle in (("handwritten", "differential"),
-                                          ("handwritten", "tlp"),
-                                          ("sqlglot", "contract"))
+                for generator, oracle, count in (("handwritten", "differential", 3),
+                                                 ("handwritten", "tlp", 3),
+                                                 ("sqlglot", "contract", 3),
+                                                 ("sqlglot", "accepted-differential", 12),
+                                                 ("sqlglot", "paired-tlp", 12),
+                                                 ("sqlglot", "reference", 8))
             ])
 
     def test_ci_gate_fails_for_failed_or_skipped_jobs(self) -> None:

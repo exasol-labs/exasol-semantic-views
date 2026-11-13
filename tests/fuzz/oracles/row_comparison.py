@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import re
 from typing import Any
 
 def _normalize_cell(value: Any) -> Any:
@@ -28,5 +29,39 @@ def compare_rows(a: list[tuple], b: list[tuple]) -> str | None:
         if ra != rb:
             return f"first diff at sorted-row {idx}: json={ra!r} sql={rb!r}"
     return "unknown diff"
+
+
+def compare_typed_rows(a: list[tuple], b: list[tuple], *, ordered: bool = False) -> str | None:
+    """Compare exact non-numeric cells and numeric cells with explicit tolerance."""
+    if len(a) != len(b):
+        return f"row count differs: left={len(a)} right={len(b)}"
+    left = a if ordered else sorted(a, key=lambda row: tuple(str(c) for c in row))
+    right = b if ordered else sorted(b, key=lambda row: tuple(str(c) for c in row))
+    for index, (lrow, rrow) in enumerate(zip(left, right, strict=True)):
+        if len(lrow) != len(rrow):
+            return f"row {index} width differs: left={lrow!r} right={rrow!r}"
+        for column, (lvalue, rvalue) in enumerate(zip(lrow, rrow, strict=True)):
+            lnumber, rnumber = _number(lvalue), _number(rvalue)
+            if lnumber is not None and rnumber is not None:
+                delta = abs(lnumber - rnumber)
+                threshold = max(Decimal("0.000001"),
+                                max(abs(lnumber), abs(rnumber)) * Decimal("0.000000001"))
+                equal = delta <= threshold
+            else:
+                equal = lvalue == rvalue
+            if not equal:
+                return (f"row {index} column {column}: left={lvalue!r} "
+                        f"right={rvalue!r}")
+    return None
+
+
+def _number(value: Any) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", value):
+        return Decimal(value)
+    return None
 
 

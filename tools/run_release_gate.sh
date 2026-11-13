@@ -7,9 +7,10 @@
 # major release, after any change to the compiler, planner, or admin scripts
 # whose blast radius is broad.
 #
-# Two knobs (environment variables):
+# Campaign sizes (environment variables):
 #   FUZZ_SEEDS   — space-separated seeds. Default "0 1 2 7 42 99 123 456".
-#   FUZZ_CASES   — cases per (seed, generator, oracle) campaign. Default 250.
+#   FUZZ_CASES   — hand-written and SQLGlot contract cases per seed. Default 250.
+#   FUZZ_LIVE_CASES — sampled SQLGlot paired cases per seed. Default 12.
 #
 # Pass --fuzz-only when another CI job owns the system suite, whether it runs
 # in parallel for PRs or finished first for a release. A failed campaign exits
@@ -30,6 +31,7 @@ fi
 
 FUZZ_SEEDS="${FUZZ_SEEDS:-0 1 2 7 42 99 123 456}"
 FUZZ_CASES="${FUZZ_CASES:-250}"
+FUZZ_LIVE_CASES="${FUZZ_LIVE_CASES:-12}"
 
 case "${1:-}" in
   "")
@@ -56,13 +58,14 @@ FUZZ_FAILURES=0
 run_campaign() {
   FUZZ_GENERATOR=$1
   FUZZ_ORACLE=$2
+  CAMPAIGN_CASES=${3:-$FUZZ_CASES}
   printf "  seed=%s generator=%s oracle=%s " "$FUZZ_SEED" "$FUZZ_GENERATOR" "$FUZZ_ORACLE"
   if "$PYTHON_BIN" tests/fuzz/run_semantic_fuzz.py \
        --generator "$FUZZ_GENERATOR" --oracle "$FUZZ_ORACLE" \
-       --seed "$FUZZ_SEED" --cases "$FUZZ_CASES" \
+       --seed "$FUZZ_SEED" --cases "$CAMPAIGN_CASES" \
        > /tmp/fuzz.$$.out 2>&1
   then
-    echo "OK ($FUZZ_CASES cases)"
+    echo "OK ($CAMPAIGN_CASES cases)"
   else
     echo "FAIL — reproduction below"
     cat /tmp/fuzz.$$.out
@@ -75,6 +78,9 @@ for FUZZ_SEED in $FUZZ_SEEDS; do
   run_campaign handwritten differential
   run_campaign handwritten tlp
   run_campaign sqlglot contract
+  run_campaign sqlglot accepted-differential "$FUZZ_LIVE_CASES"
+  run_campaign sqlglot paired-tlp "$FUZZ_LIVE_CASES"
+  run_campaign sqlglot reference 8
 done
 
 echo
