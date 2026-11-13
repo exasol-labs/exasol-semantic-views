@@ -50,14 +50,18 @@ nested functions. The runner uses `luac -p -l` to collect that active-line set;
 `-p` prevents a `luac.out` artifact. This adds only the compiler shipped with
 the Lua 5.4 toolchain, with no LuaRocks dependency or source-code parser.
 
-Lua 5.4 or newer is required. On macOS:
+Lua 5.4 is required, the version CI installs, and not a newer one: coverage
+counts the active lines in the compiler's listing, and Lua 5.5 lists some lines
+differently, so a floor measured under 5.4 can fail under 5.5 with nothing
+changed. `tools/run_lua_tests.sh` refuses any other version. On macOS, where
+Homebrew's `lua` is now 5.5:
 
 ```sh
-brew install lua
+brew install lua@5.4
 ```
 
-Set `LUA_BIN` and `LUAC_BIN` when the interpreter and compiler are installed
-under other names. See `tests/lua/README.md` for the script-test recipe.
+The script finds the keg-only `lua@5.4` itself. Set `LUA_BIN` and `LUAC_BIN`
+when the interpreter and compiler are installed elsewhere or under other names. See `tests/lua/README.md` for the script-test recipe.
 
 ## 2. Live-DB Integration Tests
 
