@@ -451,8 +451,10 @@ class SemanticFuzzTest(unittest.TestCase):
 
         for oracle, case in ((AcceptedDifferentialOracle(), paired),
                              (PairedTlpOracle(), tlp), (ReferenceOracle(), reference)):
-            with self.subTest(oracle=oracle.name), self.assertRaises(CaseTimeout):
-                oracle.run(TimedOut(), case, False)
+            backend = TimedOut()
+            with self.subTest(oracle=oracle.name):
+                with self.assertRaises(CaseTimeout):
+                    oracle.run(backend, case, False)
 
     def test_existing_tlp_verdict(self):
         case = JsonTlpCase(CaseLabel(0, 0), {"variant": "base"},

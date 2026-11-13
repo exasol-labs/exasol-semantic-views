@@ -10,6 +10,7 @@ This repository implements a database-native semantic layer for Exasol. Runtime 
 - Keep each routine in one place. Shared Lua belongs in `lua/semantic_layer/shared/` and must be included in each relevant runtime. Script bodies should import common helpers from `SEMANTIC_ADMIN.SCRIPT_SUPPORT_RUNTIME`.
 - Use one validation code per condition; severity belongs in the result channel, not the code spelling. Update `docs/validation-rules.md` when rules change.
 - Name verifiers for the invariant they protect. Integration tests belong in pytest `tests/integration/test_*.py`, use shared fixtures and `verify_support.py`, and should cover one property each. Convert legacy `verify_*.py` scripts when touching them.
+- In Python exception tests, construct fixtures and arguments before `assertRaises` or `assertRaisesRegex`. Put only the call expected to raise inside the assertion block; nest `subTest` outside it.
 - Derive introspection surfaces from Exasol metadata where possible; declare unavoidable polymorphic relationships once and reuse that declaration.
 - Read `docs/governance.md` before adding a security control: the compiler runs with caller rights, so compiler-only policy is defense in depth.
 
