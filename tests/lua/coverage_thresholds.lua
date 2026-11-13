@@ -265,7 +265,7 @@ return {
         ["lua/semantic_layer/scripts/mark_materialization_refreshed.lua"] = 12.5,
         ["lua/semantic_layer/scripts/new_validation_errors.lua"] = 10.8,
         ["lua/semantic_layer/scripts/propose_model_evolution.lua"] = 90.9,
-        ["lua/semantic_layer/scripts/publish_model.lua"] = 81.3,
+        ["lua/semantic_layer/scripts/publish_model.lua"] = 99.0,
         ["lua/semantic_layer/scripts/recertify_model_if_published.lua"] = 11.4,
         ["lua/semantic_layer/scripts/record_agent_feedback.lua"] = 90.0,
         ["lua/semantic_layer/scripts/refresh_semantic_surface.lua"] = 89.4,
