@@ -293,8 +293,15 @@ local function adoption_catalog(state)
     local function respond(sql, params)
         local text = tostring(sql)
         local function has(fragment) return text:find(fragment, 1, true) ~= nil end
-        if has("EXECUTE SCRIPT") or has("DELETE FROM") or has("INSERT INTO") then
+        if has("EXECUTE SCRIPT") or has("DELETE FROM") or has("INSERT INTO")
+                or text == "COMMIT" or has("SET UPDATED_AT = UPDATED_AT") then
             executed[#executed + 1] = text
+        end
+        if has("FROM SYS.EXA_SCHEMAS") then
+            -- Stale for as many lock rounds as the state says.
+            local stale = (state.stale_rounds or 0) > 0
+            state.stale_rounds = (state.stale_rounds or 0) - 1
+            return {{stale and 1 or 0}}
         end
         if has("UNION ALL") then return {{"DBT_ADOPT_FIXTURES", "ORDERS"}} end
         if has("VIEW_TEXT") then
@@ -415,4 +422,38 @@ test("adoption refuses a missing argument and a missing view", function()
             adopt_view("logistics", "MART", "nope")
         end)
     end, "SEMANTIC_ADMIN_228", "view MART.nope does not exist")
+end)
+
+test("adoption locks the catalog before it reads any of it", function()
+    -- A second adoption running at once waits on this write for the first to
+    -- commit; one that read the catalog first would collide with it instead.
+    local respond = adoption_catalog({})
+    local first = nil
+    with_query(function(sql, params)
+        first = first or tostring(sql)
+        return respond(sql, params)
+    end, function() adopt_view("logistics", "DBT_ADOPT_FIXTURES", "SHIPPING") end)
+    assert_contains(first, "UPDATE SYS_SEMANTIC.MODELS SET UPDATED_AT = UPDATED_AT WHERE FALSE")
+end)
+
+test("adoption that cannot see a published schema starts a fresh transaction", function()
+    -- Another adoption published the model while this one waited for the lock:
+    -- the model reads PUBLISHED, its schema is not visible. One commit, a
+    -- second lock, then on; never more than three rounds.
+    each({{rounds = 1, commits = 1, locks = 2}, {rounds = 9, commits = 3, locks = 3},
+          {rounds = 0, commits = 0, locks = 1}}, function(case)
+        local respond, executed = adoption_catalog({model_exists = true, object_exists = true,
+                                                    status = "PUBLISHED",
+                                                    stale_rounds = case.rounds})
+        with_query(respond, function() adopt_view("logistics", "DBT_ADOPT_FIXTURES", "SHIPPING") end)
+        local commits, locks = 0, 0
+        for _, sql in ipairs(executed) do
+            if sql == "COMMIT" then commits = commits + 1 end
+            if sql:find("SET UPDATED_AT = UPDATED_AT", 1, true) then locks = locks + 1 end
+        end
+        assert_equal(commits, case.commits)
+        assert_equal(locks, case.locks)
+        -- The commits all come before the adoption writes anything.
+        assert_true(executed[case.locks + case.commits + 1]:find("COMMIT", 1, true) == nil)
+    end)
 end)

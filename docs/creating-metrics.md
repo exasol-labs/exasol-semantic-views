@@ -115,6 +115,13 @@ models:
       +post-hook: "EXECUTE SCRIPT SEMANTIC_ADMIN.ADOPT_VIEW('logistics', '{{ this.schema }}', '{{ this.identifier }}')"
 ```
 
+**Adoptions may run at once** -- dbt builds view models in parallel threads --
+and take turns: each waits for the one before it to commit. An adoption that
+waited while another created a new model's published schema cannot see that
+schema in its own transaction, so it commits first, before writing anything;
+what goes with that commit is only what its caller had pending, for dbt the
+view it has just created.
+
 **What it accepts.** `SELECT <items> FROM <schema>.<table> [alias] [GROUP BY
 ...]`, with columns bare, qualified by the alias or the table name, or
 schema-qualified; ADOPT_VIEW qualifies each with the entity's alias. `GROUP BY`

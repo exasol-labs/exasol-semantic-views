@@ -11,6 +11,7 @@ it again follows the view, and a refusal leaves nothing behind.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -280,6 +281,37 @@ def test_two_views_over_one_table_share_its_entity_and_dimensions(adopted: Any) 
         == [("ship_mode", "ACTIVE")]
     assert answer(adopted, "EXTREMES", ["ship_mode"], ["max_freight"]) \
         == rows(adopted, f"SELECT ship_mode, max_freight FROM {SRC}.EXTREMES")
+
+
+def test_adoptions_at_once_wait_for_each_other(source: Any) -> None:
+    """dbt adopts its view models in parallel threads, each on its own session.
+
+    Two adoptions that each read the catalog and then wrote it collided, and
+    Exasol rolled both back. Each now waits for the other to commit.
+    """
+    outcomes: dict[str, str] = {}
+
+    def adopt_in_own_session(view: str) -> None:
+        connection = support.connect(autocommit=False)
+        try:
+            connection.execute(
+                f"EXECUTE SCRIPT SEMANTIC_ADMIN.ADOPT_VIEW('{MODEL}', '{SRC}', '{view}')")
+            connection.commit()
+            outcomes[view] = "OK"
+        except Exception as error:  # noqa: BLE001 -- reported by the assertion below
+            outcomes[view] = str(error)
+        finally:
+            connection.close()
+
+    threads = [threading.Thread(target=adopt_in_own_session, args=(view,))
+               for view in ("SHIPPING", "EXTREMES")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=300)
+    assert outcomes == {"SHIPPING": "OK", "EXTREMES": "OK"}
+    assert [name for name, _ in catalog(source)["SEMANTIC_OBJECTS"]] == ["EXTREMES", "SHIPPING"]
+    assert not support.blocking_issues(support.validate_model(source, MODEL))
 
 
 # ---- refusals -----------------------------------------------------------------

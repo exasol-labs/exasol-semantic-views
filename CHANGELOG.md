@@ -43,8 +43,9 @@ release bundle. The catalog's tables are unchanged. Behaviour that changes:
   follows the view: an unchanged view changes nothing, and a removed column
   retires its metric. Anything else -- a join, `WHERE`, `HAVING`, a subquery, a
   `GROUP BY` finer than the view's columns -- is refused naming the construct,
-  and a refusal leaves the catalog as it was. This is the shape of a dbt view
-  model, so adopting one is a single post-hook. New codes
+  and a refusal leaves the catalog as it was. Adoptions running at once, as
+  dbt's threads run them, take turns instead of colliding. This is the shape of
+  a dbt view model, so adopting one is a single post-hook. New codes
   `SEMANTIC_ADMIN_228`-`233`; see
   [Adopt a view](docs/creating-metrics.md#quickest-start-adopt-a-view).
 - Live SQLGlot fuzz campaigns compare paired JSON and SQL results, check both

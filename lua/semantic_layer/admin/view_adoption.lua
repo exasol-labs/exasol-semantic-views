@@ -711,6 +711,35 @@ do
 
     local ADOPTION_TABLES = {"ENTITIES", "ENTITY_REPRESENTATIONS", "SEMANTIC_OBJECTS"}
 
+    -- One adoption at a time. dbt adopts view models in parallel threads, and
+    -- two adoptions that each read the catalog and then wrote it were both
+    -- rolled back by Exasol as a transaction collision. A write before any
+    -- catalog read makes the second wait for the first to commit instead:
+    -- Exasol locks a table for writing whether or not a row changes.
+    --
+    -- Waiting is not quite enough. Rows read after the wait are current, but
+    -- which schemas and views exist is fixed when the transaction starts, so
+    -- an adoption that waited while the first adoption into a new model
+    -- created its published schema cannot see that schema: it creates it
+    -- again and fails at commit, or cannot create a view in it. It can tell,
+    -- because the model reads PUBLISHED while its schema is not there; then it
+    -- commits -- before writing anything, so only what the caller had pending
+    -- goes with it, for dbt the view it just created -- and takes the lock in a
+    -- fresh transaction.
+    local function lock_catalog(model_name)
+        for _ = 1, 3 do
+            query("UPDATE SYS_SEMANTIC.MODELS SET UPDATED_AT = UPDATED_AT WHERE FALSE")
+            local stale = scalar([[
+                SELECT COUNT(*) FROM SYS_SEMANTIC.MODELS m
+                WHERE UPPER(m.MODEL_NAME) = UPPER(:model_name) AND m.STATUS = 'PUBLISHED'
+                  AND NOT EXISTS (SELECT 1 FROM SYS.EXA_SCHEMAS s
+                                  WHERE s.SCHEMA_NAME = m.PUBLISHED_SCHEMA)
+            ]], {model_name = model_name})
+            if tonumber(stale or 0) == 0 then return end
+            query("COMMIT")
+        end
+    end
+
     -- `definition` carries what the definition module owns: `interior_tables`,
     -- its rollback table list, and `clause_words`, the first word of each DDL
     -- clause.
@@ -720,6 +749,7 @@ do
             if missing(value) then error("SEMANTIC_ADMIN_001: " .. label .. " is required", 0) end
         end
         model_name, view_schema, view_name = trim(model_name), trim(view_schema), trim(view_name)
+        lock_catalog(model_name)
         local statements = {}
         local function run_script(sql, params)
             local rendered = sql
