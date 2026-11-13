@@ -6,6 +6,32 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
+A semantic view from a view you already have. An aggregate SQL view over one
+table -- the shape of a dbt view model -- is adopted as a semantic view by one
+call, `ADOPT_VIEW`, reading its names, types and descriptions from Exasol's
+catalog. The view stays plain SQL; the semantic view answers correctly at any
+coarser grain, which the view cannot. Building it showed that Semantic DDL
+silently took over a metric or dimension another semantic view already had;
+both are now refused, and two views may share a dimension they define the same
+way. Fuzz campaigns now check the compiler against independently labelled
+SQLGlot cases and against live results.
+
+In dbt, adopting is one post-hook on an ordinary view model with
+`persist_docs`, whose documentation becomes the metric descriptions.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from the
+release bundle. The catalog's tables are unchanged. Behaviour that changes:
+
+- **Semantic DDL refuses a name another semantic view holds.** A metric
+  another view exposes is `SEMANTIC_DDL_095`; a dimension another view lists
+  with a different entity, expression or type is `SEMANTIC_DDL_096`. Both used
+  to be accepted and rewrote the other view's definition. A dimension declared
+  the same way in both views is shared.
+- **`ADD_CUSTOM_EXTENSION` validates `DATA_JSON` as strict RFC 8259 JSON**
+  (`SEMANTIC_ADMIN_040`).
+
 ### Added
 
 - **`SEMANTIC_ADMIN.ADOPT_VIEW(MODEL_NAME, VIEW_SCHEMA, VIEW_NAME)`** adopts an
