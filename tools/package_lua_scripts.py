@@ -306,8 +306,8 @@ end
 
 
 def lua_interpreter() -> str | None:
-    """The interpreter to measure with: LUA_BIN, else lua5.4, else lua."""
-    for candidate in (os.environ.get("LUA_BIN"), "lua5.4", "lua"):
+    """The interpreter to measure with: LUA_BIN, else lua5.5, else lua."""
+    for candidate in (os.environ.get("LUA_BIN"), "lua5.5", "lua"):
         if candidate and shutil.which(candidate):
             return candidate
     return None

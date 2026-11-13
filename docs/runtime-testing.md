@@ -44,24 +44,32 @@ The Lua interpreter runs the tests and its line hook records executed source
 lines. Its debug API can inspect the loaded top-level chunk and functions that
 exist at runtime, but it cannot enumerate the body of a nested local function
 that was never instantiated. Counting only those visible functions would remove
-untested code from the denominator and overstate coverage. The Lua 5.4 compiler
+untested code from the denominator and overstate coverage. The Lua compiler
 lists source lines for every function prototype in a script, including uncalled
 nested functions. The runner uses `luac -p -l` to collect that active-line set;
 `-p` prevents a `luac.out` artifact. This adds only the compiler shipped with
-the Lua 5.4 toolchain, with no LuaRocks dependency or source-code parser.
+the Lua toolchain, with no LuaRocks dependency or source-code parser.
 
-Lua 5.4 is required, the version CI installs, and not a newer one: coverage
-counts the active lines in the compiler's listing, and Lua 5.5 lists some lines
-differently, so a floor measured under 5.4 can fail under 5.5 with nothing
-changed. `tools/run_lua_tests.sh` refuses any other version. On macOS, where
-Homebrew's `lua` is now 5.5:
+Lua 5.5 is required, the version CI builds (`.github/actions/setup-lua`, which
+pins the release and its checksum), and no other: coverage counts the active
+lines in the compiler's listing, and versions list some lines differently, so a
+floor measured under one can fail under another with nothing changed.
+`tools/run_lua_tests.sh` refuses any other version. On macOS:
 
 ```sh
-brew install lua@5.4
+brew install lua
 ```
 
-The script finds the keg-only `lua@5.4` itself. Set `LUA_BIN` and `LUAC_BIN`
-when the interpreter and compiler are installed elsewhere or under other names. See `tests/lua/README.md` for the script-test recipe.
+Set `LUA_BIN` and `LUAC_BIN` when the interpreter and compiler are installed
+elsewhere or under other names.
+
+Exasol itself runs scripts on Lua 5.4, so these tests run the code on a newer
+Lua than production. 5.5 is stricter where the two differ in ways that matter
+here -- it refuses assignment to a `for` loop variable, which 5.4 allows -- so
+that direction can only fail a test. The other direction, syntax new in 5.5
+such as `global` declarations, would pass these tests and fail in Exasol;
+Luacheck, which still parses with the 5.4 toolchain, refuses it in the static
+checks, and the system tests run the installed scripts on Exasol. See `tests/lua/README.md` for the script-test recipe.
 
 ## 2. Live-DB Integration Tests
 

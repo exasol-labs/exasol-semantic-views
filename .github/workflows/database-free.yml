@@ -23,13 +23,11 @@ jobs:
           cache: pip
           cache-dependency-path: tools/requirements-osi.txt
       - name: Install Lua
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lua5.4
+        uses: $/.github/actions/setup-lua
       - name: Install host-test dependencies
         run: python -m pip install -r tools/requirements-osi.txt
       - name: Run database-free Lua coverage
-        run: LUA_BIN=lua5.4 sh tools/run_lua_tests.sh
+        run: sh tools/run_lua_tests.sh
       - name: Run database-free Python tests + coverage
         # Runs test_osi_tool, test_install, test_release_notes,
         # test_sql_splitter, and the property-based test suite (test_property)
@@ -37,7 +35,7 @@ jobs:
         # tests/unit/python_coverage_thresholds.py.
         run: PYTHON_BIN=python sh tools/run_python_tests.sh
       - name: Run SQLGlot compiler contract smoke
-        run: LUA_BIN=lua5.4 python tests/fuzz/run_semantic_fuzz.py --generator sqlglot --cases 1000
+        run: python tests/fuzz/run_semantic_fuzz.py --generator sqlglot --cases 1000
       - name: Save Python unit coverage
         run: cp .coverage .coverage.unit
       - name: Upload Python unit coverage
