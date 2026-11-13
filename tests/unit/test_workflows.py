@@ -99,7 +99,7 @@ class WorkflowWiringTest(unittest.TestCase):
         self.assertEqual(local_target(smoke), "fuzz.yml")
         self.assertNotIn("needs", smoke)
         self.assertEqual(smoke["with"], {
-            "seeds": "0 1 2 7 42", "cases": "60", "timeout_minutes": "30",
+            "seeds": "0 1 2 7 42", "cases": "60", "timeout_minutes": "45",
             "artifact_name": "fuzz-smoke-results",
         })
 
@@ -130,11 +130,14 @@ class WorkflowWiringTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertEqual(calls.read_text().splitlines(), [
                 f"tests/fuzz/run_semantic_fuzz.py --generator {generator} --oracle {oracle} "
-                f"--seed {seed} --cases 3"
+                f"--seed {seed} --cases {count}"
                 for seed in (0, 42)
-                for generator, oracle in (("handwritten", "differential"),
-                                          ("handwritten", "tlp"),
-                                          ("sqlglot", "contract"))
+                for generator, oracle, count in (("handwritten", "differential", 3),
+                                                 ("handwritten", "tlp", 3),
+                                                 ("sqlglot", "contract", 4500),
+                                                 ("sqlglot", "accepted-differential", 12),
+                                                 ("sqlglot", "paired-tlp", 12),
+                                                 ("sqlglot", "reference", 8))
             ])
 
     def test_ci_gate_fails_for_failed_or_skipped_jobs(self) -> None:
@@ -176,7 +179,7 @@ class WorkflowWiringTest(unittest.TestCase):
         jobs = self.workflows["release.yml"]["jobs"]
         self.assertEqual(local_target(jobs["tests"]), "ci.yml")
         self.assertEqual(local_target(jobs["fuzz"]), "fuzz.yml")
-        self.assertNotIn("with", jobs["fuzz"])
+        self.assertEqual(jobs["fuzz"]["with"], {"timeout_minutes": "150"})
         self.assertEqual(jobs["fuzz"]["needs"], "tests")
         self.assertEqual(set(jobs["release"]["needs"]), {"tests", "fuzz"})
 

@@ -116,6 +116,8 @@ class ReferenceCase:
     label: CaseLabel
     sql: str
     reference_sql: str
+    expected_code: str | None = None
+    numeric_columns: tuple[int, ...] = ()
     profile: Profile = field(default=Profile.REFERENCE, init=False)
 
 
@@ -135,6 +137,10 @@ class CaseResult:
     actual: str = ""
     minimized_sql: str | None = None
     variant_sql: str | None = None
+    stage: str = ""
+    exasol_error: str = ""
+    rows: str = ""
+    timings: str = ""
 
 
 class Generator(Protocol):
@@ -177,5 +183,5 @@ def validate_case(case: FuzzCase, profile: Profile) -> None:
             else:
                 raise ValueError(f"case {case.label.idx}: invalid or missing TLP variant {name}")
     elif isinstance(case, ReferenceCase):
-        if not case.sql.strip() or not case.reference_sql.strip():
-            raise ValueError(f"case {case.label.idx}: SQL and independent reference required")
+        if not case.sql.strip() or not (case.reference_sql.strip() or case.expected_code):
+            raise ValueError(f"case {case.label.idx}: SQL and reference or refusal required")

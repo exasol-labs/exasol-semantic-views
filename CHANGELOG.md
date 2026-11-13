@@ -8,6 +8,9 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+- Live SQLGlot fuzz campaigns compare paired JSON and SQL results, check both
+  paths against ternary partitions, and verify deterministic accepted samples
+  against independent sales-source queries and the SQL preprocessor (#58).
 - The database-free SQLGlot compiler contract campaign checks accepted queries
   and exact refusal codes against independently labelled cases, including safe
   and unsafe joins. Short runs cover every mutation; failures report minimized

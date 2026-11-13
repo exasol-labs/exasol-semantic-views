@@ -171,22 +171,65 @@ CONTRACT_SCHEDULE = ("accepted", "omitted-grouping-dimension", "measure-dimensio
                      "or-join", "using-join", "cross-object-composition", "malformed")
 
 
-def _reference_join(rng: random.Random) -> tuple[str, str]:
+def _reference_join(kind: str) -> tuple[str, str]:
     """Independent physical reference for the one-key additive sales join."""
     source = ("SELECT o.order_status, "
               "SUM(ol.quantity * ol.net_unit_price) AS total_revenue "
-              "FROM MART.ORDERS o JOIN MART.ORDER_LINES ol "
-              "ON o.order_id = ol.order_id GROUP BY o.order_status")
+              "FROM MART.ORDER_LINES ol LEFT JOIN MART.ORDERS o "
+              "ON ol.order_id = o.order_id GROUP BY o.order_status")
     semantic = _render(Spec(["order_status"], ["total_revenue"]))
-    kind = rng.choice(("LEFT", "INNER"))
     def outer(inner: str) -> str:
-        return ("SELECT l.order_status, l.total_revenue, r.total_revenue "
+        return ("SELECT l.order_status, l.total_revenue AS left_revenue, "
+                "r.total_revenue AS right_revenue "
                 f"FROM ({inner}) AS l {kind} JOIN ({inner}) AS r "
                 "ON l.order_status = r.order_status")
     sql, reference = outer(semantic), outer(source)
     _parse(sql)
     _parse(reference)
     return sql, reference
+
+
+_SOURCE_DIMENSIONS = {
+    "customer_region": "c.region", "order_status": "o.order_status",
+    "product_category": "p.category", "order_month": "DATE_TRUNC('month', o.order_date)",
+}
+_SOURCE_METRICS = {
+    "total_revenue": "SUM(ol.quantity * ol.net_unit_price)",
+    "total_cost": "SUM(ol.quantity * ol.unit_cost)",
+    "gross_margin": "SUM(ol.quantity * (ol.net_unit_price - ol.unit_cost))",
+    "completed_revenue": ("SUM(CASE WHEN o.order_status = 'COMPLETE' "
+                          "THEN ol.quantity * ol.net_unit_price END)"),
+}
+
+
+def _reference_single(spec: Spec) -> str:
+    """Render fixed sales-source formulas, never compiler output or catalog expressions."""
+    dimensions = [f"{_SOURCE_DIMENSIONS[name]} AS {name}" for name in spec.dimensions]
+    metrics = [f"{_SOURCE_METRICS[name]} AS {name}" for name in spec.metrics]
+    source = (" FROM MART.ORDER_LINES ol LEFT JOIN MART.ORDERS o ON ol.order_id = o.order_id "
+              "LEFT JOIN MART.CUSTOMERS c ON o.customer_id = c.customer_id "
+              "LEFT JOIN MART.PRODUCTS p ON ol.product_id = p.product_id")
+    where = ""
+    if spec.filters:
+        clauses = []
+        for filt in spec.filters:
+            value = str(filt.value).replace("'", "''")
+            clauses.append(f"{_SOURCE_DIMENSIONS[filt.field]} {filt.op} '{value}'")
+        where = " WHERE " + " AND ".join(clauses)
+    grouped = ("SELECT " + ", ".join(dimensions + metrics) + source + where
+               + " GROUP BY " + ", ".join(_SOURCE_DIMENSIONS[name]
+                                             for name in spec.dimensions))
+    sql = "SELECT " + ", ".join(spec.dimensions + spec.metrics) + f" FROM ({grouped}) src"
+    if spec.having:
+        sql += " WHERE " + " AND ".join(
+            f"{h.field} {h.op} {h.value}" for h in spec.having)
+    if spec.order_by:
+        sql += " ORDER BY " + ", ".join(
+            f"{order.field} {order.direction.upper()}" for order in spec.order_by)
+    if spec.limit is not None:
+        sql += f" LIMIT {spec.limit}"
+    _parse(sql)
+    return sql
 
 
 class SqlglotGenerator:
@@ -267,7 +310,11 @@ class SqlglotGenerator:
 
     def _paired(self, rng: random.Random, seed: int, idx: int) -> PairedCase:
         spec = _spec(rng)
-        return PairedCase(CaseLabel(seed, idx, "single-object", "paired"),
+        if spec.limit is not None:
+            spec.order_by = [OrderBy(spec.dimensions[0], "asc"),
+                             OrderBy(spec.metrics[0], "asc")]
+        return PairedCase(CaseLabel(seed, idx, "single-object", "paired",
+                                    expected_status="ACCEPT"),
                           spec_to_json(spec), _render(spec))
 
     def _paired_tlp(self, rng: random.Random, seed: int, idx: int) -> PairedTlpCase:
@@ -285,6 +332,31 @@ class SqlglotGenerator:
         return PairedTlpCase(label, *paired)
 
     def _reference(self, rng: random.Random, seed: int, idx: int) -> ReferenceCase:
-        sql, reference = _reference_join(rng)
-        return ReferenceCase(CaseLabel(seed, idx, "grouped-join",
-                                       "whole-grouping-key"), sql, reference)
+        shape = idx % 8
+        if shape in (5, 6):
+            kind = "INNER" if shape == 5 else "LEFT"
+            sql, reference = _reference_join(kind)
+            return ReferenceCase(CaseLabel(seed, idx, f"{kind.lower()}-grouped-join",
+                                           "whole-grouping-key"), sql, reference,
+                                 numeric_columns=(1, 2))
+        if shape == 7:
+            _, sql = _contract_join(rng, "cross-object-composition")
+            return ReferenceCase(CaseLabel(seed, idx, "unsafe-direct-join",
+                                           "cross-object-composition", "valid", "REJECT",
+                                           "SEMANTIC_QUERY_012"), sql, "", "SEMANTIC_QUERY_012")
+        specs = (
+            Spec(["order_status"], ["total_revenue"]),
+            Spec(["customer_region"], ["total_cost"],
+                 [Filter("order_status", "=", "COMPLETE")]),
+            Spec(["product_category"], ["completed_revenue"]),
+            Spec(["order_month"], ["gross_margin"], order_by=[OrderBy("order_month", "asc")],
+                 limit=2),
+            Spec(["order_status"], ["total_revenue"],
+                 having=[HavingClause("total_revenue", ">", 0)]),
+        )
+        spec = specs[shape]
+        sql = _render(spec, alias=shape == 0, inferred=shape == 2,
+                      wrapper=shape == 4)
+        return ReferenceCase(CaseLabel(seed, idx, "single-object", f"sample-{shape}",
+                                       expected_status="ACCEPT"),
+                             sql, _reference_single(spec), numeric_columns=(1,))

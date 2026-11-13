@@ -30,10 +30,13 @@ from .connection import connect  # noqa: E402
 from .generators.handwritten import HandwrittenGenerator  # noqa: E402
 from .generators.sqlglot_generator import SqlglotGenerator  # noqa: E402
 from .lua_backend import CaseTimeout, LuaBackend  # noqa: E402
+from .oracles.accepted_differential_oracle import AcceptedDifferentialOracle  # noqa: E402
 from .oracles.contract_oracle import ContractOracle  # noqa: E402
 from .oracles.differential_oracle import DifferentialOracle  # noqa: E402
+from .oracles.paired_tlp_oracle import PairedTlpOracle  # noqa: E402
+from .oracles.reference_oracle import ReferenceOracle  # noqa: E402
 from .oracles.tlp_oracle import TlpOracle  # noqa: E402
-from .reporting import CampaignSummary, print_result, print_summary  # noqa: E402
+from .reporting import CampaignSummary, FailureRecord, print_result, print_summary  # noqa: E402
 
 
 # pyexasol 3 reports usage on connect; a test run never does.
@@ -45,6 +48,8 @@ GENERATORS: dict[str, Generator] = {
 }
 ORACLES: dict[str, Oracle] = {
     "differential": DifferentialOracle(), "tlp": TlpOracle(), "contract": ContractOracle(),
+    "reference": ReferenceOracle(), "accepted-differential": AcceptedDifferentialOracle(),
+    "paired-tlp": PairedTlpOracle(),
 }
 VERDICTS = ("match", "both-error", "status-mismatch", "row-diff", "exec-error",
             "compile-error", "contract-mismatch")
@@ -125,11 +130,11 @@ def run_campaign(generator: Generator, oracle: Oracle, seed: int, cases: int,
                 expected_counts[key] = expected_counts.get(key, 0) + 1
             print_result(result, good)
             if result.verdict not in good:
-                failures.append(result)
+                failures.append(FailureRecord(case.label, result))
 
         print_summary(CampaignSummary(counts, expected_counts, rule_counts,
                                       failures, cases, seed, oracle.name,
-                                      oracle.database_free))
+                                      oracle.database_free, generator.name))
         return 1 if failures else 0
     finally:
         if previous_alarm is not None:

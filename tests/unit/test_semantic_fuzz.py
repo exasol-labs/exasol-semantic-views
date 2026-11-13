@@ -29,10 +29,14 @@ from tests.fuzz.generators.handwritten import (DIMENSIONS, METRICS,  # noqa: E40
                                                gen_tlp_case)
 from tests.fuzz.generators.sqlglot_generator import SqlglotGenerator  # noqa: E402
 from tests.fuzz.lua_backend import CaseTimeout, LuaBackend  # noqa: E402
+from tests.fuzz.oracles.accepted_differential_oracle import AcceptedDifferentialOracle  # noqa: E402
 from tests.fuzz.oracles.contract_oracle import ContractOracle  # noqa: E402
 from tests.fuzz.oracles.differential_oracle import DifferentialOracle  # noqa: E402
+from tests.fuzz.oracles.paired_tlp_oracle import PairedTlpOracle  # noqa: E402
+from tests.fuzz.oracles.reference_oracle import ReferenceOracle  # noqa: E402
+from tests.fuzz.oracles.row_comparison import compare_typed_rows  # noqa: E402
 from tests.fuzz.oracles.tlp_oracle import TlpOracle  # noqa: E402
-from tests.fuzz.reporting import CampaignSummary, print_summary  # noqa: E402
+from tests.fuzz.reporting import CampaignSummary, FailureRecord, print_summary  # noqa: E402
 from tests.fuzz.run_semantic_fuzz import run_campaign, select_profile  # noqa: E402
 
 
@@ -45,6 +49,10 @@ class _Rows:
 
     def fetchall(self):
         return self.rows
+
+    def columns(self):
+        return {name: None for name in
+                ("STATUS", "ERROR_CODE", "ERROR_MESSAGE", "PLAN_JSON", "GENERATED_SQL")}
 
 
 class _LiveBackend:
@@ -318,6 +326,216 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(oracle.run(Backend(("SEMANTIC_REQUEST_080", "SEMANTIC_QUERY_081")),
                                     case, False).verdict, "status-mismatch")
 
+    def test_sqlglot_accepted_refusal_fails_even_when_both_paths_refuse(self):
+        case = PairedCase(CaseLabel(4, 0, expected_status="ACCEPT"),
+                          {"dimensions": ["order_status"], "metrics": ["total_revenue"]},
+                          "SELECT order_status, total_revenue FROM SEMANTIC_SALES.SALES")
+
+        class Refusing:
+            def compile_json(self, payload):
+                return {"status": "ERROR", "error_code": "SEMANTIC_REQUEST_080"}
+
+            def compile_sql(self, sql):
+                return {"status": "ERROR", "error_code": "SEMANTIC_QUERY_080"}
+
+        self.assertEqual(AcceptedDifferentialOracle().run(Refusing(), case, False).verdict,
+                         "compile-error")
+
+    def test_sqlglot_paired_projection_order_and_alias(self):
+        case = PairedCase(CaseLabel(4, 0, expected_status="ACCEPT"),
+                          {"dimensions": ["order_status"], "metrics": ["total_revenue"]},
+                          "SELECT total_revenue AS amount, order_status AS state "
+                          "FROM SEMANTIC_SALES.SALES")
+
+        class Backend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": "json"}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": "sql"}
+
+            def execute(self, sql):
+                return _Rows([("COMPLETE", 2)] if sql == "json" else [(2, "COMPLETE")])
+
+        self.assertEqual(AcceptedDifferentialOracle().run(Backend(), case, False).verdict,
+                         "match")
+
+    def test_typed_rows_keep_names_exact_and_tolerate_numeric_roundoff(self):
+        from decimal import Decimal
+        self.assertIsNone(compare_typed_rows([("North", Decimal("1.0000000"))],
+                                              [("North", 1.0000001)]))
+        self.assertIsNone(compare_typed_rows([("North", "1.0000000")],
+                                              [("North", "1.0000001")],
+                                             numeric_columns=(1,)))
+        self.assertIsNotNone(compare_typed_rows([("North", 1)], [("north", 1)]))
+        self.assertIsNotNone(compare_typed_rows([("North", 1)], [("North", 1.01)]))
+
+    def test_typed_rows_preserve_numeric_text_dimensions(self):
+        self.assertIsNotNone(compare_typed_rows([("01",)], [("1",)]))
+        self.assertIsNotNone(compare_typed_rows([("01",)], [(1,)]))
+
+    def test_typed_rows_reject_material_large_currency_difference(self):
+        from decimal import Decimal
+        self.assertIsNotNone(compare_typed_rows([(Decimal("1000000000000.00"),)],
+                                               [(Decimal("1000000000500.00"),)],
+                                               numeric_columns=(0,)))
+
+    def test_typed_rows_align_unordered_numeric_representations(self):
+        from decimal import Decimal
+        self.assertIsNone(compare_typed_rows([(2, "two"), (10, "ten")],
+                                              [(Decimal("10.0"), "ten"),
+                                               (Decimal("2.0"), "two")]))
+
+    def test_paired_tlp_runs_all_four_variants_on_both_paths(self):
+        label = CaseLabel(4, 0)
+        variants = [PairedCase(label, {"variant": name}, name)
+                    for name in ("base", "p", "not_p", "null")]
+        case = PairedTlpCase(label, *variants)
+
+        class Backend:
+            calls = []
+
+            def compile_json(self, payload):
+                self.calls.append(("json", payload["variant"]))
+                return {"status": "OK", "generated_sql": payload["variant"]}
+
+            def compile_sql(self, sql):
+                self.calls.append(("sql", sql))
+                return {"status": "OK", "generated_sql": sql}
+
+            def execute(self, sql):
+                return _Rows([("North", {"base": 10, "p": 6,
+                                         "not_p": 4, "null": 0}[sql])])
+
+        backend = Backend()
+        self.assertEqual(PairedTlpOracle().run(backend, case, False).verdict, "match")
+        self.assertEqual(len(backend.calls), 8)
+
+    def test_paired_tlp_rejects_vacuous_empty_results(self):
+        label = CaseLabel(4, 0)
+        variant = PairedCase(label, {"variant": "empty"}, "empty")
+        case = PairedTlpCase(label, variant, variant, variant, variant)
+
+        class EmptyBackend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": "empty"}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": "empty"}
+
+            def execute(self, sql):
+                return _Rows([])
+
+        result = PairedTlpOracle().run(EmptyBackend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertEqual(result.stage, "json/nonempty")
+
+    def test_paired_tlp_detects_missing_null_metric_group(self):
+        label = CaseLabel(4, 0)
+        variants = [PairedCase(label, {"variant": name}, name)
+                    for name in ("base", "p", "not_p", "null")]
+        case = PairedTlpCase(label, *variants)
+
+        class Backend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": "json/" + payload["variant"]}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": "sql/" + sql}
+
+            def execute(self, sql):
+                lane, variant = sql.split("/")
+                if variant == "base":
+                    return _Rows([("A", 10), ("B", None)] if lane == "json" else [("A", 10)])
+                return _Rows([("A", {"p": 6, "not_p": 4, "null": None}[variant])])
+
+        result = PairedTlpOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "row-diff")
+        self.assertEqual(result.stage, "cross-lane")
+
+    def test_paired_tlp_preserves_decimal_precision(self):
+        from decimal import Decimal
+        label = CaseLabel(4, 0)
+        variants = [PairedCase(label, {"variant": name}, name)
+                    for name in ("base", "p", "not_p", "null")]
+        case = PairedTlpCase(label, *variants)
+
+        class Backend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": payload["variant"]}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": sql}
+
+            def execute(self, sql):
+                values = {"base": Decimal("10000000000000001"),
+                          "p": Decimal("10000000000000000"), "not_p": None, "null": None}
+                return _Rows([("A", values[sql])])
+
+        self.assertEqual(PairedTlpOracle().run(Backend(), case, False).verdict, "row-diff")
+
+    def test_reference_join_uses_sales_model_left_relationship(self):
+        case = SqlglotGenerator().generate(random.Random(4), Profile.REFERENCE, 4, 6)
+        self.assertIn("FROM MART.ORDER_LINES ol LEFT JOIN MART.ORDERS o",
+                      case.reference_sql)
+        self.assertEqual(case.numeric_columns, (1, 2))
+
+    def test_reference_oracle_checks_preprocessor_refusal_code(self):
+        case = ReferenceCase(CaseLabel(4, 0), "unsafe join", "",
+                             "SEMANTIC_QUERY_012")
+
+        class Backend:
+            def compile_sql(self, sql):
+                return {"status": "ERROR", "error_code": "SEMANTIC_QUERY_012"}
+
+            def execute_preprocessed(self, sql):
+                raise RuntimeError("SEMANTIC_QUERY_012: unsafe join")
+
+        self.assertEqual(ReferenceOracle().run(Backend(), case, False).verdict, "match")
+
+    def test_reference_oracle_checks_each_execution_against_physical_rows(self):
+        case = ReferenceCase(CaseLabel(4, 0), "semantic SQL", "physical SQL")
+
+        class Backend:
+            def __init__(self, compiled, preprocessed):
+                self.compiled = compiled
+                self.preprocessed = preprocessed
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": "generated SQL"}
+
+            def execute(self, sql):
+                return _Rows([(self.compiled if sql == "generated SQL" else 10,)])
+
+            def execute_preprocessed(self, sql):
+                return _Rows([(self.preprocessed,)])
+
+        oracle = ReferenceOracle()
+        self.assertEqual(oracle.run(Backend(10, 10), case, False).verdict, "match")
+        self.assertEqual(oracle.run(Backend(9, 10), case, False).stage, "compare-compiled")
+        self.assertEqual(oracle.run(Backend(10, 9), case, False).stage, "compare-preprocessor")
+
+    def test_live_oracles_propagate_case_timeout(self):
+        label = CaseLabel(4, 0, expected_status="ACCEPT")
+        paired = PairedCase(label, {"metrics": ["total_revenue"]},
+                            "SELECT total_revenue FROM SEMANTIC_SALES.SALES")
+        tlp = PairedTlpCase(label, paired, paired, paired, paired)
+        reference = ReferenceCase(label, paired.sql, "SELECT 1")
+
+        class TimedOut:
+            def compile_json(self, payload):
+                raise CaseTimeout
+
+            def compile_sql(self, sql):
+                raise CaseTimeout
+
+        for oracle, case in ((AcceptedDifferentialOracle(), paired),
+                             (PairedTlpOracle(), tlp), (ReferenceOracle(), reference)):
+            backend = TimedOut()
+            with self.subTest(oracle=oracle.name):
+                with self.assertRaises(CaseTimeout):
+                    oracle.run(backend, case, False)
+
     def test_existing_tlp_verdict(self):
         case = JsonTlpCase(CaseLabel(0, 0), {"variant": "base"},
                            {"variant": "true"}, {"variant": "false"},
@@ -404,8 +622,10 @@ class SemanticFuzzTest(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             print_summary(CampaignSummary({"contract-mismatch": 1}, {"ACCEPT": 1},
-                                          {"documented-subset": 1}, [result], 1, 7,
-                                          "contract", True))
+                                          {"documented-subset": 1},
+                                          [FailureRecord(case.label, result)], 1, 7,
+                                          "contract", True, "sqlglot"))
+        self.assertIn("generator=sqlglot oracle=contract seed=7 case=0", output.getvalue())
         self.assertIn("original SQL:  original", output.getvalue())
         self.assertIn("variant SQL:   variant", output.getvalue())
 
@@ -474,6 +694,26 @@ class SemanticFuzzTest(unittest.TestCase):
                                   backend_factory=lambda: backend)
         self.assertEqual(result, 0)
         self.assertTrue(backend.closed)
+
+    def test_runner_reports_failure_context_without_changing_result(self):
+        result = CaseResult(0, "row-diff", detail="different rows", sql_text="SELECT 1")
+
+        class FailingOracle:
+            name = "failing"
+            accepted_profiles = (Profile.PAIRED,)
+            database_free = True
+
+            def run(self, backend, case, verbose):
+                return result
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = run_campaign(_FixedGenerator(), FailingOracle(), 5, 1, False,
+                                  backend_factory=_TestBackend)
+        self.assertEqual(status, 1)
+        self.assertIn("generator=fixed oracle=failing seed=5 case=0", output.getvalue())
+        self.assertIsNone(result.seed)
+        self.assertEqual(result.rule, "")
 
     def test_incompatible_and_incomplete_profiles_fail_before_backend(self):
         handwritten = HandwrittenGenerator()
