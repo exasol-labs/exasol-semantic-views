@@ -365,9 +365,20 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertIsNone(compare_typed_rows([("North", Decimal("1.0000000"))],
                                               [("North", 1.0000001)]))
         self.assertIsNone(compare_typed_rows([("North", "1.0000000")],
-                                              [("North", "1.0000001")]))
+                                              [("North", "1.0000001")],
+                                             numeric_columns=(1,)))
         self.assertIsNotNone(compare_typed_rows([("North", 1)], [("north", 1)]))
         self.assertIsNotNone(compare_typed_rows([("North", 1)], [("North", 1.01)]))
+
+    def test_typed_rows_preserve_numeric_text_dimensions(self):
+        self.assertIsNotNone(compare_typed_rows([("01",)], [("1",)]))
+        self.assertIsNotNone(compare_typed_rows([("01",)], [(1,)]))
+
+    def test_typed_rows_reject_material_large_currency_difference(self):
+        from decimal import Decimal
+        self.assertIsNotNone(compare_typed_rows([(Decimal("1000000000000.00"),)],
+                                               [(Decimal("1000000000500.00"),)],
+                                               numeric_columns=(0,)))
 
     def test_typed_rows_align_unordered_numeric_representations(self):
         from decimal import Decimal
@@ -418,6 +429,56 @@ class SemanticFuzzTest(unittest.TestCase):
         result = PairedTlpOracle().run(EmptyBackend(), case, False)
         self.assertEqual(result.verdict, "contract-mismatch")
         self.assertEqual(result.stage, "json/nonempty")
+
+    def test_paired_tlp_detects_missing_null_metric_group(self):
+        label = CaseLabel(4, 0)
+        variants = [PairedCase(label, {"variant": name}, name)
+                    for name in ("base", "p", "not_p", "null")]
+        case = PairedTlpCase(label, *variants)
+
+        class Backend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": "json/" + payload["variant"]}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": "sql/" + sql}
+
+            def execute(self, sql):
+                lane, variant = sql.split("/")
+                if variant == "base":
+                    return _Rows([("A", 10), ("B", None)] if lane == "json" else [("A", 10)])
+                return _Rows([("A", {"p": 6, "not_p": 4, "null": None}[variant])])
+
+        result = PairedTlpOracle().run(Backend(), case, False)
+        self.assertEqual(result.verdict, "row-diff")
+        self.assertEqual(result.stage, "cross-lane")
+
+    def test_paired_tlp_preserves_decimal_precision(self):
+        from decimal import Decimal
+        label = CaseLabel(4, 0)
+        variants = [PairedCase(label, {"variant": name}, name)
+                    for name in ("base", "p", "not_p", "null")]
+        case = PairedTlpCase(label, *variants)
+
+        class Backend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": payload["variant"]}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": sql}
+
+            def execute(self, sql):
+                values = {"base": Decimal("10000000000000001"),
+                          "p": Decimal("10000000000000000"), "not_p": None, "null": None}
+                return _Rows([("A", values[sql])])
+
+        self.assertEqual(PairedTlpOracle().run(Backend(), case, False).verdict, "row-diff")
+
+    def test_reference_join_uses_sales_model_left_relationship(self):
+        case = SqlglotGenerator().generate(random.Random(4), Profile.REFERENCE, 4, 6)
+        self.assertIn("FROM MART.ORDER_LINES ol LEFT JOIN MART.ORDERS o",
+                      case.reference_sql)
+        self.assertEqual(case.numeric_columns, (1, 2))
 
     def test_reference_oracle_checks_preprocessor_refusal_code(self):
         case = ReferenceCase(CaseLabel(4, 0), "unsafe join", "",

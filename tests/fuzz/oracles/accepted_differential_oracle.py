@@ -72,7 +72,9 @@ class AcceptedDifferentialOracle:
             positions = [fields.index(name) for name in requested]
             rows["sql"] = [tuple(row[pos] for pos in positions) for row in sql_rows]
             diff = compare_typed_rows(rows["json"], rows["sql"],
-                                      ordered=payload.get("limit") is not None)
+                                      ordered=payload.get("limit") is not None,
+                                      numeric_columns=range(len(payload.get("dimensions", [])),
+                                                            len(requested)))
             return CaseResult(idx, "match" if diff is None else "row-diff",
                               detail=diff or f"{len(rows['json'])} rows", json_payload=payload,
                               sql_text=sql, stage="compare", rows=str(rows) if diff else "",

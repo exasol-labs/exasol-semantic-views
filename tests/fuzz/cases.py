@@ -117,6 +117,7 @@ class ReferenceCase:
     sql: str
     reference_sql: str
     expected_code: str | None = None
+    numeric_columns: tuple[int, ...] = ()
     profile: Profile = field(default=Profile.REFERENCE, init=False)
 
 

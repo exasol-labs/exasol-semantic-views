@@ -175,8 +175,8 @@ def _reference_join(kind: str) -> tuple[str, str]:
     """Independent physical reference for the one-key additive sales join."""
     source = ("SELECT o.order_status, "
               "SUM(ol.quantity * ol.net_unit_price) AS total_revenue "
-              "FROM MART.ORDERS o JOIN MART.ORDER_LINES ol "
-              "ON o.order_id = ol.order_id GROUP BY o.order_status")
+              "FROM MART.ORDER_LINES ol LEFT JOIN MART.ORDERS o "
+              "ON ol.order_id = o.order_id GROUP BY o.order_status")
     semantic = _render(Spec(["order_status"], ["total_revenue"]))
     def outer(inner: str) -> str:
         return ("SELECT l.order_status, l.total_revenue AS left_revenue, "
@@ -337,7 +337,8 @@ class SqlglotGenerator:
             kind = "INNER" if shape == 5 else "LEFT"
             sql, reference = _reference_join(kind)
             return ReferenceCase(CaseLabel(seed, idx, f"{kind.lower()}-grouped-join",
-                                           "whole-grouping-key"), sql, reference)
+                                           "whole-grouping-key"), sql, reference,
+                                 numeric_columns=(1, 2))
         if shape == 7:
             _, sql = _contract_join(rng, "cross-object-composition")
             return ReferenceCase(CaseLabel(seed, idx, "unsafe-direct-join",
@@ -358,4 +359,4 @@ class SqlglotGenerator:
                       wrapper=shape == 4)
         return ReferenceCase(CaseLabel(seed, idx, "single-object", f"sample-{shape}",
                                        expected_status="ACCEPT"),
-                             sql, _reference_single(spec))
+                             sql, _reference_single(spec), numeric_columns=(1,))

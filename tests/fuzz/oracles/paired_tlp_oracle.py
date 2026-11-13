@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from time import perf_counter
 from typing import Any
 
@@ -20,7 +21,7 @@ class PairedTlpOracle:
         variants = (("base", case.base), ("p", case.predicate),
                     ("not_p", case.complement), ("null", case.null))
         variant_sql = "\n".join(f"{name}: {variant.sql}" for name, variant in variants)
-        groups: dict[str, dict[str, dict[Any, float]]] = {"json": {}, "sql": {}}
+        groups: dict[str, dict[str, dict[Any, Decimal | None]]] = {"json": {}, "sql": {}}
         timings: dict[str, float] = {}
         stage = ""
         try:
@@ -42,13 +43,15 @@ class PairedTlpOracle:
                     started = perf_counter()
                     rows = backend.execute(result["generated_sql"]).fetchall()
                     timings[stage] = perf_counter() - started
-                    groups[lane][name] = {row[0]: float(row[1]) for row in rows
-                                          if row[1] is not None}
+                    groups[lane][name] = {
+                        row[0]: Decimal(str(row[1])) if row[1] is not None else None
+                        for row in rows
+                    }
                     if verbose:
                         print(f"[{case.label.idx}] {stage}: {groups[lane][name]}")
             for lane in ("json", "sql"):
                 stage = f"{lane}/nonempty"
-                if not groups[lane]["base"]:
+                if not any(value is not None for value in groups[lane]["base"].values()):
                     return CaseResult(case.label.idx, "contract-mismatch",
                                       detail=f"{lane} base query returned no non-NULL metric groups",
                                       sql_text=variant_sql, json_payload=case.base.json_payload,
@@ -57,8 +60,19 @@ class PairedTlpOracle:
                 base = groups[lane]["base"]
                 keys = set().union(*(groups[lane][name] for name, _ in variants))
                 for key in keys:
-                    parts = sum(groups[lane][name].get(key, 0) for name in ("p", "not_p", "null"))
-                    diff = compare_typed_rows([(base.get(key, 0),)], [(parts,)])
+                    parts = [groups[lane][name].get(key) for name in ("p", "not_p", "null")]
+                    diff: str | None
+                    if key not in base:
+                        diff = "partition group is absent from the base query"
+                    elif base[key] is None:
+                        diff = ("NULL base metric has a non-NULL partition" if any(
+                            value is not None for value in parts) else None)
+                    elif all(value is None for value in parts):
+                        diff = "non-NULL base metric has no non-NULL partition"
+                    else:
+                        total = sum((value for value in parts if value is not None), Decimal(0))
+                        diff = compare_typed_rows([(base[key],)], [(total,)],
+                                                  numeric_columns=(0,))
                     if diff:
                         return CaseResult(case.label.idx, "row-diff", detail=f"{key!r}: {diff}",
                                           sql_text=variant_sql, json_payload=case.base.json_payload,
@@ -72,7 +86,7 @@ class PairedTlpOracle:
                                       sql_text=variant_sql, json_payload=case.base.json_payload,
                                       stage=stage, rows=str(groups), timings=str(timings))
                 for key in set(j):
-                    diff = compare_typed_rows([(j[key],)], [(s[key],)])
+                    diff = compare_typed_rows([(j[key],)], [(s[key],)], numeric_columns=(0,))
                     if diff:
                         return CaseResult(case.label.idx, "row-diff", detail=f"{name}/{key!r}: {diff}",
                                           sql_text=variant_sql, json_payload=case.base.json_payload,

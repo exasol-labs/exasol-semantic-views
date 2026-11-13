@@ -65,7 +65,8 @@ class ReferenceOracle:
             ordered = " LIMIT " in case.sql.upper()
             for name in ("compiled", "preprocessor"):
                 stage = f"compare-{name}"
-                diff = compare_typed_rows(rows[name], rows["reference"], ordered=ordered)
+                diff = compare_typed_rows(rows[name], rows["reference"], ordered=ordered,
+                                          numeric_columns=case.numeric_columns)
                 if diff:
                     return self._result(case, "row-diff", stage, timings, rows, diff)
             return self._result(case, "match", "compare-reference", timings, rows,
