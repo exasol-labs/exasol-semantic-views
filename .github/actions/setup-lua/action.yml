@@ -23,7 +23,10 @@ runs:
         set -euo pipefail
         work="$(mktemp -d)"
         tarball="lua-${LUA_VERSION}.tar.gz"
-        curl --fail --silent --show-error --location --retry 3 \
+        # lua.org resets connections now and then; plain --retry does not
+        # retry that (curl 35), so every error is retried.
+        curl --fail --silent --show-error --location \
+          --retry 6 --retry-all-errors --retry-delay 5 \
           "https://www.lua.org/ftp/${tarball}" --output "${work}/${tarball}"
         echo "${LUA_SHA256}  ${work}/${tarball}" | sha256sum --check --strict -
         tar -xzf "${work}/${tarball}" -C "${work}"
