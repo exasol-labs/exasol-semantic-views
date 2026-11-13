@@ -3056,6 +3056,7 @@ local function validate_expression_binding(ctx, probes)
             local label = sql_text.quote_qualified(representation.source_schema,
                 representation.source_object) .. " " .. tostring(representation.alias)
             if groups[label] == nil then
+                ---@type string|nil
                 local source = label
                 if kind == "VIRTUAL_SCHEMA" then source = stand_in(representation) end
                 groups[label] = {source = source, virtual = kind == "VIRTUAL_SCHEMA", items = {}}
@@ -3636,7 +3637,8 @@ local function validate_fusion_conflicts(ctx)
     for _, policy in ipairs(ctx.attribute_fusion_policies or {}) do
         local strategy = upper(policy.strategy)
         if strategy == "COALESCE" or strategy == "RECONCILE" then
-            local attribute = fusion_attribute(ctx, policy)
+            local attribute = assert(fusion_attribute(ctx, policy),
+                "validated fusion attribute is required")
             local attribute_key = upper(policy.attribute_type) .. ":" .. key(policy.attribute_id)
             local bindings = ctx.bindings_by_attribute[attribute_key] or {}
             local unique_key = attribute and grain_graph.physical_unique_key(ctx.unique_keys_by_entity[key(attribute.entity_id)]) or nil
