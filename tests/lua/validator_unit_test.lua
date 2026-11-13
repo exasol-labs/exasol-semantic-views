@@ -1708,6 +1708,17 @@ test("F4 validator requires coherent authority identity and contributors", funct
     assert_true(unsafe.error_count >= 3)
 end)
 
+test("F4 conflict probe failure becomes a validation issue", function()
+    local ctx = fusion_validation_context("COALESCE")
+    with_query(function()
+        error("conflict probe unavailable")
+    end, function()
+        api.validate_fusion_conflicts(ctx)
+    end)
+    assert_true(has_rule(ctx, "SEMANTIC_MODEL_044"))
+    assert_true(ctx.error_count > 0)
+end)
+
 test("F4 contributor rules name the representations they counted", function()
     -- Both of these printed only their requirement, and a steward reading
     -- SEMANTIC_CATALOG could see rows the validator does not count -- a binding
