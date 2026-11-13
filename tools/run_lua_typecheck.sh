@@ -44,7 +44,8 @@ setup_luals() {
     mkdir -p "$base_dir/build" "$install_dir"
     if [ ! -f "$archive" ]; then
       printf 'LuaLS: downloading %s for %s\n' "$version" "$platform" >&2
-      curl -fsSL --output "$archive.part" \
+      curl -fsSL --proto '=https' --proto-redir '=https' \
+        --output "$archive.part" \
         "https://github.com/LuaLS/lua-language-server/releases/download/$version/lua-language-server-$version-$platform.tar.gz"
       mv "$archive.part" "$archive"
     else
