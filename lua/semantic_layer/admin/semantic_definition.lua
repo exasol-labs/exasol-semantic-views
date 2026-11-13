@@ -13,6 +13,7 @@ local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local rollback = assert(ESV_CATALOG_ROLLBACK,
     "shared catalog rollback runtime is required")
 local dbx = assert(ESV_DATABRICKS_IMPORT, "Databricks import runtime is required")
+local adoption = assert(ESV_VIEW_ADOPTION, "view adoption runtime is required")
 
 -- Semantic DDL reads names out of quoted tokens, so the lexer folds a
 -- quoted identifier to upper case; it must NOT fuse `>=`/`<=`/`<>`/`!=`,
@@ -3329,6 +3330,17 @@ function M.import_databricks_metric_view(yaml_text, model_name, published_schema
     return dbx.import_metric_view(yaml_text, model_name, published_schema, apply_flag)
 end
 
+-- ADOPT_VIEW lives in admin/view_adoption.lua. It is handed what this module
+-- owns rather than restating it: the interior tables a refused adoption
+-- restores, and the words that open a DDL clause, which an expression it
+-- generates must not carry at its top level.
+function M.adopt_view(model_name, view_schema, view_name)
+    local clause_words = {}
+    for _, words in ipairs(CLAUSES) do clause_words[words[1]] = true end
+    return adoption.adopt_view(model_name, view_schema, view_name,
+        {interior_tables = SNAPSHOT_TABLES, clause_words = clause_words})
+end
+
 function M.decode_json(json_text)
     return json.decode(json_text)
 end
@@ -3342,6 +3354,7 @@ end
 reresolve_dimension_filters_for = M.reresolve_dimension_filters
 apply_normalized_osi_import = M.apply_normalized_osi_import
 import_databricks_metric_view = M.import_databricks_metric_view
+adopt_view = M.adopt_view
 describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition
