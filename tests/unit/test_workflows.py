@@ -134,7 +134,7 @@ class WorkflowWiringTest(unittest.TestCase):
                 for seed in (0, 42)
                 for generator, oracle, count in (("handwritten", "differential", 3),
                                                  ("handwritten", "tlp", 3),
-                                                 ("sqlglot", "contract", 3),
+                                                 ("sqlglot", "contract", 4500),
                                                  ("sqlglot", "accepted-differential", 12),
                                                  ("sqlglot", "paired-tlp", 12),
                                                  ("sqlglot", "reference", 8))

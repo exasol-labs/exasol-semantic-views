@@ -7,7 +7,7 @@ on:
         description: Space-separated fuzz seeds; empty uses the release defaults.
         type: string
       cases:
-        description: Cases per seed and oracle; empty uses the release default.
+        description: Hand-written cases per seed; empty uses the release default.
         type: string
       timeout_minutes:
         description: Maximum time for the fuzz job.
