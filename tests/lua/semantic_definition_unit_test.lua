@@ -730,6 +730,61 @@ test("a metric name another semantic view holds is refused, not taken over", fun
     assert_contains(writes[1], "UPDATE SYS_SEMANTIC.METRICS")
 end)
 
+test("a dimension another view lists is shared only with the same definition", function()
+    -- The row another view lists: entity 20 (orders), o.ship_mode, VARCHAR(20).
+    local function run(declared, listed_by)
+        local writes = {}
+        local ok, err = pcall(with_query, function(sql)
+            local text = tostring(sql)
+            if text:find("SELECT ENTITY_ID", 1, true) then
+                return {{declared.entity_id or 20}}
+            elseif text:find("GROUP_CONCAT(DISTINCT so.OBJECT_NAME", 1, true) then
+                if listed_by == nil then return {} end
+                return {{20, "orders", "o.ship_mode", "VARCHAR(20)", listed_by}}
+            elseif text:find("SELECT DIMENSION_ID", 1, true) then
+                return {{50}}
+            elseif text:find("^%s*UPDATE") or text:find("^%s*INSERT")
+                    or text:find("^%s*DELETE") then
+                writes[#writes + 1] = text
+            end
+            return {}
+        end, function()
+            api.upsert_dimension({model_id = 1, version_id = 2, model_name = "sales"}, 10,
+                {name = "ship_mode", entity = "orders", expression = declared.expression,
+                 data_type = declared.data_type, description = "How it shipped",
+                 is_hidden = false, is_certified = false})
+        end)
+        return ok, err, writes
+    end
+
+    each({
+        {name = "same tokens and type", expression = "O.SHIP_MODE",
+         data_type = "varchar( 20 )"},
+        {name = "no other view lists it", expression = "o.other", data_type = "INT",
+         listed_by = false},
+    }, function(case)
+        local ok, err, writes = run(case, case.listed_by ~= false and "SHIPPING" or nil)
+        assert_true(ok, case.name .. ": " .. tostring(err))
+        assert_contains(writes[1], "UPDATE SYS_SEMANTIC.DIMENSIONS")
+    end)
+
+    each({
+        {name = "expression", expression = "UPPER(o.ship_mode)", data_type = "VARCHAR(20)",
+         says = "expression o.ship_mode"},
+        {name = "type", expression = "o.ship_mode", data_type = "VARCHAR(40)",
+         says = "type VARCHAR(20)"},
+        {name = "entity", expression = "o.ship_mode", data_type = "VARCHAR(20)",
+         entity_id = 21, says = "entity orders"},
+    }, function(case)
+        local ok, err, writes = run(case, "OPS, SHIPPING")
+        assert_true(not ok, case.name)
+        assert_contains(tostring(err), "SEMANTIC_DDL_096")
+        assert_contains(tostring(err), "semantic view(s) OPS, SHIPPING")
+        assert_contains(tostring(err), case.says)
+        assert_equal(#writes, 0)
+    end)
+end)
+
 test("semantic definition rejects incomplete authoring statements", function()
     local cases = {
         {"", "SEMANTIC_DDL_001"},

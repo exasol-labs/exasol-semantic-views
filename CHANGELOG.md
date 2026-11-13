@@ -29,6 +29,13 @@ All notable changes to Exasol Semantic Views are documented here.
   `METRIC_TYPE_OBSERVATIONS`, reported as `SEMANTIC_DDL_999`. Validation now
   also records each metric's type once, so a model already holding such a
   metric validates again.
+- Semantic DDL no longer takes over a dimension another semantic view lists.
+  Two views may share one dimension when both declare it with the same entity,
+  expression (compared token for token) and type; any other definition is
+  refused with `SEMANTIC_DDL_096`, from either view, naming the views that list
+  it and what differs. It used to rewrite the other view's dimension silently.
+  `ADD_DIMENSION`'s `SEMANTIC_ADMIN_019` now names the DDL that shares a
+  dimension, rather than saying no operation can.
 - Semantic SQL accepts Tableau's redundant `GROUP BY` key for a selected metric
   when every selected dimension is also grouped. The metric is not used as a
   source grouping dimension; unsafe metric grouping remains refused (#38).

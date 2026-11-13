@@ -227,19 +227,44 @@ take its name.
 ### Dimension names are unique per model
 
 A dimension belongs to an *entity* and is exposed by one or more semantic views,
-but its **name is unique across the whole model**, not per view. Two views in
-the same model therefore cannot both expose a column called `order_month`, even
-when both legitimately need it — the second `ADD_DIMENSION` is refused with
-`SEMANTIC_ADMIN_019`, naming the view that already owns it:
+but its **name is unique across the whole model**, not per view. Two views that
+both list `order_month` therefore list *one* dimension, with one definition.
+The second `ADD_DIMENSION` is refused with `SEMANTIC_ADMIN_019`, naming the view
+that already lists it:
 
 ```
 SEMANTIC_ADMIN_019: duplicate dimension: ship_mode. Dimension names are unique
 per model, not per semantic view, so this name is taken. It is defined on entity
 'order' and exposed by semantic view(s): SALES. Choose a distinct name for this
-view's column; there is no operation that shares one dimension between views.
-To change this dimension's own definition instead, call
+view's column, or list the same dimension in this view too by declaring it with
+the same entity, expression and type through Semantic DDL: ALTER SEMANTIC VIEW
+sales.SHIPPING ADD OR REPLACE DIMENSION ship_mode ON ENTITY ... AS ... RETURNS
+..., applied with SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION. To change this
+dimension's own definition instead, call
 SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION, which updates it in place.
 ```
+
+**Sharing a dimension is Semantic DDL's.** A view's `DIMENSION` entry may name
+a dimension another view lists when it declares the same entity, the same
+expression and the same type; both views then list the one dimension. The
+expression is compared token for token, so whitespace, comments and the case of
+unquoted words do not matter (`o.ship_mode` and `O."SHIP_MODE"` are the same)
+while string literals and quoted identifiers do. Any other definition is
+refused, from either view, with `SEMANTIC_DDL_096`, naming the views that list
+it and what differs:
+
+```
+SEMANTIC_DDL_096: dimension ship_mode is also listed by semantic view(s) SALES,
+where it has expression o.ship_mode. Dimension names are unique per model, so
+views share one dimension, and a view may declare it only with the same
+entity, expression and type. ...
+```
+
+A shared dimension's display name, comment, format hint, `PRIVATE` and
+`CERTIFIED` are the dimension's, not a view's: the latest statement sets them
+for every view that lists it. To change the definition itself for every view at
+once, call `SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION`. A dimension only one view
+lists is that view's to redefine.
 
 Give the second view's column a distinct name (`header_ship_mode`), or model the
 two views so they do not need the same one. If a view ends up with metrics and no
@@ -814,14 +839,14 @@ place:
 
 | you try | you get |
 |---|---|
-| add the same dimension to both views, so each can be sliced the same way | `SEMANTIC_ADMIN_019` — dimension names are unique per *model*, not per view, and there is no operation that shares one between views |
+| add the same dimension to both views, so each can be sliced the same way | `SEMANTIC_ADMIN_019` from `ADD_DIMENSION` — dimension names are unique per *model*, not per view. Semantic DDL lists one dimension in both views when both declare it identically (see [Dimension names are unique per model](#dimension-names-are-unique-per-model)); otherwise `SEMANTIC_DDL_096` |
 | ask for a field of the other view | `SEMANTIC_QUERY_020` — naming the view that does have it |
 | join the two published views to put the numbers side by side | answered when each side is grouped by its region dimension and the two are joined on those keys, one-to-one; any other join is `SEMANTIC_QUERY_012` — it can repeat rows and re-aggregation double-counts |
 
 So one business question — *"revenue and freight by region"* — becomes two
-queries, and slicing both by region needs two differently named dimensions over
-the same column (`customer_region` on one view, `order_customer_region` on the
-other). That is the design working as intended: the alternative is a single view
+queries, and slicing both by region needs either one dimension both views
+declare identically, or two differently named dimensions over the same column
+(`customer_region` on one view, `order_customer_region` on the other). That is the design working as intended: the alternative is a single view
 that answers the question with a number inflated by the fan-out. But it is worth
 knowing at design time rather than discovering across three refusals.
 
@@ -837,7 +862,8 @@ except by dropping it.
 **What to decide up front:**
 
 - Which grains does this model genuinely have? Each one is a semantic view.
-- Which dimensions does each need? Name them per view from the start
+- Which dimensions does each need? One both views declare identically is
+  shared; one they would define differently needs a name per view from the start
   (`order_ship_mode`, `line_product_category`) rather than discovering the
   collision when the second view is authored.
 - Is the split real? A metric that *can* be evaluated at the finer root belongs

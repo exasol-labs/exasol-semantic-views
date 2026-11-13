@@ -1041,6 +1041,58 @@ end
 -- partitioned entity before the single validation pass -- SEMANTIC_MODEL_052
 -- rejects an attribute that is missing a binding on any partition, and REPLACE
 -- DIMENSIONS validates once at the end.
+-- A dimension name is unique per model, and one dimension row may be listed by
+-- several semantic views: two views over the same table routinely group by the
+-- same column. So Semantic DDL in one view may declare a dimension another view
+-- already lists, but only with the same definition -- entity, expression (token
+-- for token, see sql_text.same_expression) and type. It used to take the row
+-- over instead, silently redefining the other view's column; that is now
+-- refused, including from the view that declared it first, because the row is
+-- every listing view's. The descriptive fields (display name, comment, format,
+-- PRIVATE, CERTIFIED) belong to the shared row, and the latest statement sets
+-- them for every view. ADD_OR_REPLACE_DIMENSION redefines a dimension for all
+-- of its views at once.
+local function refuse_dimension_redefined_elsewhere(model, object_id_value, dimension_id,
+                                                    entity, dimension)
+    local rows = query([[
+        SELECT d.ENTITY_ID, e.ENTITY_NAME, d.EXPRESSION, d.DATA_TYPE,
+               GROUP_CONCAT(DISTINCT so.OBJECT_NAME ORDER BY so.OBJECT_NAME SEPARATOR ', ')
+                   AS OBJECT_NAMES
+        FROM SYS_SEMANTIC.DIMENSIONS d
+        JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = d.ENTITY_ID
+        JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+          ON oc.COLUMN_KIND = 'DIMENSION' AND oc.OBJECT_REF_ID = d.DIMENSION_ID
+        JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+        WHERE d.DIMENSION_ID = :dimension_id
+          AND oc.OBJECT_ID <> :object_id
+        GROUP BY d.ENTITY_ID, e.ENTITY_NAME, d.EXPRESSION, d.DATA_TYPE
+    ]], {dimension_id = dimension_id, object_id = object_id_value}) or {}
+    local row = rows[1]
+    if row == nil then return end
+    local function type_key(value)
+        return (upper(tostring(value)):gsub("%s+", ""))
+    end
+    local differs = {}
+    if tostring(row_value(row, "ENTITY_ID", 1)) ~= tostring(entity) then
+        differs[#differs + 1] = "entity " .. tostring(row_value(row, "ENTITY_NAME", 2))
+    end
+    if not sql_text.same_expression(row_value(row, "EXPRESSION", 3), dimension.expression) then
+        differs[#differs + 1] = "expression " .. tostring(row_value(row, "EXPRESSION", 3))
+    end
+    if type_key(row_value(row, "DATA_TYPE", 4)) ~= type_key(dimension.data_type) then
+        differs[#differs + 1] = "type " .. tostring(row_value(row, "DATA_TYPE", 4))
+    end
+    if #differs == 0 then return end
+    local views = tostring(row_value(row, "OBJECT_NAMES", 5))
+    error("SEMANTIC_DDL_096: dimension " .. tostring(dimension.name)
+        .. " is also listed by semantic view(s) " .. views .. ", where it has "
+        .. table.concat(differs, ", ") .. ". Dimension names are unique per model,"
+        .. " so views share one dimension, and a view may declare it only with the"
+        .. " same entity, expression and type. Declare it that way to share it, give"
+        .. " this one another name, or redefine it for every view with"
+        .. " SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION.")
+end
+
 local function upsert_dimension(model, object_id_value, dimension)
     local entity = entity_id(model, dimension.entity)
     local existing_id = scalar([[
@@ -1051,6 +1103,8 @@ local function upsert_dimension(model, object_id_value, dimension)
           AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
     ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension.name})
     if existing_id ~= nil then
+        refuse_dimension_redefined_elsewhere(model, object_id_value, existing_id, entity,
+            dimension)
         query([[
             UPDATE SYS_SEMANTIC.DIMENSIONS
             SET ENTITY_ID = :entity_id,

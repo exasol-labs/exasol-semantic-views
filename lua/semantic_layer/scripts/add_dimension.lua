@@ -217,8 +217,12 @@ if tonumber(duplicate or 0) > 0 then
         detail = detail .. " It is defined on entity '" .. tostring(owning_entity)
             .. "' and belongs to no semantic view yet."
     end
-    detail = detail .. " Choose a distinct name for this view's column; there is"
-        .. " no operation that shares one dimension between views. To change"
+    detail = detail .. " Choose a distinct name for this view's column, or list"
+        .. " the same dimension in this view too by declaring it with the same"
+        .. " entity, expression and type through Semantic DDL: ALTER SEMANTIC VIEW "
+        .. model_name .. "." .. object_name .. " ADD OR REPLACE DIMENSION "
+        .. dimension_name .. " ON ENTITY ... AS ... RETURNS ..., applied with"
+        .. " SEMANTIC_ADMIN.APPLY_SEMANTIC_DEFINITION. To change"
         .. " this dimension's own definition instead, call"
         .. " SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION, which updates it in place."
     error("SEMANTIC_ADMIN_019: duplicate dimension: " .. dimension_name .. "." .. detail)
