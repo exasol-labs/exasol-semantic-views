@@ -35,8 +35,8 @@ def compare_typed_rows(a: list[tuple], b: list[tuple], *, ordered: bool = False)
     """Compare exact non-numeric cells and numeric cells with explicit tolerance."""
     if len(a) != len(b):
         return f"row count differs: left={len(a)} right={len(b)}"
-    left = a if ordered else sorted(a, key=lambda row: tuple(str(c) for c in row))
-    right = b if ordered else sorted(b, key=lambda row: tuple(str(c) for c in row))
+    left = a if ordered else sorted(a, key=_row_sort_key)
+    right = b if ordered else sorted(b, key=_row_sort_key)
     for index, (lrow, rrow) in enumerate(zip(left, right, strict=True)):
         if len(lrow) != len(rrow):
             return f"row {index} width differs: left={lrow!r} right={rrow!r}"
@@ -53,6 +53,12 @@ def compare_typed_rows(a: list[tuple], b: list[tuple], *, ordered: bool = False)
                 return (f"row {index} column {column}: left={lvalue!r} "
                         f"right={rvalue!r}")
     return None
+
+
+def _row_sort_key(row: tuple) -> tuple:
+    """Align numeric cells by value even when drivers render them differently."""
+    return tuple((0, number) if (number := _number(cell)) is not None
+                 else (1, str(cell)) for cell in row)
 
 
 def _number(value: Any) -> Decimal | None:

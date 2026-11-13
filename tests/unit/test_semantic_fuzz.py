@@ -369,6 +369,12 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertIsNotNone(compare_typed_rows([("North", 1)], [("north", 1)]))
         self.assertIsNotNone(compare_typed_rows([("North", 1)], [("North", 1.01)]))
 
+    def test_typed_rows_align_unordered_numeric_representations(self):
+        from decimal import Decimal
+        self.assertIsNone(compare_typed_rows([(2, "two"), (10, "ten")],
+                                              [(Decimal("10.0"), "ten"),
+                                               (Decimal("2.0"), "two")]))
+
     def test_paired_tlp_runs_all_four_variants_on_both_paths(self):
         label = CaseLabel(4, 0)
         variants = [PairedCase(label, {"variant": name}, name)
@@ -428,6 +434,25 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(oracle.run(Backend(10, 10), case, False).verdict, "match")
         self.assertEqual(oracle.run(Backend(9, 10), case, False).stage, "compare-compiled")
         self.assertEqual(oracle.run(Backend(10, 9), case, False).stage, "compare-preprocessor")
+
+    def test_live_oracles_propagate_case_timeout(self):
+        label = CaseLabel(4, 0, expected_status="ACCEPT")
+        paired = PairedCase(label, {"metrics": ["total_revenue"]},
+                            "SELECT total_revenue FROM SEMANTIC_SALES.SALES")
+        tlp = PairedTlpCase(label, paired, paired, paired, paired)
+        reference = ReferenceCase(label, paired.sql, "SELECT 1")
+
+        class TimedOut:
+            def compile_json(self, payload):
+                raise CaseTimeout
+
+            def compile_sql(self, sql):
+                raise CaseTimeout
+
+        for oracle, case in ((AcceptedDifferentialOracle(), paired),
+                             (PairedTlpOracle(), tlp), (ReferenceOracle(), reference)):
+            with self.subTest(oracle=oracle.name), self.assertRaises(CaseTimeout):
+                oracle.run(TimedOut(), case, False)
 
     def test_existing_tlp_verdict(self):
         case = JsonTlpCase(CaseLabel(0, 0), {"variant": "base"},

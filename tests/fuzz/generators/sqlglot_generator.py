@@ -206,9 +206,9 @@ def _reference_single(spec: Spec) -> str:
     """Render fixed sales-source formulas, never compiler output or catalog expressions."""
     dimensions = [f"{_SOURCE_DIMENSIONS[name]} AS {name}" for name in spec.dimensions]
     metrics = [f"{_SOURCE_METRICS[name]} AS {name}" for name in spec.metrics]
-    source = (" FROM MART.ORDER_LINES ol JOIN MART.ORDERS o ON ol.order_id = o.order_id "
-              "JOIN MART.CUSTOMERS c ON o.customer_id = c.customer_id "
-              "JOIN MART.PRODUCTS p ON ol.product_id = p.product_id")
+    source = (" FROM MART.ORDER_LINES ol LEFT JOIN MART.ORDERS o ON ol.order_id = o.order_id "
+              "LEFT JOIN MART.CUSTOMERS c ON o.customer_id = c.customer_id "
+              "LEFT JOIN MART.PRODUCTS p ON ol.product_id = p.product_id")
     where = ""
     if spec.filters:
         clauses = []

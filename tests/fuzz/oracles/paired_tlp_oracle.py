@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import Any
 
 from ..cases import CaseResult, FuzzCase, PairedTlpCase, Profile
+from ..lua_backend import CaseTimeout
 from .row_comparison import compare_typed_rows
 
 
@@ -73,6 +74,8 @@ class PairedTlpOracle:
             return CaseResult(case.label.idx, "match", detail="four variants on both paths",
                               sql_text=variant_sql, json_payload=case.base.json_payload,
                               timings=str(timings))
+        except CaseTimeout:
+            raise
         except Exception as exc:  # noqa: BLE001 -- retain SQL failure context
             if stage.endswith(("/compile", "/execute")):
                 timings.setdefault(stage, perf_counter() - started)

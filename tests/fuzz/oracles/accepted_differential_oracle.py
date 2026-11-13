@@ -9,6 +9,7 @@ from typing import Any
 from sqlglot import exp, parse_one
 
 from ..cases import CaseResult, FuzzCase, PairedCase, Profile
+from ..lua_backend import CaseTimeout
 from .row_comparison import compare_typed_rows
 
 
@@ -76,6 +77,8 @@ class AcceptedDifferentialOracle:
                               detail=diff or f"{len(rows['json'])} rows", json_payload=payload,
                               sql_text=sql, stage="compare", rows=str(rows) if diff else "",
                               timings=str(timings))
+        except CaseTimeout:
+            raise
         except Exception as exc:  # noqa: BLE001 -- retain the failing stage
             if stage.startswith(("compile", "execute")):
                 timings.setdefault(stage, perf_counter() - started)

@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any
 
 from ..cases import CaseResult, FuzzCase, Profile, ReferenceCase
+from ..lua_backend import CaseTimeout
 from .row_comparison import compare_typed_rows
 
 
@@ -34,6 +35,8 @@ class ReferenceOracle:
                 started = perf_counter()
                 try:
                     backend.execute_preprocessed(case.sql).fetchall()
+                except CaseTimeout:
+                    raise
                 except Exception as exc:  # noqa: BLE001 -- the refusal is expected
                     timings[stage] = perf_counter() - started
                     found = re.search(r"SEMANTIC_\w+_\d+", str(exc))
@@ -67,6 +70,8 @@ class ReferenceOracle:
                     return self._result(case, "row-diff", stage, timings, rows, diff)
             return self._result(case, "match", "compare-reference", timings, rows,
                                 f"{len(rows['reference'])} rows")
+        except CaseTimeout:
+            raise
         except Exception as exc:  # noqa: BLE001 -- retain the failing stage and SQL error
             if stage.startswith(("compile", "execute")):
                 timings.setdefault(stage, perf_counter() - started)
