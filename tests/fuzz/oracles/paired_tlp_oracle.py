@@ -47,6 +47,12 @@ class PairedTlpOracle:
                     if verbose:
                         print(f"[{case.label.idx}] {stage}: {groups[lane][name]}")
             for lane in ("json", "sql"):
+                stage = f"{lane}/nonempty"
+                if not groups[lane]["base"]:
+                    return CaseResult(case.label.idx, "contract-mismatch",
+                                      detail=f"{lane} base query returned no non-NULL metric groups",
+                                      sql_text=variant_sql, json_payload=case.base.json_payload,
+                                      stage=stage, rows=str(groups), timings=str(timings))
                 stage = f"{lane}/identity"
                 base = groups[lane]["base"]
                 keys = set().union(*(groups[lane][name] for name, _ in variants))

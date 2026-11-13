@@ -400,6 +400,25 @@ class SemanticFuzzTest(unittest.TestCase):
         self.assertEqual(PairedTlpOracle().run(backend, case, False).verdict, "match")
         self.assertEqual(len(backend.calls), 8)
 
+    def test_paired_tlp_rejects_vacuous_empty_results(self):
+        label = CaseLabel(4, 0)
+        variant = PairedCase(label, {"variant": "empty"}, "empty")
+        case = PairedTlpCase(label, variant, variant, variant, variant)
+
+        class EmptyBackend:
+            def compile_json(self, payload):
+                return {"status": "OK", "generated_sql": "empty"}
+
+            def compile_sql(self, sql):
+                return {"status": "OK", "generated_sql": "empty"}
+
+            def execute(self, sql):
+                return _Rows([])
+
+        result = PairedTlpOracle().run(EmptyBackend(), case, False)
+        self.assertEqual(result.verdict, "contract-mismatch")
+        self.assertEqual(result.stage, "json/nonempty")
+
     def test_reference_oracle_checks_preprocessor_refusal_code(self):
         case = ReferenceCase(CaseLabel(4, 0), "unsafe join", "",
                              "SEMANTIC_QUERY_012")
