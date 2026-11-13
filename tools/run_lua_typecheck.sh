@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Run LuaLS diagnostics over the hand-written Lua sources. The pinned release is
-# installed under build/ on first use; set LUALS_BIN to use an existing install.
+# installed under build/ on first use.
 set -eu
 
 # Keep test and check runs from reporting pyexasol usage if they invoke host tools.
@@ -13,60 +13,64 @@ setup_luals() {
     exit 2
   fi
 
-  if [ -n "${LUALS_BIN:-}" ]; then
-    luals_bin=$LUALS_BIN
-  else
-    version=3.19.2
-    case "$(uname -s)-$(uname -m)" in
-      Linux-x86_64)
-        platform=linux-x64
-        checksum=93ad326b10f6c00911dd8c450fa098332dbd8f9f45d1052f5636a2d54479b947
-        ;;
-      Linux-aarch64|Linux-arm64)
-        platform=linux-arm64
-        checksum=17b8e401a874440adeb649e5024c364f2bb9d15156c74a40e56d1ae9a1b2e4f2
-        ;;
-      Darwin-x86_64)
-        platform=darwin-x64
-        checksum=6f2174ece5ec63bcd9d5b22b2c902445c1cd9045fafe48c62602448ebf4c09cc
-        ;;
-      Darwin-arm64)
-        platform=darwin-arm64
-        checksum=79149584320a23bd5fcd5bc31f47a1975acd8a4560a0e89036bb1016fa61687f
-        ;;
-      *)
-        echo "Unsupported platform; set LUALS_BIN to a LuaLS executable." >&2
-        exit 2
-        ;;
-    esac
+  version=3.19.2
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64)
+      platform=linux-x64
+      checksum=93ad326b10f6c00911dd8c450fa098332dbd8f9f45d1052f5636a2d54479b947
+      ;;
+    Linux-aarch64|Linux-arm64)
+      platform=linux-arm64
+      checksum=17b8e401a874440adeb649e5024c364f2bb9d15156c74a40e56d1ae9a1b2e4f2
+      ;;
+    Darwin-x86_64)
+      platform=darwin-x64
+      checksum=6f2174ece5ec63bcd9d5b22b2c902445c1cd9045fafe48c62602448ebf4c09cc
+      ;;
+    Darwin-arm64)
+      platform=darwin-arm64
+      checksum=79149584320a23bd5fcd5bc31f47a1975acd8a4560a0e89036bb1016fa61687f
+      ;;
+    *)
+      echo "Unsupported platform for LuaLS: $(uname -s)-$(uname -m)." >&2
+      exit 2
+      ;;
+  esac
 
-    install_dir="$base_dir/build/luals-$version-$platform"
-    luals_bin="$install_dir/bin/lua-language-server"
-    if [ ! -x "$luals_bin" ]; then
-      archive="$base_dir/build/lua-language-server-$version-$platform.tar.gz"
-      mkdir -p "$base_dir/build" "$install_dir"
-      if [ ! -f "$archive" ]; then
-        curl -fsSL --output "$archive.part" \
-          "https://github.com/LuaLS/lua-language-server/releases/download/$version/lua-language-server-$version-$platform.tar.gz"
-        mv "$archive.part" "$archive"
-      fi
-      if command -v sha256sum >/dev/null 2>&1; then
-        actual=$(sha256sum "$archive")
-      else
-        actual=$(shasum -a 256 "$archive")
-      fi
-      if [ "${actual%% *}" != "$checksum" ]; then
-        echo "LuaLS archive checksum mismatch: $archive" >&2
-        exit 1
-      fi
-      tar -xzf "$archive" -C "$install_dir"
+  install_dir="$base_dir/build/luals-$version-$platform"
+  luals_bin="$install_dir/bin/lua-language-server"
+  if [ ! -x "$luals_bin" ]; then
+    archive="$base_dir/build/lua-language-server-$version-$platform.tar.gz"
+    mkdir -p "$base_dir/build" "$install_dir"
+    if [ ! -f "$archive" ]; then
+      printf 'LuaLS: downloading %s for %s\n' "$version" "$platform" >&2
+      curl -fsSL --output "$archive.part" \
+        "https://github.com/LuaLS/lua-language-server/releases/download/$version/lua-language-server-$version-$platform.tar.gz"
+      mv "$archive.part" "$archive"
+    else
+      printf 'LuaLS: using cached archive %s\n' "$archive" >&2
     fi
+    printf 'LuaLS: verifying archive checksum\n' >&2
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual=$(sha256sum "$archive")
+    else
+      actual=$(shasum -a 256 "$archive")
+    fi
+    if [ "${actual%% *}" != "$checksum" ]; then
+      echo "LuaLS archive checksum mismatch: $archive" >&2
+      exit 1
+    fi
+    printf 'LuaLS: unpacking %s\n' "$archive" >&2
+    tar -xzf "$archive" -C "$install_dir"
+  else
+    printf 'LuaLS: using installed %s for %s\n' "$version" "$platform" >&2
   fi
 
   # Exasol supplies these names at runtime. Script parameters come from the
   # same @param declarations that the package builder uses for CREATE SCRIPT.
   # Listing known names preserves undefined-global checks for unknown names.
   config_path="$base_dir/build/luals.luarc.json"
+  printf 'LuaLS: preparing diagnostic configuration\n' >&2
   mkdir -p "$base_dir/build"
   {
     printf '%s\n' query null exit import exa sqlparsing
@@ -84,6 +88,7 @@ setup_luals
 report_path="$base_dir/build/luals-check.json"
 # Remove the previous report so a failed LuaLS run cannot leave stale results.
 rm -f -- "$report_path"
+printf 'LuaLS: starting type check\n' >&2
 if "$luals_bin" --check "$base_dir/lua" --checklevel=Warning --quiet \
   --configpath="$config_path" --check_format=json \
   --check_out_path="$report_path" "$@"; then
