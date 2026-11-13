@@ -14,7 +14,11 @@ Metrics are not just SQL snippets. A good metric definition needs:
 - validation before use
 - agent-readable names, descriptions, and examples
 
-The semantic layer stores all of that in Exasol catalog tables. The preferred
+The semantic layer stores all of that in Exasol catalog tables. The quickest
+way in is to [adopt a view](#quickest-start-adopt-a-view): an ordinary
+aggregate view over one table, read as a semantic view, which is what a dbt
+view model already is. For anything a view cannot say -- several entities and
+their relationships, filtered or derived metrics, synonyms -- the preferred
 authoring surface is SQL-native Semantic SQL, implemented by the Lua
 preprocessor and persisted by Lua admin scripts. The older positional
 `SEMANTIC_ADMIN.ADD_*` scripts remain compatibility APIs and are still useful
@@ -46,6 +50,109 @@ That distinction matters. A row-level expression such as
 `ol.quantity * ol.net_unit_price` is not a metric yet. It becomes a metric only
 when the semantic layer knows how to aggregate it, which dimensions are safe,
 and how it should be exposed to users and agents.
+
+## Quickest Start: Adopt A View
+
+A semantic view can be defined by an ordinary SQL view: an aggregate query over
+one table. Write the view, then adopt it:
+
+```sql
+CREATE OR REPLACE VIEW MART_SEMANTIC.SHIPPING (
+    SHIP_MODE   COMMENT IS 'How the order shipped',
+    FREIGHT     COMMENT IS 'Total freight, in EUR',
+    ORDER_COUNT COMMENT IS 'Distinct orders'
+) AS
+SELECT o.ship_mode,
+       SUM(o.freight_amount)      AS freight,
+       COUNT(DISTINCT o.order_id) AS order_count
+FROM MART.ORDERS o
+GROUP BY o.ship_mode
+COMMENT IS 'Freight by ship mode';
+
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADOPT_VIEW('logistics', 'MART_SEMANTIC', 'SHIPPING');
+```
+
+Plain select items become **dimensions**, aggregate items become **metrics**,
+and the `FROM` table becomes the **entity**. Everything else is read from what
+Exasol already stores for the view:
+
+| The semantic view needs | Read from |
+|---|---|
+| names and types | the view's columns, by position (so `AVG` is `DOUBLE`, `SUM` of a `DECIMAL(18,2)` is `DECIMAL(29,2)`) |
+| dimension and metric descriptions | the view's column comments; a dimension without one takes its table column's |
+| the semantic view's description | the view's comment |
+| the entity's description | the table's comment |
+
+The view stays plain SQL that anyone can run, and at its own `GROUP BY` it
+returns exactly what the semantic view does. The semantic view adds what a plain
+view cannot: correct answers at **any coarser grain** -- `COUNT(DISTINCT)`,
+`AVG` and ratios regroup from the source rows instead of re-adding the view's --
+plus agent discovery, the metric catalog, the Semantic SQL surface and
+governance.
+
+`ADOPT_VIEW` is a front end over the scripts and Semantic DDL below, like the
+Databricks importer; it expresses nothing they cannot. It creates the model
+when it does not exist (published schema `SEMANTIC_<MODEL>`), the entity when
+the model has none over that table, and the semantic view, named after the
+view; turns each aggregate's argument into a private fact (`COUNT(*)` into the
+fact `1`); applies one `ALTER SEMANTIC VIEW ... REPLACE DIMENSIONS / FACTS /
+METRICS`, which validates; and publishes. It returns one row, `MODEL_NAME,
+OBJECT_NAME, DIMENSIONS, METRICS, STATUS, DDL`, where `DDL` is every statement
+it ran, so the translation can be read and replayed by hand.
+
+**Run it again whenever the view changes.** Adoption follows the view: a
+column removed from it retires its metric and private facts, so the metric's
+name is free again, and an unchanged view changes nothing. In dbt, a view model
+with `persist_docs` already writes its documented columns and description as
+the comments above, so adoption is one post-hook:
+
+```yaml
+models:
+  my_project:
+    semantic:
+      +materialized: view
+      +persist_docs: {relation: true, columns: true}
+      +post-hook: "EXECUTE SCRIPT SEMANTIC_ADMIN.ADOPT_VIEW('logistics', '{{ this.schema }}', '{{ this.identifier }}')"
+```
+
+**What it accepts.** `SELECT <items> FROM <schema>.<table> [alias] [GROUP BY
+...]`, with columns bare, qualified by the alias or the table name, or
+schema-qualified; ADOPT_VIEW qualifies each with the entity's alias. `GROUP BY`
+may name a column by position, alias or expression, but every entry must be a
+selected plain column. Metrics are `SUM`, `COUNT`, `COUNT(DISTINCT ...)`,
+`AVG`, `MIN` and `MAX`, of a column or an expression, combined freely in one
+column (`SUM(a) / NULLIF(SUM(b), 0)` is one metric).
+
+**What it refuses, and leaves untouched.** A refusal raises, so an orchestrator
+fails on it, and undoes everything the adoption had done -- the model it
+created, or the entity, semantic view and definitions it added to an existing
+one -- whatever the caller does with the transaction.
+
+| Code | Condition |
+|---|---|
+| `SEMANTIC_ADMIN_228` | the view does not exist or is not visible (matched as written, then in upper case) |
+| `SEMANTIC_ADMIN_229` | the query has another shape; the message names it: a join, `WHERE`, `HAVING`, a subquery, a set operation, `DISTINCT`, a window function, `SELECT *`, a table without its schema, a column outside an aggregate in a metric, a `GROUP BY` entry that is not a selected column, a view with no aggregate, or an aggregate other than the six above |
+| `SEMANTIC_ADMIN_230` | the semantic view already exists over another table; remove it with `REMOVE_SEMANTIC_OBJECT` first |
+| `SEMANTIC_ADMIN_231` | the model has an entity named after the table but over a different table |
+| `SEMANTIC_ADMIN_232` | a view, column or table name that cannot be a semantic name, such as `"Ship Mode"` |
+| `SEMANTIC_ADMIN_233` | no free entity alias: the view's own, the table name and `<table>_1` to `_99` are all taken or reserved |
+
+The Semantic DDL refusals apply as well, most usefully these two:
+
+- **Metric names are unique per model** ([below](#metric-names-are-unique-per-model)).
+  Two adopted views cannot both have a `freight` column; the second is refused
+  with `SEMANTIC_DDL_095`.
+- **Dimensions are shared** ([below](#dimension-names-are-unique-per-model)).
+  Two views over one table that both group by `ship_mode` share one dimension,
+  as long as both select the same expression; a different one is
+  `SEMANTIC_DDL_096`. A shared dimension's description is the dimension's:
+  a view whose column has a comment sets it, and one whose column has none
+  keeps it.
+
+**Out of scope.** Joins: in dbt, joining is the marts' job, and a semantic view
+over several entities is the scripts' and Semantic DDL's. Removing a semantic
+view when its view is dropped: dbt does not drop orphaned relations either, and
+`REMOVE_SEMANTIC_OBJECT` does it.
 
 ## Prerequisites
 

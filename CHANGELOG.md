@@ -8,6 +8,19 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Added
 
+- **`SEMANTIC_ADMIN.ADOPT_VIEW(MODEL_NAME, VIEW_SCHEMA, VIEW_NAME)`** adopts an
+  aggregate SQL view over one table as a semantic view: plain columns become
+  dimensions, aggregates (`SUM`, `COUNT`, `COUNT(DISTINCT)`, `AVG`, `MIN`,
+  `MAX`, combined freely) metrics, the table the entity, and the view's and
+  its columns' comments the descriptions. It creates the model when absent,
+  validates, publishes, and returns every statement it ran. Run again, it
+  follows the view: an unchanged view changes nothing, and a removed column
+  retires its metric. Anything else -- a join, `WHERE`, `HAVING`, a subquery, a
+  `GROUP BY` finer than the view's columns -- is refused naming the construct,
+  and a refusal leaves the catalog as it was. This is the shape of a dbt view
+  model, so adopting one is a single post-hook. New codes
+  `SEMANTIC_ADMIN_228`-`233`; see
+  [Adopt a view](docs/creating-metrics.md#quickest-start-adopt-a-view).
 - Live SQLGlot fuzz campaigns compare paired JSON and SQL results, check both
   paths against ternary partitions, and verify deterministic accepted samples
   against independent sales-source queries and the SQL preprocessor (#58).

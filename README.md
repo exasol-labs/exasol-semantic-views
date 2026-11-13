@@ -503,6 +503,19 @@ ORDER BY total_revenue DESC;
 
 Use `exasol stop` and `exasol start` to suspend and resume the deployment.
 
+To put your own data behind the same surface, the shortest path is a view you
+already know how to write: an aggregate over one table, adopted as a semantic
+view. Its columns become dimensions and metrics, and its comments their
+descriptions; at any coarser grain it then answers `COUNT(DISTINCT)`, `AVG` and
+ratios correctly, which the view itself cannot:
+
+```sql
+EXECUTE SCRIPT SEMANTIC_ADMIN.ADOPT_VIEW('logistics', 'MART_SEMANTIC', 'SHIPPING');
+```
+
+See [Adopt a view](docs/creating-metrics.md#quickest-start-adopt-a-view) for
+what it accepts, and for the one-line dbt post-hook.
+
 Every install records which build it applied, so a deployment can answer
 "what am I running?" without comparing checkouts:
 
