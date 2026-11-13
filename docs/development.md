@@ -75,6 +75,12 @@ when applied to a published model. Removing a semantic object uses
 `REMOVE_SEMANTIC_OBJECT`; it retains facts and entities and refuses removal when
 derived dependency metadata shows another metric depends on it.
 
+Front ends expand into those two surfaces and express nothing they cannot:
+`ADOPT_VIEW` reads an aggregate view over one table as a semantic view (the
+shape of a dbt view model), `IMPORT_DATABRICKS_METRIC_VIEW` a Databricks metric
+view, and the fusion document fusion declarations. Each returns the statements
+it ran or would run, so its translation can be read and replayed.
+
 The sales model example is in `sql/examples/`. Its order is: create model and
 entities, semantic objects, keys and relationships, dimensions/facts/metrics,
 optional representations and bindings, then validate and publish.

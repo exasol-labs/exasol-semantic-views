@@ -6,8 +6,48 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
+A semantic view from a view you already have. An aggregate SQL view over one
+table -- the shape of a dbt view model -- is adopted as a semantic view by one
+call, `ADOPT_VIEW`, reading its names, types and descriptions from Exasol's
+catalog. The view stays plain SQL; the semantic view answers correctly at any
+coarser grain, which the view cannot. Building it showed that Semantic DDL
+silently took over a metric or dimension another semantic view already had;
+both are now refused, and two views may share a dimension they define the same
+way. Fuzz campaigns now check the compiler against independently labelled
+SQLGlot cases and against live results.
+
+In dbt, adopting is one post-hook on an ordinary view model with
+`persist_docs`, whose documentation becomes the metric descriptions.
+
+**Upgrading.** Run `tools/install.py`, or the files in `build/install/` from the
+release bundle. The catalog's tables are unchanged. Behaviour that changes:
+
+- **Semantic DDL refuses a name another semantic view holds.** A metric
+  another view exposes is `SEMANTIC_DDL_095`; a dimension another view lists
+  with a different entity, expression or type is `SEMANTIC_DDL_096`. Both used
+  to be accepted and rewrote the other view's definition. A dimension declared
+  the same way in both views is shared.
+- **`ADD_CUSTOM_EXTENSION` validates `DATA_JSON` as strict RFC 8259 JSON**
+  (`SEMANTIC_ADMIN_040`).
+
 ### Added
 
+- **`SEMANTIC_ADMIN.ADOPT_VIEW(MODEL_NAME, VIEW_SCHEMA, VIEW_NAME)`** adopts an
+  aggregate SQL view over one table as a semantic view: plain columns become
+  dimensions, aggregates (`SUM`, `COUNT`, `COUNT(DISTINCT)`, `AVG`, `MIN`,
+  `MAX`, combined freely) metrics, the table the entity, and the view's and
+  its columns' comments the descriptions. It creates the model when absent,
+  validates, publishes, and returns every statement it ran. Run again, it
+  follows the view: an unchanged view changes nothing, and a removed column
+  retires its metric. Anything else -- a join, `WHERE`, `HAVING`, a subquery, a
+  `GROUP BY` finer than the view's columns -- is refused naming the construct,
+  and a refusal leaves the catalog as it was. Adoptions running at once, as
+  dbt's threads run them, take turns instead of colliding. This is the shape of
+  a dbt view model, so adopting one is a single post-hook. New codes
+  `SEMANTIC_ADMIN_228`-`233`; see
+  [Adopt a view](docs/creating-metrics.md#quickest-start-adopt-a-view).
 - Live SQLGlot fuzz campaigns compare paired JSON and SQL results, check both
   paths against ternary partitions, and verify deterministic accepted samples
   against independent sales-source queries and the SQL preprocessor (#58).
@@ -21,6 +61,21 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+- Semantic DDL that declares a metric another semantic view of the model
+  already exposes is refused with `SEMANTIC_DDL_095`, naming that view. It used
+  to take the metric over: the first view's definition was rewritten and the
+  metric became a column of both. On a draft model nothing noticed; on a
+  published one validation crashed on a primary key of
+  `METRIC_TYPE_OBSERVATIONS`, reported as `SEMANTIC_DDL_999`. Validation now
+  also records each metric's type once, so a model already holding such a
+  metric validates again.
+- Semantic DDL no longer takes over a dimension another semantic view lists.
+  Two views may share one dimension when both declare it with the same entity,
+  expression (compared token for token) and type; any other definition is
+  refused with `SEMANTIC_DDL_096`, from either view, naming the views that list
+  it and what differs. It used to rewrite the other view's dimension silently.
+  `ADD_DIMENSION`'s `SEMANTIC_ADMIN_019` now names the DDL that shares a
+  dimension, rather than saying no operation can.
 - Semantic SQL accepts Tableau's redundant `GROUP BY` key for a selected metric
   when every selected dimension is also grouped. The metric is not used as a
   source grouping dimension; unsafe metric grouping remains refused (#38).

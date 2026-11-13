@@ -435,6 +435,31 @@ function M.tokenize(text, options)
     return tokens
 end
 
+--- Whether two SQL expressions say the same thing, token for token.
+--
+-- Whitespace, comments and the case of unquoted words do not count; a string
+-- literal and a quoted identifier count exactly. An unquoted word is the
+-- identifier Exasol folds it to, so `o.ship_mode` and `o."SHIP_MODE"` are the
+-- same and `o."ship_mode"` is not. Nothing is resolved or reordered: `a + b`
+-- and `b + a` differ. Used where one definition is declared from two places and
+-- they must agree, never to prove two expressions equivalent.
+function M.same_expression(left, right)
+    local function canonical(expression)
+        local keys = {}
+        for _, token in ipairs(M.tokenize(tostring(expression or ""))) do
+            if token.kind == "word" then
+                keys[#keys + 1] = "name:" .. upper(token.text)
+            elseif token.kind == "identifier" then
+                keys[#keys + 1] = "name:" .. token.value
+            else
+                keys[#keys + 1] = token.kind .. ":" .. token.text
+            end
+        end
+        return table.concat(keys, "\0")
+    end
+    return canonical(left) == canonical(right)
+end
+
 --- Re-project compiled SQL so its result columns are the ones the caller asked
 --- for, in the order they asked for them.
 --

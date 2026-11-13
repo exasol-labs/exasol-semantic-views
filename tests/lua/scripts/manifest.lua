@@ -27,6 +27,7 @@ return {
     "add_unique_key_column",
     "add_unique_key_with_columns",
     "add_verified_query",
+    "adopt_view",
     "apply_fusion_declaration",
     "apply_fusion_declaration_or_fail",
     "apply_normalized_osi_import",
