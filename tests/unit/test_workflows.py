@@ -99,7 +99,7 @@ class WorkflowWiringTest(unittest.TestCase):
         self.assertEqual(local_target(smoke), "fuzz.yml")
         self.assertNotIn("needs", smoke)
         self.assertEqual(smoke["with"], {
-            "seeds": "0 1 2 7 42", "cases": "60", "timeout_minutes": "30",
+            "seeds": "0 1 2 7 42", "cases": "60", "timeout_minutes": "45",
             "artifact_name": "fuzz-smoke-results",
         })
 
@@ -179,7 +179,7 @@ class WorkflowWiringTest(unittest.TestCase):
         jobs = self.workflows["release.yml"]["jobs"]
         self.assertEqual(local_target(jobs["tests"]), "ci.yml")
         self.assertEqual(local_target(jobs["fuzz"]), "fuzz.yml")
-        self.assertNotIn("with", jobs["fuzz"])
+        self.assertEqual(jobs["fuzz"]["with"], {"timeout_minutes": "150"})
         self.assertEqual(jobs["fuzz"]["needs"], "tests")
         self.assertEqual(set(jobs["release"]["needs"]), {"tests", "fuzz"})
 

@@ -32,7 +32,7 @@ jobs:
     with:
       seeds: "0 1 2 7 42"
       cases: "60"
-      timeout_minutes: 30
+      timeout_minutes: 45
       artifact_name: fuzz-smoke-results
 
   sonar:

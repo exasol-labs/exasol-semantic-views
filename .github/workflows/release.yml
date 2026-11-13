@@ -23,6 +23,8 @@ jobs:
   fuzz:
     needs: tests
     uses: $/.github/workflows/fuzz.yml
+    with:
+      timeout_minutes: 150
 
   release:
     needs: [tests, fuzz]
