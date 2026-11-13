@@ -3,6 +3,9 @@
 # installed under build/ on first use; set LUALS_BIN to use an existing install.
 set -eu
 
+# Keep test and check runs from reporting pyexasol usage if they invoke host tools.
+export EXASOL_TELEMETRY_DISABLE=true
+
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 setup_luals() {
   if ! command -v jq >/dev/null 2>&1; then
@@ -60,15 +63,20 @@ setup_luals() {
     fi
   fi
 
-  # Exasol injects script parameters and runtime helpers as globals. LuaLS cannot
-  # infer them from the unannotated sources, so hide only undefined-global noise.
-  config_path="$base_dir/build/luals-prototype.luarc.json"
+  # Exasol supplies these names at runtime. Script parameters come from the
+  # same @param declarations that the package builder uses for CREATE SCRIPT.
+  # Listing known names preserves undefined-global checks for unknown names.
+  config_path="$base_dir/build/luals.luarc.json"
   mkdir -p "$base_dir/build"
-  cat > "$config_path" <<'EOF'
-{
-  "diagnostics.disable": ["undefined-global"]
-}
-EOF
+  {
+    printf '%s\n' query null exit import exa sqlparsing
+    printf '%s\n' agent compiler fusion materializations script_support \
+      semantic_definition validator
+    sed -n 's/^-- @param \([A-Z][A-Z0-9_]*\).*/\1/p' \
+      "$base_dir"/lua/semantic_layer/scripts/*.lua
+  } | sort -u | jq -R -s '
+    split("\n") | map(select(length > 0)) | {"diagnostics.globals": .}
+  ' > "$config_path"
 }
 
 setup_luals

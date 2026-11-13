@@ -18,6 +18,9 @@ The `run_*.sh` scripts are the entry points to the test lanes and static checks;
 `run_lua_typecheck.sh` installs a pinned LuaLS release on first use, requires
 `jq`, and exits with status 1 when it reports diagnostics. CI requires this
 check to pass and uploads the JSON report when it fails.
+The runner derives known script-parameter globals from the `-- @param`
+declarations and lists Exasol's runtime globals and import aliases explicitly,
+so undefined names still produce diagnostics.
 
 The [Lua packaging decision record](../docs/architecture-decisions/lua-packaging.md)
 compares the packager's bundling job with `amalg`.
