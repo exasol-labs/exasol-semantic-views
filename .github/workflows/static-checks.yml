@@ -13,7 +13,8 @@ env:
 jobs:
   static-checks:
     # Ruff, mypy, Luacheck (lua/, tests/lua/ and the Lua embedded in
-    # sql/install/) and ShellCheck; see tools/run_static_checks.sh.
+    # sql/install/), ShellCheck, and LuaLS; see tools/run_static_checks.sh
+    # and tools/run_lua_typecheck.sh.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,16 +25,26 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: tools/requirements-static.txt
-      - name: Install Luacheck
+      - name: Install Luacheck and jq
         run: |
           sudo apt-get update
-          sudo apt-get install -y lua5.4 liblua5.4-dev luarocks
+          sudo apt-get install -y lua5.4 liblua5.4-dev luarocks jq
           sudo luarocks install luacheck 1.2.0
       - name: Install Python checkers
         run: python -m pip install -r tools/requirements-static.txt
       - name: Run static checks
         # ShellCheck is preinstalled on GitHub's Ubuntu runners.
         run: PYTHON_BIN=python sh tools/run_static_checks.sh
+      - name: Run LuaLS type check
+        id: luals
+        run: sh tools/run_lua_typecheck.sh
+      - name: Upload LuaLS diagnostics
+        if: ${{ always() && steps.luals.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: luals-diagnostics
+          path: build/luals-check.json
+          if-no-files-found: error
       - name: Install zizmor
         run: python -m pip install zizmor==1.31.1
       - name: Audit GitHub Actions workflows

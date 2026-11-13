@@ -14,6 +14,12 @@ Each directory is one lane: one runtime requirement, one runner, one CI job.
 
 Static analysis is not a test lane here; `sh tools/run_static_checks.sh` runs it,
 as does the `static-checks` CI job.
+Run `sh tools/run_lua_typecheck.sh` for LuaLS type diagnostics. It requires
+`curl` and `jq`, downloads a checksum-verified LuaLS release into ignored
+`build/` on first use, and writes `build/luals-check.json`. The command exits
+with status 1 for any diagnostic. The `static-checks` CI job runs it as a
+required gate and uploads the report even when LuaLS finds diagnostics.
+
 The CI `dependency-audit` job runs `pip-audit` on both requirements files and is
 required by `ci-gate`; a separate scheduled workflow runs the same audit daily.
 

@@ -74,7 +74,8 @@ EOF
 setup_luals
 
 report_path="$base_dir/build/luals-check.json"
-: > "$report_path" # Never format a report from a previous run.
+# Remove the previous report so a failed LuaLS run cannot leave stale results.
+rm -f -- "$report_path"
 if "$luals_bin" --check "$base_dir/lua" --checklevel=Warning --quiet \
   --configpath="$config_path" --check_format=json \
   --check_out_path="$report_path" "$@"; then
