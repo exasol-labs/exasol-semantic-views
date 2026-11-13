@@ -1462,7 +1462,32 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             non_additive_dimension_id = dim.id
         end
     end
+    -- Metric names are unique per model, so the lookup above is by name alone,
+    -- and a metric is a column of one semantic view. A second view declaring
+    -- the same name used to take the row over: it rewrote the first view's
+    -- definition and joined it as a column of both. On a draft model nothing
+    -- noticed; on a published one VALIDATE_MODEL observed the metric once per
+    -- view and crashed on METRIC_TYPE_OBSERVATIONS' key, surfacing as
+    -- SEMANTIC_DDL_999. This object's own columns are gone by now when the
+    -- statement replaces its metrics, so only another view's membership counts.
     if existing_id ~= nil then
+        local owner = scalar([[
+            SELECT MIN(so.OBJECT_NAME)
+            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
+            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+            WHERE oc.COLUMN_KIND = 'METRIC'
+              AND oc.OBJECT_REF_ID = :metric_id
+              AND oc.OBJECT_ID <> :object_id
+        ]], {metric_id = existing_id, object_id = object_id_value})
+        if not missing(owner) then
+            error("SEMANTIC_DDL_095: metric " .. tostring(metric.name)
+                .. " already belongs to semantic view " .. tostring(owner) .. "."
+                .. " Metric names are unique per model, across its semantic views."
+                .. " Give this metric another name, or remove it from " .. tostring(owner)
+                .. " first with ALTER SEMANTIC VIEW "
+                .. tostring(model.model_name or "<model>") .. "." .. tostring(owner)
+                .. " DROP METRIC " .. tostring(metric.name) .. ".")
+        end
         query([[
             UPDATE SYS_SEMANTIC.METRICS
             SET EXPRESSION = :expression,

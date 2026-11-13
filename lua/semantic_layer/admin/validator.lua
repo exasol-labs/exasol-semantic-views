@@ -2529,9 +2529,16 @@ local function validate_metric_result_types(ctx, metric_result_types)
     end
     local ok, rows = pcall(metric_result_types, ctx.model_name, previous)
     if not ok then return end
-    local observed = {}
+    -- One observation per metric, which is METRIC_TYPE_OBSERVATIONS' key. The
+    -- probe answers per semantic view, so a metric that is a column of two
+    -- views comes back twice; the DDL now refuses that (SEMANTIC_DDL_095), but
+    -- a catalog written before it can still hold one, and inserting both rows
+    -- crashed every validation of the model.
+    local observed, recorded = {}, {}
     for _, row in ipairs(rows or {}) do
-        if not row.reused and row.observation_key ~= nil and row.compiled_type ~= nil then
+        if not row.reused and row.observation_key ~= nil and row.compiled_type ~= nil
+            and not recorded[key(row.metric_id)] then
+            recorded[key(row.metric_id)] = true
             query("DELETE FROM SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS WHERE METRIC_ID = :metric_id",
                 {metric_id = row.metric_id})
             observed[#observed + 1] = {row.metric_id, ctx.model_id, ctx.version_id,

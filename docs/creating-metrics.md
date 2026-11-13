@@ -206,6 +206,24 @@ with `SEMANTIC_DDL_080`, which names which of the three states applies — alrea
 dropped, active but a column of a different semantic view (the other view is
 named), or no such metric in the model.
 
+### Metric names are unique per model
+
+A metric is a column of one semantic view, and its **name is unique across the
+whole model**. `ADD_METRIC` refuses a taken name with `SEMANTIC_ADMIN_226`;
+Semantic DDL that declares, in one view, a metric another view already exposes
+is refused with `SEMANTIC_DDL_095`, naming that view and the statement that
+frees the name:
+
+```
+SEMANTIC_DDL_095: metric total_amount already belongs to semantic view SALES.
+Metric names are unique per model, across its semantic views. Give this metric
+another name, or remove it from SALES first with ALTER SEMANTIC VIEW
+sales.SALES DROP METRIC total_amount.
+```
+
+A metric a `REPLACE METRICS` block left out is in no view, so another view may
+take its name.
+
 ### Dimension names are unique per model
 
 A dimension belongs to an *entity* and is exposed by one or more semantic views,

@@ -21,6 +21,14 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ### Fixed
 
+- Semantic DDL that declares a metric another semantic view of the model
+  already exposes is refused with `SEMANTIC_DDL_095`, naming that view. It used
+  to take the metric over: the first view's definition was rewritten and the
+  metric became a column of both. On a draft model nothing noticed; on a
+  published one validation crashed on a primary key of
+  `METRIC_TYPE_OBSERVATIONS`, reported as `SEMANTIC_DDL_999`. Validation now
+  also records each metric's type once, so a model already holding such a
+  metric validates again.
 - Semantic SQL accepts Tableau's redundant `GROUP BY` key for a selected metric
   when every selected dimension is also grouped. The metric is not used as a
   source grouping dimension; unsafe metric grouping remains refused (#38).
