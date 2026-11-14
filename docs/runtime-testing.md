@@ -296,5 +296,6 @@ The CI workflow scans Python on same-repository pull requests and pushes to
 `main`. Its database-free job provides unit-test coverage. Its system-test job
 also measures the live Python integration suite, including the separate
 `verify_*.py` processes, and the scan job combines both reports. The existing
-Luacheck job remains the Lua analysis gate; SonarQube Cloud does not analyze
+Luacheck and LuaLS both gate the static-checks job. The LuaLS step uploads its
+JSON report even when diagnostics fail the job. SonarQube Cloud does not analyze
 Lua or display Lua coverage.

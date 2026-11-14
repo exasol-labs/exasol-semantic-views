@@ -91,7 +91,7 @@ end)
 load_runtime("lua/semantic_layer/compiler/request_json.lua", function()
     return {compile_request_json, compile_sql, compile_sql_debug,
         compile_sql_for_preprocessor, suggest_grain_metadata,
-        ESV_COMPILER_TEST_API}
+        fusion_health, ESV_COMPILER_TEST_API}
 end)
 load_runtime("lua/semantic_layer/admin/validator.lua", function()
     return {validate_model, ESV_VALIDATOR_TEST_API}

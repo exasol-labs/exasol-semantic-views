@@ -671,6 +671,7 @@ test("compiler rejects malformed filters and ordering contracts", function()
         {{"not-an-object"}, "SEMANTIC_REQUEST_030"},
         {{{op = "="}}, "SEMANTIC_REQUEST_020"},
         {{{field = "total_revenue", value = 1}}, "SEMANTIC_REQUEST_031"},
+        {{{field = "region"}}, "SEMANTIC_REQUEST_015"},
         {{{field = "region", op = "IN", value = {}}}, "SEMANTIC_REQUEST_032"},
         {{{field = "region", op = "REGEXP", value = "x"}}, "SEMANTIC_REQUEST_033"},
     }
@@ -755,6 +756,57 @@ local function compile_with_fixture(request, options)
     end)
     return result, state, mock
 end
+
+test("multi-fact planning reports each physical stage failure", function()
+    local request = {model = "sales", object = "SALES",
+        metrics = {"activity_ratio"}, dimensions = {"customer_region"}}
+    local stages = {
+        {method = "apply_partitioned_sources", reason = "FUSION_PROBE_FAILURE"},
+        {method = "check_sql_size", reason = "SQL_SIZE_PROBE_FAILURE"},
+    }
+    each(stages, function(stage)
+        local original = ESV_PHYSICAL_PLAN[stage.method]
+        ESV_PHYSICAL_PLAN[stage.method] = function()
+            if stage.method == "check_sql_size" then
+                return false, {reason_code = stage.reason}
+            end
+            return nil, {reason_code = stage.reason}
+        end
+        local ok, result = pcall(compile_with_fixture, request, {multi_fact = true})
+        ESV_PHYSICAL_PLAN[stage.method] = original
+        assert_true(ok, result)
+        assert_equal(result.error_code, "SEMANTIC_REQUEST_075")
+        assert_contains(result.error_message, stage.reason)
+    end)
+end)
+
+test("multi-fact planning reports a materialization rebound failure", function()
+    -- The installed compiler imports the materialization runtime. Load that
+    -- entry point in its own environment so this test exercises the import.
+    local env = setmetatable({}, {__index = _G})
+    env._G = env
+    env.import = function(_, alias)
+        assert_equal(alias, "materializations")
+        env[alias] = {select_branch_sources = function() return {}, {} end}
+    end
+    assert(loadfile("lua/semantic_layer/compiler/request_json.lua", "t", env))()
+    local original = ESV_PHYSICAL_PLAN.apply_branch_sources
+    ESV_PHYSICAL_PLAN.apply_branch_sources = function()
+        return nil, {reason_code = "REBOUND_PROBE_FAILURE"}
+    end
+    local mock = compiler_query_fixture({multi_fact = true})
+    local ok, result = pcall(function()
+        return with_query(mock, function()
+            return env.compile_request_json(api.json_encode({model = "sales",
+                object = "SALES", metrics = {"activity_ratio"},
+                dimensions = {"customer_region"}}))
+        end)
+    end)
+    ESV_PHYSICAL_PLAN.apply_branch_sources = original
+    assert_true(ok, result)
+    assert_equal(result.error_code, "SEMANTIC_REQUEST_075")
+    assert_contains(result.error_message, "REBOUND_PROBE_FAILURE")
+end)
 
 test("structured compiler executes catalog pipeline and reuses cache", function()
     local mock, state = compiler_query_fixture()
@@ -1068,6 +1120,13 @@ test("structured compiler renders unary null filters and having", function()
     assert_contains(result.generated_sql, "HAVING SUM((o.amount)) IS NOT NULL")
 end)
 
+test("structured compiler rejects a HAVING filter without a value", function()
+    local result = compile_with_fixture({model = "sales", object = "SALES",
+        metrics = {"revenue"}, having = {{field = "total_revenue", op = ">"}}})
+    assert_equal(result.error_code, "SEMANTIC_REQUEST_015")
+    assert_contains(result.error_message, "Having filter for field 'total_revenue'")
+end)
+
 test("F4 reconciled dimensions participate in every multi-fact branch", function()
     local result = compile_with_fixture({
         model = "sales",
@@ -1092,6 +1151,32 @@ test("F4 reconciled dimensions participate in every multi-fact branch", function
         end
         assert_true(found_fusion_join)
     end)
+end)
+
+test("fusion health counts the first source and resolved keys", function()
+    local catalog_query = compiler_query_fixture({f4_reconcile = true})
+    local probe_count = 0
+    local rows = with_query(function(sql, params)
+        if string.find(sql, "SELECT MIN(OBJECT_NAME)", 1, true) then
+            return {{"SALES"}}
+        end
+        if string.find(sql, "SELECT 'DIMENSION' AS KIND", 1, true) then
+            return {{"DIMENSION", 10, "status"}}
+        end
+        if string.find(sql, "SELECT COUNT(*) AS TOTAL_KEYS", 1, true) then
+            probe_count = probe_count + 1
+            assert_contains(sql, "AS FIRST_SOURCE")
+            return {{8, 5, 7}}
+        end
+        return catalog_query(sql, params)
+    end, function() return fusion_health("sales") end)
+    assert_equal(probe_count, 1)
+    assert_equal(#rows, 1)
+    assert_equal(rows[1].first_source, "primary")
+    assert_equal(rows[1].total_keys, 8)
+    assert_equal(rows[1].from_first_source, 5)
+    assert_equal(rows[1].filled, 2)
+    assert_equal(rows[1].unresolved, 1)
 end)
 
 test("F4 reconciled facts remain blocked in multi-fact plans", function()

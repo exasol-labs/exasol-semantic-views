@@ -11,9 +11,18 @@ Operational tooling — what a user or an operator runs — at the top level:
 | `osi.py` | Ossie/OSI import and export |
 | `import_databricks.py` | import a Databricks metric view YAML |
 | `release_notes.py` | release notes from `CHANGELOG.md` |
+| `run_lua_typecheck.sh` | run LuaLS on hand-written Lua sources and write `build/luals-check.json` |
 
 The `run_*.sh` scripts are the entry points to the test lanes and static checks;
 `tests/README.md` maps each to what it runs and needs.
+`run_static_checks.sh` also runs LuaLS and zizmor. `run_lua_typecheck.sh` installs
+a pinned LuaLS release on first use, requires `curl` and `jq`, and exits with
+status 1 when it reports diagnostics. CI uploads the JSON report even if the
+combined static checks fail.
+The runner derives known script-parameter globals from the `-- @param`
+declarations and lists Exasol's runtime globals and import aliases explicitly,
+so undefined names still produce diagnostics.
+
 The [Lua packaging decision record](../docs/architecture-decisions/lua-packaging.md)
 compares the packager's bundling job with `amalg`.
 
