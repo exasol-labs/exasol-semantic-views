@@ -6,7 +6,7 @@ All notable changes to Exasol Semantic Views are documented here.
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-11-13
+## [0.7.1] - 2026-11-14
 
 A semantic view from a view you already have. An aggregate SQL view over one
 table -- the shape of a dbt view model -- is adopted as a semantic view by one
@@ -86,6 +86,13 @@ release bundle. The catalog's tables are unchanged. Behaviour that changes:
   Nonstandard inputs previously accepted, including `01`, `1.`, raw control
   characters and invalid Unicode escapes, are refused with
   `SEMANTIC_ADMIN_040` and a parsing diagnostic.
+
+## [0.7.0] - not released
+
+The `v0.7.0` release build failed before publishing: the release workflow ran
+CI without passing it `SONAR_TOKEN`, which CI's SonarCloud job needs since it
+was added, so no release or bundle was published. The tag is on the same code
+as 0.7.1, which differs only in that workflow; everything above ships as 0.7.1.
 
 ## [0.6.1] - 2026-11-05
 
