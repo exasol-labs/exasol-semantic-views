@@ -19,6 +19,8 @@ concurrency:
 jobs:
   tests:
     uses: $/.github/workflows/ci.yml
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   fuzz:
     needs: tests

@@ -75,7 +75,7 @@ suite also records named decision outcomes; each decision passed to
 `assert_branch` is expected to be observed both true and false.
 
 The installed script bodies have a separate per-script coverage report and floors.
-The runner derives their active lines from Lua 5.4 compiler listings, including
+The runner derives their active lines from Lua 5.5 compiler listings, including
 nested local functions that a test never invokes. `tools/run_lua_tests.sh`
 selects the Lua interpreter and compiler; set `LUA_BIN` and `LUAC_BIN` if needed.
 

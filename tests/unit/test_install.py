@@ -8,6 +8,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import built_install  # the install SQL as the build assembles it
 
@@ -1500,7 +1501,7 @@ class MainChunkLocalCeilingTest(unittest.TestCase):
         measurement -- not the count -- is what they hold the tree to.
         """
         self.assertIsNotNone(PACKAGER.lua_interpreter(),
-                             "install lua5.4 (or set LUA_BIN): the peak is measured with it")
+                             "install lua5.5 (or set LUA_BIN): the peak is measured with it")
         bodies = {match.group(1): match.group(2)
                   for text in built_install.files().values()
                   for match in PACKAGER.SCRIPT_BODY.finditer(text)}
@@ -1510,6 +1511,21 @@ class MainChunkLocalCeilingTest(unittest.TestCase):
         compiler = bodies["COMPILER_RUNTIME"]
         self.assertGreater(peaks["COMPILER_RUNTIME"], PACKAGER.main_chunk_local_count(compiler),
                            "the do blocks' locals must be part of the peak")
+
+    def test_the_interpreter_is_lua_bin_then_lua55_then_lua(self):
+        """The local probe uses the Lua the tests run under, and nothing when there is none."""
+        cases = [
+            ({"LUA_BIN": "/opt/lua"}, {"/opt/lua", "lua5.5", "lua"}, "/opt/lua"),
+            ({"LUA_BIN": "/missing"}, {"lua5.5", "lua"}, "lua5.5"),
+            ({}, {"lua"}, "lua"),
+            ({}, set(), None),
+        ]
+        for environment, installed, chosen in cases:
+            with self.subTest(environment=environment, installed=sorted(installed)), \
+                    mock.patch.dict(PACKAGER.os.environ, environment, clear=True), \
+                    mock.patch.object(PACKAGER.shutil, "which",
+                                      lambda name, found=installed: name if name in found else None):
+                self.assertEqual(PACKAGER.lua_interpreter(), chosen)
 
     def test_a_do_block_that_crosses_the_limit_fails_although_the_count_does_not(self):
         top = "".join(f"local top_{index} = {index}\n" for index in range(190))

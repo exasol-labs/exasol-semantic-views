@@ -51,6 +51,7 @@ GRAIN_SQL_SOURCE = ROOT / "lua/semantic_layer/compiler/grain_sql.lua"
 COMPILE_RESULT_SOURCE = ROOT / "lua/semantic_layer/compiler/compile_result.lua"
 SEMANTIC_SQL_SYNTAX_SOURCE = ROOT / "lua/semantic_layer/compiler/semantic_sql_syntax.lua"
 DATABRICKS_IMPORT_SOURCE = ROOT / "lua/semantic_layer/admin/databricks_import.lua"
+VIEW_ADOPTION_SOURCE = ROOT / "lua/semantic_layer/admin/view_adoption.lua"
 SEMANTIC_DEFINITION_SOURCE = ROOT / "lua/semantic_layer/admin/semantic_definition.lua"
 FUSION_DECLARATION_SOURCE = ROOT / "lua/semantic_layer/admin/fusion_declaration.lua"
 AGENT_SOURCE = ROOT / "lua/semantic_layer/agent/runtime.lua"
@@ -305,8 +306,8 @@ end
 
 
 def lua_interpreter() -> str | None:
-    """The interpreter to measure with: LUA_BIN, else lua5.4, else lua."""
-    for candidate in (os.environ.get("LUA_BIN"), "lua5.4", "lua"):
+    """The interpreter to measure with: LUA_BIN, else lua5.5, else lua."""
+    for candidate in (os.environ.get("LUA_BIN"), "lua5.5", "lua"):
         if candidate and shutil.which(candidate):
             return candidate
     return None
@@ -531,7 +532,8 @@ RUNTIMES: dict[str, tuple[str, ...]] = {
         "SEMANTIC_SQL_SYNTAX_SOURCE", "COMPILER_SOURCE"),
     "SEMANTIC_DEFINITION_RUNTIME": (
         "JSON_SOURCE", "ROWS_SOURCE", "SQL_TEXT_SOURCE", "CATALOG_ROLLBACK_SOURCE",
-        "DATABRICKS_IMPORT_SOURCE", "SEMANTIC_DEFINITION_SOURCE"),
+        "SOURCE_COLUMNS_SOURCE", "DATABRICKS_IMPORT_SOURCE", "VIEW_ADOPTION_SOURCE",
+        "SEMANTIC_DEFINITION_SOURCE"),
     "FUSION_RUNTIME": (
         "JSON_SOURCE", "ROWS_SOURCE", "CATALOG_ROLLBACK_SOURCE",
         "FUSION_DECLARATION_SOURCE"),

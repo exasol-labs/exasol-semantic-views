@@ -1,6 +1,6 @@
 ---
 name: exasol-semantic-modeler
-description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema and catalog-comment inspection, historical query-log analysis, autonomous metric derivation from physical tables, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration.
+description: Use when an autonomous agent needs to create, bootstrap, import, or maintain an Exasol Semantic Views model. Covers schema and catalog-comment inspection, historical query-log analysis, autonomous metric derivation from physical tables, adopting an aggregate SQL view (such as a dbt view model) as a semantic view, Databricks UCMV import, entity and relationship modelling, fact and dimension authoring, SQL-native metric DDL, model validation, publication, and governance configuration.
 ---
 
 # Exasol Semantic Modeler
@@ -25,6 +25,12 @@ Prefer this order:
 
 If the source is a Databricks Unity Catalog Metric View YAML, use the dedicated
 Databricks import path instead of manually rebuilding the model.
+
+If the semantic view is an aggregate over one table -- the shape of a dbt view
+model, or any `SELECT ... FROM schema.table GROUP BY ...` -- write or reuse that
+view and call `SEMANTIC_ADMIN.ADOPT_VIEW(model, view_schema, view_name)` instead
+of authoring its dimensions, facts and metrics by hand. Put descriptions in the
+view's column comments and its comment; they become the semantic descriptions.
 
 Read [authoring-workflows.md](references/authoring-workflows.md) for copyable
 SQL and script examples.

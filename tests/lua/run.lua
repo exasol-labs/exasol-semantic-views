@@ -102,9 +102,12 @@ end)
 load_runtime("lua/semantic_layer/admin/databricks_import.lua", function()
     return {ESV_DATABRICKS_IMPORT}
 end)
+load_runtime("lua/semantic_layer/admin/view_adoption.lua", function()
+    return {ESV_VIEW_ADOPTION}
+end)
 load_runtime("lua/semantic_layer/admin/semantic_definition.lua", function()
     return {apply_semantic_definition, apply_normalized_osi_import,
-        import_databricks_metric_view, describe_semantic_metric,
+        import_databricks_metric_view, adopt_view, describe_semantic_metric,
         explain_semantic_metric, export_semantic_definition, preprocess_sql,
         ESV_SEMANTIC_DEFINITION_TEST_API}
 end)
@@ -236,6 +239,7 @@ local specs = {
     "tests/lua/validator_unit_test.lua",
     "tests/lua/materialization_unit_test.lua",
     "tests/lua/semantic_definition_unit_test.lua",
+    "tests/lua/view_adoption_unit_test.lua",
     "tests/lua/fusion_declaration_unit_test.lua",
     "tests/lua/agent_unit_test.lua",
 }

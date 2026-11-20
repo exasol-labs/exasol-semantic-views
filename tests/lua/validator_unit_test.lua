@@ -1589,6 +1589,28 @@ test("validator warns when a published metric compiles to a different kind of nu
     end)
 end)
 
+test("validator records a metric's type once when two views list it", function()
+    -- A catalog written before SEMANTIC_DDL_095 can hold one metric as a column
+    -- of two views; the probe then answers for it twice.
+    local twice = {metric = "total_revenue", metric_id = 8, declared_type = "DECIMAL(18,2)",
+                   compiled_type = "DECIMAL(36,2)", compatible = true,
+                   observation_key = "k8", reused = false}
+    local ctx = validation_context({model_name = "sales", model_status = "PUBLISHED",
+                                    model_id = 1, version_id = 2})
+    local tuples = 0
+    with_query(function(sql, params)
+        if contains(sql, "INSERT INTO SYS_SEMANTIC.METRIC_TYPE_OBSERVATIONS") then
+            for name in pairs(params) do
+                if name:match("_1$") then tuples = tuples + 1 end
+            end
+        end
+        return {}
+    end, function()
+        api.validate_metric_result_types(ctx, function() return {twice, twice} end)
+    end)
+    assert_equal(tuples, 1)
+end)
+
 test("validator skips F1 source probes after a local validation error", function()
     local entity = {id = 1, name = "customers", alias = "c"}
     local primary = {id = 1, entity_id = 1, name = "primary", alias = "c",

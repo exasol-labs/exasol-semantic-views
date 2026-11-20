@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_call:
+    # The release workflow runs CI as a reusable workflow, and a called
+    # workflow receives only the secrets its caller passes.
+    secrets:
+      SONAR_TOKEN:
+        required: false
   pull_request:
   push:
     branches: [main]

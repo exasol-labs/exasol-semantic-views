@@ -316,3 +316,19 @@ test("shared sql text recognises only EXA_DB as a catalog qualifier", function()
     assert_true(not at("EXA_DB + SEMANTIC_SALES.ORDER_HEADER"))
     assert_true(not at("1.2.3"))
 end)
+
+test("shared same_expression compares tokens, not spelling", function()
+    each({
+        {"o.ship_mode", "o.ship_mode", true},
+        {"o.ship_mode", "  O.SHIP_MODE ", true},
+        {"o.ship_mode", 'o."SHIP_MODE"', true},
+        {"UPPER(o.region) -- why\n", "upper( o.region /* note */ )", true},
+        {'o."ship_mode"', "o.ship_mode", false},
+        {"o.region = 'EU'", "o.region = 'eu'", false},
+        {"o.a + o.b", "o.b + o.a", false},
+        {"o.amount", "o.amount * 2", false},
+    }, function(case)
+        assert_equal(sql_text.same_expression(case[1], case[2]), case[3],
+            case[1] .. " / " .. case[2])
+    end)
+end)

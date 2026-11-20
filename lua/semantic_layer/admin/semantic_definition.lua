@@ -13,6 +13,7 @@ local sql_text = assert(ESV_SQL_TEXT, "shared SQL text runtime is required")
 local rollback = assert(ESV_CATALOG_ROLLBACK,
     "shared catalog rollback runtime is required")
 local dbx = assert(ESV_DATABRICKS_IMPORT, "Databricks import runtime is required")
+local adoption = assert(ESV_VIEW_ADOPTION, "view adoption runtime is required")
 
 -- Semantic DDL reads names out of quoted tokens, so the lexer folds a
 -- quoted identifier to upper case; it must NOT fuse `>=`/`<=`/`<>`/`!=`,
@@ -1041,6 +1042,58 @@ end
 -- partitioned entity before the single validation pass -- SEMANTIC_MODEL_052
 -- rejects an attribute that is missing a binding on any partition, and REPLACE
 -- DIMENSIONS validates once at the end.
+-- A dimension name is unique per model, and one dimension row may be listed by
+-- several semantic views: two views over the same table routinely group by the
+-- same column. So Semantic DDL in one view may declare a dimension another view
+-- already lists, but only with the same definition -- entity, expression (token
+-- for token, see sql_text.same_expression) and type. It used to take the row
+-- over instead, silently redefining the other view's column; that is now
+-- refused, including from the view that declared it first, because the row is
+-- every listing view's. The descriptive fields (display name, comment, format,
+-- PRIVATE, CERTIFIED) belong to the shared row, and the latest statement sets
+-- them for every view. ADD_OR_REPLACE_DIMENSION redefines a dimension for all
+-- of its views at once.
+local function refuse_dimension_redefined_elsewhere(model, object_id_value, dimension_id,
+                                                    entity, dimension)
+    local rows = query([[
+        SELECT d.ENTITY_ID, e.ENTITY_NAME, d.EXPRESSION, d.DATA_TYPE,
+               GROUP_CONCAT(DISTINCT so.OBJECT_NAME ORDER BY so.OBJECT_NAME SEPARATOR ', ')
+                   AS OBJECT_NAMES
+        FROM SYS_SEMANTIC.DIMENSIONS d
+        JOIN SYS_SEMANTIC.ENTITIES e ON e.ENTITY_ID = d.ENTITY_ID
+        JOIN SYS_SEMANTIC.OBJECT_COLUMNS oc
+          ON oc.COLUMN_KIND = 'DIMENSION' AND oc.OBJECT_REF_ID = d.DIMENSION_ID
+        JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+        WHERE d.DIMENSION_ID = :dimension_id
+          AND oc.OBJECT_ID <> :object_id
+        GROUP BY d.ENTITY_ID, e.ENTITY_NAME, d.EXPRESSION, d.DATA_TYPE
+    ]], {dimension_id = dimension_id, object_id = object_id_value}) or {}
+    local row = rows[1]
+    if row == nil then return end
+    local function type_key(value)
+        return (upper(tostring(value)):gsub("%s+", ""))
+    end
+    local differs = {}
+    if tostring(row_value(row, "ENTITY_ID", 1)) ~= tostring(entity) then
+        differs[#differs + 1] = "entity " .. tostring(row_value(row, "ENTITY_NAME", 2))
+    end
+    if not sql_text.same_expression(row_value(row, "EXPRESSION", 3), dimension.expression) then
+        differs[#differs + 1] = "expression " .. tostring(row_value(row, "EXPRESSION", 3))
+    end
+    if type_key(row_value(row, "DATA_TYPE", 4)) ~= type_key(dimension.data_type) then
+        differs[#differs + 1] = "type " .. tostring(row_value(row, "DATA_TYPE", 4))
+    end
+    if #differs == 0 then return end
+    local views = tostring(row_value(row, "OBJECT_NAMES", 5))
+    error("SEMANTIC_DDL_096: dimension " .. tostring(dimension.name)
+        .. " is also listed by semantic view(s) " .. views .. ", where it has "
+        .. table.concat(differs, ", ") .. ". Dimension names are unique per model,"
+        .. " so views share one dimension, and a view may declare it only with the"
+        .. " same entity, expression and type. Declare it that way to share it, give"
+        .. " this one another name, or redefine it for every view with"
+        .. " SEMANTIC_ADMIN.ADD_OR_REPLACE_DIMENSION.")
+end
+
 local function upsert_dimension(model, object_id_value, dimension)
     local entity = entity_id(model, dimension.entity)
     local existing_id = scalar([[
@@ -1051,6 +1104,8 @@ local function upsert_dimension(model, object_id_value, dimension)
           AND UPPER(DIMENSION_NAME) = UPPER(:dimension_name)
     ]], {model_id = model.model_id, version_id = model.version_id, dimension_name = dimension.name})
     if existing_id ~= nil then
+        refuse_dimension_redefined_elsewhere(model, object_id_value, existing_id, entity,
+            dimension)
         query([[
             UPDATE SYS_SEMANTIC.DIMENSIONS
             SET ENTITY_ID = :entity_id,
@@ -1462,7 +1517,32 @@ local function upsert_metric(model, object_id_value, metric, definition_source_i
             non_additive_dimension_id = dim.id
         end
     end
+    -- Metric names are unique per model, so the lookup above is by name alone,
+    -- and a metric is a column of one semantic view. A second view declaring
+    -- the same name used to take the row over: it rewrote the first view's
+    -- definition and joined it as a column of both. On a draft model nothing
+    -- noticed; on a published one VALIDATE_MODEL observed the metric once per
+    -- view and crashed on METRIC_TYPE_OBSERVATIONS' key, surfacing as
+    -- SEMANTIC_DDL_999. This object's own columns are gone by now when the
+    -- statement replaces its metrics, so only another view's membership counts.
     if existing_id ~= nil then
+        local owner = scalar([[
+            SELECT MIN(so.OBJECT_NAME)
+            FROM SYS_SEMANTIC.OBJECT_COLUMNS oc
+            JOIN SYS_SEMANTIC.SEMANTIC_OBJECTS so ON so.OBJECT_ID = oc.OBJECT_ID
+            WHERE oc.COLUMN_KIND = 'METRIC'
+              AND oc.OBJECT_REF_ID = :metric_id
+              AND oc.OBJECT_ID <> :object_id
+        ]], {metric_id = existing_id, object_id = object_id_value})
+        if not missing(owner) then
+            error("SEMANTIC_DDL_095: metric " .. tostring(metric.name)
+                .. " already belongs to semantic view " .. tostring(owner) .. "."
+                .. " Metric names are unique per model, across its semantic views."
+                .. " Give this metric another name, or remove it from " .. tostring(owner)
+                .. " first with ALTER SEMANTIC VIEW "
+                .. tostring(model.model_name or "<model>") .. "." .. tostring(owner)
+                .. " DROP METRIC " .. tostring(metric.name) .. ".")
+        end
         query([[
             UPDATE SYS_SEMANTIC.METRICS
             SET EXPRESSION = :expression,
@@ -3250,6 +3330,17 @@ function M.import_databricks_metric_view(yaml_text, model_name, published_schema
     return dbx.import_metric_view(yaml_text, model_name, published_schema, apply_flag)
 end
 
+-- ADOPT_VIEW lives in admin/view_adoption.lua. It is handed what this module
+-- owns rather than restating it: the interior tables a refused adoption
+-- restores, and the words that open a DDL clause, which an expression it
+-- generates must not carry at its top level.
+function M.adopt_view(model_name, view_schema, view_name)
+    local clause_words = {}
+    for _, words in ipairs(CLAUSES) do clause_words[words[1]] = true end
+    return adoption.adopt_view(model_name, view_schema, view_name,
+        {interior_tables = SNAPSHOT_TABLES, clause_words = clause_words})
+end
+
 function M.decode_json(json_text)
     return json.decode(json_text)
 end
@@ -3263,6 +3354,7 @@ end
 reresolve_dimension_filters_for = M.reresolve_dimension_filters
 apply_normalized_osi_import = M.apply_normalized_osi_import
 import_databricks_metric_view = M.import_databricks_metric_view
+adopt_view = M.adopt_view
 describe_semantic_metric = M.describe_semantic_metric
 explain_semantic_metric = M.explain_semantic_metric
 export_semantic_definition = M.export_semantic_definition

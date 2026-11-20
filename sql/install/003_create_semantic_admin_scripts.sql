@@ -171,6 +171,8 @@
 
 -- @lua lua/semantic_layer/scripts/import_databricks_metric_view.lua
 
+-- @lua lua/semantic_layer/scripts/adopt_view.lua
+
 -- @lua lua/semantic_layer/scripts/describe_semantic_metric.lua
 
 -- @lua lua/semantic_layer/scripts/explain_semantic_metric.lua
