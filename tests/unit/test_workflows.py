@@ -1,7 +1,7 @@
 """Check the wiring between the GitHub Actions workflows.
 
-The static-checks job runs zizmor for workflow syntax and security audits. These
-tests cover relationships that a valid individual workflow can still get wrong.
+The static-checks runner includes zizmor for workflow syntax and security audits.
+These tests cover relationships that a valid individual workflow can still get wrong.
 """
 
 from __future__ import annotations

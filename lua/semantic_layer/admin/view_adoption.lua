@@ -794,6 +794,7 @@ do
                     {model_name = model_name, published_schema = "SEMANTIC_" .. upper(model_name)})
                 model = assert(model_of(model_name), "CREATE_MODEL left no model")
             else
+                model = assert(model, "model disappeared before adoption")
                 tables = {}
                 for _, name in ipairs(ADOPTION_TABLES) do
                     tables[#tables + 1] = {name = name,
@@ -840,6 +841,7 @@ do
                      description = null_if_missing(view.comment)})
                 object = object_of(model, object_name)
             end
+            object = assert(object, "ADD_SEMANTIC_OBJECT left no semantic object")
 
             local scope = {alias = entity.alias, schema = relation.schema,
                            object = relation.object, columns = {},
@@ -877,6 +879,7 @@ do
             pcall(query, "EXECUTE SCRIPT SEMANTIC_ADMIN.DROP_MODEL_IF_EXISTS(:model_name)",
                 {model_name = model_name})
         elseif snapshot ~= nil then
+            model = assert(model, "model disappeared during adoption")
             rollback.restore(query, tables, snapshot,
                 {model_id = model.model_id, version_id = model.version_id})
             pcall(query, "EXECUTE SCRIPT SEMANTIC_ADMIN.VALIDATE_MODEL(:model_name)",

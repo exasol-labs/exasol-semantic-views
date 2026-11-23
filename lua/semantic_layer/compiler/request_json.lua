@@ -2048,6 +2048,7 @@ local function fused_attribute_expression(ctx, entity, base_representation,
                     predicates[#predicates + 1] = alternate_identity
                         .. " = " .. base_identity_expression
                 else
+                    assert(unique_key, "fusion unique key is required without semantic identity")
                     -- Resolve the declared key column to the physical name each
                     -- source actually carries. A declared `customer_id` quoted
                     -- verbatim against a physical `CUSTOMER_ID` produces SQL
@@ -2437,6 +2438,7 @@ local function build_filters(ctx, request_filters, selected_dimensions, needed_e
         if err ~= nil then
             return nil, nil, err
         end
+        assert(field, "resolved filter field is required")
         if field.kind ~= "DIMENSION" then
             return nil, nil, error_result("SEMANTIC_REQUEST_031", "MVP filters support dimensions only: " .. tostring(filter_field) .. ".")
         end
@@ -2737,6 +2739,8 @@ local function relationship_join_condition(ctx, relationship)
         local route = selection and selection.relationship_routes[
             key(relationship.id) .. ":" .. endpoint.side] or nil
         if route ~= nil and route.kind == "DIRECT_IDENTITY" then
+            assert(entity, "relationship endpoint entity is required")
+            assert(selection, "relationship route selection is required")
             condition = replace_qualified_column(condition, entity.alias,
                 route.column_name, route.binding.expression)
             provenance[#provenance + 1] = {
@@ -2769,6 +2773,7 @@ local function build_order_by(ctx, request_order_by, output_fields)
         if err ~= nil then
             return nil, err
         end
+        assert(field, "resolved order-by field is required")
         if not output_fields[field.kind .. ":" .. key(field.id)] then
             return nil, error_result("SEMANTIC_REQUEST_061", "ORDER BY field must be selected in the MVP: " .. tostring(item.field) .. ".")
         end
@@ -3277,6 +3282,7 @@ local function compile_request_table(request, options)
     if filter_err ~= nil then
         return filter_err
     end
+    assert(filter_dimensions, "resolved filter dimensions are required")
     local filter_dimension_seen = {}
     for _, dimension in ipairs(filter_dimensions) do
         filter_dimension_seen[dimension.kind .. ":" .. key(dimension.id)] = true
@@ -3363,6 +3369,7 @@ local function compile_request_table(request, options)
         if having_err ~= nil then
             return having_err
         end
+        assert(metric_field, "resolved HAVING metric is required")
         add_unique(planning_metrics, planning_metric_seen, metric_field)
         collect_metric_entities(ctx, metric_field, needed_entities, {})
         local op = upper(having_filter.op or having_filter.operator or "=")
@@ -3403,9 +3410,10 @@ local function compile_request_table(request, options)
     end
     local joins, relationship_paths = {}, {}
     if metric_base_entity_count <= 1 then
-        local join_err
-        joins, relationship_paths, join_err = plan_joins(ctx, needed_entities)
+        local planned_joins, planned_paths, join_err = plan_joins(ctx, needed_entities)
         if join_err ~= nil then return join_err end
+        joins = assert(planned_joins, "planned joins are required")
+        relationship_paths = assert(planned_paths, "relationship paths are required")
         configure_relationship_requirements(ctx, joins)
     end
 
@@ -3596,6 +3604,14 @@ local function compile_request_table(request, options)
                 table.sort(selected_bindings, function(left, right)
                     return left.attribute < right.attribute
                 end)
+                local selection_reason = "STATIC_PRIMARY"
+                if selection ~= nil and not selection.legacy_only then
+                    if (selection["fallback_count"] or 0) > 0 then
+                        selection_reason = "ATTRIBUTE_FALLBACK"
+                    else
+                        selection_reason = "ATTRIBUTE_PREFER"
+                    end
+                end
                 plan.selected_representations[#plan.selected_representations + 1] = {
                     entity_id = entity.id,
                     entity_name = entity.name,
@@ -3604,10 +3620,7 @@ local function compile_request_table(request, options)
                     source_kind = representation.source_kind,
                     source_schema = representation.source_schema,
                     source_object = representation.source_object,
-                    selection_reason = (selection == nil or selection.legacy_only)
-                        and "STATIC_PRIMARY"
-                        or selection.fallback_count > 0 and "ATTRIBUTE_FALLBACK"
-                        or "ATTRIBUTE_PREFER",
+                    selection_reason = selection_reason,
                     fallback_binding_count = selection and selection.fallback_count or 0,
                     binding_priority = selection and selection.binding_priority or 0,
                     selected_bindings = selected_bindings,
@@ -3672,6 +3685,7 @@ local function compile_request_table(request, options)
         )
         if physical_plan == nil then
             typed_plan.failure = physical_error
+            assert(physical_error, "physical planning failure is required")
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(physical_error.reason_code) .. ".")
         end
@@ -3679,6 +3693,7 @@ local function compile_request_table(request, options)
             physical_plan, snapshot)
         if fused_plan == nil then
             typed_plan.failure = fusion_error
+            assert(fusion_error, "fusion planning failure is required")
             return plan_error("_075", "Fusion planning failed: "
                 .. tostring(fusion_error.reason_code) .. ".")
         end
@@ -3693,6 +3708,7 @@ local function compile_request_table(request, options)
                 physical_plan_runtime.apply_branch_sources(physical_plan, selections)
             if rebound_plan == nil then
                 typed_plan.failure = rebound_error
+                assert(rebound_error, "branch planning failure is required")
                 return plan_error("_075", "Physical planning failed: "
                     .. tostring(rebound_error.reason_code) .. ".")
             end
@@ -3723,6 +3739,7 @@ local function compile_request_table(request, options)
         )
         if not within_limit then
             typed_plan.failure = size_error
+            assert(size_error, "SQL size failure is required")
             return plan_error("_075", "Physical planning failed: "
                 .. tostring(size_error.reason_code) .. ".")
         end
@@ -3988,6 +4005,7 @@ local HAVING_CLAUSE = {
         if resolve_error ~= nil then
             return nil, envelope.recode_error_prefix(resolve_error, "SEMANTIC_QUERY")
         end
+        assert(resolved, "resolved HAVING field is required")
         if resolved.kind ~= "METRIC" then
             return nil, error_result("SEMANTIC_QUERY_040",
                 "HAVING supports metric predicates only. Use WHERE for dimension filters.")
@@ -4157,7 +4175,7 @@ local function parse_semantic_sql(statement_text, options)
             and (part[3].text == "*" or part[3].kind == "number") then
             row_counted = true
             output_columns[#output_columns + 1] = {value = "CAST(1 AS DECIMAL(18,0))",
-                output = syntax.alias_from_select_part(part) or "COUNT(" .. part[3].text .. ")"}
+                output = syntax.alias_from_select_part(part) or ("COUNT(" .. part[3].text .. ")")}
             goto next_select_part
         end
         local field_name = syntax.identifier_from_part(part)
@@ -4171,6 +4189,7 @@ local function parse_semantic_sql(statement_text, options)
         if bind_err ~= nil then
             return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
         end
+        assert(field, "resolved SELECT field is required")
         -- An unaliased column is named after what the caller wrote, as SQL
         -- names a column reference -- not after the field it resolved to. The
         -- two differ only for a synonym, and the synonym a rename leaves behind
@@ -4226,6 +4245,7 @@ local function parse_semantic_sql(statement_text, options)
         if filter_err ~= nil then
             return nil, filter_err
         end
+        assert(raw_filters, "parsed WHERE filters are required")
         -- A constant-false conjunct empties the result. Say so as LIMIT 0, which
         -- is the same shape-without-rows the driver asked for and needs no new
         -- concept in the planner.
@@ -4273,6 +4293,7 @@ local function parse_semantic_sql(statement_text, options)
                 if bind_err ~= nil then
                     return nil, envelope.recode_error_prefix(bind_err, "SEMANTIC_QUERY")
                 end
+                assert(field, "resolved GROUP BY field is required")
                 if field.kind == "DIMENSION" then
                     if not selected_dimension_seen[upper(field.name)] then
                         return nil, error_result("SEMANTIC_QUERY_008",
@@ -4302,6 +4323,7 @@ local function parse_semantic_sql(statement_text, options)
         if having_err ~= nil then
             return nil, having_err
         end
+        assert(having_filters, "parsed HAVING filters are required")
         for _, f in ipairs(having_filters) do
             request.having[#request.having + 1] = f
         end
@@ -4350,6 +4372,8 @@ local function compile_sql_internal(statement_sql, options)
     if request ~= nil and request.status == "UNCHANGED" then
         return request, nil, nil
     end
+    assert(request, "parsed semantic SQL request is required")
+    assert(model, "resolved semantic model is required")
     local table_options = {
         model = model,
         ctx = meta and meta.ctx or nil,
@@ -5413,7 +5437,7 @@ do
                 end
             else
                 local column, output = bi_expansion.projected_field(item, reference.by_name)
-                if column ~= nil then outputs[output] = column end
+                if column ~= nil and output ~= nil then outputs[output] = column end
             end
         end
         for _, column_name in ipairs(wanted or {}) do
@@ -5940,7 +5964,7 @@ do
                     or word == "QUALIFY" or word == "PREFERRING" then
                     return nil
                 end
-                if clauses[word] == nil then clauses[word] = index end
+                if word ~= nil and clauses[word] == nil then clauses[word] = index end
             end
         end
         local from = clauses.FROM
@@ -6011,6 +6035,7 @@ do
             items[#items + 1] = current
         end
         local index = from_index + 1
+        ---@type string|nil
         local join = "FIRST"
         while tokens[index] ~= nil and tokens[index].depth >= depth do
             local token = tokens[index]
@@ -7019,6 +7044,10 @@ function M.fusion_health(model_name)
             if fused == nil then
                 finding.error = fusion_error
             else
+                assert(contributors, "fusion contributors are required")
+                assert(expressions, "fusion expressions are required")
+                assert(contributors[1], "first fusion contributor is required")
+                assert(expressions[1], "first fusion expression is required")
                 finding.first_source = contributors[1].representation_name
                 local joins = {}
                 for _, join in ipairs(probe_entity.fusion_joins or {}) do

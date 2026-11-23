@@ -16,7 +16,7 @@ This repository implements a database-native semantic layer for Exasol. Runtime 
 
 ## Verification commands
 
-- `sh tools/run_static_checks.sh` — Ruff, mypy, Luacheck, ShellCheck.
+- `sh tools/run_static_checks.sh` — Ruff, mypy, Luacheck, ShellCheck, LuaLS, zizmor.
 - `sh tools/run_python_tests.sh` — Python unit/property tests and coverage thresholds.
 - `sh tools/run_lua_tests.sh` — database-free Lua runtime tests and coverage.
 - `sh tools/run_system_tests.sh` — full live Exasol system suite; requires a reachable deployment. See [tests/README.md](tests/README.md).

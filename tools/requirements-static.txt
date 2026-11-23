@@ -2,3 +2,4 @@
 # adds a rule should arrive as a deliberate change, not as a red build.
 ruff==0.17.3
 mypy==2.4.1
+zizmor==1.31.1

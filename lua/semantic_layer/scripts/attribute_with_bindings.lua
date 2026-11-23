@@ -320,7 +320,8 @@ for index, item in ipairs(binding_specs) do
         -- outcome was the wrong one.
         primary_role = upper(item.binding_role)
         if item.binding_priority ~= nil and item.binding_priority ~= null then
-            primary_priority = tonumber(item.binding_priority)
+            primary_priority = assert(tonumber(item.binding_priority),
+                "validated binding priority must be numeric")
         end
         if seen[upper(representation_name)] then
             error("SEMANTIC_ADMIN_213: duplicate binding for representation: "

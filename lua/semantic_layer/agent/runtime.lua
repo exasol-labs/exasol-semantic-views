@@ -100,6 +100,7 @@ local function top_level_fields(text)
                 local colon = string.find(text, "^%s*:", index)
                 if colon ~= nil then
                     local value_start = string.find(text, "[^%s]", index + 1)
+                    ---@type boolean|string
                     local value = true
                     if value_start ~= nil
                         and string.sub(text, value_start, value_start) == '"' then

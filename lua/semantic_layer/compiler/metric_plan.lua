@@ -137,6 +137,7 @@ function M.build_dag(snapshot, selected_metrics)
                 if dependency == nil then return nil, "MISSING_PRIVATE_METRIC_DEPENDENCY" end
                 local dependency_node, err = visit(dependency)
                 if err ~= nil then return nil, err end
+                assert(dependency_node, "metric dependency node is required")
                 inputs[#inputs + 1] = {
                     kind = "METRIC",
                     id = dependency.id,
@@ -239,6 +240,7 @@ function M.build_dag(snapshot, selected_metrics)
     for _, metric in ipairs(selected_metrics or {}) do
         local node, err = visit(metric_by_id[key(metric.id)] or metric)
         if err ~= nil then return nil, err end
+        assert(node, "selected metric node is required")
         selected_node_ids[#selected_node_ids + 1] = node.node_id
     end
     return {
