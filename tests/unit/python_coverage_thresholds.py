@@ -41,6 +41,7 @@ OMIT_PATTERNS: list[str] = [
     "tests/fuzz/*.py",
     "tools/import_databricks.py",
     "tools/package_lua_scripts.py",
+    "tools/lua_runtime.py",              # bootstrap utility; validated through its callers
     "tools/dev/*.py",                    # developer helpers: lint, live measurement
     "tools/dev/user_studies/*.py",       # the simulated user-study harness
 ]

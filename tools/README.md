@@ -6,6 +6,7 @@ Operational tooling — what a user or an operator runs — at the top level:
 |---|---|
 | `install.py` | package and install the layer, optionally with the sales example |
 | `package_lua_scripts.py` | build the install SQL into `build/install/` from `sql/install/` and `lua/` (the installer runs it) |
+| `lua_runtime.py` | provision the pinned Lua 5.4 interpreter and compiler into ignored `build/`; used automatically by Lua-executing tools |
 | `run_sql_files.py` | run SQL files against the deployment, including slash-delimited script blocks |
 | `semantic_client.py` | thin host-side helpers for calling the layer's scripts |
 | `osi.py` | Ossie/OSI import and export |

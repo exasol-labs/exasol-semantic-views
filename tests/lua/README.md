@@ -75,9 +75,10 @@ suite also records named decision outcomes; each decision passed to
 `assert_branch` is expected to be observed both true and false.
 
 The installed script bodies have a separate per-script coverage report and floors.
-The runner derives their active lines from Lua 5.5 compiler listings, including
-nested local functions that a test never invokes. `tools/run_lua_tests.sh`
-selects the Lua interpreter and compiler; set `LUA_BIN` and `LUAC_BIN` if needed.
+The runner derives their active lines from the project-pinned Lua 5.4 compiler
+listings, including nested local functions that a test never invokes.
+`tools/run_lua_tests.sh` provisions this interpreter and compiler automatically
+on first use, in the ignored `build/` directory.
 
 `semantic_fuzz_driver.lua` is a separate JSON-lines compiler driver used by the
 database-free SQLGlot fuzz campaign. It shares the sales catalog fixture with

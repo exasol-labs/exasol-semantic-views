@@ -23,14 +23,19 @@ import collections
 import hashlib
 import os
 import re
-import shutil
 import subprocess
+import sys
 import tempfile
 import typing
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.lua_runtime import ensure_lua  # noqa: E402
+
+
 SOURCE_DIR = ROOT / "sql/install"
 BUILD_DIR = ROOT / "build/install"
 COMPILER_SOURCE = ROOT / "lua/semantic_layer/compiler/request_json.lua"
@@ -305,23 +310,18 @@ end
 """
 
 
-def lua_interpreter() -> str | None:
-    """The interpreter to measure with: LUA_BIN, else lua5.5, else lua."""
-    for candidate in (os.environ.get("LUA_BIN"), "lua5.5", "lua"):
-        if candidate and shutil.which(candidate):
-            return candidate
-    return None
+def lua_interpreter() -> str:
+    """The repository-pinned Lua interpreter used for compiler probes."""
+    return str(ensure_lua()[0])
 
 
 def measured_local_peaks(bodies: dict[str, str]) -> dict[str, int]:
     """Peak active main-chunk locals per script, as the Lua compiler sees them.
 
-    Empty when no interpreter is installed; a script that does not compile under
-    the local interpreter (Exasol runs Lua 5.4) is left out, so the caller falls
-    back to the count for it.
+    The shared runtime installer makes the compiler version match Exasol.
     """
     interpreter = lua_interpreter()
-    if interpreter is None or not bodies:
+    if not bodies:
         return {}
     with tempfile.TemporaryDirectory() as scratch:
         paths = {}

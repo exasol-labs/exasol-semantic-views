@@ -50,26 +50,13 @@ nested functions. The runner uses `luac -p -l` to collect that active-line set;
 `-p` prevents a `luac.out` artifact. This adds only the compiler shipped with
 the Lua toolchain, with no LuaRocks dependency or source-code parser.
 
-Lua 5.5 is required, the version CI builds (`.github/actions/setup-lua`, which
-pins the release and its checksum), and no other: coverage counts the active
-lines in the compiler's listing, and versions list some lines differently, so a
-floor measured under one can fail under another with nothing changed.
-`tools/run_lua_tests.sh` refuses any other version. On macOS:
-
-```sh
-brew install lua
-```
-
-Set `LUA_BIN` and `LUAC_BIN` when the interpreter and compiler are installed
-elsewhere or under other names.
-
-Exasol itself runs scripts on Lua 5.4, so these tests run the code on a newer
-Lua than production. 5.5 is stricter where the two differ in ways that matter
-here -- it refuses assignment to a `for` loop variable, which 5.4 allows -- so
-that direction can only fail a test. The other direction, syntax new in 5.5
-such as `global` declarations, would pass these tests and fail in Exasol;
-Luacheck, which still parses with the 5.4 toolchain, refuses it in the static
-checks, and the system tests run the installed scripts on Exasol. See `tests/lua/README.md` for the script-test recipe.
+Lua 5.4.9 is provisioned automatically by `tools/lua_runtime.py`, which pins
+the source archive and verifies its SHA-256. It builds into ignored `build/`
+without changing the system Lua installation. Local test runs and CI call this
+same installer. The SQL packager and Lua-backed fuzz driver use the same local
+interpreter as well, so a different `lua` earlier on `PATH` cannot affect their
+results. Exasol itself runs scripts on Lua 5.4. See `tests/lua/README.md` for
+the script-test recipe.
 
 ## 2. Live-DB Integration Tests
 
