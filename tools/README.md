@@ -6,6 +6,8 @@ Operational tooling — what a user or an operator runs — at the top level:
 |---|---|
 | `install.py` | package and install the layer, optionally with the sales example |
 | `package_lua_scripts.py` | build the install SQL into `build/install/` from `sql/install/` and `lua/` (the installer runs it) |
+| `lua_runtime.py` | provision pinned Lua 5.4.9 or 5.5.1 into separate ignored `build/` directories; Lua-executing tools default to 5.4.9 |
+| `check_lua_syntax.py` | parse all maintained Lua sources with a selected pinned compiler |
 | `run_sql_files.py` | run SQL files against the deployment, including slash-delimited script blocks |
 | `semantic_client.py` | thin host-side helpers for calling the layer's scripts |
 | `osi.py` | Ossie/OSI import and export |
@@ -15,7 +17,8 @@ Operational tooling — what a user or an operator runs — at the top level:
 
 The `run_*.sh` scripts are the entry points to the test lanes and static checks;
 `tests/README.md` maps each to what it runs and needs.
-`run_static_checks.sh` also runs LuaLS and zizmor. `run_lua_typecheck.sh` installs
+`run_static_checks.sh` also checks Lua syntax with the default pinned compiler and
+runs LuaLS and zizmor. `run_lua_typecheck.sh` installs
 a pinned LuaLS release on first use, requires `curl` and `jq`, and exits with
 status 1 when it reports diagnostics. CI uploads the JSON report even if the
 combined static checks fail.

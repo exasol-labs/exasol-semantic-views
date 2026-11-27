@@ -5,14 +5,17 @@ from __future__ import annotations
 import json
 import os
 import select
-import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.lua_runtime import ensure_lua  # noqa: E402
 
 
 class CaseTimeout(Exception):
@@ -21,12 +24,10 @@ class CaseTimeout(Exception):
 
 class LuaBackend:
     def __init__(self, timeout: int) -> None:
-        command = os.environ.get("LUA_BIN") or shutil.which("lua") or shutil.which("lua5.4")
-        if command is None:
-            raise RuntimeError("Lua 5.4 is required for the SQLGlot contract oracle")
+        command, _ = ensure_lua()
         self.timeout = timeout
         self.process = subprocess.Popen(
-            [command, "tests/lua/semantic_fuzz_driver.lua"], cwd=ROOT,
+            [str(command), "tests/lua/semantic_fuzz_driver.lua"], cwd=ROOT,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
             bufsize=0,
         )

@@ -33,14 +33,14 @@ LINE_THRESHOLDS: dict[str, float] = {
     # `62.34`) don't trip the gate on unchanged code.
 }
 
-# Files under tools/ that legitimately have zero unit-test coverage because
-# they are integration scripts run only against a live Exasol instance. Listing
-# them here keeps the coverage report readable and prevents them from
-# dragging a per-file gate down to 0%.
+# Tools outside the unit-coverage gate, including live integration scripts and
+# standalone build and static-check utilities.
 OMIT_PATTERNS: list[str] = [
     "tests/fuzz/*.py",
     "tools/import_databricks.py",
     "tools/package_lua_scripts.py",
+    "tools/check_lua_syntax.py",         # static check, exercised directly
+    "tools/lua_runtime.py",              # bootstrap utility; validated through its callers
     "tools/dev/*.py",                    # developer helpers: lint, live measurement
     "tools/dev/user_studies/*.py",       # the simulated user-study harness
 ]

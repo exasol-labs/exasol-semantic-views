@@ -1,36 +1,24 @@
 name: Set up Lua
 description: >-
-  Build and install the Lua release the Lua tests run under, from lua.org's
-  source tarball, checked against its published SHA-256. Ubuntu packages stop
-  at 5.4; tools/run_lua_tests.sh requires 5.5, because script-body coverage is
-  counted from the compiler's listing and differs between versions.
+  Provision the project-pinned Lua runtime with the same installer used locally.
 inputs:
   version:
-    description: Lua release to build.
-    default: "5.5.1"
-  sha256:
-    description: SHA-256 of lua-<version>.tar.gz, as listed on https://www.lua.org/ftp/.
-    default: "1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce"
+    description: Pinned Lua release to provision.
+    required: false
+    default: "5.4.9"
 runs:
   using: composite
   steps:
-    - name: Build and install Lua
+    - name: Provision project-local Lua
       shell: bash
       env:
         LUA_VERSION: ${{ inputs.version }}
-        LUA_SHA256: ${{ inputs.sha256 }}
-      run: |
+      run: | # zizmor: ignore[github-env] -- newlines are rejected below
         set -euo pipefail
-        work="$(mktemp -d)"
-        tarball="lua-${LUA_VERSION}.tar.gz"
-        # lua.org resets connections now and then; plain --retry does not
-        # retry that (curl 35), so every error is retried.
-        curl --fail --silent --show-error --location \
-          --retry 6 --retry-all-errors --retry-delay 5 \
-          "https://www.lua.org/ftp/${tarball}" --output "${work}/${tarball}"
-        echo "${LUA_SHA256}  ${work}/${tarball}" | sha256sum --check --strict -
-        tar -xzf "${work}/${tarball}" -C "${work}"
-        make -C "${work}/lua-${LUA_VERSION}" linux
-        sudo make -C "${work}/lua-${LUA_VERSION}" install INSTALL_TOP=/usr/local
-        lua -v
-        luac -v
+        # GITHUB_ENV treats newlines as separate entries, so reject them before export.
+        case "$LUA_VERSION" in
+          *$'\n'*|*$'\r'*) echo 'Invalid Lua version' >&2; exit 1 ;;
+        esac
+        # The installer validates the version against its supported releases.
+        python3 tools/lua_runtime.py --version "$LUA_VERSION"
+        echo "LUA_VERSION=${LUA_VERSION}" >> "$GITHUB_ENV"
