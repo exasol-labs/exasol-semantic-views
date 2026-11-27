@@ -13,11 +13,12 @@ runs:
       shell: bash
       env:
         LUA_VERSION: ${{ inputs.version }}
-      run: |
+      run: | # zizmor: ignore[github-env] -- newlines are rejected below
         set -euo pipefail
-        python3 tools/lua_runtime.py --version "$LUA_VERSION"
+        # GITHUB_ENV treats newlines as separate entries, so reject them before export.
         case "$LUA_VERSION" in
-          5.4.9) echo 'LUA_VERSION=5.4.9' >> "$GITHUB_ENV" ;;
-          5.5.1) echo 'LUA_VERSION=5.5.1' >> "$GITHUB_ENV" ;;
-          *) exit 1 ;;
+          *$'\n'*|*$'\r'*) echo 'Invalid Lua version' >&2; exit 1 ;;
         esac
+        # The installer validates the version against its supported releases.
+        python3 tools/lua_runtime.py --version "$LUA_VERSION"
+        echo "LUA_VERSION=${LUA_VERSION}" >> "$GITHUB_ENV"
