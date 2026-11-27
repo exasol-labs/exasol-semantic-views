@@ -38,6 +38,13 @@ them. Enforced thresholds are in
 high coverage of the smaller materialization runtime cannot conceal lower
 compiler or validator coverage.
 
+Run the suite under Lua 5.5 as a compatibility check with
+`LUA_VERSION=5.5.1 sh tools/run_lua_tests.sh`. Lua 5.4 remains authoritative:
+its runtime and script-body line coverage floors are enforced. The 5.5 run
+reports line coverage for comparison but does not enforce those floors because
+the compiler can report a different active-line denominator. Named decision
+outcome coverage and test assertions remain enforced under both versions.
+
 ### Why script coverage uses `luac`
 
 The Lua interpreter runs the tests and its line hook records executed source
@@ -50,13 +57,13 @@ nested functions. The runner uses `luac -p -l` to collect that active-line set;
 `-p` prevents a `luac.out` artifact. This adds only the compiler shipped with
 the Lua toolchain, with no LuaRocks dependency or source-code parser.
 
-Lua 5.4.9 is provisioned automatically by `tools/lua_runtime.py`, which pins
-the source archive and verifies its SHA-256. It builds into ignored `build/`
-without changing the system Lua installation. Local test runs and CI call this
-same installer. The SQL packager and Lua-backed fuzz driver use the same local
-interpreter as well, so a different `lua` earlier on `PATH` cannot affect their
-results. Exasol itself runs scripts on Lua 5.4. See `tests/lua/README.md` for
-the script-test recipe.
+Lua 5.4.9 and 5.5.1 are provisioned by `tools/lua_runtime.py`, which pins each
+source archive and verifies its SHA-256. Each builds into its own ignored
+`build/` directory without changing the system Lua installation. Local test
+runs and CI use the same installer. Packaging, the Lua-backed fuzz driver, and
+the default test run use Lua 5.4.9; the 5.5 compatibility run selects its
+runtime with `LUA_VERSION=5.5.1`. Exasol itself runs scripts on Lua 5.4. See
+`tests/lua/README.md` for the script-test recipe.
 
 ## 2. Live-DB Integration Tests
 

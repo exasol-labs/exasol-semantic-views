@@ -48,3 +48,25 @@ jobs:
           name: luals-diagnostics
           path: build/luals-check.json
           if-no-files-found: error
+
+  lua-syntax:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lua_version: ["5.4.9", "5.5.1"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Set up Lua ${{ matrix.lua_version }}
+        uses: $/.github/actions/setup-lua
+        with:
+          version: ${{ matrix.lua_version }}
+      # LuaLS and Luacheck provide richer analysis for Exasol's authoritative
+      # Lua 5.4 target above; this matrix checks syntax with each actual compiler.
+      - name: Parse all Lua sources with luac
+        run: python tools/check_lua_syntax.py --version "$LUA_VERSION"

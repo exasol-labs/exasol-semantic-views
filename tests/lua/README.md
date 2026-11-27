@@ -75,10 +75,14 @@ suite also records named decision outcomes; each decision passed to
 `assert_branch` is expected to be observed both true and false.
 
 The installed script bodies have a separate per-script coverage report and floors.
-The runner derives their active lines from the project-pinned Lua 5.4 compiler
-listings, including nested local functions that a test never invokes.
-`tools/run_lua_tests.sh` provisions this interpreter and compiler automatically
-on first use, in the ignored `build/` directory.
+The runner derives their active lines from the selected pinned compiler listings,
+including nested local functions that a test never invokes. Lua 5.4.9 is the
+authoritative coverage baseline. Run `LUA_VERSION=5.5.1 sh tools/run_lua_tests.sh`
+for compatibility; 5.5 line coverage is reported but not gated because compiler
+versions can produce different denominators. Test assertions and named decision
+coverage remain gated in both runs.
+`tools/run_lua_tests.sh` provisions the selected interpreter and compiler
+automatically on first use, in the ignored `build/` directory.
 
 `semantic_fuzz_driver.lua` is a separate JSON-lines compiler driver used by the
 database-free SQLGlot fuzz campaign. It shares the sales catalog fixture with
